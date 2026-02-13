@@ -1,0 +1,951 @@
+import { useState, useMemo } from "react";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Search,
+  ExternalLink,
+  Building2,
+  BedDouble,
+  Users,
+  DollarSign,
+  Layers,
+  MapPin,
+} from "lucide-react";
+
+type Property = {
+  id: number;
+  name: string;
+  community: string;
+  location: string;
+  island: string;
+  bedrooms: number;
+  guests: number;
+  bathrooms: number;
+  lowPrice: number | null;
+  highPrice: number | null;
+  multiUnit: boolean;
+  unitDetails: string;
+  url: string;
+};
+
+const properties: Property[] = [
+  {
+    id: 1,
+    name: "Poipu Kai for large groups!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 7,
+    guests: 18,
+    bathrooms: 5,
+    lowPrice: 1195,
+    highPrice: 2400,
+    multiUnit: true,
+    unitDetails: "Multiple adjacent villas in Poipu Kai",
+    url: "https://thevacationrentalexperts.com/en/poipu-kai-for-large-groups",
+  },
+  {
+    id: 2,
+    name: "Top floor 2 bedroom Oceanfront Unit!",
+    community: "Waipouli Beach Resort",
+    location: "Kapaa",
+    island: "Kauai",
+    bedrooms: 2,
+    guests: 6,
+    bathrooms: 2,
+    lowPrice: null,
+    highPrice: null,
+    multiUnit: false,
+    unitDetails: "Single penthouse condo unit",
+    url: "https://thevacationrentalexperts.com/en/top-floor-2-bedroom-oceanfront-unit",
+  },
+  {
+    id: 3,
+    name: "3 bedroom for 7 beachfront penthouse villa!",
+    community: "Palmas Del Mar",
+    location: "Humacao",
+    island: "Puerto Rico",
+    bedrooms: 3,
+    guests: 7,
+    bathrooms: 3,
+    lowPrice: 545,
+    highPrice: 545,
+    multiUnit: false,
+    unitDetails: "Single penthouse villa",
+    url: "https://thevacationrentalexperts.com/en/3-bedroom-for-7-beachfront-penthouse-villa",
+  },
+  {
+    id: 4,
+    name: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 16,
+    bathrooms: 5,
+    lowPrice: 1150,
+    highPrice: 2425,
+    multiUnit: true,
+    unitDetails: "2 side-by-side 3BR villas in Poipu Kai",
+    url: "https://thevacationrentalexperts.com/en/beautiful-6-bedroom-for-16-villa-in-poipu",
+  },
+  {
+    id: 5,
+    name: "3 Bedroom Poipu Kai condo for 7 w/AC!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 7,
+    bathrooms: 2,
+    lowPrice: 795,
+    highPrice: 995,
+    multiUnit: false,
+    unitDetails: "Single 3BR condo",
+    url: "https://thevacationrentalexperts.com/en/3-bedroom-poipu-kai-condo-for-7-w-ac",
+  },
+  {
+    id: 6,
+    name: "Luxury Poipu Kai 3 Bedroom Villa with Pool and Tennis!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 8,
+    bathrooms: 2,
+    lowPrice: 850,
+    highPrice: 1050,
+    multiUnit: false,
+    unitDetails: "Single 3BR villa",
+    url: "https://thevacationrentalexperts.com/en/luxury-poipu-kai-3-bedroom-villa-with-pool-and-tennis",
+  },
+  {
+    id: 7,
+    name: "Beautiful 8 brs for 22 near Poipu Beach Park!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 8,
+    guests: 22,
+    bathrooms: 7,
+    lowPrice: 1795,
+    highPrice: 2950,
+    multiUnit: true,
+    unitDetails: "3 adjacent villas (3BR + 3BR + 2BR)",
+    url: "https://thevacationrentalexperts.com/en/beautiful-8-brs-for-22-near-poipu-beach-park",
+  },
+  {
+    id: 8,
+    name: "Wonderful Large Group option in Poipu Kai!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 16,
+    bathrooms: 5,
+    lowPrice: 1195,
+    highPrice: 1195,
+    multiUnit: true,
+    unitDetails: "2 adjacent 3BR units in Poipu Kai",
+    url: "https://thevacationrentalexperts.com/en/wonderful-large-group-option-in-poipu-kai",
+  },
+  {
+    id: 9,
+    name: "Spacious 5 Bedrooms in Poipu Kai! AC!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 12,
+    bathrooms: 4,
+    lowPrice: 995,
+    highPrice: 1695,
+    multiUnit: true,
+    unitDetails: "2 adjacent units (3BR + 2BR)",
+    url: "https://thevacationrentalexperts.com/en/spacious-5-bedrooms-in-poipu-kai-ac",
+  },
+  {
+    id: 10,
+    name: "Fabulous 5 br for 15 private beachfront Estate!",
+    community: "Kekaha Beachfront",
+    location: "Kekaha",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 15,
+    bathrooms: 3,
+    lowPrice: 1595,
+    highPrice: 1595,
+    multiUnit: true,
+    unitDetails: "Main house + guest quarters on beachfront estate",
+    url: "https://thevacationrentalexperts.com/en/fabulous-5-br-for-15-private-beachfront-estate",
+  },
+  {
+    id: 11,
+    name: "Gorgeous Kekaha Beachfront Home!",
+    community: "Kekaha Beachfront",
+    location: "Kekaha",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 6,
+    bathrooms: 2,
+    lowPrice: 795,
+    highPrice: 795,
+    multiUnit: false,
+    unitDetails: "Single beachfront home",
+    url: "https://thevacationrentalexperts.com/en/gorgeous-kekaha-beachfront-home",
+  },
+  {
+    id: 12,
+    name: "Incredible Kekaha Beachfront Estate for 10!",
+    community: "Kekaha Beachfront",
+    location: "Kekaha",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 10,
+    bathrooms: 4,
+    lowPrice: 1195,
+    highPrice: 1350,
+    multiUnit: true,
+    unitDetails: "Main house + guest quarters",
+    url: "https://thevacationrentalexperts.com/en/incredible-kekaha-beachfront-estate-for-10",
+  },
+  {
+    id: 13,
+    name: "Beautiful 3 br for 7 beachfront walkout villa!",
+    community: "Palmas Del Mar",
+    location: "Humacao",
+    island: "Puerto Rico",
+    bedrooms: 3,
+    guests: 7,
+    bathrooms: 3,
+    lowPrice: 599,
+    highPrice: 599,
+    multiUnit: false,
+    unitDetails: "Single beachfront walkout villa",
+    url: "https://thevacationrentalexperts.com/en/beautiful-3-br-for-7-beachfront-walkout-villa",
+  },
+  {
+    id: 14,
+    name: "Fabulous 7 br 22 ocean view pool estate!",
+    community: "Keauhou",
+    location: "Kahaluu-Keauhou",
+    island: "Big Island",
+    bedrooms: 7,
+    guests: 22,
+    bathrooms: 5,
+    lowPrice: 1695,
+    highPrice: 1695,
+    multiUnit: true,
+    unitDetails: "Main house + guest quarters estate",
+    url: "https://thevacationrentalexperts.com/en/fabulous-7-br-22-ocean-view-pool-estate",
+  },
+  {
+    id: 15,
+    name: "Beautiful Oceanfront bungalow with Infinity Pool!",
+    community: "Haapiti",
+    location: "Moorea-Maiao",
+    island: "Moorea",
+    bedrooms: 1,
+    guests: 2,
+    bathrooms: 1,
+    lowPrice: 295,
+    highPrice: 295,
+    multiUnit: false,
+    unitDetails: "Single oceanfront bungalow",
+    url: "https://thevacationrentalexperts.com/en/beautiful-oceanfront-bungalow-with-infinity-pool",
+  },
+  {
+    id: 16,
+    name: "Beautiful 3 br 8 Kekaha Beach house!",
+    community: "Kekaha Beachfront",
+    location: "Kekaha",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 8,
+    bathrooms: 2,
+    lowPrice: 350,
+    highPrice: 495,
+    multiUnit: false,
+    unitDetails: "Single beach house",
+    url: "https://thevacationrentalexperts.com/en/beautiful-3-br-8-kekaha-beach-house",
+  },
+  {
+    id: 17,
+    name: "Fabulous 3 br 6 Hanalei Home just steps to the beach!",
+    community: "Hanalei",
+    location: "Hanalei",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 6,
+    bathrooms: 2,
+    lowPrice: 995,
+    highPrice: 1495,
+    multiUnit: false,
+    unitDetails: "Single home steps to beach",
+    url: "https://thevacationrentalexperts.com/en/fabulous-3-br-6-hanalei-home-just-steps-to-the-beach",
+  },
+  {
+    id: 18,
+    name: "Fabulous Six BR for 16 Poipu Kai! Steps to 3 Beaches!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 16,
+    bathrooms: 5,
+    lowPrice: 1550,
+    highPrice: 2495,
+    multiUnit: true,
+    unitDetails: "2 adjacent 3BR units in Poipu Kai",
+    url: "https://thevacationrentalexperts.com/en/fabulous-six-br-for-16-poipu-kai-steps-to-the-3-beaches",
+  },
+  {
+    id: 19,
+    name: "Fabulous 5 bedroom for 10 townhome above Anini Beach!",
+    community: "Princeville",
+    location: "Princeville",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 10,
+    bathrooms: 3,
+    lowPrice: 928,
+    highPrice: 1585,
+    multiUnit: true,
+    unitDetails: "2 adjacent townhomes (3BR + 2BR)",
+    url: "https://thevacationrentalexperts.com/en/fabulous-5-bedroom-for-10-townhome-above-famous-anini-beach",
+  },
+  {
+    id: 20,
+    name: "Fabulous 7 bedrooms for 16 above Anini Beach!",
+    community: "Princeville",
+    location: "Princeville",
+    island: "Kauai",
+    bedrooms: 7,
+    guests: 16,
+    bathrooms: 5,
+    lowPrice: 1542,
+    highPrice: 2250,
+    multiUnit: true,
+    unitDetails: "3 adjacent townhomes (3BR + 2BR + 2BR)",
+    url: "https://thevacationrentalexperts.com/en/fabulous-7-bedrooms-for-16-above-famous-anini-beach",
+  },
+  {
+    id: 21,
+    name: "Fabulous 8 bedrooms Poipu Kai steps to beach!",
+    community: "Poipu Kai",
+    location: "Poipu",
+    island: "Kauai",
+    bedrooms: 8,
+    guests: 16,
+    bathrooms: 6,
+    lowPrice: 1595,
+    highPrice: 2500,
+    multiUnit: true,
+    unitDetails: "2 adjacent villas in same building",
+    url: "https://thevacationrentalexperts.com/en/fabulous-8-bedrooms-poipu-kai-steps-to-beach",
+  },
+  {
+    id: 22,
+    name: "Wonderful 3 bedroom for 6 ocean view Kekaha home!",
+    community: "Kekaha Beachfront",
+    location: "Kekaha",
+    island: "Kauai",
+    bedrooms: 3,
+    guests: 6,
+    bathrooms: 2,
+    lowPrice: 350,
+    highPrice: 495,
+    multiUnit: false,
+    unitDetails: "Single ocean view home",
+    url: "https://thevacationrentalexperts.com/en/wonderful-3-bedroom-for-6-ocean-view-kekaha-home",
+  },
+  {
+    id: 23,
+    name: "Gorgeous 5 br for 12 in Kapaa - Beachfront!",
+    community: "Kapaa Beachfront",
+    location: "Kapaa",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 11,
+    bathrooms: 5,
+    lowPrice: 1195,
+    highPrice: 1495,
+    multiUnit: true,
+    unitDetails: "3BR + 2BR oceanfront townhomes steps apart",
+    url: "https://thevacationrentalexperts.com/en/gorgeous-5-br-for-12-in-kapaa---beachfront",
+  },
+  {
+    id: 24,
+    name: "Wonderful 5 br 12 Poipu ocean view! Oceanfront complex!",
+    community: "Poipu Oceanfront",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 12,
+    bathrooms: 5,
+    lowPrice: 1150,
+    highPrice: 1687,
+    multiUnit: true,
+    unitDetails: "3BR + 2BR units in oceanfront complex",
+    url: "https://thevacationrentalexperts.com/en/wonderful-5-br-12-poipu-ocean-view-oceanfront-complex",
+  },
+  {
+    id: 25,
+    name: "Wonderful 6 Bedroom for 10 Hanalei Home. Beachfront!",
+    community: "Hanalei",
+    location: "Hanalei",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 10,
+    bathrooms: 3,
+    lowPrice: 2650,
+    highPrice: 2650,
+    multiUnit: false,
+    unitDetails: "Single beachfront home on Hanalei Bay",
+    url: "https://thevacationrentalexperts.com/en/wonderful-6-bedroom-for-10-hanalei-home-beachfront",
+  },
+  {
+    id: 26,
+    name: "Fabulous 7 bedroom for 23 near Magic Sands Beach!",
+    community: "Keauhou",
+    location: "Kahaluu-Keauhou",
+    island: "Big Island",
+    bedrooms: 7,
+    guests: 23,
+    bathrooms: 4,
+    lowPrice: 1250,
+    highPrice: 2195,
+    multiUnit: true,
+    unitDetails: "Main house + guest quarters with private pool",
+    url: "https://thevacationrentalexperts.com/en/fabulous-7-bedroom-for-23-near-magic-sands-beach",
+  },
+  {
+    id: 27,
+    name: "Beautiful 4 bedroom Poipu Kai Condo!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 4,
+    guests: 8,
+    bathrooms: 3,
+    lowPrice: 795,
+    highPrice: 1250,
+    multiUnit: false,
+    unitDetails: "Single 4BR condo with loft",
+    url: "https://thevacationrentalexperts.com/en/beautiful-4-bedroom-poipu-kai-condo",
+  },
+  {
+    id: 28,
+    name: "Beautiful ocean view Poipu 7 brs for 17! 60 yards to Beach!",
+    community: "Poipu Brenneckes",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 7,
+    guests: 17,
+    bathrooms: 6,
+    lowPrice: 2375,
+    highPrice: 2575,
+    multiUnit: true,
+    unitDetails: "4BR home + 3BR home 10 feet apart",
+    url: "https://thevacationrentalexperts.com/en/beautiful-ocean-view-poipu-7-brs-for-17-60-yards-to-beach",
+  },
+  {
+    id: 29,
+    name: "Ocean view 7 bedrooms for 14 above Anini Beach!",
+    community: "Princeville",
+    location: "Princeville",
+    island: "Kauai",
+    bedrooms: 7,
+    guests: 14,
+    bathrooms: 4,
+    lowPrice: 1150,
+    highPrice: 2195,
+    multiUnit: true,
+    unitDetails: "4BR + 3BR townhomes steps apart",
+    url: "https://thevacationrentalexperts.com/en/ocean-view-7-bedrooms-for-14-above-famous-anini-beach",
+  },
+  {
+    id: 30,
+    name: "Fabulous 5 br 10 cliffside home! AC Brand new listing!",
+    community: "Princeville",
+    location: "Princeville",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 10,
+    bathrooms: 5,
+    lowPrice: null,
+    highPrice: null,
+    multiUnit: false,
+    unitDetails: "Single cliffside home with ocean views",
+    url: "https://thevacationrentalexperts.com/en/fabulous-5-br-10-cliffside-home-ac-brand-new-listing",
+  },
+  {
+    id: 31,
+    name: "Fabulous 7 bedroom for 14 oceanfront Poipu pool home!",
+    community: "Poipu Brenneckes",
+    location: "Poipu",
+    island: "Kauai",
+    bedrooms: 7,
+    guests: 14,
+    bathrooms: 4,
+    lowPrice: 2950,
+    highPrice: 2995,
+    multiUnit: true,
+    unitDetails: "5BR main home + 2BR guest quarters",
+    url: "https://thevacationrentalexperts.com/en/fabulous-7-bedroom-for-14-oceanfront-poipu-pool-home",
+  },
+  {
+    id: 32,
+    name: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
+    community: "Kiahuna Plantation",
+    location: "Poipu",
+    island: "Kauai",
+    bedrooms: 5,
+    guests: 12,
+    bathrooms: 5,
+    lowPrice: null,
+    highPrice: null,
+    multiUnit: true,
+    unitDetails: "3BR + 2BR townhomes steps apart",
+    url: "https://thevacationrentalexperts.com/en/gorgeous-poipu-townhomes-for-12-with-ac-5-bedrooms",
+  },
+  {
+    id: 33,
+    name: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
+    community: "Kiahuna Plantation",
+    location: "Poipu",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 12,
+    bathrooms: 6,
+    lowPrice: 1377,
+    highPrice: 2099,
+    multiUnit: true,
+    unitDetails: "Two 3BR/3BA townhomes steps apart",
+    url: "https://thevacationrentalexperts.com/en/beautiful-poipu-townhomes-for-12-with-ac-6-bedrooms",
+  },
+  {
+    id: 34,
+    name: "Wonderful 6 Bedroom For 16 Villa in Poipu!",
+    community: "Poipu Kai",
+    location: "Koloa",
+    island: "Kauai",
+    bedrooms: 6,
+    guests: 16,
+    bathrooms: 4,
+    lowPrice: 1095,
+    highPrice: 2525,
+    multiUnit: true,
+    unitDetails: "2 side-by-side 3BR condos",
+    url: "https://thevacationrentalexperts.com/en/wonderful-6-bedroom-for-16-villa-in-poipu",
+  },
+  {
+    id: 35,
+    name: "Incredible He'eia Bay Pool Home w/hot tub for 16!",
+    community: "Keauhou",
+    location: "Kahaluu-Keauhou",
+    island: "Big Island",
+    bedrooms: 5,
+    guests: 16,
+    bathrooms: 5,
+    lowPrice: 1595,
+    highPrice: 1795,
+    multiUnit: false,
+    unitDetails: "Single estate with pool and guest quarters",
+    url: "https://thevacationrentalexperts.com/en/incredible-heeia-bay-pool-home-whot-tub-for-16",
+  },
+];
+
+type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island";
+type SortDir = "asc" | "desc";
+
+export default function Home() {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [communityFilter, setCommunityFilter] = useState("all");
+  const [islandFilter, setIslandFilter] = useState("all");
+  const [multiUnitFilter, setMultiUnitFilter] = useState("all");
+  const [sortField, setSortField] = useState<SortField>("community");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const communities = useMemo(() => {
+    const set = new Set(properties.map((p) => p.community));
+    return Array.from(set).sort();
+  }, []);
+
+  const islands = useMemo(() => {
+    const set = new Set(properties.map((p) => p.island));
+    return Array.from(set).sort();
+  }, []);
+
+  const filtered = useMemo(() => {
+    let result = properties;
+    if (searchTerm) {
+      const lower = searchTerm.toLowerCase();
+      result = result.filter(
+        (p) =>
+          p.name.toLowerCase().includes(lower) ||
+          p.community.toLowerCase().includes(lower) ||
+          p.location.toLowerCase().includes(lower) ||
+          p.unitDetails.toLowerCase().includes(lower)
+      );
+    }
+    if (communityFilter !== "all") {
+      result = result.filter((p) => p.community === communityFilter);
+    }
+    if (islandFilter !== "all") {
+      result = result.filter((p) => p.island === islandFilter);
+    }
+    if (multiUnitFilter !== "all") {
+      const isMulti = multiUnitFilter === "yes";
+      result = result.filter((p) => p.multiUnit === isMulti);
+    }
+    result = [...result].sort((a, b) => {
+      let aVal: string | number | null = a[sortField];
+      let bVal: string | number | null = b[sortField];
+      if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
+      if (bVal === null) bVal = sortDir === "asc" ? Infinity : -Infinity;
+      if (typeof aVal === "string" && typeof bVal === "string") {
+        return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      const numA = aVal as number;
+      const numB = bVal as number;
+      return sortDir === "asc" ? numA - numB : numB - numA;
+    });
+    return result;
+  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir]);
+
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (sortField !== field) return <ArrowUpDown className="ml-1 h-3.5 w-3.5 text-muted-foreground" />;
+    return sortDir === "asc" ? (
+      <ArrowUp className="ml-1 h-3.5 w-3.5" />
+    ) : (
+      <ArrowDown className="ml-1 h-3.5 w-3.5" />
+    );
+  };
+
+  const multiUnitCount = properties.filter((p) => p.multiUnit).length;
+  const poipuKaiCount = properties.filter((p) => p.community === "Poipu Kai").length;
+  const avgBedrooms = Math.round((properties.reduce((s, p) => s + p.bedrooms, 0) / properties.length) * 10) / 10;
+  const pricedProperties = properties.filter((p) => p.lowPrice !== null);
+  const avgLow = pricedProperties.length
+    ? Math.round(pricedProperties.reduce((s, p) => s + (p.lowPrice || 0), 0) / pricedProperties.length)
+    : 0;
+
+  const communityVariant = (community: string): "default" | "secondary" | "outline" => {
+    const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Kiahuna Plantation"];
+    if (poipuCommunities.includes(community)) return "default";
+    return "secondary";
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="max-w-[1400px] mx-auto px-4 py-6">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
+            Vacation Rental Experts - Property Research
+          </h1>
+          <p className="text-muted-foreground mt-1">
+            Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          <Card className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Building2 className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Total Properties</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-total-properties">{properties.length}</p>
+          </Card>
+          <Card className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Layers className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Multi-Unit Combos</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-multi-unit-count">{multiUnitCount}</p>
+          </Card>
+          <Card className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <MapPin className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Poipu Kai Properties</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-poipu-kai-count">{poipuKaiCount}</p>
+          </Card>
+          <Card className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <DollarSign className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
+          </Card>
+        </div>
+
+        <Card className="p-4 mb-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                data-testid="input-search"
+                placeholder="Search properties..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+            <Select value={communityFilter} onValueChange={setCommunityFilter}>
+              <SelectTrigger className="w-[200px]" data-testid="select-community">
+                <SelectValue placeholder="All Communities" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Communities</SelectItem>
+                {communities.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={islandFilter} onValueChange={setIslandFilter}>
+              <SelectTrigger className="w-[160px]" data-testid="select-island">
+                <SelectValue placeholder="All Islands" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Islands</SelectItem>
+                {islands.map((i) => (
+                  <SelectItem key={i} value={i}>
+                    {i}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={multiUnitFilter} onValueChange={setMultiUnitFilter}>
+              <SelectTrigger className="w-[160px]" data-testid="select-multi-unit">
+                <SelectValue placeholder="All Types" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Types</SelectItem>
+                <SelectItem value="yes">Multi-Unit</SelectItem>
+                <SelectItem value="no">Single Unit</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-3 border-b flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-muted-foreground" data-testid="text-showing-count">
+              Showing {filtered.length} of {properties.length} properties
+            </p>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-xs">
+                <BedDouble className="h-3 w-3 mr-1" />
+                Avg {avgBedrooms} BR
+              </Badge>
+            </div>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[30px] text-center">#</TableHead>
+                <TableHead>
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("name")}
+                    data-testid="button-sort-name"
+                  >
+                    Property Name
+                    <SortIcon field="name" />
+                  </Button>
+                </TableHead>
+                <TableHead>
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("community")}
+                    data-testid="button-sort-community"
+                  >
+                    Community
+                    <SortIcon field="community" />
+                  </Button>
+                </TableHead>
+                <TableHead>
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("island")}
+                    data-testid="button-sort-island"
+                  >
+                    Island
+                    <SortIcon field="island" />
+                  </Button>
+                </TableHead>
+                <TableHead className="text-center">
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("bedrooms")}
+                    data-testid="button-sort-bedrooms"
+                  >
+                    BR
+                    <SortIcon field="bedrooms" />
+                  </Button>
+                </TableHead>
+                <TableHead className="text-center">
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("guests")}
+                    data-testid="button-sort-guests"
+                  >
+                    Guests
+                    <SortIcon field="guests" />
+                  </Button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("lowPrice")}
+                    data-testid="button-sort-low-price"
+                  >
+                    Low $/Night
+                    <SortIcon field="lowPrice" />
+                  </Button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <Button
+                    variant="ghost"
+                    className="font-medium"
+                    onClick={() => handleSort("highPrice")}
+                    data-testid="button-sort-high-price"
+                  >
+                    High $/Night
+                    <SortIcon field="highPrice" />
+                  </Button>
+                </TableHead>
+                <TableHead className="text-center">Type</TableHead>
+                <TableHead className="w-[40px]"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((property, idx) => (
+                <TableRow key={property.id} data-testid={`row-property-${property.id}`}>
+                  <TableCell className="text-center text-muted-foreground text-xs">{idx + 1}</TableCell>
+                  <TableCell>
+                    <div className="max-w-[280px]">
+                      <span className="font-medium text-sm leading-tight" data-testid={`text-name-${property.id}`}>
+                        {property.name}
+                      </span>
+                      <p className="text-xs text-muted-foreground mt-0.5">{property.unitDetails}</p>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={communityVariant(property.community)}
+                      className="no-default-hover-elevate no-default-active-elevate text-xs"
+                      data-testid={`badge-community-${property.id}`}
+                    >
+                      {property.community}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <span className="text-sm text-muted-foreground">{property.island}</span>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <BedDouble className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="font-medium" data-testid={`text-bedrooms-${property.id}`}>
+                        {property.bedrooms}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="font-medium" data-testid={`text-guests-${property.id}`}>
+                        {property.guests}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <span className="font-medium" data-testid={`text-low-price-${property.id}`}>
+                      {property.lowPrice ? `$${property.lowPrice.toLocaleString()}` : "N/A"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <span className="font-medium" data-testid={`text-high-price-${property.id}`}>
+                      {property.highPrice ? `$${property.highPrice.toLocaleString()}` : "N/A"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    {property.multiUnit ? (
+                      <Badge variant="outline" className="text-xs">
+                        <Layers className="h-3 w-3 mr-1" />
+                        Multi
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Single</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <a
+                      href={property.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid={`link-property-${property.id}`}
+                    >
+                      <Button size="icon" variant="ghost">
+                        <ExternalLink className="h-4 w-4" />
+                      </Button>
+                    </a>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {filtered.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
+                    No properties match your filters
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Card>
+
+        <div className="mt-4 text-xs text-muted-foreground text-center">
+          Data sourced from thevacationrentalexperts.com sitemap. Prices shown are nightly rates and may vary by season.
+        </div>
+      </div>
+    </div>
+  );
+}
