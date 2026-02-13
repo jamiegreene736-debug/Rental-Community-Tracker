@@ -155,6 +155,90 @@ const PHOTOS_621: UnitPhoto[] = [
   { filename: "18-third-bedroom-bath.jpg", label: "Third Bedroom Bath", category: "Bathrooms" },
 ];
 
+const PHOTOS_KEKAHA_MAIN: UnitPhoto[] = [
+  { filename: "photo_1.jpg", label: "Beachfront Exterior", category: "Exterior" },
+  { filename: "photo_2.jpg", label: "Ocean View from Lanai", category: "Exterior" },
+  { filename: "photo_3.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_4.jpg", label: "Great Room Overview", category: "Living Areas" },
+  { filename: "photo_5.jpg", label: "Dining Area", category: "Living Areas" },
+  { filename: "photo_6.jpg", label: "Granite Kitchen", category: "Kitchen" },
+  { filename: "photo_7.jpg", label: "Kitchen and Dining", category: "Kitchen" },
+  { filename: "photo_8.jpg", label: "Master Bedroom - King", category: "Bedrooms" },
+  { filename: "photo_9.jpg", label: "Second Bedroom - Queens", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Third Bedroom - Queen", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Second Bathroom", category: "Bathrooms" },
+  { filename: "photo_13.jpg", label: "Oceanfront Patio", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Beach Access", category: "Exterior" },
+  { filename: "photo_15.jpg", label: "Sunroom with Twin Bed", category: "Bedrooms" },
+  { filename: "photo_16.jpg", label: "Aerial Property View", category: "Exterior" },
+  { filename: "photo_17.jpg", label: "Surf Break View", category: "Exterior" },
+  { filename: "photo_18.jpg", label: "Sunset from Lanai", category: "Exterior" },
+];
+
+const PHOTOS_KEKAHA_COTTAGE: UnitPhoto[] = [
+  { filename: "photo_1.jpg", label: "Cottage Exterior", category: "Exterior" },
+  { filename: "photo_2.jpg", label: "Ocean View", category: "Exterior" },
+  { filename: "photo_3.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_4.jpg", label: "Living and Dining", category: "Living Areas" },
+  { filename: "photo_5.jpg", label: "Kitchen", category: "Kitchen" },
+  { filename: "photo_6.jpg", label: "Kitchen Detail", category: "Kitchen" },
+  { filename: "photo_7.jpg", label: "Master Bedroom - King", category: "Bedrooms" },
+  { filename: "photo_8.jpg", label: "Second Bedroom - King", category: "Bedrooms" },
+  { filename: "photo_9.jpg", label: "Master En-Suite Bath", category: "Bathrooms" },
+  { filename: "photo_10.jpg", label: "Second En-Suite Bath", category: "Bathrooms" },
+  { filename: "photo_11.jpg", label: "Third Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Sun Room", category: "Living Areas" },
+  { filename: "photo_13.jpg", label: "Aerial Cottage View", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Cottage and Beach House", category: "Exterior" },
+  { filename: "photo_15.jpg", label: "Oceanfront Lanai", category: "Exterior" },
+  { filename: "photo_16.jpg", label: "Beachfront Path", category: "Exterior" },
+  { filename: "photo_17.jpg", label: "Sunset View", category: "Exterior" },
+  { filename: "photo_18.jpg", label: "Beach Access", category: "Exterior" },
+];
+
+const PHOTOS_KEKAHA_OHANA: UnitPhoto[] = [
+  { filename: "photo_1.jpg", label: "Retractable Lanai Doors", category: "Living Areas" },
+  { filename: "photo_2.jpg", label: "Master Bedroom", category: "Bedrooms" },
+  { filename: "photo_3.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_4.jpg", label: "Guest Bedroom 1", category: "Bedrooms" },
+  { filename: "photo_5.jpg", label: "Guest Bedroom 2", category: "Bedrooms" },
+  { filename: "photo_6.jpg", label: "Guest Bedroom Detail", category: "Bedrooms" },
+  { filename: "photo_7.jpg", label: "Living Area with Bar", category: "Living Areas" },
+  { filename: "photo_8.jpg", label: "Lower Lanai", category: "Exterior" },
+  { filename: "photo_9.jpg", label: "Upper Lanai Ocean View", category: "Exterior" },
+  { filename: "photo_10.jpg", label: "Upper Lanai Seating", category: "Exterior" },
+  { filename: "photo_11.jpg", label: "Alaula Estate Grounds", category: "Exterior" },
+  { filename: "photo_12.jpg", label: "Aerial Estate View", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Home Exterior", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Entry", category: "Exterior" },
+  { filename: "photo_15.jpg", label: "Gourmet Kitchen", category: "Kitchen" },
+  { filename: "photo_16.jpg", label: "Kitchen and Living", category: "Living Areas" },
+  { filename: "photo_17.jpg", label: "Wet Bar", category: "Kitchen" },
+  { filename: "photo_18.jpg", label: "Upstairs Living Area", category: "Living Areas" },
+];
+
+const PHOTOS_KEAUHOU: UnitPhoto[] = [
+  { filename: "photo_1.jpg", label: "Estate Pool and Ocean View", category: "Exterior" },
+  { filename: "photo_2.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_3.jpg", label: "Circular Kitchen", category: "Kitchen" },
+  { filename: "photo_4.jpg", label: "Master Suite", category: "Bedrooms" },
+  { filename: "photo_5.jpg", label: "Garden and Pool", category: "Exterior" },
+  { filename: "photo_6.jpg", label: "Pool Area", category: "Exterior" },
+  { filename: "photo_7.jpg", label: "Lanai Dining", category: "Exterior" },
+  { filename: "photo_8.jpg", label: "Guest Suite", category: "Bedrooms" },
+  { filename: "photo_9.jpg", label: "Kitchen Island", category: "Kitchen" },
+  { filename: "photo_10.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_11.jpg", label: "Ocean View from Lanai", category: "Exterior" },
+  { filename: "photo_12.jpg", label: "Tropical Gardens", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_14.jpg", label: "Bedroom 3", category: "Bedrooms" },
+  { filename: "photo_15.jpg", label: "Bedroom 4", category: "Bedrooms" },
+  { filename: "photo_16.jpg", label: "Estate Exterior", category: "Exterior" },
+  { filename: "photo_17.jpg", label: "Casita Guest Quarters", category: "Bedrooms" },
+  { filename: "photo_18.jpg", label: "Sunset View", category: "Exterior" },
+];
+
 export const unitBuilderData: PropertyUnitBuilder[] = [
   {
     propertyId: 1,
@@ -517,33 +601,53 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
     propertyName: "Fabulous 5 br for 15 private beachfront Estate!",
     complexName: "Kekaha Beachfront Estate",
     address: "8497 Kekaha Rd, Kekaha, HI 96752",
-    bookingTitle: "Private Kekaha Beachfront Estate - 5BR Home with Direct Beach Access on Kauai's West Shore",
-    sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest quarters may vary in decor and furnishings from photos shown.",
-    hasPhotos: false,
+    bookingTitle: "Kekaha Beachfront Estate - Sleeps 15 | 5BR Oceanfront Home & Cottage at Davidson's Surf Break | Kekaha, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
+    hasPhotos: true,
     units: [
       {
-        id: "prop10-unit-a",
-        unitNumber: "Main House",
+        id: "prop10-kimsey-house",
+        unitNumber: "Kimsey Beach House",
         bedrooms: 3,
         bathrooms: "2",
-        sqft: "~1,800",
-        maxGuests: 8,
-        shortDescription: "Placeholder for main house. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        sqft: "~2,000",
+        maxGuests: 9,
+        shortDescription: "Luxury 3-bedroom, 2-bath oceanfront home at Davidson's Surf Break in Kekaha. Merbau wood floors, travertine bathrooms, granite countertops. Every room opens to the oceanfront patio, steps from the beach. AC in master and second bedrooms. Sleeps 9 with King, 3 Queens, and Twin.",
+        longDescription: `Welcome to Kimsey Beach House, a luxury 3-bedroom, 2-bathroom oceanfront home located directly on Davidson's Surf Break in Kekaha on Kauai's sunny west side. This beautifully remodeled beach home puts you steps from miles of pristine white sand beach.
+
+The home has been renovated with Merbau wood floors throughout, travertine bathrooms, and granite countertops. Every room features sliding glass doors that lead directly to the oceanfront patio and lanai, creating a seamless indoor-outdoor living experience with the sound of waves as your constant soundtrack.
+
+The spacious great room flows from comfortable living areas through a generous dining space to the fully equipped modern kitchen, perfect for preparing family meals and entertaining. Two living areas provide plenty of space for your group to spread out.
+
+The private master suite is separate from the other bedrooms for added privacy, featuring a King bed and an en-suite travertine bathroom with a double-head walk-in shower. The second bedroom has a Queen bed, and the third bedroom features two Queen beds. A sleeping sunroom with a twin bed provides additional space. Split AC units cool the master and second bedrooms.
+
+Enjoy spectacular Ni'ihau sunset views from the oceanfront patio. A Weber BBQ, outdoor shower, and full laundry room are included. Beach towels, beach chairs, and all linens provided.
+
+Kekaha is the sunniest spot on Kauai with a laid-back local vibe. You're close to Waimea Canyon, Polihale Beach, and the beautiful Na Pali Coast. The west side truly is the best side.`,
+        photoFolder: "kekaha-main",
+        photos: PHOTOS_KEKAHA_MAIN,
       },
       {
-        id: "prop10-unit-b",
-        unitNumber: "Guest Quarters",
+        id: "prop10-kimsey-cottage",
+        unitNumber: "Kimsey Beach Cottage",
         bedrooms: 2,
-        bathrooms: "1",
-        sqft: "~800",
-        maxGuests: 7,
-        shortDescription: "Placeholder for guest quarters. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        bathrooms: "3",
+        sqft: "~1,200",
+        maxGuests: 6,
+        shortDescription: "Charming renovated 1930s plantation cottage on the same oceanfront property. Two king master suites with en-suite baths, plus a queen sleeper sofa. Ocean and Ni'ihau views, AC in both bedrooms, full kitchen, and 3 bathrooms. Sleeps 6.",
+        longDescription: `Welcome to Kimsey Beach Cottage, a completely renovated 1930s plantation-style oceanfront cottage located right next to Kimsey Beach House on the same property at Davidson's Surf Break in Kekaha.
+
+This charming cottage retains its old Hawaii character while boasting all modern conveniences and comforts. Two master suites each feature a comfortable king-sized bed with their own en-suite bathrooms, plus a third full bathroom. Split AC units in both bedrooms keep you cool, and ceiling fans are located in every room.
+
+The open living area features a queen-sized sleeper sofa for additional guests, and a separate sun room provides a peaceful reading nook. The fully equipped kitchen has everything you need for meal preparation, with views that look out over the ocean.
+
+Sweeping ocean and Ni'ihau island views are visible from nearly every room. Step outside to the oceanfront lanai where you can watch surfers ride Davidson's famous break while enjoying your morning coffee.
+
+Cable TV, DVD player, high-speed internet, gas grill, laundry room, and all linens and beach towels are included. This cottage can be rented alone or combined with Kimsey Beach House for groups of up to 15 guests.
+
+Experience the authentic charm of old Hawaii plantation living with the comforts of a modern vacation home, all on one of Kauai's most beautiful and uncrowded beachfronts.`,
+        photoFolder: "kekaha-cottage",
+        photos: PHOTOS_KEKAHA_COTTAGE,
       },
     ],
   },
@@ -552,33 +656,53 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
     propertyName: "Incredible Kekaha Beachfront Estate for 10!",
     complexName: "Kekaha Beachfront Estate",
     address: "8515 Kekaha Rd, Kekaha, HI 96752",
-    bookingTitle: "Incredible Kekaha Beachfront Estate - 5BR Home with Ocean Views on Kauai's Sunny West Shore",
-    sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest quarters may vary in decor and furnishings from photos shown.",
-    hasPhotos: false,
+    bookingTitle: "Kekaha Alaula Estate - Sleeps 10 | 5BR Oceanfront Plantation Home & Cottage | Kekaha, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
+    hasPhotos: true,
     units: [
       {
-        id: "prop12-unit-a",
-        unitNumber: "Main House",
+        id: "prop12-hale-ohana",
+        unitNumber: "Hale Ohana",
         bedrooms: 3,
-        bathrooms: "2",
-        sqft: "~1,600",
+        bathrooms: "3",
+        sqft: "~2,400",
         maxGuests: 6,
-        shortDescription: "Placeholder for main house. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        shortDescription: "Luxury 2-story oceanfront plantation home on the Alaula Estate. Retractable glass doors, soapstone counters, teak furnishings, wet bar, split AC, wrap-around lanai with ocean and sunset views. Sleeps 6 with King and 2 Queens.",
+        longDescription: `Welcome to Hale Ohana, an exquisite oceanfront luxury plantation-style vacation home located on the historic Alaula Estate on Kauai's sunny west side in Kekaha.
+
+This beautifully appointed two-story home features retractable sliding glass doors that open to spacious lanais, creating an open-air ambiance while enjoying lavishly appointed living areas with tropically covered solid teak furnishings. Soapstone countertops and sea grass floor coverings add authentic Hawaiian elegance.
+
+The upstairs master suite is a private retreat featuring a large bedroom, adjoining custom bathroom, and access to the "Great Room" with a wet bar and spectacular ocean views from the spacious upper lanai - perfect for entertaining or simply watching the sun set over Ni'ihau Island.
+
+The main floor offers two guest bedrooms with queen beds, each with ceiling fans and windows for natural trade wind circulation. Two full bathrooms on the main level feature travertine floors and showers. The fully equipped kitchen boasts high-end appliances and the finest amenities for the home chef.
+
+Split AC units in all bedrooms ensure comfortable sleeping. A wrap-around covered lanai on both levels provides ample outdoor living space with breathtaking ocean views.
+
+Located on a private beachfront plantation estate, Hale Ohana offers a truly unique Hawaiian experience. Walk directly to the beach, explore Waimea Canyon, or simply relax in paradise.`,
+        photoFolder: "kekaha-ohana",
+        photos: PHOTOS_KEKAHA_OHANA,
       },
       {
-        id: "prop12-unit-b",
-        unitNumber: "Guest Quarters",
+        id: "prop12-hale-alaula",
+        unitNumber: "Hale Alaula Cottage",
         bedrooms: 2,
         bathrooms: "2",
-        sqft: "~800",
+        sqft: "~900",
         maxGuests: 4,
-        shortDescription: "Placeholder for guest quarters. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        shortDescription: "Restored 1930s plantation guest cottage on the same Alaula Estate. Vintage Hawaiian decor, spacious living and dining room, full kitchen, large covered lanai overlooking manicured tropical grounds. Sleeps 4.",
+        longDescription: `Welcome to Hale Alaula Cottage, a beautifully restored 1930s beachfront plantation guest cottage on the historic Alaula Estate in Kekaha, Kauai.
+
+This charming two-bedroom cottage features vintage Hawaiian decor that captures the authentic spirit of old Hawaii. The cottage includes a spacious living room, dining area, full kitchen, and two comfortable bedrooms, each with its own bathroom.
+
+The large covered lanai is the highlight, looking out over the estate's palatial, manicured tropical grounds with views extending to the ocean beyond. Enjoy your morning coffee surrounded by swaying palms and fragrant tropical flowers.
+
+The cottage is located on the same estate as Hale Ohana, sharing the beautiful grounds and direct beach access. Together, the two properties can accommodate up to 10 guests, making this an ideal setup for family reunions or group vacations.
+
+All linens, beach towels, and kitchen essentials are provided. The west side of Kauai enjoys the most sunshine on the island, and Kekaha's laid-back community offers a genuine local Hawaiian experience far from the tourist crowds.
+
+Nearby attractions include Waimea Canyon, Polihale Beach, and the stunning Na Pali Coast. Enjoy spectacular sunsets over the Forbidden Island of Ni'ihau every evening.`,
+        photoFolder: "kekaha-ohana",
+        photos: PHOTOS_KEKAHA_OHANA,
       },
     ],
   },
@@ -587,33 +711,51 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
     propertyName: "Fabulous 7 br 22 ocean view pool estate!",
     complexName: "Keauhou Estates",
     address: "78-6855 Ali'i Dr, Kailua-Kona, HI 96740",
-    bookingTitle: "Keauhou Ocean View Pool Estate - Luxurious 7BR Home with Pool near Kona Coast, Big Island",
-    sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and guest quarters may vary in decor and furnishings from photos shown.",
-    hasPhotos: false,
+    bookingTitle: "Keauhou Estates Halele'a - Sleeps 22 | 7BR Luxury Pool Estate with Ocean Views | Kailua-Kona, Big Island",
+    sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and casita guest quarters may vary in decor and furnishings from photos shown.",
+    hasPhotos: true,
     units: [
       {
-        id: "prop14-unit-a",
-        unitNumber: "Main House",
-        bedrooms: 5,
-        bathrooms: "3",
-        sqft: "~3,000",
-        maxGuests: 14,
-        shortDescription: "Placeholder for main house. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        id: "prop14-halelea-main",
+        unitNumber: "Halele'a Main House",
+        bedrooms: 4,
+        bathrooms: "4",
+        sqft: "~4,000",
+        maxGuests: 8,
+        shortDescription: "Stunning 4-bedroom, 4-bath custom estate in gated Keauhou Estates. Each suite has private bath, king bed, and ocean views. Circular kitchen with high ceilings, 72ft saltwater lap pool, zoned AC, and multiple lanais overlooking Kailua Bay.",
+        longDescription: `Welcome to Halele'a - the House of Joy - a breathtaking Hawaiian retreat in the private, gated community of Keauhou Estates on the Big Island's Kona Coast.
+
+This stunning custom estate features four main suites, each uniquely designed with a private bathroom, Roku-enabled TV, king-sized bed, and captivating ocean views overlooking Kailua Bay. The upstairs primary suite offers unparalleled luxury with a private lanai and an elegant en-suite bathroom featuring a bathtub and shower.
+
+The spacious circular kitchen with soaring high ceilings was designed for entertaining and culinary creativity, fully equipped with modern appliances, a large island with stool seating, and ample counter space. Indoor and outdoor dining areas seat up to eight guests.
+
+The expansive open-plan design features large windows and glass doors that invite natural light and ocean breezes. Multiple seating areas and multiple lanais offer both sun-soaked and shaded relaxation spaces with breathtaking tropical garden and ocean views.
+
+The crown jewel is the designer saltwater pool, approximately 72 feet long and ideal for lap swimming, with an adjacent plunge pool for added relaxation. Positioned to enjoy sunlight from morning to sunset.
+
+Zoned air conditioning ensures comfort throughout. Located in exclusive Keauhou Estates with convenient access to Magic Sands Beach, Kahaluu Snorkel Beach, golf courses, shopping, and dining.`,
+        photoFolder: "keauhou-estate",
+        photos: PHOTOS_KEAUHOU,
       },
       {
-        id: "prop14-unit-b",
-        unitNumber: "Guest Quarters",
+        id: "prop14-halelea-casita",
+        unitNumber: "Halele'a Casita",
         bedrooms: 2,
-        bathrooms: "2",
-        sqft: "~1,000",
-        maxGuests: 8,
-        shortDescription: "Placeholder for guest quarters. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        bathrooms: "1",
+        sqft: "~800",
+        maxGuests: 4,
+        shortDescription: "Private casita-style guest quarters across the pool landing from the main house. Two bedrooms with king beds, private bathroom, individual AC unit, and pool access. Perfect for couples or overflow guests.",
+        longDescription: `The Halele'a Casita is a separate guest quarters located across a landing over the pool from the main house, within the same gated Keauhou Estates property.
+
+This casita-style structure provides two additional bedrooms, each with a king bed, and a private bathroom. Individual AC units ensure comfortable sleeping. The casita offers a sense of privacy and seclusion while being just steps from the main house and its full amenities.
+
+Guests in the casita have full access to the main house kitchen, living areas, the 72-foot saltwater lap pool, and all outdoor amenities including the BBQ area and multiple lanais.
+
+The separate structure is ideal for couples who want their own private space, or for family members who appreciate a bit of independence while still being part of the group vacation experience.
+
+From the casita, enjoy views of the tropical gardens, pool area, and ocean beyond. The gated Keauhou Estates community provides security and privacy, with Magic Sands Beach and Kahaluu Snorkel Beach nearby.`,
+        photoFolder: "keauhou-estate",
+        photos: PHOTOS_KEAUHOU,
       },
     ],
   },
@@ -674,83 +816,111 @@ Walk to three stunning south shore beaches in just 10 minutes. Snorkel among col
   },
   {
     propertyId: 19,
-    propertyName: "Fabulous 5 bedroom for 10 townhome above Anini Beach!",
-    complexName: "Mauna Kai at Princeville",
+    propertyName: "Gorgeous Princeville 5 bedroom condos for 14!",
+    complexName: "Mauna Kai Princeville",
     address: "3920 Wyllie Rd, Princeville, HI 96722",
-    bookingTitle: "Mauna Kai Princeville - 5BR Townhomes above Famous Anini Beach with Ocean Views, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of townhome units within Mauna Kai at Princeville. Individual units may vary in decor, furnishings, and layout.",
+    bookingTitle: "Mauna Kai Princeville - Sleeps 14 | 5BR Resort Condos near Hideaways Beach | Princeville, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop19-unit-a",
-        unitNumber: "TBD",
+        id: "prop19-mk-9",
+        unitNumber: "9",
         bedrooms: 3,
         bathrooms: "2",
-        sqft: "~1,400",
-        maxGuests: 6,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        sqft: "~1,600",
+        maxGuests: 8,
+        shortDescription: "Bright two-story 3BR/2BA condo with mountain views, shared pool and hot tub. Fully equipped kitchen with granite counters, gas grill on deck, and outdoor dining. King master, queen second and third bedrooms, plus queen sofa bed. Near Hideaways Beach.",
+        longDescription: `Welcome to Mauna Kai Unit 9, a spacious two-story condominium in the Mauna Kai resort community in Princeville on Kauai's North Shore.
+
+This bright and airy condo features an open floor plan that seamlessly combines the kitchen, living room, and dining area into one large gathering space. Floor-to-ceiling windows bring in natural light and showcase the surrounding mountain and garden views.
+
+The fully equipped kitchen features stainless steel appliances, gorgeous granite countertops, and all the cooking essentials for preparing meals during your stay. A gas grill on the deck allows for outdoor cooking, and the outdoor dining area and comfortable seating make the deck an extension of your living space.
+
+The king-bedded master suite, queen-bedded second bedroom, and queen-bedded third bedroom provide comfortable sleeping for up to six. A queen sofa bed in the living area sleeps two more. Central AC keeps the entire unit comfortable.
+
+Mauna Kai Unit 9 grants guests access to the shared outdoor pool and hot tub, perfect for relaxing after a day of North Shore adventures. Water sports gear is available for guest use.
+
+Princeville offers jaw-dropping beaches, top golf courses, and breathtaking cliffs. Hideaways Beach is just two miles away, Hanalei Bay and its famous pier are four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop19-unit-b",
-        unitNumber: "TBD",
+        id: "prop19-mk-11",
+        unitNumber: "11",
         bedrooms: 2,
-        bathrooms: "1",
-        sqft: "~1,000",
-        maxGuests: 4,
-        shortDescription: "Placeholder for 2-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        bathrooms: "2",
+        sqft: "~1,200",
+        maxGuests: 6,
+        shortDescription: "Comfortable 2BR/2BA ground-floor condo with garden views, shared pool, full kitchen, and covered lanai. Queen beds in both bedrooms plus sofa sleeper. Walkable to Princeville shops and restaurants.",
+        longDescription: `Welcome to Mauna Kai Unit 11, a comfortable ground-floor 2-bedroom, 2-bathroom condominium in the Mauna Kai resort community in beautiful Princeville.
+
+This well-maintained unit offers a relaxed island atmosphere with garden views from the covered lanai. The open floor plan creates a spacious feel, with comfortable living areas flowing into the fully equipped kitchen and dining space.
+
+Both bedrooms feature queen beds with ceiling fans and their own adjacent bathrooms. A sofa sleeper in the living area accommodates additional guests. The kitchen is fully stocked with cookware, dishes, and modern appliances.
+
+A covered lanai provides the perfect spot for morning coffee or evening relaxation. In-unit washer and dryer, WiFi, and cable TV are included.
+
+Guests enjoy access to the Mauna Kai shared pool and BBQ area. The resort's convenient Princeville location puts you close to shopping, dining, and some of Kauai's most spectacular scenery.
+
+Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture to Hanalei for surfing and dining. The Na Pali Coast's dramatic cliffs and hiking trails are a short drive away.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
   {
     propertyId: 20,
-    propertyName: "Fabulous 7 bedrooms for 16 above Anini Beach!",
-    complexName: "Mauna Kai at Princeville",
-    address: "3920 Wyllie Rd, Unit B, Princeville, HI 96722",
-    bookingTitle: "Mauna Kai Princeville - Fabulous 7BR Townhomes above Anini Beach with Ocean Views, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of townhome units within Mauna Kai at Princeville. Individual units may vary in decor, furnishings, and layout.",
+    propertyName: "Gorgeous Princeville 6 bedroom condos for 18!",
+    complexName: "Mauna Kai Princeville",
+    address: "3920 Wyllie Rd, Princeville, HI 96722",
+    bookingTitle: "Mauna Kai Princeville - Sleeps 18 | 6BR Resort Condos with Pool near Hideaways Beach | Princeville, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop20-unit-a",
-        unitNumber: "TBD",
+        id: "prop20-mk-7b",
+        unitNumber: "7B",
+        bedrooms: 3,
+        bathrooms: "3",
+        sqft: "~1,600",
+        maxGuests: 8,
+        shortDescription: "Spacious 3BR/3BA two-story condo with ocean glimpses, shared pool, fully equipped kitchen, and covered lanai. King master suite, queen bedrooms, and loft sleeping area. Central AC throughout.",
+        longDescription: `Welcome to Mauna Kai Unit 7B, a spacious 3-bedroom, 3-bathroom two-story condominium in Princeville's Mauna Kai resort. This well-appointed unit features central AC and a layout that maximizes space and privacy.
+
+The main level features an open-concept living area with comfortable seating, a dining table, and a fully equipped kitchen. Sliding glass doors open to a covered lanai where you can enjoy the tropical breezes and garden views.
+
+Three full bathrooms serve the three bedrooms. The king-bedded master suite includes an en-suite bath, while the second and third bedrooms feature queen beds. A loft area provides additional flexible sleeping space.
+
+The kitchen has everything you need for home cooking, from quality appliances to ample prep space. A washer and dryer in the unit add convenience.
+
+Mauna Kai's shared pool and hot tub are just steps away. The resort location in Princeville puts you close to Hideaways Beach, the Princeville Botanical Gardens, and the gateway to the North Shore's most spectacular scenery.
+
+From Hanalei Bay's famous crescent beach to the dramatic Na Pali Coast trails, Kauai's North Shore offers some of Hawaii's most breathtaking experiences right at your doorstep.`,
+        photoFolder: "",
+        photos: [],
+      },
+      {
+        id: "prop20-mk-8",
+        unitNumber: "8",
         bedrooms: 3,
         bathrooms: "2",
-        sqft: "~1,400",
-        maxGuests: 6,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        sqft: "~1,600",
+        maxGuests: 8,
+        shortDescription: "Airy 3BR/2BA two-story condo with garden and mountain views. Open floor plan, stainless kitchen, lanai with seating, shared pool. King, queen, and twin bedrooms. Near Princeville shops and beaches.",
+        longDescription: `Welcome to Mauna Kai Unit 8, a bright and airy 3-bedroom, 2-bathroom two-story condo in Princeville's Mauna Kai resort community.
+
+The open floor plan on the main level creates a wonderful gathering space where the kitchen, dining area, and living room flow together. Mountain and garden views from the windows and lanai remind you that you're in one of Hawaii's most beautiful locations.
+
+The stainless steel kitchen is fully equipped for meal preparation, with granite counters and modern appliances. The lanai features comfortable seating for outdoor dining and relaxation.
+
+The king-bedded master suite is on the main level with an en-suite bath. Two upstairs bedrooms offer a queen bed and twin beds respectively, sharing a full bath. WiFi, cable TV, in-unit washer/dryer, and all linens are included.
+
+The shared pool and hot tub provide a refreshing retreat. Princeville's convenient location offers easy access to grocery stores, restaurants, and the Princeville golf courses.
+
+Kauai's North Shore stretches before you with endless possibilities - from the turquoise waters of Anini Beach to the towering waterfalls along the Na Pali Coast. Hanalei's charming shops and restaurants are just a short drive away.`,
         photoFolder: "",
-      },
-      {
-        id: "prop20-unit-b",
-        unitNumber: "TBD",
-        bedrooms: 2,
-        bathrooms: "1.5",
-        sqft: "~1,000",
-        maxGuests: 5,
-        shortDescription: "Placeholder for 2-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
         photos: [],
-        photoFolder: "",
-      },
-      {
-        id: "prop20-unit-c",
-        unitNumber: "TBD",
-        bedrooms: 2,
-        bathrooms: "1.5",
-        sqft: "~1,000",
-        maxGuests: 5,
-        shortDescription: "Placeholder for 2-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
       },
     ],
   },
@@ -833,71 +1003,105 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
   },
   {
     propertyId: 23,
-    propertyName: "Gorgeous 5 br for 12 in Kapaa - Beachfront!",
-    complexName: "Kapaa Beachfront Townhomes",
-    address: "4-820 Kuhio Hwy, Kapaa, HI 96746",
-    bookingTitle: "Kapaa Beachfront Townhomes - Gorgeous 5BR Oceanfront Retreat on Kauai's Coconut Coast",
-    sampleDisclaimer: "Photos shown are representative samples of townhome units within this beachfront complex. Individual units may vary in decor, furnishings, and layout.",
+    propertyName: "Incredible 5 bedrooms for 14 at Lydgate Beach!",
+    complexName: "Kaha Lani Resort",
+    address: "4460 Nehe Rd, Lihue, HI 96766",
+    bookingTitle: "Kaha Lani Resort Kapaa - Sleeps 14 | 5BR Oceanfront Condos at Lydgate Beach | Kapaa, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Kaha Lani Resort. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop23-unit-a",
-        unitNumber: "TBD",
+        id: "prop23-kl-3br",
+        unitNumber: "339",
         bedrooms: 3,
         bathrooms: "3",
-        sqft: "~1,500",
-        maxGuests: 7,
-        shortDescription: "Placeholder for 3-bedroom oceanfront townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        sqft: "~1,700",
+        maxGuests: 8,
+        shortDescription: "Spacious 3BR/3BA oceanfront condo at Kaha Lani Resort. Open floor plan, fully equipped kitchen, private lanai with ocean views. King master, queen second, twins third. Steps to Lydgate Beach and playground. AC throughout.",
+        longDescription: `Welcome to Kaha Lani Unit 339, a spacious 3-bedroom, 3-bathroom oceanfront condominium at the Kaha Lani Resort in Kapaa on Kauai's Coconut Coast.
+
+This well-appointed condo features an open floor plan with ocean views from the main living areas and private lanai. The fully equipped kitchen has modern appliances, granite counters, and everything needed for meal preparation. The dining area seats your full group comfortably.
+
+The king-bedded master suite includes an en-suite bathroom and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds - both with adjacent bathrooms. AC throughout keeps you comfortable in Kapaa's tropical climate.
+
+The private lanai is perfect for morning coffee while watching the sunrise over the Pacific. A washer/dryer, WiFi, cable TV, and all linens are included.
+
+Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park, one of Kauai's best family beaches with a protected swimming lagoon, snorkeling, and the expansive Kamalani Playground.
+
+Kapaa's Coconut Coast is centrally located on Kauai, making it easy to explore both the North Shore and South Shore. The charming Kapaa town offers eclectic shopping, dining, and the scenic coastal bike path.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop23-unit-b",
-        unitNumber: "TBD",
+        id: "prop23-kl-2br",
+        unitNumber: "221",
         bedrooms: 2,
         bathrooms: "2",
-        sqft: "~1,100",
-        maxGuests: 4,
-        shortDescription: "Placeholder for 2-bedroom oceanfront townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        sqft: "~1,200",
+        maxGuests: 6,
+        shortDescription: "Ocean view 2BR/2BA condo at Kaha Lani Resort. Renovated kitchen, comfortable living areas, and a private lanai overlooking the ocean. King master and queen second bedroom. Steps to Lydgate Beach.",
+        longDescription: `Welcome to Kaha Lani Unit 221, a comfortable 2-bedroom, 2-bathroom ocean view condominium at the Kaha Lani Resort in Kapaa.
+
+This well-maintained unit features a renovated kitchen with modern appliances and granite counters. The open living and dining area flows to a private lanai with ocean views, creating a relaxing tropical retreat.
+
+The king-bedded master suite has an en-suite bathroom, and the queen-bedded second bedroom is adjacent to the second full bath. A sofa sleeper in the living area provides space for additional guests. WiFi, cable TV, washer/dryer, and all linens included.
+
+Take advantage of Kaha Lani Resort's pool, hot tub, and BBQ facilities. Walk directly to Lydgate Beach Park's protected swimming lagoon, ideal for families with its calm waters and abundant sea life.
+
+Kapaa town is minutes away with its bike path, shopping, and diverse dining options. The Coconut Coast location provides easy access to attractions across the island.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
   {
     propertyId: 24,
-    propertyName: "Wonderful 5 br 12 Poipu ocean view! Oceanfront complex!",
-    complexName: "Poipu Oceanfront Resort",
-    address: "1775 Pe'e Rd, Koloa, HI 96756",
-    bookingTitle: "Poipu Oceanfront Resort - 5BR Ocean View Condos in Oceanfront Complex, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of units within this oceanfront complex. Individual units may vary in decor, furnishings, and layout.",
+    propertyName: "Gorgeous 5 bedroom condos for 10 on Kapaa coast!",
+    complexName: "Lae Nani Resort",
+    address: "410 Papaloa Rd, Kapaa, HI 96746",
+    bookingTitle: "Lae Nani Resort Kapaa - Sleeps 10 | 5BR Oceanfront Condos on Kapaa's Coconut Coast | Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Lae Nani Resort. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop24-unit-a",
-        unitNumber: "TBD",
+        id: "prop24-ln-3br",
+        unitNumber: "314",
         bedrooms: 3,
-        bathrooms: "3",
+        bathrooms: "2",
         sqft: "~1,500",
-        maxGuests: 8,
-        shortDescription: "Placeholder for 3-bedroom ocean view unit. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        maxGuests: 6,
+        shortDescription: "Oceanfront 3BR/2BA condo at Lae Nani Resort. Open living with ocean views, full kitchen, private lanai, pool and tennis. King master, queen and twin bedrooms. Steps to a private sandy beach cove.",
+        longDescription: `Welcome to Lae Nani Unit 314, an oceanfront 3-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa on Kauai's beautiful Coconut Coast.
+
+This corner unit offers expansive ocean views from the living area and private lanai. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
+
+The fully equipped kitchen features modern appliances and plenty of counter space. The king-bedded master suite has an en-suite bath and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds. AC and ceiling fans keep all rooms comfortable.
+
+Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
+
+Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Central Kauai location makes day trips to any part of the island easy and convenient.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop24-unit-b",
-        unitNumber: "TBD",
+        id: "prop24-ln-2br",
+        unitNumber: "225",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
         maxGuests: 4,
-        shortDescription: "Placeholder for 2-bedroom ocean view unit. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Charming 2BR/2BA condo at Lae Nani Resort with ocean views, tropical garden setting, full kitchen, and lanai. King and queen bedrooms. Private beach cove, pool, and tennis court.",
+        longDescription: `Welcome to Lae Nani Unit 225, a charming 2-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa.
+
+Set in a tropical garden with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath.
+
+WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer/dryer adds convenience.
+
+Lae Nani's private beach cove offers some of the best swimming on Kauai's east side. The resort pool, tennis court, and landscaped grounds provide a relaxing base for your Kauai vacation.
+
+Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
@@ -906,33 +1110,49 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Fabulous 7 bedroom for 23 near Magic Sands Beach!",
     complexName: "Keauhou Estates",
     address: "78-6920 Ali'i Dr, Kailua-Kona, HI 96740",
-    bookingTitle: "Keauhou Estate - Fabulous 7BR Home with Pool near Magic Sands Beach, Big Island Hawaii",
-    sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and guest quarters may vary in decor and furnishings from photos shown.",
-    hasPhotos: false,
+    bookingTitle: "Keauhou Estates - Sleeps 23 | 7BR Luxury Estate with Pool near Magic Sands Beach | Kailua-Kona, Big Island",
+    sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and guest wing may vary in decor and furnishings from photos shown.",
+    hasPhotos: true,
     units: [
       {
-        id: "prop26-unit-a",
-        unitNumber: "Main House",
+        id: "prop26-estate-main",
+        unitNumber: "Main Estate",
         bedrooms: 5,
-        bathrooms: "3",
-        sqft: "~3,200",
+        bathrooms: "5",
+        sqft: "~4,500",
         maxGuests: 15,
-        shortDescription: "Placeholder for main house. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        shortDescription: "Grand 5-bedroom, 5-bath estate in gated Keauhou Estates with private pool, ocean views, and gourmet kitchen. Each bedroom has a king bed and private bath. Zoned AC throughout. Near Magic Sands Beach.",
+        longDescription: `Welcome to this grand 5-bedroom, 5-bathroom estate within the exclusive gated community of Keauhou Estates on the Big Island's stunning Kona Coast.
+
+This expansive custom home was designed for luxury entertaining and family gatherings. Five en-suite bedrooms each feature king beds and private bathrooms, ensuring comfort and privacy for all guests. Zoned air conditioning keeps every room at your preferred temperature.
+
+The gourmet kitchen is a chef's dream with professional-grade appliances, extensive counter space, and a large island perfect for casual dining or meal prep for the whole group. The open-plan living and dining areas feature high ceilings, designer furnishings, and floor-to-ceiling windows framing spectacular ocean views.
+
+Multiple lanais offer outdoor living spaces with ocean-facing views, lounge seating, and al fresco dining. The private pool area is the centerpiece of the outdoor space, surrounded by lush tropical landscaping and views of Kailua Bay.
+
+A private 2-car garage, outdoor BBQ area, beach towels, snorkel gear, and beach chairs are provided. The gated community offers 24-hour security with friendly gate staff.
+
+Magic Sands Beach and Kahaluu Snorkel Beach are minutes away. Explore the historic Kona Coast, enjoy world-class coffee tours, or tee off at nearby championship golf courses.`,
+        photoFolder: "keauhou-estate",
+        photos: PHOTOS_KEAUHOU,
       },
       {
-        id: "prop26-unit-b",
-        unitNumber: "Guest Quarters",
+        id: "prop26-estate-guest",
+        unitNumber: "Guest Wing",
         bedrooms: 2,
         bathrooms: "1",
-        sqft: "~800",
+        sqft: "~900",
         maxGuests: 8,
-        shortDescription: "Placeholder for guest quarters. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
-        photoFolder: "",
+        shortDescription: "Separate guest wing with 2 bedrooms and private bathroom, providing independence while sharing the estate's pool, kitchen, and living areas. King beds, AC, and lanai access.",
+        longDescription: `The Guest Wing at this Keauhou Estates property provides a separate living space within the estate grounds, offering privacy and independence while maintaining easy access to all the main house amenities.
+
+Two comfortable bedrooms each feature king beds and air conditioning. A private bathroom serves the guest wing exclusively. Direct lanai access allows guests to step outside to enjoy the tropical gardens and ocean breezes.
+
+Guest wing occupants have full access to the main estate's gourmet kitchen, living areas, private pool, and outdoor amenities. The separation is ideal for multi-generational family trips or groups who appreciate having their own private space.
+
+The Keauhou Estates gated community provides a secure, peaceful environment with easy access to Kona's best attractions, beaches, and dining.`,
+        photoFolder: "keauhou-estate",
+        photos: PHOTOS_KEAUHOU,
       },
     ],
   },
@@ -941,33 +1161,51 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Beautiful ocean view Poipu 7 brs for 17! 60 yards to Beach!",
     complexName: "Poipu Brenneckes Beachside",
     address: "2298 Ho'one Rd, Koloa, HI 96756",
-    bookingTitle: "Poipu Beachside - Beautiful 7BR Ocean View Homes 60 Yards to Brennecke's Beach, Kauai",
+    bookingTitle: "Poipu Beachside - Sleeps 17 | 7BR Ocean View Homes Steps to Brennecke's Beach | Poipu, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of these beachside homes. Individual homes may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop28-unit-a",
-        unitNumber: "Home A",
+        id: "prop28-house-a",
+        unitNumber: "Beach House A",
         bedrooms: 4,
         bathrooms: "3",
         sqft: "~2,200",
         maxGuests: 10,
-        shortDescription: "Placeholder for 4-bedroom home. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Ocean view 4-bedroom, 3-bath home just 60 yards from Brennecke's Beach. Open floor plan, fully equipped kitchen, covered lanai with ocean views, and tropical landscaping. King master suite, queen and twin bedrooms.",
+        longDescription: `Welcome to Beach House A, a spacious 4-bedroom, 3-bathroom home located just 60 yards from famous Brennecke's Beach on Kauai's sunny south shore.
+
+This well-appointed home features an open floor plan with the living room, dining area, and kitchen flowing together to create a perfect gathering space. Large windows frame ocean views, and the covered lanai extends your living space outdoors with comfortable seating and dining.
+
+The fully equipped kitchen has everything needed for meal preparation, from modern appliances to a full complement of cookware and serving ware. The dining area comfortably seats your group.
+
+The king-bedded master suite includes a private en-suite bathroom. Additional bedrooms offer queen and twin bed configurations with two more full bathrooms. AC and ceiling fans keep all rooms comfortable. WiFi, cable TV, washer/dryer, and all linens provided.
+
+Step outside and walk to Brennecke's Beach in just minutes for world-class body surfing and boogie boarding. Poipu Beach Park is equally close for calm-water swimming and snorkeling. Shipwreck Beach's dramatic cliffs are a short walk along the coast.
+
+The Poipu area offers excellent dining, shopping, and the National Tropical Botanical Garden. This is Kauai's premier resort coast with the island's most consistent sunny weather.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop28-unit-b",
-        unitNumber: "Home B",
+        id: "prop28-house-b",
+        unitNumber: "Beach House B",
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Placeholder for 3-bedroom home. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Charming 3-bedroom, 3-bath home steps from Brennecke's Beach. Island-style decor, lanai with ocean views, full kitchen, and private bathrooms for each bedroom. King, queen, and twin beds.",
+        longDescription: `Welcome to Beach House B, a charming 3-bedroom, 3-bathroom home located steps from Brennecke's Beach on Poipu's renowned south shore.
+
+Island-style decor and comfortable furnishings create a welcoming atmosphere throughout this well-maintained home. Each of the three bedrooms has its own private bathroom - a rare luxury that ensures comfort for all guests.
+
+The king-bedded master, queen second bedroom, and twin-bedded third bedroom accommodate up to 7 guests. The open living area connects to a full kitchen with modern appliances and a dining area. The covered lanai offers ocean views and outdoor dining.
+
+AC, ceiling fans, WiFi, cable TV, washer/dryer, beach chairs, beach towels, and all linens are provided. A BBQ grill on the lanai makes outdoor cooking a pleasure.
+
+The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach are all within a short walk. Enjoy some of Hawaii's best snorkeling, body surfing, and sunset watching right at your doorstep.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
@@ -976,33 +1214,51 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Ocean view 7 bedrooms for 14 above Anini Beach!",
     complexName: "Kaiulani of Princeville",
     address: "4100 Queen Emma's Dr, Princeville, HI 96722",
-    bookingTitle: "Kaiulani of Princeville - 7BR Ocean View Townhomes above Anini Beach, Kauai",
+    bookingTitle: "Kaiulani of Princeville - Sleeps 14 | 7BR Ocean View Townhomes above Anini Beach | Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of townhome units within Kaiulani of Princeville. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop29-unit-a",
-        unitNumber: "TBD",
-        bedrooms: 4,
+        id: "prop29-kai-3br",
+        unitNumber: "Unit 5",
+        bedrooms: 3,
         bathrooms: "2.5",
         sqft: "~1,800",
-        maxGuests: 8,
-        shortDescription: "Placeholder for 4-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        maxGuests: 7,
+        shortDescription: "Ocean view 3BR/2.5BA two-story townhome above Anini Beach. Open living with high ceilings, full kitchen, covered lanai, and mountain views. King master upstairs, queen and twin bedrooms. Pool access.",
+        longDescription: `Welcome to Kaiulani of Princeville Unit 5, a spacious 3-bedroom, 2.5-bathroom two-story townhome perched above beautiful Anini Beach on Kauai's North Shore.
+
+High vaulted ceilings and an open floor plan create an impressive sense of space in the main living area. The fully equipped kitchen, dining area, and comfortable living room flow together, with sliding glass doors opening to a covered lanai with mountain and partial ocean views.
+
+The upstairs king-bedded master suite features an en-suite bathroom and views of the surrounding greenery. The second bedroom offers a queen bed, and the third bedroom has twin beds. A half bath on the main level serves common areas. Ceiling fans and trade winds keep the home comfortable.
+
+This townhome community features a shared pool and tropical landscaped grounds. The quiet residential setting offers privacy and peace while being conveniently located in Princeville.
+
+Anini Beach, one of Kauai's most beautiful and protected beaches, is just down the hill - perfect for swimming, snorkeling, and windsurfing. The North Shore's legendary attractions including Hanalei Bay, Na Pali Coast, and the Kilauea Lighthouse are all easily accessible.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop29-unit-b",
-        unitNumber: "TBD",
-        bedrooms: 3,
-        bathrooms: "1.5",
-        sqft: "~1,400",
-        maxGuests: 6,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        id: "prop29-kai-4br",
+        unitNumber: "Units 6-7",
+        bedrooms: 4,
+        bathrooms: "3",
+        sqft: "~2,400",
+        maxGuests: 7,
+        shortDescription: "Two adjacent 2BR townhomes combined for 4 bedrooms and 3 baths. Each unit has its own kitchen, living area, and lanai. King and queen beds throughout. Ocean and mountain views above Anini Beach.",
+        longDescription: `Welcome to Kaiulani of Princeville Units 6 and 7, two adjacent 2-bedroom townhomes that combine to create a spacious 4-bedroom, 3-bathroom vacation home above Anini Beach.
+
+Each townhome unit has its own fully equipped kitchen, living area, and covered lanai, providing flexibility for your group. The combined layout creates a large vacation home while allowing different parts of your group to have their own space and privacy.
+
+Four bedrooms across the two units feature king and queen beds. Three full bathrooms ensure comfort for all guests. Each kitchen is fully stocked with modern appliances, cookware, and dining essentials.
+
+The covered lanais offer views of the mountains and ocean, perfect for relaxing with a tropical drink. Trade winds and ceiling fans provide natural cooling.
+
+Kaiulani's shared pool and landscaped grounds create a peaceful retreat. Anini Beach below offers some of the calmest, clearest waters on Kauai - ideal for swimming, snorkeling, and kayaking.
+
+Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach for unforgettable day trips.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
@@ -1011,33 +1267,49 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Fabulous 7 bedroom for 14 oceanfront Poipu pool home!",
     complexName: "Poipu Brenneckes Oceanfront",
     address: "2350 Ho'one Rd, Koloa, HI 96756",
-    bookingTitle: "Poipu Oceanfront Pool Home - Fabulous 7BR Estate with Pool Steps to Beach, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of this oceanfront estate. The main house and guest quarters may vary in decor and furnishings from photos shown.",
+    bookingTitle: "Poipu Oceanfront Pool Home - Sleeps 14 | 7BR Estate with Pool Steps to Brennecke's Beach | Poipu, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of this oceanfront estate. The main home and guest suite may vary in decor and furnishings from photos shown.",
     hasPhotos: false,
     units: [
       {
-        id: "prop31-unit-a",
+        id: "prop31-main",
         unitNumber: "Main Home",
         bedrooms: 5,
         bathrooms: "3",
         sqft: "~3,000",
         maxGuests: 10,
-        shortDescription: "Placeholder for 5-bedroom main home. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Oceanfront 5-bedroom, 3-bath pool home steps from Brennecke's Beach. Open layout with ocean views, gourmet kitchen, private pool, covered lanai, and tropical gardens. King master, queens, and twins.",
+        longDescription: `Welcome to this stunning oceanfront 5-bedroom, 3-bathroom pool home located steps from Brennecke's Beach on Kauai's premier Poipu coast.
+
+This spacious home features an open layout designed to take full advantage of the spectacular ocean views. The living room, dining area, and gourmet kitchen flow together with large windows and glass doors opening to the covered lanai and pool deck.
+
+The gourmet kitchen is equipped with high-end appliances, granite counters, and ample space for preparing meals for your group. The dining area seats the whole party comfortably.
+
+Five bedrooms include a king-bedded master suite with ocean-view en-suite bathroom, queen-bedded rooms, and a twin-bedded room perfect for younger guests. Three full bathrooms ensure comfort for all. AC throughout and ceiling fans provide cooling options.
+
+The private pool is the centerpiece of the outdoor living space, surrounded by tropical landscaping and ocean views. The covered lanai offers al fresco dining, lounging, and sunset watching. Beach chairs, towels, and snorkel gear are provided.
+
+Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop31-unit-b",
-        unitNumber: "Guest Quarters",
+        id: "prop31-guest",
+        unitNumber: "Guest Suite",
         bedrooms: 2,
         bathrooms: "1",
         sqft: "~800",
         maxGuests: 4,
-        shortDescription: "Placeholder for 2-bedroom guest quarters. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Separate guest suite adjacent to the main home with 2 bedrooms, private bathroom, and its own entrance. Shares pool and outdoor amenities. Queen beds in both rooms.",
+        longDescription: `The Guest Suite at this Poipu oceanfront estate provides a separate living space with its own entrance, offering privacy while being just steps from the main home and its full amenities.
+
+Two comfortable bedrooms each feature queen beds, and a private bathroom serves the suite exclusively. The separate entrance provides independence for guests who appreciate their own space.
+
+Full access to the main home's gourmet kitchen, living areas, private pool, and outdoor amenities is included. The poolside location means you can step right out to the pool deck.
+
+The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach all within walking distance. Enjoy Kauai's sunniest coast with its world-class snorkeling, dining, and dramatic coastal scenery.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
@@ -1046,33 +1318,49 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     complexName: "Kiahuna Plantation",
     address: "2253 Poipu Rd, Unit A, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Gorgeous 5BR Beachfront Townhomes with AC in Poipu, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of townhome units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
+    bookingTitle: "Kiahuna Plantation - Sleeps 12 | 5BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop32-unit-a",
-        unitNumber: "TBD",
+        id: "prop32-kia-3br",
+        unitNumber: "Building 38",
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 7,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Beachfront 3BR/3BA condo at Kiahuna Plantation with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms. Access to resort pool and grounds.",
+        longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities.
+
+Set within 35 acres of lush tropical gardens originally designed for Hawaiian royalty, this spacious condo offers a perfect blend of historic charm and modern comfort. Air conditioning throughout ensures comfort, complemented by ceiling fans and tropical breezes.
+
+The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers twin beds - each with its own bathroom. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
+
+Kiahuna Plantation's grounds are a destination themselves, with manicured gardens, meandering paths, and the resort pool. But the real treasure is the location: walk through the gardens and you're on Poipu Beach, consistently rated one of Hawaii's best.
+
+The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop32-unit-b",
-        unitNumber: "TBD",
+        id: "prop32-kia-2br",
+        unitNumber: "Building 2",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
         maxGuests: 5,
-        shortDescription: "Placeholder for 2-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Garden view 2BR/2BA condo at Kiahuna Plantation. AC, full kitchen, lanai, and direct access to Poipu Beach. King master and queen second bedroom. Resort pool and tropical garden paths.",
+        longDescription: `Welcome to this 2-bedroom, 2-bathroom condominium at Kiahuna Plantation in Poipu, set among 35 acres of royal tropical gardens.
+
+This comfortable unit features air conditioning, a full kitchen with modern appliances, and a cozy living area that opens to a lanai overlooking the tropical gardens. The king-bedded master suite has a private en-suite bath, and the queen-bedded second bedroom is adjacent to the second full bath.
+
+All linens, beach towels, WiFi, and basic kitchen supplies are provided. The resort pool and garden walking paths offer relaxation between beach adventures.
+
+Step through the gardens to reach Poipu Beach for swimming, snorkeling, and sunbathing. Kiahuna's beachfront location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
+
+Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Poipu's restaurants and shops are just a short walk away.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
@@ -1081,33 +1369,53 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     complexName: "Kiahuna Plantation",
     address: "2253 Poipu Rd, Unit B, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Beautiful 6BR Beachfront Townhomes with AC in Poipu, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of townhome units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
+    bookingTitle: "Kiahuna Plantation - Sleeps 12 | 6BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
     hasPhotos: false,
     units: [
       {
-        id: "prop33-unit-a",
-        unitNumber: "TBD",
+        id: "prop33-kia-3br-a",
+        unitNumber: "Building 10",
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 6,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Tropical 3BR/3BA condo in Kiahuna Plantation with AC, full kitchen, lanai with garden views, and beachfront access. King master, queen and twin bedrooms. Steps to Poipu Beach.",
+        longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, nestled within the resort's lush 35-acre tropical gardens on Poipu Beach.
+
+This well-appointed unit features AC throughout, an open floor plan with the living room flowing into the fully equipped kitchen and dining area. The covered lanai provides a peaceful outdoor space surrounded by tropical plants and the resort's beautiful grounds.
+
+Three bedrooms each have their own bathroom: the king-bedded master suite, queen second bedroom, and twin-bedded third room. All rooms feature ceiling fans and AC for comfort.
+
+The kitchen is fully stocked for home cooking, and the dining area accommodates the whole group. WiFi, cable TV, washer/dryer access, and all linens are provided.
+
+Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. The resort pool, restaurant, and gorgeously maintained grounds make this an exceptional Kauai vacation base.
+
+Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at nearby Koloa Landing.`,
         photoFolder: "",
+        photos: [],
       },
       {
-        id: "prop33-unit-b",
-        unitNumber: "TBD",
+        id: "prop33-kia-3br-b",
+        unitNumber: "Building 26",
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 6,
-        shortDescription: "Placeholder for 3-bedroom townhome. Details to be added.",
-        longDescription: "Full description to be added once unit is identified and verified not on Booking.com or VRBO.",
-        photos: [],
+        shortDescription: "Stylish 3BR/3BA condo at Kiahuna Plantation. AC, modern kitchen, comfortable bedrooms with private baths, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
+        longDescription: `Welcome to this stylish 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, located in the heart of Poipu's most iconic beachfront resort.
+
+Updated with a modern aesthetic while honoring the property's historic Hawaiian heritage, this condo offers comfortable living with AC throughout. The open layout connects the living, dining, and kitchen areas for easy entertaining.
+
+Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen and twin-bedded rooms accommodate additional guests comfortably. Ceiling fans supplement the AC.
+
+The modern kitchen has quality appliances, ample counter space, and all the essentials for preparing meals. The lanai overlooks the resort's spectacular gardens.
+
+Walk to Poipu Beach through the beautiful resort grounds. The Kiahuna Plantation's 35 acres of tropical gardens, originally landscaped for Hawaiian royalty, create a serene environment unlike any other resort on Kauai.
+
+Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast.`,
         photoFolder: "",
+        photos: [],
       },
     ],
   },
