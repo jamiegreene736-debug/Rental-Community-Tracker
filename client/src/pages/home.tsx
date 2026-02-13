@@ -33,6 +33,7 @@ import {
   MapPin,
   Hammer,
 } from "lucide-react";
+import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 
 type Property = {
   id: number;
@@ -662,6 +663,8 @@ export default function Home() {
     ? Math.round(pricedProperties.reduce((s, p) => s + (p.lowPrice || 0), 0) / pricedProperties.length)
     : 0;
 
+  const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
+
   const communityVariant = (community: string): "default" | "secondary" | "outline" => {
     const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Kiahuna Plantation"];
     if (poipuCommunities.includes(community)) return "default";
@@ -671,21 +674,13 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-[1400px] mx-auto px-4 py-6">
-        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-              Vacation Rental Experts - Property Research
-            </h1>
-            <p className="text-muted-foreground mt-1">
-              Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
-            </p>
-          </div>
-          <Link href="/unit-builder">
-            <Button variant="default" data-testid="button-unit-builder">
-              <Hammer className="h-4 w-4 mr-2" />
-              Unit Builder
-            </Button>
-          </Link>
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
+            Vacation Rental Experts - Property Research
+          </h1>
+          <p className="text-muted-foreground mt-1">
+            Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
+          </p>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -928,16 +923,25 @@ export default function Home() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <a
-                      href={property.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      data-testid={`link-property-${property.id}`}
-                    >
-                      <Button size="icon" variant="ghost">
-                        <ExternalLink className="h-4 w-4" />
-                      </Button>
-                    </a>
+                    <div className="flex items-center gap-1">
+                      {unitBuilderIds.has(property.id) && (
+                        <Link href={`/unit-builder/${property.id}`}>
+                          <Button size="icon" variant="ghost" data-testid={`button-unit-builder-${property.id}`}>
+                            <Hammer className="h-4 w-4" />
+                          </Button>
+                        </Link>
+                      )}
+                      <a
+                        href={property.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid={`link-property-${property.id}`}
+                      >
+                        <Button size="icon" variant="ghost">
+                          <ExternalLink className="h-4 w-4" />
+                        </Button>
+                      </a>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
