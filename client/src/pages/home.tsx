@@ -32,6 +32,7 @@ import {
   Layers,
   MapPin,
   Hammer,
+  ClipboardList,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 
@@ -925,11 +926,18 @@ export default function Home() {
                   <TableCell>
                     <div className="flex items-center gap-1">
                       {unitBuilderIds.has(property.id) && (
-                        <Link href={`/unit-builder/${property.id}`}>
-                          <Button size="icon" variant="ghost" data-testid={`button-unit-builder-${property.id}`}>
-                            <Hammer className="h-4 w-4" />
-                          </Button>
-                        </Link>
+                        <>
+                          <Link href={`/unit-builder/${property.id}`}>
+                            <Button size="icon" variant="ghost" data-testid={`button-unit-builder-${property.id}`}>
+                              <Hammer className="h-4 w-4" />
+                            </Button>
+                          </Link>
+                          <Link href={`/lodgify-prep/${property.id}`}>
+                            <Button size="icon" variant="ghost" data-testid={`button-lodgify-prep-${property.id}`}>
+                              <ClipboardList className="h-4 w-4" />
+                            </Button>
+                          </Link>
+                        </>
                       )}
                       <a
                         href={property.url}

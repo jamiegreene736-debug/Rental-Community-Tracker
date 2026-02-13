@@ -6,6 +6,7 @@ Property research dashboard for thevacationrentalexperts.com. Displays all 35 ca
 
 ## Recent Changes
 
+- **Feb 13, 2026**: Added "Prepare for Lodgify" workflow system. Each multi-unit property now has a dedicated Lodgify prep page (`/lodgify-prep/:id`) with one-click copy buttons for titles/descriptions, amenities checklists with Lodgify category names, ordered photo downloads as individual JPGs (File System Access API with fallback), Lodgify sync status checker via API proxy, and step-by-step entry guide. Photo downloads now save to folder (no zip). Backend route `GET /api/lodgify/properties` proxies Lodgify API for sync checking. Navigation added from dashboard and unit builder pages.
 - **Feb 13, 2026**: Built property research dashboard with all 35 properties from thevacationrentalexperts.com. Data includes community assignments (Poipu Kai, Princeville, Kekaha, Hanalei, Keauhou, etc.), pricing, and multi-unit designations. Frontend-only data (no database needed).
 
 ## User Preferences

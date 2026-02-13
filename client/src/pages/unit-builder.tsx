@@ -20,8 +20,9 @@ import {
   Square,
   Ruler,
   AlertTriangle,
+  ClipboardList,
+  FolderOpen,
 } from "lucide-react";
-import JSZip from "jszip";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
 
@@ -187,28 +188,54 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 }
 
 async function downloadAllPropertyPhotos(property: PropertyUnitBuilder) {
-  const zip = new JSZip();
-  const folder = zip.folder(`property-${property.propertyId}-photos`);
-  if (!folder) return;
+  if ("showDirectoryPicker" in window) {
+    try {
+      const dirHandle = await (window as any).showDirectoryPicker({
+        mode: "readwrite",
+        startIn: "downloads",
+      });
 
-  for (const unit of property.units) {
-    if (unit.photos.length === 0) continue;
-    const unitFolder = folder.folder(`${unit.id}-${unit.unitNumber}`);
-    if (!unitFolder) continue;
-    for (const photo of unit.photos) {
-      const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
-      const blob = await response.blob();
-      unitFolder.file(photo.filename, blob);
+      for (const unit of property.units) {
+        if (unit.photos.length === 0) continue;
+        const unitDir = await dirHandle.getDirectoryHandle(
+          `${unit.id}-${unit.unitNumber}`,
+          { create: true }
+        );
+        for (let i = 0; i < unit.photos.length; i++) {
+          const photo = unit.photos[i];
+          const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
+          const blob = await response.blob();
+          const paddedIdx = String(i + 1).padStart(2, "0");
+          const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
+          const fileHandle = await unitDir.getFileHandle(safeName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        }
+      }
+      return;
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
     }
   }
 
-  const content = await zip.generateAsync({ type: "blob" });
-  const url = URL.createObjectURL(content);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `property-${property.propertyId}-all-photos.zip`;
-  a.click();
-  URL.revokeObjectURL(url);
+  for (const unit of property.units) {
+    if (unit.photos.length === 0) continue;
+    for (let i = 0; i < unit.photos.length; i++) {
+      const photo = unit.photos[i];
+      const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
+      const blob = await response.blob();
+      const paddedIdx = String(i + 1).padStart(2, "0");
+      const safeName = `${unit.id}-${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = safeName;
+      a.click();
+      URL.revokeObjectURL(url);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
 }
 
 function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
@@ -361,17 +388,25 @@ export default function UnitBuilder() {
               {property.complexName} - {property.units.length} unit{property.units.length > 1 ? "s" : ""} in this listing
             </p>
           </div>
-          {totalPhotos > 0 && (
-            <Button
-              variant="default"
-              onClick={handleDownload}
-              disabled={downloading}
-              data-testid="button-download-all"
-            >
-              <Download className="h-4 w-4 mr-2" />
-              {downloading ? "Zipping..." : `Download All ${totalPhotos} Photos`}
-            </Button>
-          )}
+          <div className="flex flex-wrap gap-2">
+            <Link href={`/lodgify-prep/${property.propertyId}`}>
+              <Button variant="default" data-testid="button-prepare-lodgify">
+                <ClipboardList className="h-4 w-4 mr-2" />
+                Prepare for Lodgify
+              </Button>
+            </Link>
+            {totalPhotos > 0 && (
+              <Button
+                variant="outline"
+                onClick={handleDownload}
+                disabled={downloading}
+                data-testid="button-download-all"
+              >
+                <FolderOpen className="h-4 w-4 mr-2" />
+                {downloading ? "Downloading..." : `Download All ${totalPhotos} Photos`}
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">

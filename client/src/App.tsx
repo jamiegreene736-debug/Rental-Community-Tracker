@@ -6,12 +6,14 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import UnitBuilder from "@/pages/unit-builder";
+import LodgifyPrep from "@/pages/lodgify-prep";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/unit-builder/:id" component={UnitBuilder} />
+      <Route path="/lodgify-prep/:id" component={LodgifyPrep} />
       <Route component={NotFound} />
     </Switch>
   );
