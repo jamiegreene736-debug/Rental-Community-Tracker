@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -30,6 +31,7 @@ import {
   DollarSign,
   Layers,
   MapPin,
+  Hammer,
 } from "lucide-react";
 
 type Property = {
@@ -669,13 +671,21 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-[1400px] mx-auto px-4 py-6">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-            Vacation Rental Experts - Property Research
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
-          </p>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
+              Vacation Rental Experts - Property Research
+            </h1>
+            <p className="text-muted-foreground mt-1">
+              Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
+            </p>
+          </div>
+          <Link href="/unit-builder">
+            <Button variant="default" data-testid="button-unit-builder">
+              <Hammer className="h-4 w-4 mr-2" />
+              Unit Builder
+            </Button>
+          </Link>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
