@@ -28,13 +28,30 @@ import {
   ListChecks,
   ChevronRight,
   FolderOpen,
+  DollarSign,
+  TrendingUp,
 } from "lucide-react";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { getUnitBuilderByPropertyId, getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
 import {
   LODGIFY_AMENITY_CATEGORIES,
   getDefaultAmenities,
 } from "@/data/lodgify-amenities";
+import {
+  getPropertyPricing,
+  getSeasonLabel,
+  getSeasonBadgeVariant,
+  type PropertyPricing,
+  type UnitPricing,
+} from "@/data/pricing-data";
 
 function CopyField({ label, value, multiline }: { label: string; value: string; multiline?: boolean }) {
   const [copied, setCopied] = useState(false);
@@ -523,10 +540,125 @@ function LodgifyEntryGuide() {
   );
 }
 
+function PricingSummaryCard({ pricing }: { pricing: PropertyPricing }) {
+  return (
+    <Card className="p-4">
+      <h3 className="text-sm font-bold mb-3 flex items-center gap-2">
+        <DollarSign className="h-4 w-4" />
+        Buy-In & Sell Rate Summary
+      </h3>
+      <p className="text-xs text-muted-foreground mb-4">
+        Average Airbnb buy-in rate (including taxes & fees) marked up 35% (15% Booking.com commission + 20% your commission).
+      </p>
+
+      <div className="space-y-3">
+        {pricing.units.map((unit) => (
+          <div key={unit.unitId} className="flex items-center justify-between gap-4 py-2 border-b last:border-b-0" data-testid={`pricing-unit-${unit.unitId}`}>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{unit.unitLabel}</p>
+              <p className="text-xs text-muted-foreground">{unit.bedrooms}BR in {unit.community}</p>
+            </div>
+            <div className="text-right flex-shrink-0">
+              <p className="text-xs text-muted-foreground">Buy-in: ${unit.baseBuyIn}/night</p>
+              <p className="text-sm font-bold text-green-700 dark:text-green-400">Sell: ${unit.baseSellRate}/night</p>
+            </div>
+          </div>
+        ))}
+
+        <div className="flex items-center justify-between gap-4 pt-2 border-t-2">
+          <div>
+            <p className="text-sm font-bold">Combined Total</p>
+            <p className="text-xs text-muted-foreground">{pricing.units.length} units</p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Buy-in: ${pricing.totalBaseBuyIn}/night</p>
+            <p className="text-base font-bold text-green-700 dark:text-green-400">Sell: ${pricing.totalBaseSellRate}/night</p>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function SeasonalityTable({ pricing }: { pricing: PropertyPricing }) {
+  const months = pricing.units[0]?.monthlyRates || [];
+
+  return (
+    <Card className="p-4">
+      <h3 className="text-sm font-bold mb-3 flex items-center gap-2">
+        <TrendingUp className="h-4 w-4" />
+        24-Month Rate Schedule (Feb 2026 - Jan 2028)
+      </h3>
+      <p className="text-xs text-muted-foreground mb-4">
+        Seasonal rates based on Hawaii vacation rental demand patterns. High season: Dec-Mar & Jul-Aug. Low season: Sep-Nov.
+      </p>
+
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="sticky left-0 bg-background z-10 min-w-[120px]">Month</TableHead>
+              <TableHead className="min-w-[70px]">Season</TableHead>
+              {pricing.units.map((unit) => (
+                <TableHead key={`buy-${unit.unitId}`} className="min-w-[100px] text-right">
+                  {unit.unitLabel} Buy-In
+                </TableHead>
+              ))}
+              {pricing.units.map((unit) => (
+                <TableHead key={`sell-${unit.unitId}`} className="min-w-[100px] text-right">
+                  {unit.unitLabel} Sell
+                </TableHead>
+              ))}
+              <TableHead className="min-w-[100px] text-right">Total Buy-In</TableHead>
+              <TableHead className="min-w-[100px] text-right font-bold">Total Sell</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {months.map((monthData, idx) => {
+              const totalBuyIn = pricing.units.reduce((sum, u) => sum + u.monthlyRates[idx].buyInRate, 0);
+              const totalSell = pricing.units.reduce((sum, u) => sum + u.monthlyRates[idx].sellRate, 0);
+
+              return (
+                <TableRow key={`${monthData.month}-${monthData.year}`} data-testid={`rate-row-${idx}`}>
+                  <TableCell className="sticky left-0 bg-background z-10 font-medium text-sm">
+                    {monthData.month} {monthData.year}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={getSeasonBadgeVariant(monthData.season)} className="text-xs">
+                      {getSeasonLabel(monthData.season)}
+                    </Badge>
+                  </TableCell>
+                  {pricing.units.map((unit) => (
+                    <TableCell key={`buy-${unit.unitId}`} className="text-right text-sm text-muted-foreground">
+                      ${unit.monthlyRates[idx].buyInRate}
+                    </TableCell>
+                  ))}
+                  {pricing.units.map((unit) => (
+                    <TableCell key={`sell-${unit.unitId}`} className="text-right text-sm font-medium">
+                      ${unit.monthlyRates[idx].sellRate}
+                    </TableCell>
+                  ))}
+                  <TableCell className="text-right text-sm text-muted-foreground">
+                    ${totalBuyIn}
+                  </TableCell>
+                  <TableCell className="text-right text-sm font-bold text-green-700 dark:text-green-400">
+                    ${totalSell}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </Card>
+  );
+}
+
 export default function LodgifyPrep() {
   const params = useParams<{ id: string }>();
   const propertyId = parseInt(params.id || "0", 10);
   const property = getUnitBuilderByPropertyId(propertyId);
+  const pricing = getPropertyPricing(propertyId);
 
   if (!property) {
     return (
@@ -589,6 +721,15 @@ export default function LodgifyPrep() {
           </div>
           <LodgifyEntryGuide />
         </div>
+
+        {pricing && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+            <PricingSummaryCard pricing={pricing} />
+            <div className="lg:col-span-2">
+              <SeasonalityTable pricing={pricing} />
+            </div>
+          </div>
+        )}
 
         <div className="space-y-6">
           {property.units.map((unit) => (
