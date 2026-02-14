@@ -351,12 +351,15 @@ function UnitPrepCard({ unit, complexName, propertyId }: { unit: Unit; complexNa
           </div>
         </div>
 
-        <Tabs defaultValue="descriptions" className="w-full">
+        <div className="mb-3">
+          <CopyField
+            label="Room Configuration"
+            value={`${unit.bedrooms} Bedrooms, ${unit.bathrooms} Bathrooms, Sleeps ${unit.maxGuests}, ${unit.sqft} sq ft`}
+          />
+        </div>
+
+        <Tabs defaultValue="amenities" className="w-full">
           <TabsList className="w-full flex-wrap">
-            <TabsTrigger value="descriptions" className="flex-1 gap-1" data-testid={`tab-desc-${unit.id}`}>
-              <FileText className="h-3.5 w-3.5" />
-              Descriptions
-            </TabsTrigger>
             <TabsTrigger value="amenities" className="flex-1 gap-1" data-testid={`tab-amenities-${unit.id}`}>
               <ListChecks className="h-3.5 w-3.5" />
               Amenities
@@ -366,28 +369,6 @@ function UnitPrepCard({ unit, complexName, propertyId }: { unit: Unit; complexNa
               Photos ({unit.photos.length})
             </TabsTrigger>
           </TabsList>
-
-          <TabsContent value="descriptions" className="mt-4">
-            <div className="space-y-4">
-              <CopyField
-                label="Lodgify Property Name"
-                value={`${complexName} #${unit.unitNumber}`}
-              />
-              <CopyField
-                label="Short Description (for search results)"
-                value={unit.shortDescription}
-              />
-              <CopyField
-                label="Full Description (main listing)"
-                value={unit.longDescription}
-                multiline
-              />
-              <CopyField
-                label="Room Configuration"
-                value={`${unit.bedrooms} Bedrooms, ${unit.bathrooms} Bathrooms, Sleeps ${unit.maxGuests}, ${unit.sqft} sq ft`}
-              />
-            </div>
-          </TabsContent>
 
           <TabsContent value="amenities" className="mt-4">
             <AmenitiesChecklist propertyId={propertyId} />
@@ -492,12 +473,12 @@ function LodgifyEntryGuide() {
           {
             step: 2,
             title: "Set Property Name",
-            desc: "Copy the Lodgify Property Name from below and paste it as the property name.",
+            desc: "Use the Booking Title above as the property name in Lodgify.",
           },
           {
             step: 3,
-            title: "Add Descriptions",
-            desc: "Go to the Description section. Copy the Short Description for the summary and the Full Description for the main listing text.",
+            title: "Add Description",
+            desc: "Go to the Description section. Copy the Combined Property Description above and paste it as the main listing text. This single description covers all units in the listing.",
           },
           {
             step: 4,
@@ -720,6 +701,10 @@ export default function LodgifyPrep() {
             <CopyField label="Booking Title" value={property.bookingTitle} />
           </div>
           <LodgifyEntryGuide />
+        </div>
+
+        <div className="mb-6">
+          <CopyField label="Combined Property Description (copy into Lodgify)" value={property.combinedDescription} multiline />
         </div>
 
         {pricing && (

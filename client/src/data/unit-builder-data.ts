@@ -24,6 +24,7 @@ export type PropertyUnitBuilder = {
   address: string;
   bookingTitle: string;
   sampleDisclaimer: string;
+  combinedDescription: string;
   units: Unit[];
   hasPhotos: boolean;
 };
@@ -247,6 +248,15 @@ export const unitBuilderData: PropertyUnitBuilder[] = [
     address: "1831 Poipu Rd, Bldg 8, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 7BR Resort Villas with Pool & Tennis | Poipu Beach, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of three spacious condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 7 bedrooms and can accommodate up to 19 guests, making this an ideal setup for large family reunions or group vacations on Kauai's sunny south shore.
+
+Unit 924 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) featuring a King bed in the master suite with jetted tub and walk-in marble shower, a Queen bed in the second bedroom, 2 Twins in the loft third bedroom, and a futon for additional sleeping. Central AC and an open-concept layout with granite kitchen make this a comfortable home base.
+
+Unit 114 is a 2-bedroom, 2-bathroom ground-floor condo (~1,250 sq ft) with a modern renovation, Queen bed in the primary bedroom, King bed in the second bedroom, and a queen sleeper sofa. Two private balconies, stainless steel kitchen, and AC with ceiling fans throughout.
+
+Unit 911 is a 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, King beds in both bedrooms, a queen sleeper sofa, smart TVs, and a private covered lanai. The fully stocked kitchen and large dining area are perfect for group meals.
+
+All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden paths. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within an easy 10-minute walk.`,
     hasPhotos: true,
     units: [
       {
@@ -277,15 +287,15 @@ Poipu's sunny south shore offers world-class snorkeling, surfing, and dining. Fr
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,250",
-        maxGuests: 5,
-        shortDescription: "Modern 2-bedroom, 2-bath ground-floor condo in Regency I building 1. Features AC and ceiling fans, a renovated modern kitchen with stainless appliances, two private balconies, and an open floor plan. Sleeps 5 with Queen and King beds.",
+        maxGuests: 6,
+        shortDescription: "Modern 2-bedroom, 2-bath ground-floor condo in Regency I building 1. Features AC and ceiling fans, a renovated modern kitchen with stainless appliances, two private balconies, and an open floor plan. Sleeps 6 with Queen and King beds and a queen sleeper sofa.",
         longDescription: `Welcome to Unit 114, a stylishly renovated 2-bedroom, 2-bathroom ground-floor condominium in Building 1 of the Regency at Poipu Kai resort on Kauai's coveted south shore.
 
 This approximately 1,250 sq ft condo has been thoughtfully updated with a modern aesthetic while maintaining its warm island charm. The open floor plan creates a spacious feel, with the living room flowing into the dining area and kitchen. Air conditioning and ceiling fans keep you comfortable year-round.
 
 The modern kitchen features sleek stainless steel appliances, ample counter space, and is fully stocked with everything you need for home-cooked meals. Two private balconies provide outdoor living space to enjoy the tropical breezes and garden views.
 
-The primary bedroom features a comfortable Queen bed with its own renovated en-suite bathroom with dual sinks. The second bedroom offers a King bed and is adjacent to the second full bathroom, also beautifully renovated. A convenient work area is available for those who need to stay connected.
+The primary bedroom features a comfortable Queen bed with its own renovated en-suite bathroom with dual sinks. The second bedroom offers a King bed and is adjacent to the second full bathroom, also beautifully renovated. A queen sleeper sofa in the living area provides additional sleeping for two more guests. A convenient work area is available for those who need to stay connected.
 
 As a Regency at Poipu Kai guest, you have full access to the resort pool, hot tub, tennis and pickleball courts, and lush tropical garden paths. Three world-class Poipu beaches are just a short 10-minute walk away.
 
@@ -299,15 +309,15 @@ From snorkeling at Poipu Beach Park to body surfing at Brennecke's Beach, or wat
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,250",
-        maxGuests: 4,
-        shortDescription: "Comfortable 2-bedroom, 2-bath Regency II condo in building 9 with central AC throughout. Features King beds in both rooms, a fully stocked kitchen, large dining area, private covered lanai, and smart TVs. Sleeps 4.",
+        maxGuests: 6,
+        shortDescription: "Comfortable 2-bedroom, 2-bath Regency II condo in building 9 with central AC throughout. Features King beds in both rooms, a fully stocked kitchen, large dining area, private covered lanai, and smart TVs. Sleeps 6 with two King beds and a queen sleeper sofa.",
         longDescription: `Welcome to Unit 911, a well-appointed 2-bedroom, 2-bathroom condominium in Building 9 of the Regency at Poipu Kai resort. This Regency II unit features central air conditioning throughout for your complete comfort on Kauai's sunny south shore.
 
 The approximately 1,250 sq ft interior offers a thoughtfully designed layout with a spacious living area, large dining area that seats the whole party, and a private covered lanai perfect for al fresco dining or simply soaking in the tropical garden views. Smart TVs in the living area and bedrooms provide entertainment options.
 
 The fully stocked kitchen includes modern appliances, generous counter space, and all the cookware and utensils needed for everything from quick breakfasts to full dinners. The open layout connects the kitchen to the dining and living spaces for easy socializing.
 
-The master bedroom features a plush King bed, smart TV, and en-suite bathroom with a soaking tub and separate shower. The second bedroom also offers a comfortable King bed and is adjacent to the second full bathroom, ideal for couples traveling together.
+The master bedroom features a plush King bed, smart TV, and en-suite bathroom with a soaking tub and separate shower. The second bedroom also offers a comfortable King bed and is adjacent to the second full bathroom, ideal for couples traveling together. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 Resort amenities await just steps from your door, including a gorgeous swimming pool, relaxing hot tub, and tennis and pickleball courts surrounded by tropical gardens. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all an easy 10-minute stroll.
 
@@ -324,6 +334,13 @@ Whether you spend your days exploring Waimea Canyon, snorkeling with sea turtles
     address: "1831 Poipu Rd, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villas with Pool & Tennis | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups exploring Kauai's sunny south shore.
+
+Unit 423 is a 3-bedroom, 2.5-bathroom condo (~1,800 sq ft) with a covered dining lanai, open great room layout, fully equipped kitchen with breakfast bar, and a master suite with private lanai and en-suite bath. Sleeps 8 with a King bed, Queen bed, 2 Twins in the loft, and a queen sleeper sofa.
+
+Unit 621 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) featuring lovely garden views from the living room and lanai, a primary bedroom suite with private lanai and walk-in shower, and two additional guest bedrooms each with their own bath. Sleeps 8 with a King bed, Queen bed, 2 Twins, and a queen sleeper sofa.
+
+All guests enjoy resort amenities including a swimming pool, hot tub, tennis and pickleball courts, and beautifully maintained tropical gardens. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within a pleasant 10-minute walk.`,
     hasPhotos: true,
     units: [
       {
@@ -333,14 +350,14 @@ Whether you spend your days exploring Waimea Canyon, snorkeling with sea turtles
         bathrooms: "2.5",
         sqft: "~1,800",
         maxGuests: 8,
-        shortDescription: "Spacious 3-bedroom, 2.5-bath condo at the Regency at Poipu Kai resort. Features a covered dining lanai, open-plan living with great room, fully equipped kitchen with breakfast bar, master suite with private lanai and en-suite bath, plus two additional guest bedrooms including a loft. Steps to pool, tennis courts, and three Poipu beaches.",
+        shortDescription: "Spacious 3-bedroom, 2.5-bath condo at the Regency at Poipu Kai resort. Features a covered dining lanai, open-plan living with great room, fully equipped kitchen with breakfast bar, master suite with private lanai and en-suite bath, plus two additional guest bedrooms including a loft and a queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
         longDescription: `Welcome to this beautifully appointed 3-bedroom, 2.5-bathroom condominium at the prestigious Regency at Poipu Kai resort on Kauai's sunny south shore.
 
 This spacious approximately 1,800 sq ft condo features an inviting open floor plan with a generous great room that flows seamlessly from the living area through the dining space to the fully equipped kitchen. The covered dining lanai is perfect for enjoying tropical breezes and morning coffee.
 
 The kitchen boasts modern appliances, ample counter space, and a breakfast bar for casual dining. The main living area offers comfortable seating with direct lanai access and abundant natural light.
 
-The master bedroom suite includes a private lanai, walk-in closet, and en-suite bathroom with separate shower. The second guest bedroom provides a comfortable retreat, while the third bedroom is a charming open loft space with its own adjacent bath.
+The master bedroom suite includes a private lanai, walk-in closet, and en-suite bathroom with separate shower. The second guest bedroom provides a comfortable retreat, while the third bedroom is a charming open loft space with its own adjacent bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 Located within the Regency at Poipu Kai complex, guests enjoy access to resort amenities including swimming pool, tennis courts, and beautifully maintained tropical gardens. The property is just steps from three stunning Poipu beaches including Shipwreck Beach and Poipu Beach Park.
 
@@ -355,14 +372,14 @@ The complex is ideally situated near shops, restaurants, and the Poipu Athletic 
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 8,
-        shortDescription: "Beautiful 3-bedroom, 3-bath condo at the Regency at Poipu Kai resort. Features garden views from the living room and lanai, open-concept kitchen with breakfast bar, primary bedroom suite with private lanai and en-suite bath with walk-in shower, plus two additional guest bedrooms each with their own bath. Steps to pool, tennis courts, and three Poipu beaches.",
+        shortDescription: "Beautiful 3-bedroom, 3-bath condo at the Regency at Poipu Kai resort. Features garden views from the living room and lanai, open-concept kitchen with breakfast bar, primary bedroom suite with private lanai and en-suite bath with walk-in shower, plus two additional guest bedrooms each with their own bath and a queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
         longDescription: `Welcome to this stunning 3-bedroom, 3-bathroom condominium at the sought-after Regency at Poipu Kai resort on Kauai's beautiful south shore.
 
 This approximately 1,800 sq ft condo offers a light-filled open floor plan with lovely garden views from the main living area and lanai. The spacious great room seamlessly connects the living, dining, and kitchen areas for an ideal entertaining layout.
 
 The fully equipped kitchen features modern appliances, generous counter space, and a breakfast bar perfect for casual meals. The open layout allows the cook to stay connected with family and guests while preparing meals.
 
-The primary bedroom suite is a true retreat, featuring a private lanai overlooking the gardens, an en-suite bathroom with walk-in shower, and ample closet space. The second guest bedroom also enjoys garden views and has its own adjacent bathroom. The third bedroom is located in an upper loft area with its own bath, providing additional privacy.
+The primary bedroom suite is a true retreat, featuring a private lanai overlooking the gardens, an en-suite bathroom with walk-in shower, and ample closet space. The second guest bedroom also enjoys garden views and has its own adjacent bathroom. The third bedroom is located in an upper loft area with its own bath, providing additional privacy. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 Guests enjoy full access to the Regency at Poipu Kai resort amenities including a swimming pool, tennis courts, and lushly landscaped tropical gardens. The complex is a short walk to three of Poipu's finest beaches, including world-famous Poipu Beach Park and Shipwreck Beach.
 
@@ -379,6 +396,15 @@ Located on Kauai's sunny south shore, the area offers excellent dining, shopping
     address: "1831 Poipu Rd, Bldg 3, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 22 | 8BR Resort Villas near Poipu Beach Park | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of three condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 8 bedrooms and can accommodate up to 21 guests, making this an exceptional option for large group gatherings on Kauai's beautiful south shore.
+
+Unit 721 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) with central AC, Hawaiian-style furnishings, a granite kitchen, and a spa-inspired master bath with jetted tub and walk-in marble shower. Sleeps 8 with a King bed, Queen bed, 2 Twins, and a queen sleeper sofa.
+
+Unit 323 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) featuring an expansive open floor plan, granite kitchen with breakfast bar, covered lanai, and AC in bedrooms. Sleeps 7 with a King bed, Queen bed, 2 Twins in the loft, and a sofa bed.
+
+Unit 811 is a 2-bedroom, 2-bathroom ground-floor condo (~1,250 sq ft) with central AC throughout, King beds in both bedrooms, a queen sleeper sofa, and easy ground-level access to the pool and gardens. Sleeps 6.
+
+All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden walkways. Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach are all within a 10-minute walk.`,
     hasPhotos: true,
     units: [
       {
@@ -387,13 +413,13 @@ Located on Kauai's sunny south shore, the area offers excellent dining, shopping
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,800",
-        maxGuests: 6,
-        shortDescription: "Charming 3-bedroom, 3-bath Regency II condo in building 7 with Hawaiian-style furnishings, granite kitchen, and central AC. Features a jetted tub, walk-in marble shower, garden views, and a private balcony. Sleeps 6 with King, Queen, and 2 Twin beds.",
+        maxGuests: 8,
+        shortDescription: "Charming 3-bedroom, 3-bath Regency II condo in building 7 with Hawaiian-style furnishings, granite kitchen, and central AC. Features a jetted tub, walk-in marble shower, garden views, and a private balcony. Sleeps 8 with King, Queen, 2 Twin beds, and a queen sleeper sofa.",
         longDescription: `Welcome to Unit 721, a tastefully decorated 3-bedroom, 3-bathroom condominium in Building 7 of the Regency at Poipu Kai resort. This Regency II unit boasts central air conditioning and authentic Hawaiian-style furniture that captures the spirit of the islands.
 
 The approximately 1,800 sq ft interior features a welcoming open layout with the living room flowing into a spacious dining area and well-appointed kitchen. Granite countertops, modern appliances, and ample prep space make cooking a pleasure. A private balcony offers serene garden views and fresh tropical air.
 
-Step into the master suite to find a luxurious King bed and a spa-inspired en-suite bathroom featuring a jetted soaking tub and walk-in marble shower. The second bedroom provides a restful Queen bed, while the third bedroom is outfitted with 2 Twin beds, ideal for children or friends.
+Step into the master suite to find a luxurious King bed and a spa-inspired en-suite bathroom featuring a jetted soaking tub and walk-in marble shower. The second bedroom provides a restful Queen bed, while the third bedroom is outfitted with 2 Twin beds, ideal for children or friends. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 An upper loft area provides a flexible bonus space for reading, relaxing, or extra sleeping arrangements. Each of the three full bathrooms is well-appointed, ensuring comfort and privacy for all guests.
 
@@ -431,15 +457,15 @@ Three of Kauai's finest beaches are a short 10-minute walk away, including Poipu
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,250",
-        maxGuests: 4,
-        shortDescription: "Well-appointed 2-bedroom, 2-bath ground-floor Regency II condo in building 8 with central AC, King beds in both rooms, a full kitchen, garden views, and a private lanai. Sleeps 4.",
+        maxGuests: 6,
+        shortDescription: "Well-appointed 2-bedroom, 2-bath ground-floor Regency II condo in building 8 with central AC, King beds in both rooms, a full kitchen, garden views, and a private lanai. Sleeps 6 with two King beds and a queen sleeper sofa.",
         longDescription: `Welcome to Unit 811, a comfortable 2-bedroom, 2-bathroom ground-floor condominium in Building 8 of the Regency at Poipu Kai resort. This Regency II unit features central air conditioning throughout, ensuring cool comfort on even the warmest Kauai days.
 
 The approximately 1,250 sq ft layout is thoughtfully designed with an open living and dining area that connects to the fully equipped kitchen. Sliding doors open to a private lanai with peaceful garden views, bringing the outside in. Smart TVs are available for entertainment.
 
 The kitchen comes fully stocked with modern appliances, cookware, and utensils for preparing anything from tropical smoothies to multi-course dinners. A generous dining area provides space for the whole group to gather over meals.
 
-Both bedrooms feature luxurious King beds for a restful night's sleep. The master bedroom has its own en-suite bathroom, while the second bedroom is adjacent to the second full bath. The ground-floor location provides easy access to the pool and gardens.
+Both bedrooms feature luxurious King beds for a restful night's sleep. The master bedroom has its own en-suite bathroom, while the second bedroom is adjacent to the second full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The ground-floor location provides easy access to the pool and gardens.
 
 Resort amenities include a beautiful swimming pool and hot tub, tennis and pickleball courts, and winding paths through tropical gardens. Everything is just steps from your front door in this well-maintained complex.
 
@@ -456,6 +482,13 @@ Poipu's famous beaches are a pleasant 10-minute walk, where you can snorkel with
     address: "1831 Poipu Rd, Bldg 5, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Group Villas with Pool & Tennis | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 14 guests, ideal for families or friends vacationing together on Kauai's sunny south shore.
+
+Unit 623 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) with central AC, a modern open-plan layout, granite countertops, and a covered lanai with garden views. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a sofa bed.
+
+Unit 624 is a 3-bedroom, 3-bathroom two-story condo (~1,800 sq ft) with full AC, a granite kitchen, wrap-around lanai, and a tropical garden setting. The two-story design provides natural separation for groups. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a futon.
+
+All guests enjoy resort amenities including a crystal-clear pool, hot tub, tennis and pickleball courts, and tropical garden paths. Three stunning Poipu beaches are just a 10-minute walk from your door.`,
     hasPhotos: true,
     units: [
       {
@@ -511,6 +544,13 @@ From your home base in Poipu, explore Kauai's south shore treasures. Walk to Poi
     address: "1831 Poipu Rd, Bldg 6, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 12 | 5BR AC Villas with Pool & Tennis | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, a great option for families or groups looking for comfortable south shore accommodations with AC.
+
+Unit 723 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) with central AC, updated finishes, a granite kitchen, private balcony, and a loft bedroom. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a sofa bed.
+
+Unit 611 is a spacious corner 2-bedroom, 2-bathroom ground-floor condo (~1,400 sq ft) with central AC, extra natural light from the corner position, a Queen bed in the primary bedroom, and a King bed in the second bedroom. Sleeps 5.
+
+All guests enjoy resort amenities including the swimming pool, hot tub, tennis and pickleball courts, and tropical garden paths. Poipu's beloved beaches are a short 10-minute walk from the resort.`,
     hasPhotos: true,
     units: [
       {
@@ -566,6 +606,13 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
     address: "8497 Kekaha Rd, Kekaha, HI 96752",
     bookingTitle: "Kekaha Beachfront Estate - Sleeps 15 | 5BR Oceanfront Home & Cottage at Davidson's Surf Break | Kekaha, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
+    combinedDescription: `This listing includes a luxury beachfront home and a charming guest cottage, both located on the same oceanfront estate property at Davidson's Surf Break in Kekaha on Kauai's sunny west side. Together they offer 5 bedrooms and can accommodate up to 15 guests, with direct beach access and spectacular Ni'ihau sunset views.
+
+Kimsey Beach House is a 3-bedroom, 2-bathroom oceanfront home (~2,000 sq ft) with Merbau wood floors, travertine bathrooms, and granite countertops. Every room opens to the oceanfront patio. Sleeps 9 with a King bed, 3 Queen beds, a Twin bed in the sunroom, and a queen sleeper sofa. AC in the master and second bedrooms.
+
+Kimsey Beach Cottage is a completely renovated 1930s plantation-style cottage (~1,200 sq ft) with 2 bedrooms and 3 bathrooms, located right next to the main house on the same property. Two king master suites each have en-suite baths, and a queen sleeper sofa provides additional sleeping. AC in both bedrooms. Sleeps 6.
+
+Both homes share the same pristine beachfront property with miles of white sand beach, Weber BBQ, outdoor shower, and all beach amenities provided. Kekaha is the sunniest spot on Kauai, close to Waimea Canyon, Polihale Beach, and the Na Pali Coast.`,
     hasPhotos: true,
     units: [
       {
@@ -575,14 +622,14 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
         bathrooms: "2",
         sqft: "~2,000",
         maxGuests: 9,
-        shortDescription: "Luxury 3-bedroom, 2-bath oceanfront home at Davidson's Surf Break in Kekaha. Merbau wood floors, travertine bathrooms, granite countertops. Every room opens to the oceanfront patio, steps from the beach. AC in master and second bedrooms. Sleeps 9 with King, 3 Queens, and Twin.",
+        shortDescription: "Luxury 3-bedroom, 2-bath oceanfront home at Davidson's Surf Break in Kekaha. Merbau wood floors, travertine bathrooms, granite countertops. Every room opens to the oceanfront patio, steps from the beach. AC in master and second bedrooms. Sleeps 9 with King, 3 Queens, Twin, and queen sleeper sofa.",
         longDescription: `Welcome to Kimsey Beach House, a luxury 3-bedroom, 2-bathroom oceanfront home located directly on Davidson's Surf Break in Kekaha on Kauai's sunny west side. This beautifully remodeled beach home puts you steps from miles of pristine white sand beach.
 
 The home has been renovated with Merbau wood floors throughout, travertine bathrooms, and granite countertops. Every room features sliding glass doors that lead directly to the oceanfront patio and lanai, creating a seamless indoor-outdoor living experience with the sound of waves as your constant soundtrack.
 
 The spacious great room flows from comfortable living areas through a generous dining space to the fully equipped modern kitchen, perfect for preparing family meals and entertaining. Two living areas provide plenty of space for your group to spread out.
 
-The private master suite is separate from the other bedrooms for added privacy, featuring a King bed and an en-suite travertine bathroom with a double-head walk-in shower. The second bedroom has a Queen bed, and the third bedroom features two Queen beds. A sleeping sunroom with a twin bed provides additional space. Split AC units cool the master and second bedrooms.
+The private master suite is separate from the other bedrooms for added privacy, featuring a King bed and an en-suite travertine bathroom with a double-head walk-in shower. The second bedroom has a Queen bed, and the third bedroom features two Queen beds. A sleeping sunroom with a twin bed and a queen sleeper sofa in the living area provide additional sleeping space. Split AC units cool the master and second bedrooms.
 
 Enjoy spectacular Ni'ihau sunset views from the oceanfront patio. A Weber BBQ, outdoor shower, and full laundry room are included. Beach towels, beach chairs, and all linens provided.
 
@@ -621,6 +668,13 @@ Experience the authentic charm of old Hawaii plantation living with the comforts
     address: "8515 Kekaha Rd, Kekaha, HI 96752",
     bookingTitle: "Kekaha Alaula Estate - Sleeps 10 | 5BR Oceanfront Plantation Home & Cottage | Kekaha, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
+    combinedDescription: `This listing includes a luxury oceanfront plantation home and a beautifully restored 1930s guest cottage, both located on the same historic Alaula Estate in Kekaha on Kauai's sunny west side. Together they offer 5 bedrooms and can accommodate up to 10 guests, with direct beach access and breathtaking ocean and Ni'ihau sunset views.
+
+Hale Ohana is an exquisite 2-story plantation-style home (~2,400 sq ft) with 3 bedrooms and 3 bathrooms. Features retractable sliding glass doors, solid teak furnishings, soapstone countertops, a wet bar, and wrap-around lanais on both levels. Sleeps 6 with a King bed and 2 Queen beds. Split AC in all bedrooms.
+
+Hale Alaula Cottage is a restored 1930s beachfront plantation cottage (~900 sq ft) with 2 bedrooms and 2 bathrooms, featuring vintage Hawaiian decor and a large covered lanai overlooking the estate's manicured tropical grounds. Sleeps 4 and shares direct beach access with the main home.
+
+The private estate grounds offer a truly unique Hawaiian experience with direct beachfront access, spectacular sunsets, and proximity to Waimea Canyon, Polihale Beach, and the stunning Na Pali Coast.`,
     hasPhotos: true,
     units: [
       {
@@ -676,6 +730,13 @@ Nearby attractions include Waimea Canyon, Polihale Beach, and the stunning Na Pa
     address: "78-6855 Ali'i Dr, Kailua-Kona, HI 96740",
     bookingTitle: "Keauhou Estates Halele'a - Sleeps 22 | 7BR Luxury Pool Estate with Ocean Views | Kailua-Kona, Big Island",
     sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and casita guest quarters may vary in decor and furnishings from photos shown.",
+    combinedDescription: `This listing includes a stunning custom estate home and a separate casita guest quarters, both located within the private, gated community of Keauhou Estates on the Big Island's Kona Coast. Together they offer 6 bedrooms and can accommodate up to 12 guests, with ocean views, a 72-foot saltwater lap pool, and zoned AC throughout.
+
+Halele'a Main House is a breathtaking 4-bedroom, 4-bathroom custom estate (~4,000 sq ft) with each suite offering a private bath, king bed, and ocean views overlooking Kailua Bay. The spacious circular kitchen with soaring high ceilings is designed for entertaining, and multiple lanais provide sun-soaked and shaded relaxation spaces.
+
+The Halele'a Casita is a separate guest quarters (~800 sq ft) across the pool landing from the main house, with 2 bedrooms, 1 bathroom, king beds in each room, and individual AC units. Casita guests have full access to the main house kitchen, living areas, pool, and all outdoor amenities.
+
+Located in exclusive Keauhou Estates with convenient access to Magic Sands Beach, Kahaluu Snorkel Beach, championship golf courses, and Kona Coast dining and shopping.`,
     hasPhotos: true,
     units: [
       {
@@ -729,6 +790,13 @@ From the casita, enjoy views of the tropical gardens, pool area, and ocean beyon
     address: "1831 Poipu Rd, Bldg 9, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villas Steps to 3 Beaches | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 14 guests, perfectly positioned steps from three of Poipu's finest beaches.
+
+Unit 823 is a beautifully renovated 3-bedroom, 3-bathroom two-story condo (~1,800 sq ft) with AC throughout, stainless steel kitchen appliances, and a luxurious marble master bath. Sleeps 7 with a King bed, Queen bed, 2 Twins upstairs, and a futon.
+
+Unit 724 is a designer-furnished 3-bedroom, 3-bathroom condo (~1,800 sq ft) with full central AC, a granite kitchen with breakfast bar, and a private garden-view lanai. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a sofa bed.
+
+All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden paths. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in just 10 minutes.`,
     hasPhotos: true,
     units: [
       {
@@ -784,6 +852,13 @@ Walk to three stunning south shore beaches in just 10 minutes. Snorkel among col
     address: "3920 Wyllie Rd, Princeville, HI 96722",
     bookingTitle: "Mauna Kai Princeville - Sleeps 14 | 5BR Resort Condos near Hideaways Beach | Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two comfortable condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, providing a wonderful home base for exploring Kauai's spectacular North Shore.
+
+Unit 9 is a bright two-story 3-bedroom, 2-bathroom condo (~1,600 sq ft) with mountain views, a fully equipped kitchen with granite counters, gas grill on the deck, and outdoor dining. Sleeps 8 with a King master, Queen second and third bedrooms, and a queen sofa bed. Central AC throughout.
+
+Unit 11 is a comfortable ground-floor 2-bedroom, 2-bathroom condo (~1,200 sq ft) with garden views, a covered lanai, and a full kitchen. Sleeps 6 with Queen beds in both bedrooms and a sofa sleeper. Walkable to Princeville shops and restaurants.
+
+Both units enjoy access to Mauna Kai's shared pool and hot tub. Hideaways Beach is just two miles away, Hanalei Bay is four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
     hasPhotos: false,
     units: [
       {
@@ -839,6 +914,13 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
     address: "3920 Wyllie Rd, Princeville, HI 96722",
     bookingTitle: "Mauna Kai Princeville - Sleeps 18 | 6BR Resort Condos with Pool near Hideaways Beach | Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
+
+Unit 7B is a 3-bedroom, 3-bathroom two-story condo (~1,600 sq ft) with central AC, a King master suite, Queen second and third bedrooms, a loft sleeping area, and a queen sleeper sofa. The open-concept living area opens to a covered lanai with tropical breezes and garden views.
+
+Unit 8 is a bright 3-bedroom, 2-bathroom two-story condo (~1,600 sq ft) with garden and mountain views, a stainless steel kitchen with granite counters, and a lanai with comfortable seating. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+
+Both units enjoy access to Mauna Kai's shared pool and hot tub. Princeville's convenient location offers easy access to Hideaways Beach, Hanalei Bay, the Princeville golf courses, and the dramatic Na Pali Coast.`,
     hasPhotos: false,
     units: [
       {
@@ -848,12 +930,12 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
         bathrooms: "3",
         sqft: "~1,600",
         maxGuests: 8,
-        shortDescription: "Spacious 3BR/3BA two-story condo with ocean glimpses, shared pool, fully equipped kitchen, and covered lanai. King master suite, queen bedrooms, and loft sleeping area. Central AC throughout.",
+        shortDescription: "Spacious 3BR/3BA two-story condo with ocean glimpses, shared pool, fully equipped kitchen, and covered lanai. King master suite, queen bedrooms, loft sleeping area, and queen sleeper sofa. Central AC throughout.",
         longDescription: `Welcome to Mauna Kai Unit 7B, a spacious 3-bedroom, 3-bathroom two-story condominium in Princeville's Mauna Kai resort. This well-appointed unit features central AC and a layout that maximizes space and privacy.
 
 The main level features an open-concept living area with comfortable seating, a dining table, and a fully equipped kitchen. Sliding glass doors open to a covered lanai where you can enjoy the tropical breezes and garden views.
 
-Three full bathrooms serve the three bedrooms. The king-bedded master suite includes an en-suite bath, while the second and third bedrooms feature queen beds. A loft area provides additional flexible sleeping space.
+Three full bathrooms serve the three bedrooms. The king-bedded master suite includes an en-suite bath, while the second and third bedrooms feature queen beds. A loft area provides additional flexible sleeping space. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 The kitchen has everything you need for home cooking, from quality appliances to ample prep space. A washer and dryer in the unit add convenience.
 
@@ -870,14 +952,14 @@ From Hanalei Bay's famous crescent beach to the dramatic Na Pali Coast trails, K
         bathrooms: "2",
         sqft: "~1,600",
         maxGuests: 8,
-        shortDescription: "Airy 3BR/2BA two-story condo with garden and mountain views. Open floor plan, stainless kitchen, lanai with seating, shared pool. King, queen, and twin bedrooms. Near Princeville shops and beaches.",
+        shortDescription: "Airy 3BR/2BA two-story condo with garden and mountain views. Open floor plan, stainless kitchen, lanai with seating, shared pool. King, queen, and twin bedrooms plus queen sleeper sofa. Near Princeville shops and beaches.",
         longDescription: `Welcome to Mauna Kai Unit 8, a bright and airy 3-bedroom, 2-bathroom two-story condo in Princeville's Mauna Kai resort community.
 
 The open floor plan on the main level creates a wonderful gathering space where the kitchen, dining area, and living room flow together. Mountain and garden views from the windows and lanai remind you that you're in one of Hawaii's most beautiful locations.
 
 The stainless steel kitchen is fully equipped for meal preparation, with granite counters and modern appliances. The lanai features comfortable seating for outdoor dining and relaxation.
 
-The king-bedded master suite is on the main level with an en-suite bath. Two upstairs bedrooms offer a queen bed and twin beds respectively, sharing a full bath. WiFi, cable TV, in-unit washer/dryer, and all linens are included.
+The king-bedded master suite is on the main level with an en-suite bath. Two upstairs bedrooms offer a queen bed and twin beds respectively, sharing a full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. WiFi, cable TV, in-unit washer/dryer, and all linens are included.
 
 The shared pool and hot tub provide a refreshing retreat. Princeville's convenient location offers easy access to grocery stores, restaurants, and the Princeville golf courses.
 
@@ -894,6 +976,15 @@ Kauai's North Shore stretches before you with endless possibilities - from the t
     address: "1831 Poipu Rd, Bldg 2, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 22 | 8BR Resort Villas Steps to Beach | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of three condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 8 bedrooms and can accommodate up to 20 guests, making this one of the largest group options available steps from Poipu's famous beaches.
+
+Unit 824 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) with central AC, an open floor plan, full granite kitchen, covered dining lanai, and a master suite with luxurious jetted tub. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a futon.
+
+Unit 923 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) with central AC, charming Hawaiian decor, garden views, a private balcony, and a walk-in shower in the master bath. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a sofa bed.
+
+Unit 914 is a sleek 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, King beds in both rooms, a stainless steel kitchen, smart TVs, and a queen sleeper sofa. Sleeps 6.
+
+All guests enjoy resort amenities including a shimmering pool, hot tub, tennis and pickleball courts, and tropical gardens. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in under 10 minutes.`,
     hasPhotos: true,
     units: [
       {
@@ -946,15 +1037,15 @@ Poipu's celebrated beaches are mere minutes away on foot. Discover the vibrant u
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,250",
-        maxGuests: 4,
-        shortDescription: "Modern 2-bedroom, 2-bath Regency II condo in building 9 with central AC, King beds in both rooms, stainless steel kitchen, and a private lanai. Sleeps 4.",
+        maxGuests: 6,
+        shortDescription: "Modern 2-bedroom, 2-bath Regency II condo in building 9 with central AC, King beds in both rooms, stainless steel kitchen, and a private lanai. Sleeps 6 with two King beds and a queen sleeper sofa.",
         longDescription: `Welcome to Unit 914, a sleek and modern 2-bedroom, 2-bathroom condominium in Building 9 of the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and tasteful contemporary updates throughout.
 
 The approximately 1,250 sq ft layout is efficiently designed with an open living area that connects to the kitchen and dining space. A private lanai offers a quiet retreat with views of the tropical gardens. Smart TVs are available in the living area and bedrooms.
 
 The updated kitchen features stainless steel appliances, modern finishes, and is fully stocked for meal preparation. The dining area provides ample seating for your group, and the open layout keeps everyone connected.
 
-Both bedrooms feature plush King beds for maximum sleeping comfort. The master bedroom includes an en-suite bathroom, while the second bedroom is adjacent to the second full bath. Modern updates in both bathrooms include contemporary fixtures and finishes.
+Both bedrooms feature plush King beds for maximum sleeping comfort. The master bedroom includes an en-suite bathroom, while the second bedroom is adjacent to the second full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Modern updates in both bathrooms include contemporary fixtures and finishes.
 
 Resort amenities including the swimming pool, hot tub, and tennis and pickleball courts are just a short walk from your door. The tropical gardens and well-maintained grounds create a peaceful resort atmosphere.
 
@@ -971,6 +1062,13 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     address: "4460 Nehe Rd, Lihue, HI 96766",
     bookingTitle: "Kaha Lani Resort Kapaa - Sleeps 14 | 5BR Oceanfront Condos at Lydgate Beach | Kapaa, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kaha Lani Resort. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two oceanfront condos within the Kaha Lani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with stunning ocean views and steps to family-friendly Lydgate Beach Park.
+
+Unit 339 is a spacious 3-bedroom, 3-bathroom oceanfront condo (~1,700 sq ft) with an open floor plan, ocean views from the lanai, and AC throughout. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+
+Unit 221 is a comfortable 2-bedroom, 2-bathroom ocean view condo (~1,200 sq ft) with a renovated kitchen, private lanai with ocean views, and a relaxing tropical retreat feel. Sleeps 6 with a King master, Queen second bedroom, and a sofa sleeper.
+
+Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park with its protected swimming lagoon and Kamalani Playground. Kapaa's charming town center offers eclectic shopping, dining, and the scenic coastal bike path.`,
     hasPhotos: false,
     units: [
       {
@@ -980,12 +1078,12 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
         bathrooms: "3",
         sqft: "~1,700",
         maxGuests: 8,
-        shortDescription: "Spacious 3BR/3BA oceanfront condo at Kaha Lani Resort. Open floor plan, fully equipped kitchen, private lanai with ocean views. King master, queen second, twins third. Steps to Lydgate Beach and playground. AC throughout.",
+        shortDescription: "Spacious 3BR/3BA oceanfront condo at Kaha Lani Resort. Open floor plan, fully equipped kitchen, private lanai with ocean views. King master, queen second, twins third, and queen sleeper sofa. Steps to Lydgate Beach and playground. AC throughout.",
         longDescription: `Welcome to Kaha Lani Unit 339, a spacious 3-bedroom, 3-bathroom oceanfront condominium at the Kaha Lani Resort in Kapaa on Kauai's Coconut Coast.
 
 This well-appointed condo features an open floor plan with ocean views from the main living areas and private lanai. The fully equipped kitchen has modern appliances, granite counters, and everything needed for meal preparation. The dining area seats your full group comfortably.
 
-The king-bedded master suite includes an en-suite bathroom and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds - both with adjacent bathrooms. AC throughout keeps you comfortable in Kapaa's tropical climate.
+The king-bedded master suite includes an en-suite bathroom and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds - both with adjacent bathrooms. A queen sleeper sofa in the living area provides additional sleeping for two more guests. AC throughout keeps you comfortable in Kapaa's tropical climate.
 
 The private lanai is perfect for morning coffee while watching the sunrise over the Pacific. A washer/dryer, WiFi, cable TV, and all linens are included.
 
@@ -1024,6 +1122,13 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
     address: "410 Papaloa Rd, Kapaa, HI 96746",
     bookingTitle: "Lae Nani Resort Kapaa - Sleeps 10 | 5BR Oceanfront Condos on Kapaa's Coconut Coast | Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Lae Nani Resort. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two oceanfront condos within the Lae Nani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with ocean views and access to the resort's own private sandy beach cove.
+
+Unit 314 is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. AC and ceiling fans throughout.
+
+Unit 225 is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set in a tropical garden with ocean views, a full kitchen, and a private lanai. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa. AC and ceiling fans included.
+
+Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area round out the amenities. Kapaa's vibrant town center is walking distance with its coastal bike path, boutiques, and diverse restaurants.`,
     hasPhotos: false,
     units: [
       {
@@ -1032,13 +1137,13 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
         bedrooms: 3,
         bathrooms: "2",
         sqft: "~1,500",
-        maxGuests: 6,
-        shortDescription: "Oceanfront 3BR/2BA condo at Lae Nani Resort. Open living with ocean views, full kitchen, private lanai, pool and tennis. King master, queen and twin bedrooms. Steps to a private sandy beach cove.",
+        maxGuests: 8,
+        shortDescription: "Oceanfront 3BR/2BA condo at Lae Nani Resort. Open living with ocean views, full kitchen, private lanai, pool and tennis. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to a private sandy beach cove.",
         longDescription: `Welcome to Lae Nani Unit 314, an oceanfront 3-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa on Kauai's beautiful Coconut Coast.
 
 This corner unit offers expansive ocean views from the living area and private lanai. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
 
-The fully equipped kitchen features modern appliances and plenty of counter space. The king-bedded master suite has an en-suite bath and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds. AC and ceiling fans keep all rooms comfortable.
+The fully equipped kitchen features modern appliances and plenty of counter space. The king-bedded master suite has an en-suite bath and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds. A queen sleeper sofa in the living area provides additional sleeping for two more guests. AC and ceiling fans keep all rooms comfortable.
 
 Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
 
@@ -1052,11 +1157,11 @@ Kapaa's vibrant town center is walking distance, offering the popular coastal bi
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
-        maxGuests: 4,
-        shortDescription: "Charming 2BR/2BA condo at Lae Nani Resort with ocean views, tropical garden setting, full kitchen, and lanai. King and queen bedrooms. Private beach cove, pool, and tennis court.",
+        maxGuests: 6,
+        shortDescription: "Charming 2BR/2BA condo at Lae Nani Resort with ocean views, tropical garden setting, full kitchen, and lanai. King and queen bedrooms plus queen sleeper sofa. Private beach cove, pool, and tennis court.",
         longDescription: `Welcome to Lae Nani Unit 225, a charming 2-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa.
 
-Set in a tropical garden with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath.
+Set in a tropical garden with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer/dryer adds convenience.
 
@@ -1075,6 +1180,13 @@ Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. The c
     address: "78-6920 Ali'i Dr, Kailua-Kona, HI 96740",
     bookingTitle: "Keauhou Estates - Sleeps 23 | 7BR Luxury Estate with Pool near Magic Sands Beach | Kailua-Kona, Big Island",
     sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and guest wing may vary in decor and furnishings from photos shown.",
+    combinedDescription: `This listing includes a grand main estate home and a separate guest wing, both located on the same property within the exclusive gated community of Keauhou Estates on the Big Island's stunning Kona Coast. Together they offer 7 bedrooms and can accommodate up to 23 guests, with a private pool, ocean views, and zoned AC throughout.
+
+The Main Estate is a grand 5-bedroom, 5-bathroom home (~4,500 sq ft) with five en-suite king bedrooms, a gourmet kitchen with professional-grade appliances, high ceilings, and floor-to-ceiling ocean-view windows. The private pool area is the centerpiece of the outdoor space, surrounded by tropical landscaping and views of Kailua Bay. Sleeps 15.
+
+The Guest Wing is a separate living space (~900 sq ft) within the estate grounds, offering 2 bedrooms with king beds, a private bathroom, AC, and lanai access. Guest wing occupants enjoy full access to the main estate's kitchen, living areas, pool, and outdoor amenities. Sleeps 8.
+
+Located in the gated Keauhou Estates community with 24-hour security, minutes from Magic Sands Beach and Kahaluu Snorkel Beach. Championship golf courses, Kona Coast dining, and world-class coffee tours are all nearby.`,
     hasPhotos: true,
     units: [
       {
@@ -1126,6 +1238,13 @@ The Keauhou Estates gated community provides a secure, peaceful environment with
     address: "2298 Ho'one Rd, Koloa, HI 96756",
     bookingTitle: "Poipu Beachside - Sleeps 17 | 7BR Ocean View Homes Steps to Brennecke's Beach | Poipu, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of these beachside homes. Individual homes may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing includes two beachside homes located on the same property, just 60 yards from famous Brennecke's Beach on Kauai's sunny Poipu coast. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean views and an unbeatable beach location.
+
+Beach House A is a spacious 4-bedroom, 3-bathroom home (~2,200 sq ft) with an open floor plan, ocean views, a covered lanai, and tropical landscaping. Sleeps 10 with a King master suite, Queen and Twin bedrooms, and a queen sleeper sofa. AC and ceiling fans throughout.
+
+Beach House B is a charming 3-bedroom, 3-bathroom home (~1,800 sq ft) with island-style decor and the luxury of private bathrooms for each bedroom. Sleeps 7 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. Covered lanai with ocean views and a BBQ grill.
+
+The location is unbeatable - Brennecke's Beach for world-class body surfing, Poipu Beach Park for calm-water snorkeling, and Shipwreck Beach's dramatic coastline are all within a short walk. Poipu offers excellent dining, shopping, and the National Tropical Botanical Garden.`,
     hasPhotos: false,
     units: [
       {
@@ -1135,14 +1254,14 @@ The Keauhou Estates gated community provides a secure, peaceful environment with
         bathrooms: "3",
         sqft: "~2,200",
         maxGuests: 10,
-        shortDescription: "Ocean view 4-bedroom, 3-bath home just 60 yards from Brennecke's Beach. Open floor plan, fully equipped kitchen, covered lanai with ocean views, and tropical landscaping. King master suite, queen and twin bedrooms.",
+        shortDescription: "Ocean view 4-bedroom, 3-bath home just 60 yards from Brennecke's Beach. Open floor plan, fully equipped kitchen, covered lanai with ocean views, and tropical landscaping. King master suite, queen and twin bedrooms, and queen sleeper sofa.",
         longDescription: `Welcome to Beach House A, a spacious 4-bedroom, 3-bathroom home located just 60 yards from famous Brennecke's Beach on Kauai's sunny south shore.
 
 This well-appointed home features an open floor plan with the living room, dining area, and kitchen flowing together to create a perfect gathering space. Large windows frame ocean views, and the covered lanai extends your living space outdoors with comfortable seating and dining.
 
 The fully equipped kitchen has everything needed for meal preparation, from modern appliances to a full complement of cookware and serving ware. The dining area comfortably seats your group.
 
-The king-bedded master suite includes a private en-suite bathroom. Additional bedrooms offer queen and twin bed configurations with two more full bathrooms. AC and ceiling fans keep all rooms comfortable. WiFi, cable TV, washer/dryer, and all linens provided.
+The king-bedded master suite includes a private en-suite bathroom. Additional bedrooms offer queen and twin bed configurations with two more full bathrooms. A queen sleeper sofa in the living area provides additional sleeping for two more guests. AC and ceiling fans keep all rooms comfortable. WiFi, cable TV, washer/dryer, and all linens provided.
 
 Step outside and walk to Brennecke's Beach in just minutes for world-class body surfing and boogie boarding. Poipu Beach Park is equally close for calm-water swimming and snorkeling. Shipwreck Beach's dramatic cliffs are a short walk along the coast.
 
@@ -1157,12 +1276,12 @@ The Poipu area offers excellent dining, shopping, and the National Tropical Bota
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Charming 3-bedroom, 3-bath home steps from Brennecke's Beach. Island-style decor, lanai with ocean views, full kitchen, and private bathrooms for each bedroom. King, queen, and twin beds.",
+        shortDescription: "Charming 3-bedroom, 3-bath home steps from Brennecke's Beach. Island-style decor, lanai with ocean views, full kitchen, and private bathrooms for each bedroom. King, queen, and twin beds, plus queen sleeper sofa.",
         longDescription: `Welcome to Beach House B, a charming 3-bedroom, 3-bathroom home located steps from Brennecke's Beach on Poipu's renowned south shore.
 
 Island-style decor and comfortable furnishings create a welcoming atmosphere throughout this well-maintained home. Each of the three bedrooms has its own private bathroom - a rare luxury that ensures comfort for all guests.
 
-The king-bedded master, queen second bedroom, and twin-bedded third bedroom accommodate up to 7 guests. The open living area connects to a full kitchen with modern appliances and a dining area. The covered lanai offers ocean views and outdoor dining.
+The king-bedded master, queen second bedroom, and twin-bedded third bedroom provide comfortable sleeping. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The open living area connects to a full kitchen with modern appliances and a dining area. The covered lanai offers ocean views and outdoor dining.
 
 AC, ceiling fans, WiFi, cable TV, washer/dryer, beach chairs, beach towels, and all linens are provided. A BBQ grill on the lanai makes outdoor cooking a pleasure.
 
@@ -1179,6 +1298,13 @@ The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck 
     address: "4100 Queen Emma's Dr, Princeville, HI 96722",
     bookingTitle: "Kaiulani of Princeville - Sleeps 14 | 7BR Ocean View Townhomes above Anini Beach | Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of townhome units within Kaiulani of Princeville. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of three townhome units within the Kaiulani of Princeville community, perched above beautiful Anini Beach on Kauai's North Shore. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean and mountain views and access to the community pool.
+
+Unit 5 is a spacious 3-bedroom, 2.5-bathroom two-story townhome (~1,800 sq ft) with high vaulted ceilings, a fully equipped kitchen, and a covered lanai with mountain and partial ocean views. Sleeps 8 with a King master upstairs, Queen and Twin bedrooms, and a queen sleeper sofa.
+
+Units 6 and 7 are two adjacent 2-bedroom townhomes combined to create a 4-bedroom, 3-bathroom vacation home (~2,400 sq ft). Each unit has its own kitchen, living area, lanai, and queen sleeper sofa, providing flexibility for your group. Four bedrooms with King and Queen beds throughout. Sleeps 9.
+
+Anini Beach below offers some of the calmest, clearest waters on Kauai, ideal for swimming, snorkeling, and kayaking. Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach.`,
     hasPhotos: false,
     units: [
       {
@@ -1187,13 +1313,13 @@ The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck 
         bedrooms: 3,
         bathrooms: "2.5",
         sqft: "~1,800",
-        maxGuests: 7,
-        shortDescription: "Ocean view 3BR/2.5BA two-story townhome above Anini Beach. Open living with high ceilings, full kitchen, covered lanai, and mountain views. King master upstairs, queen and twin bedrooms. Pool access.",
+        maxGuests: 8,
+        shortDescription: "Ocean view 3BR/2.5BA two-story townhome above Anini Beach. Open living with high ceilings, full kitchen, covered lanai, and mountain views. King master upstairs, queen and twin bedrooms, and queen sleeper sofa. Pool access.",
         longDescription: `Welcome to Kaiulani of Princeville Unit 5, a spacious 3-bedroom, 2.5-bathroom two-story townhome perched above beautiful Anini Beach on Kauai's North Shore.
 
 High vaulted ceilings and an open floor plan create an impressive sense of space in the main living area. The fully equipped kitchen, dining area, and comfortable living room flow together, with sliding glass doors opening to a covered lanai with mountain and partial ocean views.
 
-The upstairs king-bedded master suite features an en-suite bathroom and views of the surrounding greenery. The second bedroom offers a queen bed, and the third bedroom has twin beds. A half bath on the main level serves common areas. Ceiling fans and trade winds keep the home comfortable.
+The upstairs king-bedded master suite features an en-suite bathroom and views of the surrounding greenery. The second bedroom offers a queen bed, and the third bedroom has twin beds. A queen sleeper sofa in the living area provides additional sleeping for two more guests. A half bath on the main level serves common areas. Ceiling fans and trade winds keep the home comfortable.
 
 This townhome community features a shared pool and tropical landscaped grounds. The quiet residential setting offers privacy and peace while being conveniently located in Princeville.
 
@@ -1207,13 +1333,13 @@ Anini Beach, one of Kauai's most beautiful and protected beaches, is just down t
         bedrooms: 4,
         bathrooms: "3",
         sqft: "~2,400",
-        maxGuests: 7,
-        shortDescription: "Two adjacent 2BR townhomes combined for 4 bedrooms and 3 baths. Each unit has its own kitchen, living area, and lanai. King and queen beds throughout. Ocean and mountain views above Anini Beach.",
+        maxGuests: 9,
+        shortDescription: "Two adjacent 2BR townhomes combined for 4 bedrooms and 3 baths. Each unit has its own kitchen, living area, lanai, and queen sleeper sofa. King and queen beds throughout. Ocean and mountain views above Anini Beach.",
         longDescription: `Welcome to Kaiulani of Princeville Units 6 and 7, two adjacent 2-bedroom townhomes that combine to create a spacious 4-bedroom, 3-bathroom vacation home above Anini Beach.
 
 Each townhome unit has its own fully equipped kitchen, living area, and covered lanai, providing flexibility for your group. The combined layout creates a large vacation home while allowing different parts of your group to have their own space and privacy.
 
-Four bedrooms across the two units feature king and queen beds. Three full bathrooms ensure comfort for all guests. Each kitchen is fully stocked with modern appliances, cookware, and dining essentials.
+Four bedrooms across the two units feature king and queen beds. Three full bathrooms ensure comfort for all guests. Each townhome includes a queen sleeper sofa in the living area, providing additional sleeping for more guests. Each kitchen is fully stocked with modern appliances, cookware, and dining essentials.
 
 The covered lanais offer views of the mountains and ocean, perfect for relaxing with a tropical drink. Trade winds and ceiling fans provide natural cooling.
 
@@ -1232,6 +1358,13 @@ Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, th
     address: "2350 Ho'one Rd, Koloa, HI 96756",
     bookingTitle: "Poipu Oceanfront Pool Home - Sleeps 14 | 7BR Estate with Pool Steps to Brennecke's Beach | Poipu, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this oceanfront estate. The main home and guest suite may vary in decor and furnishings from photos shown.",
+    combinedDescription: `This listing includes a stunning oceanfront pool home and a separate guest suite, both located on the same estate property steps from Brennecke's Beach on Kauai's premier Poipu coast. Together they offer 7 bedrooms and can accommodate up to 14 guests, with ocean views, a private pool, and an unbeatable beachside location.
+
+The Main Home is a spacious 5-bedroom, 3-bathroom oceanfront pool home (~3,000 sq ft) with an open layout designed to maximize ocean views, a gourmet kitchen with granite counters, and a private pool surrounded by tropical landscaping. Sleeps 10 with a King master suite, Queen-bedded rooms, Twin room, and a queen sleeper sofa. AC throughout.
+
+The Guest Suite is a separate living space (~800 sq ft) adjacent to the main home with its own entrance, offering 2 bedrooms with Queen beds, a private bathroom, and full access to the main home's pool and outdoor amenities. Sleeps 4.
+
+Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations, offering world-class snorkeling, dining, and dramatic coastal scenery.`,
     hasPhotos: false,
     units: [
       {
@@ -1241,14 +1374,14 @@ Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, th
         bathrooms: "3",
         sqft: "~3,000",
         maxGuests: 10,
-        shortDescription: "Oceanfront 5-bedroom, 3-bath pool home steps from Brennecke's Beach. Open layout with ocean views, gourmet kitchen, private pool, covered lanai, and tropical gardens. King master, queens, and twins.",
+        shortDescription: "Oceanfront 5-bedroom, 3-bath pool home steps from Brennecke's Beach. Open layout with ocean views, gourmet kitchen, private pool, covered lanai, and tropical gardens. King master, queens, twins, and queen sleeper sofa.",
         longDescription: `Welcome to this stunning oceanfront 5-bedroom, 3-bathroom pool home located steps from Brennecke's Beach on Kauai's premier Poipu coast.
 
 This spacious home features an open layout designed to take full advantage of the spectacular ocean views. The living room, dining area, and gourmet kitchen flow together with large windows and glass doors opening to the covered lanai and pool deck.
 
 The gourmet kitchen is equipped with high-end appliances, granite counters, and ample space for preparing meals for your group. The dining area seats the whole party comfortably.
 
-Five bedrooms include a king-bedded master suite with ocean-view en-suite bathroom, queen-bedded rooms, and a twin-bedded room perfect for younger guests. Three full bathrooms ensure comfort for all. AC throughout and ceiling fans provide cooling options.
+Five bedrooms include a king-bedded master suite with ocean-view en-suite bathroom, queen-bedded rooms, and a twin-bedded room perfect for younger guests. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Three full bathrooms ensure comfort for all. AC throughout and ceiling fans provide cooling options.
 
 The private pool is the centerpiece of the outdoor living space, surrounded by tropical landscaping and ocean views. The covered lanai offers al fresco dining, lounging, and sunset watching. Beach chairs, towels, and snorkel gear are provided.
 
@@ -1283,6 +1416,13 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     address: "2253 Poipu Rd, Unit A, Koloa, HI 96756",
     bookingTitle: "Kiahuna Plantation - Sleeps 12 | 5BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two condos within Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities, set among 35 acres of lush tropical gardens originally landscaped for Hawaiian royalty. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and a garden walk to Poipu Beach.
+
+Building 38 is a beachfront 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, a tropical garden setting, a full kitchen, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+
+Building 2 is a garden view 2-bedroom, 2-bathroom condo (~1,100 sq ft) with AC, a full kitchen, and a lanai overlooking the tropical gardens. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa.
+
+Walk through the resort's spectacular gardens directly to Poipu Beach, consistently rated one of Hawaii's best. Nearby attractions include Spouting Horn, the National Tropical Botanical Garden, and the scenic Maha'ulepu Heritage Trail.`,
     hasPhotos: false,
     units: [
       {
@@ -1291,13 +1431,13 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
-        maxGuests: 7,
-        shortDescription: "Beachfront 3BR/3BA condo at Kiahuna Plantation with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms. Access to resort pool and grounds.",
+        maxGuests: 8,
+        shortDescription: "Beachfront 3BR/3BA condo at Kiahuna Plantation with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms plus queen sleeper sofa. Access to resort pool and grounds.",
         longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities.
 
 Set within 35 acres of lush tropical gardens originally designed for Hawaiian royalty, this spacious condo offers a perfect blend of historic charm and modern comfort. Air conditioning throughout ensures comfort, complemented by ceiling fans and tropical breezes.
 
-The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers twin beds - each with its own bathroom. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
+The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers twin beds - each with its own bathroom. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
 
 Kiahuna Plantation's grounds are a destination themselves, with manicured gardens, meandering paths, and the resort pool. But the real treasure is the location: walk through the gardens and you're on Poipu Beach, consistently rated one of Hawaii's best.
 
@@ -1311,11 +1451,11 @@ The on-site restaurant, nearby shops, and Poipu's dining scene are all convenien
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
-        maxGuests: 5,
-        shortDescription: "Garden view 2BR/2BA condo at Kiahuna Plantation. AC, full kitchen, lanai, and direct access to Poipu Beach. King master and queen second bedroom. Resort pool and tropical garden paths.",
+        maxGuests: 6,
+        shortDescription: "Garden view 2BR/2BA condo at Kiahuna Plantation. AC, full kitchen, lanai, and direct access to Poipu Beach. King master and queen second bedroom plus queen sleeper sofa. Resort pool and tropical garden paths.",
         longDescription: `Welcome to this 2-bedroom, 2-bathroom condominium at Kiahuna Plantation in Poipu, set among 35 acres of royal tropical gardens.
 
-This comfortable unit features air conditioning, a full kitchen with modern appliances, and a cozy living area that opens to a lanai overlooking the tropical gardens. The king-bedded master suite has a private en-suite bath, and the queen-bedded second bedroom is adjacent to the second full bath.
+This comfortable unit features air conditioning, a full kitchen with modern appliances, and a cozy living area that opens to a lanai overlooking the tropical gardens. The king-bedded master suite has a private en-suite bath, and the queen-bedded second bedroom is adjacent to the second full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 All linens, beach towels, WiFi, and basic kitchen supplies are provided. The resort pool and garden walking paths offer relaxation between beach adventures.
 
@@ -1334,6 +1474,13 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     address: "2253 Poipu Rd, Unit B, Koloa, HI 96756",
     bookingTitle: "Kiahuna Plantation - Sleeps 12 | 6BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within Kiahuna Plantation, Poipu Beach's iconic beachfront resort set among 35 acres of royal tropical gardens. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and direct garden-path access to Poipu Beach.
+
+Building 10 is a tropical 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, a full kitchen, covered lanai with garden views, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+
+Building 26 is a stylish 3-bedroom, 3-bathroom condo (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+
+Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at Koloa Landing.`,
     hasPhotos: false,
     units: [
       {
@@ -1342,13 +1489,13 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
-        maxGuests: 6,
-        shortDescription: "Tropical 3BR/3BA condo in Kiahuna Plantation with AC, full kitchen, lanai with garden views, and beachfront access. King master, queen and twin bedrooms. Steps to Poipu Beach.",
+        maxGuests: 8,
+        shortDescription: "Tropical 3BR/3BA condo in Kiahuna Plantation with AC, full kitchen, lanai with garden views, and beachfront access. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to Poipu Beach.",
         longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, nestled within the resort's lush 35-acre tropical gardens on Poipu Beach.
 
 This well-appointed unit features AC throughout, an open floor plan with the living room flowing into the fully equipped kitchen and dining area. The covered lanai provides a peaceful outdoor space surrounded by tropical plants and the resort's beautiful grounds.
 
-Three bedrooms each have their own bathroom: the king-bedded master suite, queen second bedroom, and twin-bedded third room. All rooms feature ceiling fans and AC for comfort.
+Three bedrooms each have their own bathroom: the king-bedded master suite, queen second bedroom, and twin-bedded third room. A queen sleeper sofa in the living area provides additional sleeping for two more guests. All rooms feature ceiling fans and AC for comfort.
 
 The kitchen is fully stocked for home cooking, and the dining area accommodates the whole group. WiFi, cable TV, washer/dryer access, and all linens are provided.
 
@@ -1364,13 +1511,13 @@ Explore the south shore's attractions including Spouting Horn, the National Trop
         bedrooms: 3,
         bathrooms: "3",
         sqft: "~1,500",
-        maxGuests: 6,
-        shortDescription: "Stylish 3BR/3BA condo at Kiahuna Plantation. AC, modern kitchen, comfortable bedrooms with private baths, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
+        maxGuests: 8,
+        shortDescription: "Stylish 3BR/3BA condo at Kiahuna Plantation. AC, modern kitchen, comfortable bedrooms with private baths, queen sleeper sofa, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
         longDescription: `Welcome to this stylish 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, located in the heart of Poipu's most iconic beachfront resort.
 
 Updated with a modern aesthetic while honoring the property's historic Hawaiian heritage, this condo offers comfortable living with AC throughout. The open layout connects the living, dining, and kitchen areas for easy entertaining.
 
-Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen and twin-bedded rooms accommodate additional guests comfortably. Ceiling fans supplement the AC.
+Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen and twin-bedded rooms accommodate additional guests comfortably. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Ceiling fans supplement the AC.
 
 The modern kitchen has quality appliances, ample counter space, and all the essentials for preparing meals. The lanai overlooks the resort's spectacular gardens.
 
@@ -1389,6 +1536,13 @@ Poipu's south shore offers year-round sunshine, world-class snorkeling, and the 
     address: "1831 Poipu Rd, Bldg 7, Koloa, HI 96756",
     bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villa with Pool & Tennis | Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 15 guests, a wonderful option for groups seeking a sunny south shore Kauai vacation.
+
+Unit 524 is a 3-bedroom, 2.5-bathroom Regency I condo (~1,800 sq ft) with a breakfast bar kitchen, covered lanai, master suite with private bath, and a loft bedroom. Sleeps 8 with a King bed, Queen bed, 2 Twins, and a sofa bed. AC in bedrooms.
+
+Unit 324 is a bright 3-bedroom, 3-bathroom Regency I condo (~1,800 sq ft) with an open-concept design, fully equipped kitchen, garden views, three full baths, and a lanai dining area. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a futon. AC in bedrooms.
+
+All guests enjoy resort amenities including a pool, hot tub, tennis and pickleball courts, and beautifully landscaped tropical gardens. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in about 10 minutes.`,
     hasPhotos: true,
     units: [
       {
