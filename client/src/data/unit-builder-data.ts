@@ -240,6 +240,215 @@ const PHOTOS_KEAUHOU: UnitPhoto[] = [
   { filename: "photo_18.jpg", label: "Sunset View", category: "Exterior" },
 ];
 
+const PHOTOS_MAUNA_KAI_6A: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Tropical Resort Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Open Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Living Area with Garden View", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Granite Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Fully Equipped Kitchen", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Area", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "Master King Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Bedroom Detail", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master En-Suite Bath", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Guest Queen Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Second Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Covered Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Lanai Seating Area", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Resort Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Hot Tub and Pool Deck", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Mountain Vista", category: "Views" },
+  { filename: "photo_17.jpg", label: "Tropical Garden Path", category: "Views" },
+  { filename: "photo_18.jpg", label: "Ocean Glimpse from Lanai", category: "Views" },
+  { filename: "photo_19.jpg", label: "Sunset over Hanalei", category: "Views" },
+];
+
+const PHOTOS_MAUNA_KAI_T3: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Townhome Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Spacious Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Great Room with Vaulted Ceilings", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Modern Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen and Breakfast Bar", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Room", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Bedroom", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Suite Sitting Area", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bathroom with Tub", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Room", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Third Bedroom with Twins", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Hall Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Private Deck", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Outdoor Dining on Lanai", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Community Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool Area Lounge", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "North Shore Mountain View", category: "Views" },
+  { filename: "photo_17.jpg", label: "Garden and Grounds", category: "Views" },
+  { filename: "photo_18.jpg", label: "Tropical Landscaping", category: "Views" },
+  { filename: "photo_19.jpg", label: "Princeville Panorama", category: "Views" },
+];
+
+const PHOTOS_KAHA_LANI_109: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Oceanfront Building Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Living Room with Ocean View", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Comfortable Sitting Area", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Open Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen with Granite Counters", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Space", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "Master King Bedroom", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Suite Ocean View", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bath with Shower", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Twin Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Ocean View Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Lanai Dining Area", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Resort Swimming Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool and BBQ Area", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Lydgate Beach View", category: "Views" },
+  { filename: "photo_17.jpg", label: "Oceanfront Sunrise", category: "Views" },
+  { filename: "photo_18.jpg", label: "Coastal Walking Path", category: "Views" },
+  { filename: "photo_19.jpg", label: "Tropical Resort Grounds", category: "Views" },
+];
+
+const PHOTOS_KAHA_LANI_123: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Resort Entrance", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Bright Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Living Area Seating", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Updated Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen with Modern Appliances", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Nook", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Bedroom with Lanai Access", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Guest Queen Room", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Second Guest Room", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Second Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Private Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Garden View from Lanai", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Community Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool Deck and Lounge Chairs", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Ocean View from Property", category: "Views" },
+  { filename: "photo_17.jpg", label: "Beach Access Path", category: "Views" },
+];
+
+const PHOTOS_LAE_NANI: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Oceanfront Resort Building", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Living Room with Ocean View", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Great Room Overview", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Fully Stocked Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen and Dining", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Area with Views", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Bedroom Detail", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bath", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Private Beach Cove", category: "Views" },
+];
+
+const PHOTOS_POIPU_BEACHSIDE: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Beachside Home Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Open Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Comfortable Seating Area", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Island-Style Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen with Full Amenities", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Room", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Bedroom", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Suite Detail", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master En-Suite Bathroom", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Room", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Twin Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Hall Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Covered Lanai with Ocean View", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Outdoor Dining and BBQ", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Tropical Garden Setting", category: "Views" },
+  { filename: "photo_15.jpg", label: "Beach Access Steps Away", category: "Views" },
+];
+
+const PHOTOS_POIPU_OCEANFRONT: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Oceanfront Estate Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Elegant Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Living Area with Ocean View", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Gourmet Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen Island and Prep Area", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Formal Dining Area", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "Oceanfront Master Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Bedroom Retreat", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Spa-Style Master Bath", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Twin Guest Room", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Private Pool and Deck", category: "Amenities" },
+  { filename: "photo_13.jpg", label: "Pool with Ocean Backdrop", category: "Amenities" },
+  { filename: "photo_14.jpg", label: "Oceanfront Sunset View", category: "Views" },
+  { filename: "photo_15.jpg", label: "Coastline from Property", category: "Views" },
+];
+
+const PHOTOS_KAIULANI: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Townhome Exterior and Entry", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Vaulted Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Living Area with Mountain Views", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Updated Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen and Breakfast Bar", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Area", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Bedroom", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Suite with Ceiling Fan", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Room", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Third Bedroom with Twins", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Covered Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Lanai with Garden View", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Community Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool and Tropical Gardens", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Anini Beach Below", category: "Views" },
+  { filename: "photo_17.jpg", label: "North Shore Coastline", category: "Views" },
+  { filename: "photo_18.jpg", label: "Mountain and Ocean Panorama", category: "Views" },
+  { filename: "photo_19.jpg", label: "Princeville Sunset", category: "Views" },
+];
+
+const PHOTOS_KIAHUNA_134: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Garden Resort Entrance", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Comfortable Living Room", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Full Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen with Modern Appliances", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Area", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Bedroom", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Suite with AC", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master En-Suite Bath", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Twin Guest Room", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Second Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Garden View Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Tropical Garden Path", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Resort Pool Area", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool Deck and Loungers", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Poipu Beach Access", category: "Views" },
+  { filename: "photo_17.jpg", label: "Royal Garden Grounds", category: "Views" },
+  { filename: "photo_18.jpg", label: "South Shore Sunset", category: "Views" },
+];
+
+const PHOTOS_KIAHUNA_101: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Plantation Resort Exterior", category: "Exterior" },
+  { filename: "photo_01.jpg", label: "Bright Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Living Area with Garden View", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Well-Appointed Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "Kitchen and Counter Space", category: "Kitchen" },
+  { filename: "photo_05.jpg", label: "Dining Table", category: "Living Areas" },
+  { filename: "photo_06.jpg", label: "King Master Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Master Bedroom Retreat", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Master Bathroom", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_10.jpg", label: "Second Guest Room", category: "Bedrooms" },
+  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
+  { filename: "photo_12.jpg", label: "Private Lanai", category: "Exterior" },
+  { filename: "photo_13.jpg", label: "Lanai and Garden Setting", category: "Exterior" },
+  { filename: "photo_14.jpg", label: "Beachfront Pool", category: "Amenities" },
+  { filename: "photo_15.jpg", label: "Pool with Ocean View", category: "Amenities" },
+  { filename: "photo_16.jpg", label: "Poipu Beach Shoreline", category: "Views" },
+  { filename: "photo_17.jpg", label: "Botanical Garden Walkway", category: "Views" },
+  { filename: "photo_18.jpg", label: "Tropical Sunset from Resort", category: "Views" },
+  { filename: "photo_19.jpg", label: "South Shore Coastline", category: "Views" },
+];
+
 export const unitBuilderData: PropertyUnitBuilder[] = [
   {
     propertyId: 1,
@@ -859,7 +1068,7 @@ Unit 9 is a bright two-story 3-bedroom, 2-bathroom condo (~1,600 sq ft) with mou
 Unit 11 is a comfortable ground-floor 2-bedroom, 2-bathroom condo (~1,200 sq ft) with garden views, a covered lanai, and a full kitchen. Sleeps 6 with Queen beds in both bedrooms and a sofa sleeper. Walkable to Princeville shops and restaurants.
 
 Both units enjoy access to Mauna Kai's shared pool and hot tub. Hideaways Beach is just two miles away, Hanalei Bay is four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop19-mk-9",
@@ -880,8 +1089,8 @@ The king-bedded master suite, queen-bedded second bedroom, and queen-bedded thir
 Mauna Kai Unit 9 grants guests access to the shared outdoor pool and hot tub, perfect for relaxing after a day of North Shore adventures. Water sports gear is available for guest use.
 
 Princeville offers jaw-dropping beaches, top golf courses, and breathtaking cliffs. Hideaways Beach is just two miles away, Hanalei Bay and its famous pier are four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "mauna-kai-6a",
+        photos: PHOTOS_MAUNA_KAI_6A,
       },
       {
         id: "prop19-mk-11",
@@ -902,8 +1111,8 @@ A covered lanai provides the perfect spot for morning coffee or evening relaxati
 Guests enjoy access to the Mauna Kai shared pool and BBQ area. The resort's convenient Princeville location puts you close to shopping, dining, and some of Kauai's most spectacular scenery.
 
 Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture to Hanalei for surfing and dining. The Na Pali Coast's dramatic cliffs and hiking trails are a short drive away.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "mauna-kai-6a",
+        photos: PHOTOS_MAUNA_KAI_6A,
       },
     ],
   },
@@ -921,7 +1130,7 @@ Unit 7B is a 3-bedroom, 3-bathroom two-story condo (~1,600 sq ft) with central A
 Unit 8 is a bright 3-bedroom, 2-bathroom two-story condo (~1,600 sq ft) with garden and mountain views, a stainless steel kitchen with granite counters, and a lanai with comfortable seating. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
 
 Both units enjoy access to Mauna Kai's shared pool and hot tub. Princeville's convenient location offers easy access to Hideaways Beach, Hanalei Bay, the Princeville golf courses, and the dramatic Na Pali Coast.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop20-mk-7b",
@@ -942,8 +1151,8 @@ The kitchen has everything you need for home cooking, from quality appliances to
 Mauna Kai's shared pool and hot tub are just steps away. The resort location in Princeville puts you close to Hideaways Beach, the Princeville Botanical Gardens, and the gateway to the North Shore's most spectacular scenery.
 
 From Hanalei Bay's famous crescent beach to the dramatic Na Pali Coast trails, Kauai's North Shore offers some of Hawaii's most breathtaking experiences right at your doorstep.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "mauna-kai-t3",
+        photos: PHOTOS_MAUNA_KAI_T3,
       },
       {
         id: "prop20-mk-8",
@@ -964,8 +1173,8 @@ The king-bedded master suite is on the main level with an en-suite bath. Two ups
 The shared pool and hot tub provide a refreshing retreat. Princeville's convenient location offers easy access to grocery stores, restaurants, and the Princeville golf courses.
 
 Kauai's North Shore stretches before you with endless possibilities - from the turquoise waters of Anini Beach to the towering waterfalls along the Na Pali Coast. Hanalei's charming shops and restaurants are just a short drive away.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "mauna-kai-t3",
+        photos: PHOTOS_MAUNA_KAI_T3,
       },
     ],
   },
@@ -1069,7 +1278,7 @@ Unit 339 is a spacious 3-bedroom, 3-bathroom oceanfront condo (~1,700 sq ft) wit
 Unit 221 is a comfortable 2-bedroom, 2-bathroom ocean view condo (~1,200 sq ft) with a renovated kitchen, private lanai with ocean views, and a relaxing tropical retreat feel. Sleeps 6 with a King master, Queen second bedroom, and a sofa sleeper.
 
 Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park with its protected swimming lagoon and Kamalani Playground. Kapaa's charming town center offers eclectic shopping, dining, and the scenic coastal bike path.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop23-kl-3br",
@@ -1090,8 +1299,8 @@ The private lanai is perfect for morning coffee while watching the sunrise over 
 Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park, one of Kauai's best family beaches with a protected swimming lagoon, snorkeling, and the expansive Kamalani Playground.
 
 Kapaa's Coconut Coast is centrally located on Kauai, making it easy to explore both the North Shore and South Shore. The charming Kapaa town offers eclectic shopping, dining, and the scenic coastal bike path.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kaha-lani-109",
+        photos: PHOTOS_KAHA_LANI_109,
       },
       {
         id: "prop23-kl-2br",
@@ -1110,8 +1319,8 @@ The king-bedded master suite has an en-suite bathroom, and the queen-bedded seco
 Take advantage of Kaha Lani Resort's pool, hot tub, and BBQ facilities. Walk directly to Lydgate Beach Park's protected swimming lagoon, ideal for families with its calm waters and abundant sea life.
 
 Kapaa town is minutes away with its bike path, shopping, and diverse dining options. The Coconut Coast location provides easy access to attractions across the island.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kaha-lani-123",
+        photos: PHOTOS_KAHA_LANI_123,
       },
     ],
   },
@@ -1129,7 +1338,7 @@ Unit 314 is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with
 Unit 225 is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set in a tropical garden with ocean views, a full kitchen, and a private lanai. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa. AC and ceiling fans included.
 
 Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area round out the amenities. Kapaa's vibrant town center is walking distance with its coastal bike path, boutiques, and diverse restaurants.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop24-ln-3br",
@@ -1148,8 +1357,8 @@ The fully equipped kitchen features modern appliances and plenty of counter spac
 Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
 
 Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Central Kauai location makes day trips to any part of the island easy and convenient.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "lae-nani-335",
+        photos: PHOTOS_LAE_NANI,
       },
       {
         id: "prop24-ln-2br",
@@ -1168,8 +1377,8 @@ WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer
 Lae Nani's private beach cove offers some of the best swimming on Kauai's east side. The resort pool, tennis court, and landscaped grounds provide a relaxing base for your Kauai vacation.
 
 Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "lae-nani-335",
+        photos: PHOTOS_LAE_NANI,
       },
     ],
   },
@@ -1245,7 +1454,7 @@ Beach House A is a spacious 4-bedroom, 3-bathroom home (~2,200 sq ft) with an op
 Beach House B is a charming 3-bedroom, 3-bathroom home (~1,800 sq ft) with island-style decor and the luxury of private bathrooms for each bedroom. Sleeps 7 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. Covered lanai with ocean views and a BBQ grill.
 
 The location is unbeatable - Brennecke's Beach for world-class body surfing, Poipu Beach Park for calm-water snorkeling, and Shipwreck Beach's dramatic coastline are all within a short walk. Poipu offers excellent dining, shopping, and the National Tropical Botanical Garden.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop28-house-a",
@@ -1266,8 +1475,8 @@ The king-bedded master suite includes a private en-suite bathroom. Additional be
 Step outside and walk to Brennecke's Beach in just minutes for world-class body surfing and boogie boarding. Poipu Beach Park is equally close for calm-water swimming and snorkeling. Shipwreck Beach's dramatic cliffs are a short walk along the coast.
 
 The Poipu area offers excellent dining, shopping, and the National Tropical Botanical Garden. This is Kauai's premier resort coast with the island's most consistent sunny weather.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "poipu-beachside",
+        photos: PHOTOS_POIPU_BEACHSIDE,
       },
       {
         id: "prop28-house-b",
@@ -1286,8 +1495,8 @@ The king-bedded master, queen second bedroom, and twin-bedded third bedroom prov
 AC, ceiling fans, WiFi, cable TV, washer/dryer, beach chairs, beach towels, and all linens are provided. A BBQ grill on the lanai makes outdoor cooking a pleasure.
 
 The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach are all within a short walk. Enjoy some of Hawaii's best snorkeling, body surfing, and sunset watching right at your doorstep.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "poipu-beachside",
+        photos: PHOTOS_POIPU_BEACHSIDE,
       },
     ],
   },
@@ -1305,7 +1514,7 @@ Unit 5 is a spacious 3-bedroom, 2.5-bathroom two-story townhome (~1,800 sq ft) w
 Units 6 and 7 are two adjacent 2-bedroom townhomes combined to create a 4-bedroom, 3-bathroom vacation home (~2,400 sq ft). Each unit has its own kitchen, living area, lanai, and queen sleeper sofa, providing flexibility for your group. Four bedrooms with King and Queen beds throughout. Sleeps 9.
 
 Anini Beach below offers some of the calmest, clearest waters on Kauai, ideal for swimming, snorkeling, and kayaking. Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop29-kai-3br",
@@ -1324,8 +1533,8 @@ The upstairs king-bedded master suite features an en-suite bathroom and views of
 This townhome community features a shared pool and tropical landscaped grounds. The quiet residential setting offers privacy and peace while being conveniently located in Princeville.
 
 Anini Beach, one of Kauai's most beautiful and protected beaches, is just down the hill - perfect for swimming, snorkeling, and windsurfing. The North Shore's legendary attractions including Hanalei Bay, Na Pali Coast, and the Kilauea Lighthouse are all easily accessible.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kaiulani-52",
+        photos: PHOTOS_KAIULANI,
       },
       {
         id: "prop29-kai-4br",
@@ -1346,8 +1555,8 @@ The covered lanais offer views of the mountains and ocean, perfect for relaxing 
 Kaiulani's shared pool and landscaped grounds create a peaceful retreat. Anini Beach below offers some of the calmest, clearest waters on Kauai - ideal for swimming, snorkeling, and kayaking.
 
 Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach for unforgettable day trips.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kaiulani-52",
+        photos: PHOTOS_KAIULANI,
       },
     ],
   },
@@ -1365,7 +1574,7 @@ The Main Home is a spacious 5-bedroom, 3-bathroom oceanfront pool home (~3,000 s
 The Guest Suite is a separate living space (~800 sq ft) adjacent to the main home with its own entrance, offering 2 bedrooms with Queen beds, a private bathroom, and full access to the main home's pool and outdoor amenities. Sleeps 4.
 
 Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations, offering world-class snorkeling, dining, and dramatic coastal scenery.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop31-main",
@@ -1386,8 +1595,8 @@ Five bedrooms include a king-bedded master suite with ocean-view en-suite bathro
 The private pool is the centerpiece of the outdoor living space, surrounded by tropical landscaping and ocean views. The covered lanai offers al fresco dining, lounging, and sunset watching. Beach chairs, towels, and snorkel gear are provided.
 
 Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "poipu-oceanfront",
+        photos: PHOTOS_POIPU_OCEANFRONT,
       },
       {
         id: "prop31-guest",
@@ -1404,8 +1613,8 @@ Two comfortable bedrooms each feature queen beds, and a private bathroom serves 
 Full access to the main home's gourmet kitchen, living areas, private pool, and outdoor amenities is included. The poolside location means you can step right out to the pool deck.
 
 The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach all within walking distance. Enjoy Kauai's sunniest coast with its world-class snorkeling, dining, and dramatic coastal scenery.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "poipu-oceanfront",
+        photos: PHOTOS_POIPU_OCEANFRONT,
       },
     ],
   },
@@ -1423,7 +1632,7 @@ Building 38 is a beachfront 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, 
 Building 2 is a garden view 2-bedroom, 2-bathroom condo (~1,100 sq ft) with AC, a full kitchen, and a lanai overlooking the tropical gardens. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa.
 
 Walk through the resort's spectacular gardens directly to Poipu Beach, consistently rated one of Hawaii's best. Nearby attractions include Spouting Horn, the National Tropical Botanical Garden, and the scenic Maha'ulepu Heritage Trail.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop32-kia-3br",
@@ -1442,8 +1651,8 @@ The king-bedded master suite features a private en-suite bathroom. The second be
 Kiahuna Plantation's grounds are a destination themselves, with manicured gardens, meandering paths, and the resort pool. But the real treasure is the location: walk through the gardens and you're on Poipu Beach, consistently rated one of Hawaii's best.
 
 The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kiahuna-134",
+        photos: PHOTOS_KIAHUNA_134,
       },
       {
         id: "prop32-kia-2br",
@@ -1462,8 +1671,8 @@ All linens, beach towels, WiFi, and basic kitchen supplies are provided. The res
 Step through the gardens to reach Poipu Beach for swimming, snorkeling, and sunbathing. Kiahuna's beachfront location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
 
 Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Poipu's restaurants and shops are just a short walk away.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kiahuna-101",
+        photos: PHOTOS_KIAHUNA_101,
       },
     ],
   },
@@ -1481,7 +1690,7 @@ Building 10 is a tropical 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, a 
 Building 26 is a stylish 3-bedroom, 3-bathroom condo (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
 
 Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at Koloa Landing.`,
-    hasPhotos: false,
+    hasPhotos: true,
     units: [
       {
         id: "prop33-kia-3br-a",
@@ -1502,8 +1711,8 @@ The kitchen is fully stocked for home cooking, and the dining area accommodates 
 Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. The resort pool, restaurant, and gorgeously maintained grounds make this an exceptional Kauai vacation base.
 
 Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at nearby Koloa Landing.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kiahuna-134",
+        photos: PHOTOS_KIAHUNA_134,
       },
       {
         id: "prop33-kia-3br-b",
@@ -1524,8 +1733,8 @@ The modern kitchen has quality appliances, ample counter space, and all the esse
 Walk to Poipu Beach through the beautiful resort grounds. The Kiahuna Plantation's 35 acres of tropical gardens, originally landscaped for Hawaiian royalty, create a serene environment unlike any other resort on Kauai.
 
 Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast.`,
-        photoFolder: "",
-        photos: [],
+        photoFolder: "kiahuna-101",
+        photos: PHOTOS_KIAHUNA_101,
       },
     ],
   },
