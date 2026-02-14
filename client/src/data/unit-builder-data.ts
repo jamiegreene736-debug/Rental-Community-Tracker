@@ -246,7 +246,7 @@ export const unitBuilderData: PropertyUnitBuilder[] = [
     propertyName: "Poipu Kai for large groups!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 8, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 7BR Resort Villas with Pool & Tennis | Poipu Beach, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 16 - 7BR Resort Villas with Pool and Tennis - Poipu Beach, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of three spacious condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 7 bedrooms and can accommodate up to 19 guests, making this an ideal setup for large family reunions or group vacations on Kauai's sunny south shore.
 
@@ -332,7 +332,7 @@ Whether you spend your days exploring Waimea Canyon, snorkeling with sea turtles
     propertyName: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villas with Pool & Tennis | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 16 - 6BR Villas with Pool and Tennis - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups exploring Kauai's sunny south shore.
 
@@ -394,7 +394,7 @@ Located on Kauai's sunny south shore, the area offers excellent dining, shopping
     propertyName: "Beautiful 8 brs for 22 near Poipu Beach Park!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 3, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 22 | 8BR Resort Villas near Poipu Beach Park | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 22 - 8BR Resort Villas near Poipu Beach Park - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of three condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 8 bedrooms and can accommodate up to 21 guests, making this an exceptional option for large group gatherings on Kauai's beautiful south shore.
 
@@ -480,7 +480,7 @@ Poipu's famous beaches are a pleasant 10-minute walk, where you can snorkel with
     propertyName: "Wonderful Large Group option in Poipu Kai!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 5, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Group Villas with Pool & Tennis | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 16 - 6BR Group Villas with Pool and Tennis - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 14 guests, ideal for families or friends vacationing together on Kauai's sunny south shore.
 
@@ -542,7 +542,7 @@ From your home base in Poipu, explore Kauai's south shore treasures. Walk to Poi
     propertyName: "Spacious 5 Bedrooms in Poipu Kai! AC!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 6, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 12 | 5BR AC Villas with Pool & Tennis | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 12 - 5BR AC Villas with Pool and Tennis - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, a great option for families or groups looking for comfortable south shore accommodations with AC.
 
@@ -604,7 +604,7 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
     propertyName: "Fabulous 5 br for 15 private beachfront Estate!",
     complexName: "Kekaha Beachfront Estate",
     address: "8497 Kekaha Rd, Kekaha, HI 96752",
-    bookingTitle: "Kekaha Beachfront Estate - Sleeps 15 | 5BR Oceanfront Home & Cottage at Davidson's Surf Break | Kekaha, Kauai",
+    bookingTitle: "Kekaha Beachfront Estate - Sleeps 15 - 5BR Oceanfront Home and Cottage at Davidson's Surf Break - Kekaha, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
     combinedDescription: `This listing includes a luxury beachfront home and a charming guest cottage, both located on the same oceanfront estate property at Davidson's Surf Break in Kekaha on Kauai's sunny west side. Together they offer 5 bedrooms and can accommodate up to 15 guests, with direct beach access and spectacular Ni'ihau sunset views.
 
@@ -666,7 +666,7 @@ Experience the authentic charm of old Hawaii plantation living with the comforts
     propertyName: "Incredible Kekaha Beachfront Estate for 10!",
     complexName: "Kekaha Beachfront Estate",
     address: "8515 Kekaha Rd, Kekaha, HI 96752",
-    bookingTitle: "Kekaha Alaula Estate - Sleeps 10 | 5BR Oceanfront Plantation Home & Cottage | Kekaha, Kauai",
+    bookingTitle: "Kekaha Alaula Estate - Sleeps 10 - 5BR Oceanfront Plantation Home and Cottage - Kekaha, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this beachfront estate. The main house and guest cottage may vary in decor and furnishings from photos shown.",
     combinedDescription: `This listing includes a luxury oceanfront plantation home and a beautifully restored 1930s guest cottage, both located on the same historic Alaula Estate in Kekaha on Kauai's sunny west side. Together they offer 5 bedrooms and can accommodate up to 10 guests, with direct beach access and breathtaking ocean and Ni'ihau sunset views.
 
@@ -728,7 +728,7 @@ Nearby attractions include Waimea Canyon, Polihale Beach, and the stunning Na Pa
     propertyName: "Fabulous 7 br 22 ocean view pool estate!",
     complexName: "Keauhou Estates",
     address: "78-6855 Ali'i Dr, Kailua-Kona, HI 96740",
-    bookingTitle: "Keauhou Estates Halele'a - Sleeps 22 | 7BR Luxury Pool Estate with Ocean Views | Kailua-Kona, Big Island",
+    bookingTitle: "Keauhou Estates Halele'a - Sleeps 22 - 7BR Luxury Pool Estate with Ocean Views - Kailua-Kona, Big Island",
     sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and casita guest quarters may vary in decor and furnishings from photos shown.",
     combinedDescription: `This listing includes a stunning custom estate home and a separate casita guest quarters, both located within the private, gated community of Keauhou Estates on the Big Island's Kona Coast. Together they offer 6 bedrooms and can accommodate up to 12 guests, with ocean views, a 72-foot saltwater lap pool, and zoned AC throughout.
 
@@ -788,7 +788,7 @@ From the casita, enjoy views of the tropical gardens, pool area, and ocean beyon
     propertyName: "Fabulous Six BR for 16 Poipu Kai! Steps to 3 Beaches!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 9, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villas Steps to 3 Beaches | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 16 - 6BR Villas Steps to 3 Beaches - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 14 guests, perfectly positioned steps from three of Poipu's finest beaches.
 
@@ -850,7 +850,7 @@ Walk to three stunning south shore beaches in just 10 minutes. Snorkel among col
     propertyName: "Gorgeous Princeville 5 bedroom condos for 14!",
     complexName: "Mauna Kai Princeville",
     address: "3920 Wyllie Rd, Princeville, HI 96722",
-    bookingTitle: "Mauna Kai Princeville - Sleeps 14 | 5BR Resort Condos near Hideaways Beach | Princeville, Kauai",
+    bookingTitle: "Mauna Kai Princeville - Sleeps 14 - 5BR Resort Condos near Hideaways Beach - Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two comfortable condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, providing a wonderful home base for exploring Kauai's spectacular North Shore.
 
@@ -912,7 +912,7 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
     propertyName: "Gorgeous Princeville 6 bedroom condos for 18!",
     complexName: "Mauna Kai Princeville",
     address: "3920 Wyllie Rd, Princeville, HI 96722",
-    bookingTitle: "Mauna Kai Princeville - Sleeps 18 | 6BR Resort Condos with Pool near Hideaways Beach | Princeville, Kauai",
+    bookingTitle: "Mauna Kai Princeville - Sleeps 18 - 6BR Resort Condos with Pool near Hideaways Beach - Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Mauna Kai. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
 
@@ -974,7 +974,7 @@ Kauai's North Shore stretches before you with endless possibilities - from the t
     propertyName: "Fabulous 8 bedrooms Poipu Kai steps to beach!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 2, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 22 | 8BR Resort Villas Steps to Beach | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 22 - 8BR Resort Villas Steps to Beach - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of three condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 8 bedrooms and can accommodate up to 20 guests, making this one of the largest group options available steps from Poipu's famous beaches.
 
@@ -1060,7 +1060,7 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
     propertyName: "Incredible 5 bedrooms for 14 at Lydgate Beach!",
     complexName: "Kaha Lani Resort",
     address: "4460 Nehe Rd, Lihue, HI 96766",
-    bookingTitle: "Kaha Lani Resort Kapaa - Sleeps 14 | 5BR Oceanfront Condos at Lydgate Beach | Kapaa, Kauai",
+    bookingTitle: "Kaha Lani Resort Kapaa - Sleeps 14 - 5BR Oceanfront Condos at Lydgate Beach - Kapaa, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kaha Lani Resort. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two oceanfront condos within the Kaha Lani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with stunning ocean views and steps to family-friendly Lydgate Beach Park.
 
@@ -1120,7 +1120,7 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
     propertyName: "Gorgeous 5 bedroom condos for 10 on Kapaa coast!",
     complexName: "Lae Nani Resort",
     address: "410 Papaloa Rd, Kapaa, HI 96746",
-    bookingTitle: "Lae Nani Resort Kapaa - Sleeps 10 | 5BR Oceanfront Condos on Kapaa's Coconut Coast | Kauai",
+    bookingTitle: "Lae Nani Resort Kapaa - Sleeps 10 - 5BR Oceanfront Condos on Kapaa's Coconut Coast - Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Lae Nani Resort. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two oceanfront condos within the Lae Nani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with ocean views and access to the resort's own private sandy beach cove.
 
@@ -1178,7 +1178,7 @@ Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. The c
     propertyName: "Fabulous 7 bedroom for 23 near Magic Sands Beach!",
     complexName: "Keauhou Estates",
     address: "78-6920 Ali'i Dr, Kailua-Kona, HI 96740",
-    bookingTitle: "Keauhou Estates - Sleeps 23 | 7BR Luxury Estate with Pool near Magic Sands Beach | Kailua-Kona, Big Island",
+    bookingTitle: "Keauhou Estates - Sleeps 23 - 7BR Luxury Estate with Pool near Magic Sands Beach - Kailua-Kona, Big Island",
     sampleDisclaimer: "Photos shown are representative samples of this estate property. The main house and guest wing may vary in decor and furnishings from photos shown.",
     combinedDescription: `This listing includes a grand main estate home and a separate guest wing, both located on the same property within the exclusive gated community of Keauhou Estates on the Big Island's stunning Kona Coast. Together they offer 7 bedrooms and can accommodate up to 23 guests, with a private pool, ocean views, and zoned AC throughout.
 
@@ -1236,7 +1236,7 @@ The Keauhou Estates gated community provides a secure, peaceful environment with
     propertyName: "Beautiful ocean view Poipu 7 brs for 17! 60 yards to Beach!",
     complexName: "Poipu Brenneckes Beachside",
     address: "2298 Ho'one Rd, Koloa, HI 96756",
-    bookingTitle: "Poipu Beachside - Sleeps 17 | 7BR Ocean View Homes Steps to Brennecke's Beach | Poipu, Kauai",
+    bookingTitle: "Poipu Beachside - Sleeps 17 - 7BR Ocean View Homes Steps to Brennecke's Beach - Poipu, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of these beachside homes. Individual homes may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing includes two beachside homes located on the same property, just 60 yards from famous Brennecke's Beach on Kauai's sunny Poipu coast. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean views and an unbeatable beach location.
 
@@ -1296,7 +1296,7 @@ The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck 
     propertyName: "Ocean view 7 bedrooms for 14 above Anini Beach!",
     complexName: "Kaiulani of Princeville",
     address: "4100 Queen Emma's Dr, Princeville, HI 96722",
-    bookingTitle: "Kaiulani of Princeville - Sleeps 14 | 7BR Ocean View Townhomes above Anini Beach | Princeville, Kauai",
+    bookingTitle: "Kaiulani of Princeville - Sleeps 14 - 7BR Ocean View Townhomes above Anini Beach - Princeville, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of townhome units within Kaiulani of Princeville. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of three townhome units within the Kaiulani of Princeville community, perched above beautiful Anini Beach on Kauai's North Shore. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean and mountain views and access to the community pool.
 
@@ -1356,7 +1356,7 @@ Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, th
     propertyName: "Fabulous 7 bedroom for 14 oceanfront Poipu pool home!",
     complexName: "Poipu Brenneckes Oceanfront",
     address: "2350 Ho'one Rd, Koloa, HI 96756",
-    bookingTitle: "Poipu Oceanfront Pool Home - Sleeps 14 | 7BR Estate with Pool Steps to Brennecke's Beach | Poipu, Kauai",
+    bookingTitle: "Poipu Oceanfront Pool Home - Sleeps 14 - 7BR Estate with Pool Steps to Brennecke's Beach - Poipu, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of this oceanfront estate. The main home and guest suite may vary in decor and furnishings from photos shown.",
     combinedDescription: `This listing includes a stunning oceanfront pool home and a separate guest suite, both located on the same estate property steps from Brennecke's Beach on Kauai's premier Poipu coast. Together they offer 7 bedrooms and can accommodate up to 14 guests, with ocean views, a private pool, and an unbeatable beachside location.
 
@@ -1414,7 +1414,7 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     complexName: "Kiahuna Plantation",
     address: "2253 Poipu Rd, Unit A, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Sleeps 12 | 5BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
+    bookingTitle: "Kiahuna Plantation - Sleeps 12 - 5BR Beachfront Garden Condos with AC - Poipu Beach, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two condos within Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities, set among 35 acres of lush tropical gardens originally landscaped for Hawaiian royalty. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and a garden walk to Poipu Beach.
 
@@ -1472,7 +1472,7 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     complexName: "Kiahuna Plantation",
     address: "2253 Poipu Rd, Unit B, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Sleeps 12 | 6BR Beachfront Garden Condos with AC | Poipu Beach, Kauai",
+    bookingTitle: "Kiahuna Plantation - Sleeps 12 - 6BR Beachfront Garden Condos with AC - Poipu Beach, Kauai",
     sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within Kiahuna Plantation, Poipu Beach's iconic beachfront resort set among 35 acres of royal tropical gardens. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and direct garden-path access to Poipu Beach.
 
@@ -1534,7 +1534,7 @@ Poipu's south shore offers year-round sunshine, world-class snorkeling, and the 
     propertyName: "Wonderful 6 Bedroom For 16 Villa in Poipu!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 7, Koloa, HI 96756",
-    bookingTitle: "Regency at Poipu Kai - Sleeps 16 | 6BR Villa with Pool & Tennis | Poipu, Kauai",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 16 - 6BR Villa with Pool and Tennis - Poipu, Kauai",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 15 guests, a wonderful option for groups seeking a sunny south shore Kauai vacation.
 

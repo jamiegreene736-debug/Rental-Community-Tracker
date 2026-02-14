@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
+import JSZip from "jszip";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -213,21 +214,28 @@ async function downloadPhotosToFolder(unit: Unit) {
     }
   }
 
+  const zip = new JSZip();
   for (let i = 0; i < unit.photos.length; i++) {
     const photo = unit.photos[i];
     const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
     const blob = await response.blob();
     const paddedIdx = String(i + 1).padStart(2, "0");
     const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = safeName;
-    a.click();
-    URL.revokeObjectURL(url);
-    await new Promise((r) => setTimeout(r, 300));
+    zip.file(safeName, blob);
   }
-  return { success: true, method: "individual" as const };
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${unit.id}-photos.zip`;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+  return { success: true, method: "zip" as const };
 }
 
 function PhotoOrderPreview({ unit }: { unit: Unit }) {
@@ -242,8 +250,8 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
       let msg: string | null = null;
       if (result?.success && result.method === "folder") {
         msg = "Photos saved to folder";
-      } else if (result?.success && result.method === "individual") {
-        msg = "Photos downloading individually";
+      } else if (result?.success && result.method === "zip") {
+        msg = "Photos downloaded as zip";
       }
       setDownloadResult(msg);
       if (msg) setTimeout(() => setDownloadResult(null), 4000);
@@ -635,6 +643,16 @@ function SeasonalityTable({ pricing }: { pricing: PropertyPricing }) {
   );
 }
 
+function getAverageSqft(property: PropertyUnitBuilder): string {
+  const nums = property.units.map((u) => {
+    const n = parseInt(u.sqft.replace(/[^0-9]/g, ""), 10);
+    return isNaN(n) ? 0 : n;
+  }).filter((n) => n > 0);
+  if (nums.length === 0) return "N/A";
+  const avg = Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
+  return `~${avg.toLocaleString()} sq ft`;
+}
+
 export default function LodgifyPrep() {
   const params = useParams<{ id: string }>();
   const propertyId = parseInt(params.id || "0", 10);
@@ -693,7 +711,10 @@ export default function LodgifyPrep() {
           <div className="lg:col-span-2">
             <LodgifySyncStatus property={property} />
           </div>
-          <CopyField label="Property Address" value={property.address} />
+          <div className="space-y-4">
+            <CopyField label="Property Address" value={property.address} />
+            <CopyField label="Average Square Footage" value={getAverageSqft(property)} />
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
