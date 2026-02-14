@@ -25,7 +25,7 @@ export type PropertyPricing = {
   units: UnitPricing[];
 };
 
-const MARKUP = 1.35;
+const MARKUP = 1.20;
 
 const SEASON_MULTIPLIERS: Record<SeasonType, number> = {
   high: 1.25,
