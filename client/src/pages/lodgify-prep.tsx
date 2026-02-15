@@ -31,7 +31,11 @@ import {
   FolderOpen,
   DollarSign,
   TrendingUp,
+  Upload,
+  AlertCircle,
 } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { apiRequest } from "@/lib/queryClient";
 import {
   Table,
   TableBody,
@@ -51,7 +55,6 @@ import {
   getSeasonLabel,
   getSeasonBadgeVariant,
   type PropertyPricing,
-  type UnitPricing,
 } from "@/data/pricing-data";
 
 function CopyField({ label, value, multiline }: { label: string; value: string; multiline?: boolean }) {
@@ -537,7 +540,7 @@ function PricingSummaryCard({ pricing }: { pricing: PropertyPricing }) {
         Buy-In & Sell Rate Summary
       </h3>
       <p className="text-xs text-muted-foreground mb-4">
-        Average Airbnb buy-in rate (including taxes & fees) marked up 35% (15% Booking.com commission + 20% your commission).
+        Average Airbnb buy-in rate (including taxes & fees) marked up 20%.
       </p>
 
       <div className="space-y-3">
@@ -643,6 +646,126 @@ function SeasonalityTable({ pricing }: { pricing: PropertyPricing }) {
   );
 }
 
+function PushRatesToLodgify({ pricing }: { pricing: PropertyPricing }) {
+  const [lodgifyId, setLodgifyId] = useState("");
+  const [pushing, setPushing] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const combinedRates = pricing.units[0]?.monthlyRates.map((rate, idx) => {
+    const totalSell = pricing.units.reduce((sum, u) => sum + u.monthlyRates[idx].sellRate, 0);
+    return {
+      month: rate.month,
+      year: rate.year,
+      sellRate: totalSell,
+      season: rate.season,
+      minStay: rate.season === "high" ? 7 : 5,
+    };
+  }) || [];
+
+  const handlePush = async () => {
+    if (!lodgifyId.trim()) return;
+
+    setPushing(true);
+    setResult(null);
+
+    try {
+      const response = await apiRequest("POST", "/api/lodgify/push-rates", {
+        lodgifyPropertyId: lodgifyId.trim(),
+        rates: combinedRates,
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        const roomSummary = data.results?.map((r: any) => `"${r.roomTypeName}" (${r.periodsSubmitted} periods)`).join(", ") || "";
+        setResult({
+          success: true,
+          message: `Rates pushed to Lodgify property ${lodgifyId}. ${data.roomTypesProcessed} room type(s) updated: ${roomSummary}.`,
+        });
+      } else {
+        const failedRooms = data.results?.filter((r: any) => !r.success).map((r: any) => r.roomTypeName).join(", ") || "";
+        setResult({
+          success: false,
+          message: data.error || `Some room types failed: ${failedRooms}`,
+        });
+      }
+    } catch (err: any) {
+      let errorMsg = "Failed to push rates to Lodgify";
+      try {
+        const errData = JSON.parse(err.message || "{}");
+        errorMsg = errData.error || errData.message || errorMsg;
+      } catch {
+        if (err.message) errorMsg = err.message;
+      }
+      setResult({ success: false, message: errorMsg });
+    } finally {
+      setPushing(false);
+    }
+  };
+
+  return (
+    <Card className="p-4">
+      <h3 className="text-sm font-bold mb-3 flex items-center gap-2">
+        <Upload className="h-4 w-4" />
+        Push Rates to Lodgify
+      </h3>
+      <p className="text-xs text-muted-foreground mb-4">
+        Enter your Lodgify property ID and push the current 24-month sell rates directly to Lodgify. This sets nightly rates for each month based on the seasonal schedule above.
+      </p>
+
+      <div className="flex flex-wrap items-end gap-3 mb-3">
+        <div className="flex-1 min-w-[200px]">
+          <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+            Lodgify Property ID
+          </label>
+          <Input
+            type="text"
+            placeholder="e.g. 766525"
+            value={lodgifyId}
+            onChange={(e) => setLodgifyId(e.target.value)}
+            data-testid="input-lodgify-property-id"
+          />
+        </div>
+        <Button
+          onClick={handlePush}
+          disabled={!lodgifyId.trim() || pushing}
+          data-testid="button-push-rates"
+        >
+          {pushing ? (
+            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+          ) : (
+            <Upload className="h-4 w-4 mr-2" />
+          )}
+          {pushing ? "Pushing..." : "Push Rates to Lodgify"}
+        </Button>
+      </div>
+
+      {result && (
+        <div
+          className={`flex items-start gap-2 p-3 rounded-md text-sm ${
+            result.success
+              ? "bg-green-50 dark:bg-green-950/30 text-green-800 dark:text-green-300"
+              : "bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-300"
+          }`}
+          data-testid="text-push-result"
+        >
+          {result.success ? (
+            <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          ) : (
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          )}
+          <span>{result.message}</span>
+        </div>
+      )}
+
+      <div className="mt-3 text-xs text-muted-foreground">
+        <p>Combined nightly sell rate being pushed: ${combinedRates[0]?.sellRate || 0} - ${combinedRates[combinedRates.length - 1]?.sellRate || 0}/night (varies by season)</p>
+        <p className="mt-1">Minimum stay: 7 nights (high season), 5 nights (mid/low season)</p>
+      </div>
+    </Card>
+  );
+}
+
 function getAverageSqft(property: PropertyUnitBuilder): string {
   const nums = property.units.map((u) => {
     const n = parseInt(u.sqft.replace(/[^0-9]/g, ""), 10);
@@ -729,12 +852,17 @@ export default function LodgifyPrep() {
         </div>
 
         {pricing && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-            <PricingSummaryCard pricing={pricing} />
-            <div className="lg:col-span-2">
-              <SeasonalityTable pricing={pricing} />
+          <>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+              <PricingSummaryCard pricing={pricing} />
+              <div className="lg:col-span-2">
+                <SeasonalityTable pricing={pricing} />
+              </div>
             </div>
-          </div>
+            <div className="mb-6">
+              <PushRatesToLodgify pricing={pricing} />
+            </div>
+          </>
         )}
 
         <div className="space-y-6">
