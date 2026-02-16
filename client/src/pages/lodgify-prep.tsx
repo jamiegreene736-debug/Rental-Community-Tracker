@@ -186,16 +186,7 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
-function downloadPhotosAsZip(unit: Unit) {
-  if (unit.photos.length === 0 || !unit.photoFolder) return;
-  window.open(`/api/photos/zip/${unit.photoFolder}`, "_blank");
-}
-
 function PhotoOrderPreview({ unit }: { unit: Unit }) {
-  const handleDownload = () => {
-    downloadPhotosAsZip(unit);
-  };
-
   if (unit.photos.length === 0) {
     return (
       <div className="text-sm text-muted-foreground p-4 text-center">
@@ -213,11 +204,13 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
         <Button
           variant="default"
           size="sm"
-          onClick={handleDownload}
+          asChild
           data-testid={`button-download-photos-${unit.id}`}
         >
-          <Download className="h-3.5 w-3.5 mr-1.5" />
-          Download All Photos (ZIP)
+          <a href={`/api/photos/zip/${unit.photoFolder}`} download={`${unit.id}-photos.zip`}>
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download All Photos (ZIP)
+          </a>
         </Button>
       </div>
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
