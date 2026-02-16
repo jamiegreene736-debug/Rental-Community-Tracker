@@ -255,29 +255,36 @@ export async function registerRoutes(
           body: JSON.stringify(ratePayload),
         });
 
+        const rateResponseStatus = rateResponse.status;
+        const rateResponseText = await rateResponse.text();
+
         if (!rateResponse.ok) {
-          const errorText = await rateResponse.text();
           let errorData;
           try {
-            errorData = JSON.parse(errorText);
+            errorData = JSON.parse(rateResponseText);
           } catch {
-            errorData = { message: errorText };
+            errorData = { message: rateResponseText || `HTTP ${rateResponseStatus} error` };
           }
+          console.error(`Lodgify rate push failed for room ${room.id} (${room.name}):`, {
+            status: rateResponseStatus,
+            error: errorData,
+            payload: JSON.stringify(ratePayload).substring(0, 500),
+          });
           results.push({
             roomTypeId: room.id,
             roomTypeName: room.name,
             success: false,
+            httpStatus: rateResponseStatus,
             error: errorData,
           });
           continue;
         }
 
-        const resultText = await rateResponse.text();
         let parsedResult;
         try {
-          parsedResult = JSON.parse(resultText);
+          parsedResult = JSON.parse(rateResponseText);
         } catch {
-          parsedResult = { raw: resultText };
+          parsedResult = { raw: rateResponseText };
         }
 
         results.push({
