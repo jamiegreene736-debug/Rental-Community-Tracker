@@ -199,7 +199,13 @@ function getAllPhotoFolders(property: PropertyUnitBuilder): string[] {
 function getDownloadAllUrl(property: PropertyUnitBuilder): string {
   const folders = getAllPhotoFolders(property);
   const name = property.complexName.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
-  return `/api/photos/zip-multi?folders=${folders.join(",")}&name=${name}`;
+  let url = `/api/photos/zip-multi?folders=${folders.join(",")}&name=${name}`;
+  if (property.communityPhotos && property.communityPhotos.length > 0 && property.communityPhotoFolder) {
+    const beginningPhotos = property.communityPhotos.filter(p => p.position === "beginning").map(p => p.filename).join(",");
+    const endPhotos = property.communityPhotos.filter(p => p.position === "end").map(p => p.filename).join(",");
+    url += `&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningPhotos)}&endPhotos=${encodeURIComponent(endPhotos)}`;
+  }
+  return url;
 }
 
 function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
@@ -320,7 +326,8 @@ export default function UnitBuilder() {
     );
   }
 
-  const totalPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
+  const totalUnitPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
+  const totalPhotos = totalUnitPhotos + (property.communityPhotos?.length || 0);
 
   return (
     <div className="min-h-screen bg-background">
