@@ -1,11 +1,43 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import path from "path";
+import fs from "fs";
+import JSZip from "jszip";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  app.get("/api/photos/zip/:folder", async (req, res) => {
+    const folder = req.params.folder.replace(/[^a-zA-Z0-9_-]/g, "");
+    const photosDir = path.join(process.cwd(), "client", "public", "photos", folder);
+
+    if (!fs.existsSync(photosDir)) {
+      return res.status(404).json({ error: "Photo folder not found" });
+    }
+
+    const files = fs.readdirSync(photosDir).filter(f => f.endsWith(".jpg") || f.endsWith(".png") || f.endsWith(".jpeg"));
+    if (files.length === 0) {
+      return res.status(404).json({ error: "No photos found in folder" });
+    }
+
+    const zip = new JSZip();
+    for (const file of files) {
+      const filePath = path.join(photosDir, file);
+      const data = fs.readFileSync(filePath);
+      zip.file(file, data);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+    res.set({
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${folder}-photos.zip"`,
+      "Content-Length": String(zipBuffer.length),
+    });
+    res.send(zipBuffer);
+  });
+
   app.get("/api/lodgify/properties", async (_req, res) => {
     const apiKey = process.env.LODGIFY_API_KEY;
     if (!apiKey) {

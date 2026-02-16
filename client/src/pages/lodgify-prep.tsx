@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import JSZip from "jszip";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -187,55 +186,14 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
-async function downloadPhotosAsZip(unit: Unit) {
-  if (unit.photos.length === 0) return null;
-
-  const zip = new JSZip();
-  const fetchPromises = unit.photos.map(async (photo, i) => {
-    const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
-    if (!response.ok) throw new Error(`Failed to fetch ${photo.filename}`);
-    const blob = await response.blob();
-    const paddedIdx = String(i + 1).padStart(2, "0");
-    const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
-    zip.file(safeName, blob);
-  });
-
-  await Promise.all(fetchPromises);
-
-  const zipBlob = await zip.generateAsync({ type: "blob" });
-  const url = URL.createObjectURL(zipBlob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${unit.id}-photos.zip`;
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 100);
-  return true;
+function downloadPhotosAsZip(unit: Unit) {
+  if (unit.photos.length === 0 || !unit.photoFolder) return;
+  window.open(`/api/photos/zip/${unit.photoFolder}`, "_blank");
 }
 
 function PhotoOrderPreview({ unit }: { unit: Unit }) {
-  const [downloading, setDownloading] = useState(false);
-  const [downloadResult, setDownloadResult] = useState<string | null>(null);
-
-  const handleDownload = async () => {
-    setDownloading(true);
-    setDownloadResult(null);
-    try {
-      const result = await downloadPhotosAsZip(unit);
-      if (result) {
-        setDownloadResult(`${unit.photos.length} photos downloaded as zip`);
-        setTimeout(() => setDownloadResult(null), 4000);
-      }
-    } catch {
-      setDownloadResult("Download failed - try again");
-      setTimeout(() => setDownloadResult(null), 4000);
-    } finally {
-      setDownloading(false);
-    }
+  const handleDownload = () => {
+    downloadPhotosAsZip(unit);
   };
 
   if (unit.photos.length === 0) {
@@ -252,25 +210,15 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
         <p className="text-xs font-medium text-muted-foreground">
           {unit.photos.length} photos in Lodgify upload order (main first, interiors, exteriors)
         </p>
-        <div className="flex items-center gap-2">
-          {downloadResult && (
-            <span className="text-xs text-green-600 dark:text-green-400">{downloadResult}</span>
-          )}
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleDownload}
-            disabled={downloading}
-            data-testid={`button-download-photos-${unit.id}`}
-          >
-            {downloading ? (
-              <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            ) : (
-              <Download className="h-3.5 w-3.5 mr-1.5" />
-            )}
-            {downloading ? "Downloading..." : "Download All Photos (ZIP)"}
-          </Button>
-        </div>
+        <Button
+          variant="default"
+          size="sm"
+          onClick={handleDownload}
+          data-testid={`button-download-photos-${unit.id}`}
+        >
+          <Download className="h-3.5 w-3.5 mr-1.5" />
+          Download All Photos (ZIP)
+        </Button>
       </div>
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
         {unit.photos.map((photo, idx) => (
