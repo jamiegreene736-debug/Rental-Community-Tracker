@@ -224,29 +224,27 @@ export async function registerRoutes(
       const results: any[] = [];
 
       for (const room of roomTypes) {
-        const periodRates = rates.map((rate: any) => {
+        const rateEntries = rates.map((rate: any) => {
           const monthIndex = MONTH_NAMES.indexOf(rate.month);
           const startDate = new Date(rate.year, monthIndex, 1);
           const endDate = new Date(rate.year, monthIndex + 1, 0);
 
           return {
-            start: startDate.toISOString().split("T")[0],
-            end: endDate.toISOString().split("T")[0],
-            nightly: rate.sellRate,
-            weekly: 0,
-            monthly: 0,
+            room_type_id: room.id,
+            start_date: startDate.toISOString().split("T")[0],
+            end_date: endDate.toISOString().split("T")[0],
+            price_per_day: rate.sellRate,
             min_stay: typeof rate.minStay === "number" && rate.minStay > 0 ? rate.minStay : 5,
           };
         });
 
         const ratePayload = {
-          house_id: parsedPropertyId,
-          room_type_id: room.id,
-          periods: periodRates,
+          property_id: parsedPropertyId,
+          rates: rateEntries,
         };
 
         const rateResponse = await fetch("https://api.lodgify.com/v1/rates/savewithoutavailability", {
-          method: "PUT",
+          method: "POST",
           headers: {
             "X-ApiKey": apiKey,
             "Content-Type": "application/json",
@@ -291,7 +289,7 @@ export async function registerRoutes(
           roomTypeId: room.id,
           roomTypeName: room.name,
           success: true,
-          periodsSubmitted: periodRates.length,
+          rateEntriesSubmitted: rateEntries.length,
           response: parsedResult,
         });
       }

@@ -709,17 +709,26 @@ function PushRatesToLodgify({ pricing }: { pricing: PropertyPricing }) {
       const data = await response.json();
 
       if (data.success) {
-        const roomSummary = data.results?.map((r: any) => `"${r.roomTypeName}" (${r.periodsSubmitted} periods)`).join(", ") || "";
+        const roomSummary = data.results?.map((r: any) => `"${r.roomTypeName}" (${r.rateEntriesSubmitted} months)`).join(", ") || "";
         setResult({
           success: true,
           message: `Rates pushed to Lodgify property ${lodgifyId}. ${data.roomTypesProcessed} room type(s) updated: ${roomSummary}.`,
         });
       } else {
-        const failedRooms = data.results?.filter((r: any) => !r.success).map((r: any) => r.roomTypeName).join(", ") || "";
-        setResult({
-          success: false,
-          message: data.error || `Some room types failed: ${failedRooms}`,
-        });
+        const failedResults = data.results?.filter((r: any) => !r.success) || [];
+        const hasExternalRatesError = failedResults.some((r: any) => r.error?.code === 940 || r.httpStatus === 406);
+        if (hasExternalRatesError) {
+          setResult({
+            success: false,
+            message: `This Lodgify property doesn't have "External Rates" enabled. Go to your Lodgify account > Settings > External Rates and enable it for this property, then try again.`,
+          });
+        } else {
+          const failedRooms = failedResults.map((r: any) => r.roomTypeName).join(", ") || "";
+          setResult({
+            success: false,
+            message: data.error || `Some room types failed: ${failedRooms}`,
+          });
+        }
       }
     } catch (err: any) {
       let errorMsg = "Failed to push rates to Lodgify";
