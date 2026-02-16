@@ -21,7 +21,6 @@ import {
   Ruler,
   AlertTriangle,
   ClipboardList,
-  FolderOpen,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
@@ -187,55 +186,20 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-async function downloadAllPropertyPhotos(property: PropertyUnitBuilder) {
-  if ("showDirectoryPicker" in window) {
-    try {
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: "readwrite",
-        startIn: "downloads",
-      });
-
-      for (const unit of property.units) {
-        if (unit.photos.length === 0) continue;
-        const unitDir = await dirHandle.getDirectoryHandle(
-          `${unit.id}-${unit.unitNumber}`,
-          { create: true }
-        );
-        for (let i = 0; i < unit.photos.length; i++) {
-          const photo = unit.photos[i];
-          const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
-          const blob = await response.blob();
-          const paddedIdx = String(i + 1).padStart(2, "0");
-          const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
-          const fileHandle = await unitDir.getFileHandle(safeName, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-        }
-      }
-      return;
-    } catch (err: any) {
-      if (err.name === "AbortError") return;
-    }
-  }
-
+function getAllPhotoFolders(property: PropertyUnitBuilder): string[] {
+  const folders = new Set<string>();
   for (const unit of property.units) {
-    if (unit.photos.length === 0) continue;
-    for (let i = 0; i < unit.photos.length; i++) {
-      const photo = unit.photos[i];
-      const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
-      const blob = await response.blob();
-      const paddedIdx = String(i + 1).padStart(2, "0");
-      const safeName = `${unit.id}-${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = safeName;
-      a.click();
-      URL.revokeObjectURL(url);
-      await new Promise((r) => setTimeout(r, 300));
+    if (unit.photos.length > 0 && unit.photoFolder) {
+      folders.add(unit.photoFolder);
     }
   }
+  return Array.from(folders);
+}
+
+function getDownloadAllUrl(property: PropertyUnitBuilder): string {
+  const folders = getAllPhotoFolders(property);
+  const name = property.complexName.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
+  return `/api/photos/zip-multi?folders=${folders.join(",")}&name=${name}`;
 }
 
 function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
@@ -335,7 +299,7 @@ export default function UnitBuilder() {
   const params = useParams<{ id: string }>();
   const propertyId = parseInt(params.id || "0", 10);
   const property = getUnitBuilderByPropertyId(propertyId);
-  const [downloading, setDownloading] = useState(false);
+
 
   if (!property) {
     return (
@@ -357,15 +321,6 @@ export default function UnitBuilder() {
   }
 
   const totalPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
-
-  const handleDownload = async () => {
-    setDownloading(true);
-    try {
-      await downloadAllPropertyPhotos(property);
-    } finally {
-      setDownloading(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -398,12 +353,13 @@ export default function UnitBuilder() {
             {totalPhotos > 0 && (
               <Button
                 variant="outline"
-                onClick={handleDownload}
-                disabled={downloading}
+                asChild
                 data-testid="button-download-all"
               >
-                <FolderOpen className="h-4 w-4 mr-2" />
-                {downloading ? "Downloading..." : `Download All ${totalPhotos} Photos`}
+                <a href={getDownloadAllUrl(property)} download>
+                  <Download className="h-4 w-4 mr-2" />
+                  Download All {totalPhotos} Photos
+                </a>
               </Button>
             )}
           </div>

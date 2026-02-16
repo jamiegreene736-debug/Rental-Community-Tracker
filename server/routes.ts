@@ -9,6 +9,48 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  app.get("/api/photos/zip-multi", async (req, res) => {
+    const foldersParam = req.query.folders as string;
+    const name = (req.query.name as string) || "all-photos";
+    if (!foldersParam) {
+      return res.status(400).json({ error: "Missing folders query parameter" });
+    }
+
+    const folders = foldersParam.split(",").map(f => f.replace(/[^a-zA-Z0-9_-]/g, "")).filter(Boolean);
+    if (folders.length === 0) {
+      return res.status(400).json({ error: "No valid folders specified" });
+    }
+
+    const zip = new JSZip();
+    let totalFiles = 0;
+    const photosBase = path.join(process.cwd(), "client", "public", "photos");
+
+    for (const folder of folders) {
+      const photosDir = path.join(photosBase, folder);
+      if (!fs.existsSync(photosDir)) continue;
+      const files = fs.readdirSync(photosDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f));
+      for (const file of files) {
+        const filePath = path.join(photosDir, file);
+        const data = fs.readFileSync(filePath);
+        zip.file(`${folder}/${file}`, data);
+        totalFiles++;
+      }
+    }
+
+    if (totalFiles === 0) {
+      return res.status(404).json({ error: "No photos found" });
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+    const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "");
+    res.set({
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${safeName}-photos.zip"`,
+      "Content-Length": String(zipBuffer.length),
+    });
+    res.send(zipBuffer);
+  });
+
   app.get("/api/photos/zip/:folder", async (req, res) => {
     const folder = req.params.folder.replace(/[^a-zA-Z0-9_-]/g, "");
     const photosDir = path.join(process.cwd(), "client", "public", "photos", folder);
