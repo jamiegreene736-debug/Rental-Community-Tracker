@@ -224,22 +224,36 @@ export async function registerRoutes(
       const results: any[] = [];
 
       for (const room of roomTypes) {
-        const rateEntries = rates.map((rate: any) => {
+        const firstRate = rates[0];
+        const defaultMinStay = typeof firstRate.minStay === "number" && firstRate.minStay > 0 ? firstRate.minStay : 5;
+
+        const rateEntries: any[] = [
+          {
+            is_default: true,
+            price_per_day: firstRate.sellRate,
+            min_stay: defaultMinStay,
+          },
+        ];
+
+        for (const rate of rates) {
           const monthIndex = MONTH_NAMES.indexOf(rate.month);
           const startDate = new Date(rate.year, monthIndex, 1);
           const endDate = new Date(rate.year, monthIndex + 1, 0);
+          const minStay = typeof rate.minStay === "number" && rate.minStay > 0 ? rate.minStay : 5;
 
-          return {
-            room_type_id: room.id,
+          rateEntries.push({
+            is_default: false,
+            name: `${rate.month} ${rate.year}`,
             start_date: startDate.toISOString().split("T")[0],
             end_date: endDate.toISOString().split("T")[0],
             price_per_day: rate.sellRate,
-            min_stay: typeof rate.minStay === "number" && rate.minStay > 0 ? rate.minStay : 5,
-          };
-        });
+            min_stay: minStay,
+          });
+        }
 
         const ratePayload = {
           property_id: parsedPropertyId,
+          room_type_id: room.id,
           rates: rateEntries,
         };
 
