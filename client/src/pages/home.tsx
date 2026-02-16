@@ -454,8 +454,8 @@ const properties: Property[] = [
     bathrooms: 3,
     lowPrice: 795,
     highPrice: 1250,
-    multiUnit: false,
-    unitDetails: "Single 4BR condo with loft",
+    multiUnit: true,
+    unitDetails: "2 x 2BR condos",
     url: "https://thevacationrentalexperts.com/en/beautiful-4-bedroom-poipu-kai-condo",
   },
   {
