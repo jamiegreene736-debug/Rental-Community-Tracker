@@ -186,7 +186,7 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
-function PhotoOrderPreview({ unit }: { unit: Unit }) {
+function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
   if (unit.photos.length === 0) {
     return (
       <div className="text-sm text-muted-foreground p-4 text-center">
@@ -195,11 +195,20 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
     );
   }
 
+  const beginningPhotos = communityPhotos?.filter(p => p.position === "beginning") || [];
+  const endPhotos = communityPhotos?.filter(p => p.position === "end") || [];
+  const hasCommunity = communityPhotoFolder && communityPhotos && communityPhotos.length > 0;
+  const totalPhotos = unit.photos.length + (hasCommunity ? communityPhotos.length : 0);
+
+  const downloadUrl = hasCommunity
+    ? `/api/photos/zip-multi?folders=${unit.photoFolder}&name=${encodeURIComponent(unit.id)}&communityFolder=${communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningPhotos.map(p => p.filename).join(","))}&endPhotos=${encodeURIComponent(endPhotos.map(p => p.filename).join(","))}`
+    : `/api/photos/zip/${unit.photoFolder}`;
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground">
-          {unit.photos.length} photos in Lodgify upload order (main first, interiors, exteriors)
+          {totalPhotos} photos total ({unit.photos.length} unit{hasCommunity ? ` + ${communityPhotos.length} community` : ""}) in Lodgify upload order
         </p>
         <Button
           variant="default"
@@ -207,7 +216,7 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
           asChild
           data-testid={`button-download-photos-${unit.id}`}
         >
-          <a href={`/api/photos/zip/${unit.photoFolder}`} download={`${unit.id}-photos.zip`}>
+          <a href={downloadUrl} download={`${unit.id}-photos.zip`}>
             <Download className="h-3.5 w-3.5 mr-1.5" />
             Download All Photos (ZIP)
           </a>
@@ -359,7 +368,7 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
   );
 }
 
-function UnitPrepCard({ unit, complexName, propertyId }: { unit: Unit; complexName: string; propertyId: number }) {
+function UnitPrepCard({ unit, complexName, propertyId, communityPhotos, communityPhotoFolder }: { unit: Unit; complexName: string; propertyId: number; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
   return (
     <Card className="overflow-visible">
       <div className="p-4 md:p-6">
@@ -409,7 +418,7 @@ function UnitPrepCard({ unit, complexName, propertyId }: { unit: Unit; complexNa
           </TabsContent>
 
           <TabsContent value="photos" className="mt-4">
-            <PhotoOrderPreview unit={unit} />
+            <PhotoOrderPreview unit={unit} communityPhotos={communityPhotos} communityPhotoFolder={communityPhotoFolder} />
           </TabsContent>
         </Tabs>
       </div>
@@ -899,6 +908,8 @@ export default function LodgifyPrep() {
               unit={unit}
               complexName={property.complexName}
               propertyId={propertyId}
+              communityPhotos={property.communityPhotos}
+              communityPhotoFolder={property.communityPhotoFolder}
             />
           ))}
         </div>
