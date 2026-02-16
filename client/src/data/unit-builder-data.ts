@@ -1932,6 +1932,70 @@ Three of Kauai's best beaches are within a pleasant 10-minute walk. Enjoy the ca
       },
     ],
   },
+  {
+    propertyId: 27,
+    propertyName: "Beautiful 4 bedroom Poipu Kai Condo!",
+    complexName: "Regency at Poipu Kai",
+    address: "1831 Poipu Rd, Koloa, HI 96756",
+    bookingTitle: "Regency at Poipu Kai - Sleeps 8 - 4BR AC Condos with Pool and Tennis - Poipu, Kauai",
+    sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `This listing is comprised of two 2-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 4 bedrooms and can accommodate up to 8 guests, an ideal setup for families or friends traveling together on Kauai's sunny south shore.
+
+Unit A is a stylish 2-bedroom, 2-bathroom ground-floor condo (~1,200 sq ft) with central AC, a renovated kitchen with granite counters, and a private garden lanai. Sleeps 4 with a King master and Queen second bedroom, plus a queen sleeper sofa for 2 additional guests.
+
+Unit B is a bright 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, modern stainless steel kitchen, and a private lanai with garden views. Sleeps 4 with King beds in both bedrooms, plus a queen sleeper sofa for 2 additional guests.
+
+All guests enjoy resort amenities including a swimming pool, hot tub, tennis and pickleball courts, and tropical garden paths. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within a pleasant 10-minute walk.`,
+    hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
+    units: [
+      {
+        id: "prop27-unit-a",
+        unitNumber: "A",
+        bedrooms: 2,
+        bathrooms: "2",
+        sqft: "~1,200",
+        maxGuests: 6,
+        shortDescription: "Stylish ground-floor 2-bedroom, 2-bath Regency condo with central AC, renovated granite kitchen, garden lanai, King master and Queen second bedroom, plus queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
+        longDescription: `Welcome to Unit A, a stylishly renovated 2-bedroom, 2-bathroom ground-floor condominium at the Regency at Poipu Kai resort on Kauai's coveted south shore.
+
+This approximately 1,200 sq ft retreat features central air conditioning and a bright, inviting interior with updated finishes throughout. The open-concept living and dining area flows seamlessly to a private garden lanai, perfect for morning coffee or evening relaxation.
+
+The renovated kitchen boasts granite countertops, modern appliances, and plenty of prep space for cooking vacation meals. A breakfast bar adds casual seating.
+
+The king-bedded master suite includes an en-suite bathroom with contemporary fixtures. The second bedroom features a comfortable Queen bed with the second full bathroom adjacent. A queen sleeper sofa in the living area provides additional sleeping for two more guests. WiFi, cable TV, washer/dryer, and all linens are included.
+
+The Regency at Poipu Kai resort amenities are steps from your door: a sparkling pool, hot tub, and tennis and pickleball courts set among beautifully landscaped tropical gardens.
+
+Three of Poipu's best beaches are within a 10-minute walk. Discover vibrant coral reefs at Poipu Beach Park, bodysurf the waves at Brennecke's Beach, or enjoy dramatic coastal views from Shipwreck Beach.`,
+        photoFolder: "unit-114",
+        photos: PHOTOS_114,
+      },
+      {
+        id: "prop27-unit-b",
+        unitNumber: "B",
+        bedrooms: 2,
+        bathrooms: "2",
+        sqft: "~1,250",
+        maxGuests: 6,
+        shortDescription: "Modern 2-bedroom, 2-bath Regency condo with central AC, stainless steel kitchen, garden lanai, King beds in both rooms, plus queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
+        longDescription: `Welcome to Unit B, a sleek and modern 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This unit features central air conditioning and tasteful contemporary updates throughout.
+
+The approximately 1,250 sq ft layout is efficiently designed with an open living area that connects to the kitchen and dining space. A private lanai offers a quiet retreat with views of the tropical gardens.
+
+The updated kitchen features stainless steel appliances, modern finishes, and is fully stocked for meal preparation. The dining area provides ample seating for your group.
+
+Both bedrooms feature plush King beds for maximum sleeping comfort. The master bedroom includes an en-suite bathroom, while the second bedroom is adjacent to the second full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. WiFi, cable TV, washer/dryer, and all linens are included.
+
+Resort amenities including the swimming pool, hot tub, and tennis and pickleball courts are just a short walk from your door. The tropical gardens and well-maintained grounds create a peaceful resort atmosphere.
+
+Kauai's famous south shore beaches are a leisurely 10-minute walk from the complex. Enjoy world-class snorkeling at Poipu Beach Park, exciting body surfing at Brennecke's Beach, or peaceful sunset views from Shipwreck Beach.`,
+        photoFolder: "unit-911",
+        photos: PHOTOS_911,
+      },
+    ],
+  },
 ];
 
 export function getUnitBuilderByPropertyId(propertyId: number): PropertyUnitBuilder | undefined {

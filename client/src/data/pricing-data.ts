@@ -283,6 +283,13 @@ const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConf
       { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
     ],
   },
+  27: {
+    community: "Poipu Kai",
+    units: [
+      { unitId: "A", unitLabel: "Unit A", bedrooms: 2 },
+      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
+    ],
+  },
 };
 
 export function getPropertyPricing(propertyId: number): PropertyPricing | null {
