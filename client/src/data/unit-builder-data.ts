@@ -17,6 +17,12 @@ export type Unit = {
   photoFolder: string;
 };
 
+export type CommunityPhoto = {
+  filename: string;
+  label: string;
+  position: "beginning" | "end";
+};
+
 export type PropertyUnitBuilder = {
   propertyId: number;
   propertyName: string;
@@ -27,9 +33,93 @@ export type PropertyUnitBuilder = {
   combinedDescription: string;
   units: Unit[];
   hasPhotos: boolean;
+  communityPhotos: CommunityPhoto[];
+  communityPhotoFolder: string;
 };
 
 const DEFAULT_DISCLAIMER = "Photos shown are representative samples of units within this complex. Individual units may vary in decor, furnishings, and layout. Actual unit assigned will be of comparable quality and configuration.";
+
+const COMMUNITY_REGENCY: CommunityPhoto[] = [
+  { filename: "01-resort-pool.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-tennis-courts.jpg", label: "Tennis Courts", position: "beginning" },
+  { filename: "03-garden-walkway.jpg", label: "Garden Walkway", position: "beginning" },
+  { filename: "04-poipu-beach.jpg", label: "Poipu Beach", position: "end" },
+  { filename: "05-bbq-area.jpg", label: "BBQ Area", position: "beginning" },
+  { filename: "06-sunset-view.jpg", label: "Sunset View", position: "end" },
+  { filename: "07-hot-tub.jpg", label: "Hot Tub & Spa", position: "beginning" },
+  { filename: "08-tropical-grounds.jpg", label: "Tropical Grounds", position: "end" },
+];
+
+const COMMUNITY_KEKAHA: CommunityPhoto[] = [
+  { filename: "01-beach-sunset.jpg", label: "Beach Sunset", position: "beginning" },
+  { filename: "02-beach-ocean.jpg", label: "Beach & Ocean", position: "beginning" },
+  { filename: "03-tropical-garden.jpg", label: "Tropical Garden", position: "beginning" },
+  { filename: "04-ocean-sunset.jpg", label: "Ocean Sunset View", position: "end" },
+  { filename: "05-oceanfront-view.jpg", label: "Oceanfront View", position: "end" },
+  { filename: "06-estate-grounds.jpg", label: "Estate Grounds", position: "end" },
+];
+
+const COMMUNITY_KEAUHOU: CommunityPhoto[] = [
+  { filename: "01-coastline.jpg", label: "Big Island Coastline", position: "beginning" },
+  { filename: "02-estate-grounds.jpg", label: "Estate Grounds", position: "beginning" },
+  { filename: "03-ocean-view.jpg", label: "Ocean View", position: "end" },
+  { filename: "04-sunset.jpg", label: "Sunset", position: "end" },
+  { filename: "05-outdoor-dining.jpg", label: "Outdoor Dining", position: "beginning" },
+];
+
+const COMMUNITY_MAUNA_KAI: CommunityPhoto[] = [
+  { filename: "01-mountain-view.jpg", label: "Mountain View", position: "beginning" },
+  { filename: "02-hanalei-bay.jpg", label: "Hanalei Bay", position: "beginning" },
+  { filename: "03-pool-area.jpg", label: "Pool Area", position: "beginning" },
+  { filename: "04-garden-path.jpg", label: "Garden Path", position: "end" },
+  { filename: "05-north-shore.jpg", label: "North Shore View", position: "end" },
+];
+
+const COMMUNITY_KAHA_LANI: CommunityPhoto[] = [
+  { filename: "01-pool.jpg", label: "Oceanfront Pool", position: "beginning" },
+  { filename: "02-beach-path.jpg", label: "Beach Path", position: "beginning" },
+  { filename: "03-tennis-court.jpg", label: "Tennis Court", position: "beginning" },
+  { filename: "04-coastal-path.jpg", label: "Coastal Walking Path", position: "end" },
+  { filename: "05-resort-grounds.jpg", label: "Resort Grounds", position: "end" },
+];
+
+const COMMUNITY_LAE_NANI: CommunityPhoto[] = [
+  { filename: "01-pool.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-beach.jpg", label: "Beach", position: "beginning" },
+  { filename: "03-garden.jpg", label: "Garden Courtyard", position: "end" },
+  { filename: "04-ocean-view.jpg", label: "Ocean View", position: "end" },
+  { filename: "05-bbq-area.jpg", label: "BBQ Area", position: "beginning" },
+];
+
+const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [
+  { filename: "01-poipu-beach.jpg", label: "Poipu Beach", position: "beginning" },
+  { filename: "02-exterior.jpg", label: "Condo Exterior", position: "beginning" },
+  { filename: "03-ocean-shore.jpg", label: "Ocean Shore", position: "end" },
+  { filename: "04-sunset.jpg", label: "Beach Sunset", position: "end" },
+];
+
+const COMMUNITY_KAIULANI: CommunityPhoto[] = [
+  { filename: "01-princeville-view.jpg", label: "Princeville View", position: "beginning" },
+  { filename: "02-pool.jpg", label: "Pool Area", position: "beginning" },
+  { filename: "03-garden.jpg", label: "Garden", position: "end" },
+  { filename: "04-cliff-view.jpg", label: "Cliff View", position: "end" },
+];
+
+const COMMUNITY_POIPU_OCEANFRONT: CommunityPhoto[] = [
+  { filename: "01-ocean-view.jpg", label: "Ocean View", position: "beginning" },
+  { filename: "02-sunset.jpg", label: "Sunset", position: "beginning" },
+  { filename: "03-coastline.jpg", label: "Coastline", position: "end" },
+  { filename: "04-garden.jpg", label: "Tropical Garden", position: "end" },
+];
+
+const COMMUNITY_KIAHUNA: CommunityPhoto[] = [
+  { filename: "01-plantation-grounds.jpg", label: "Plantation Grounds", position: "beginning" },
+  { filename: "02-beach.jpg", label: "Kiahuna Beach", position: "beginning" },
+  { filename: "03-pool.jpg", label: "Pool & Athletic Club", position: "beginning" },
+  { filename: "04-gardens.jpg", label: "Tropical Gardens", position: "end" },
+  { filename: "05-bbq.jpg", label: "BBQ Area", position: "end" },
+  { filename: "06-sunset.jpg", label: "Beach Sunset", position: "end" },
+];
 
 const PHOTOS_924: UnitPhoto[] = [
   { filename: "01-living-room-overview.jpg", label: "Living Room Overview", category: "Living Areas" },
@@ -467,6 +557,8 @@ Unit 911 is a 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, King b
 
 All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden paths. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within an easy 10-minute walk.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-924",
@@ -551,6 +643,8 @@ Unit 621 is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) featuring lovely garden
 
 All guests enjoy resort amenities including a swimming pool, hot tub, tennis and pickleball courts, and beautifully maintained tropical gardens. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within a pleasant 10-minute walk.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-423",
@@ -615,6 +709,8 @@ Unit 811 is a 2-bedroom, 2-bathroom ground-floor condo (~1,250 sq ft) with centr
 
 All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden walkways. Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach are all within a 10-minute walk.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-721",
@@ -699,6 +795,8 @@ Unit 624 is a 3-bedroom, 3-bathroom two-story condo (~1,800 sq ft) with full AC,
 
 All guests enjoy resort amenities including a crystal-clear pool, hot tub, tennis and pickleball courts, and tropical garden paths. Three stunning Poipu beaches are just a 10-minute walk from your door.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-623",
@@ -761,6 +859,8 @@ Unit 611 is a spacious corner 2-bedroom, 2-bathroom ground-floor condo (~1,400 s
 
 All guests enjoy resort amenities including the swimming pool, hot tub, tennis and pickleball courts, and tropical garden paths. Poipu's beloved beaches are a short 10-minute walk from the resort.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-723",
@@ -823,6 +923,8 @@ Kimsey Beach Cottage is a completely renovated 1930s plantation-style cottage (~
 
 Both homes share the same pristine beachfront property with miles of white sand beach, Weber BBQ, outdoor shower, and all beach amenities provided. Kekaha is the sunniest spot on Kauai, close to Waimea Canyon, Polihale Beach, and the Na Pali Coast.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KEKAHA,
+    communityPhotoFolder: "community-kekaha-estate",
     units: [
       {
         id: "prop10-kimsey-house",
@@ -885,6 +987,8 @@ Hale Alaula Cottage is a restored 1930s beachfront plantation cottage (~900 sq f
 
 The private estate grounds offer a truly unique Hawaiian experience with direct beachfront access, spectacular sunsets, and proximity to Waimea Canyon, Polihale Beach, and the stunning Na Pali Coast.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KEKAHA,
+    communityPhotoFolder: "community-kekaha-estate",
     units: [
       {
         id: "prop12-hale-ohana",
@@ -947,6 +1051,8 @@ The Halele'a Casita is a separate guest quarters (~800 sq ft) across the pool la
 
 Located in exclusive Keauhou Estates with convenient access to Magic Sands Beach, Kahaluu Snorkel Beach, championship golf courses, and Kona Coast dining and shopping.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KEAUHOU,
+    communityPhotoFolder: "community-keauhou-estates",
     units: [
       {
         id: "prop14-halelea-main",
@@ -1007,6 +1113,8 @@ Unit 724 is a designer-furnished 3-bedroom, 3-bathroom condo (~1,800 sq ft) with
 
 All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden paths. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in just 10 minutes.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-823",
@@ -1069,6 +1177,8 @@ Unit 11 is a comfortable ground-floor 2-bedroom, 2-bathroom condo (~1,200 sq ft)
 
 Both units enjoy access to Mauna Kai's shared pool and hot tub. Hideaways Beach is just two miles away, Hanalei Bay is four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_MAUNA_KAI,
+    communityPhotoFolder: "community-mauna-kai",
     units: [
       {
         id: "prop19-mk-9",
@@ -1131,6 +1241,8 @@ Unit 8 is a bright 3-bedroom, 2-bathroom two-story condo (~1,600 sq ft) with gar
 
 Both units enjoy access to Mauna Kai's shared pool and hot tub. Princeville's convenient location offers easy access to Hideaways Beach, Hanalei Bay, the Princeville golf courses, and the dramatic Na Pali Coast.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_MAUNA_KAI,
+    communityPhotoFolder: "community-mauna-kai",
     units: [
       {
         id: "prop20-mk-7b",
@@ -1195,6 +1307,8 @@ Unit 914 is a sleek 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, 
 
 All guests enjoy resort amenities including a shimmering pool, hot tub, tennis and pickleball courts, and tropical gardens. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in under 10 minutes.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-824",
@@ -1279,6 +1393,8 @@ Unit 221 is a comfortable 2-bedroom, 2-bathroom ocean view condo (~1,200 sq ft) 
 
 Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park with its protected swimming lagoon and Kamalani Playground. Kapaa's charming town center offers eclectic shopping, dining, and the scenic coastal bike path.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KAHA_LANI,
+    communityPhotoFolder: "community-kaha-lani",
     units: [
       {
         id: "prop23-kl-3br",
@@ -1339,6 +1455,8 @@ Unit 225 is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set in a tropi
 
 Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area round out the amenities. Kapaa's vibrant town center is walking distance with its coastal bike path, boutiques, and diverse restaurants.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_LAE_NANI,
+    communityPhotoFolder: "community-lae-nani",
     units: [
       {
         id: "prop24-ln-3br",
@@ -1397,6 +1515,8 @@ The Guest Wing is a separate living space (~900 sq ft) within the estate grounds
 
 Located in the gated Keauhou Estates community with 24-hour security, minutes from Magic Sands Beach and Kahaluu Snorkel Beach. Championship golf courses, Kona Coast dining, and world-class coffee tours are all nearby.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KEAUHOU,
+    communityPhotoFolder: "community-keauhou-estates",
     units: [
       {
         id: "prop26-estate-main",
@@ -1455,6 +1575,8 @@ Beach House B is a charming 3-bedroom, 3-bathroom home (~1,800 sq ft) with islan
 
 The location is unbeatable - Brennecke's Beach for world-class body surfing, Poipu Beach Park for calm-water snorkeling, and Shipwreck Beach's dramatic coastline are all within a short walk. Poipu offers excellent dining, shopping, and the National Tropical Botanical Garden.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_POIPU_BEACHSIDE,
+    communityPhotoFolder: "community-poipu-beachside",
     units: [
       {
         id: "prop28-house-a",
@@ -1515,6 +1637,8 @@ Units 6 and 7 are two adjacent 2-bedroom townhomes combined to create a 4-bedroo
 
 Anini Beach below offers some of the calmest, clearest waters on Kauai, ideal for swimming, snorkeling, and kayaking. Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KAIULANI,
+    communityPhotoFolder: "community-kaiulani",
     units: [
       {
         id: "prop29-kai-3br",
@@ -1575,6 +1699,8 @@ The Guest Suite is a separate living space (~800 sq ft) adjacent to the main hom
 
 Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations, offering world-class snorkeling, dining, and dramatic coastal scenery.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_POIPU_OCEANFRONT,
+    communityPhotoFolder: "community-poipu-oceanfront",
     units: [
       {
         id: "prop31-main",
@@ -1633,6 +1759,8 @@ Building 2 is a garden view 2-bedroom, 2-bathroom condo (~1,100 sq ft) with AC, 
 
 Walk through the resort's spectacular gardens directly to Poipu Beach, consistently rated one of Hawaii's best. Nearby attractions include Spouting Horn, the National Tropical Botanical Garden, and the scenic Maha'ulepu Heritage Trail.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KIAHUNA,
+    communityPhotoFolder: "community-kiahuna",
     units: [
       {
         id: "prop32-kia-3br",
@@ -1691,6 +1819,8 @@ Building 26 is a stylish 3-bedroom, 3-bathroom condo (~1,500 sq ft) with a moder
 
 Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at Koloa Landing.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_KIAHUNA,
+    communityPhotoFolder: "community-kiahuna",
     units: [
       {
         id: "prop33-kia-3br-a",
@@ -1753,6 +1883,8 @@ Unit 324 is a bright 3-bedroom, 3-bathroom Regency I condo (~1,800 sq ft) with a
 
 All guests enjoy resort amenities including a pool, hot tub, tennis and pickleball courts, and beautifully landscaped tropical gardens. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in about 10 minutes.`,
     hasPhotos: true,
+    communityPhotos: COMMUNITY_REGENCY,
+    communityPhotoFolder: "community-regency-poipu-kai",
     units: [
       {
         id: "unit-524",

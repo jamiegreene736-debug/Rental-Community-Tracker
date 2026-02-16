@@ -12,6 +12,10 @@ export async function registerRoutes(
   app.get("/api/photos/zip-multi", async (req, res) => {
     const foldersParam = req.query.folders as string;
     const name = (req.query.name as string) || "all-photos";
+    const communityFolder = (req.query.communityFolder as string || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const beginningPhotos = (req.query.beginningPhotos as string || "").split(",").filter(Boolean);
+    const endPhotos = (req.query.endPhotos as string || "").split(",").filter(Boolean);
+
     if (!foldersParam) {
       return res.status(400).json({ error: "Missing folders query parameter" });
     }
@@ -23,17 +27,51 @@ export async function registerRoutes(
 
     const zip = new JSZip();
     let totalFiles = 0;
+    let globalIndex = 1;
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
+
+    const addFileToZip = (filePath: string, zipName: string) => {
+      if (fs.existsSync(filePath)) {
+        const data = fs.readFileSync(filePath);
+        zip.file(zipName, data);
+        totalFiles++;
+      }
+    };
+
+    if (communityFolder && beginningPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of beginningPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        addFileToZip(path.join(communityDir, safePhoto), `${paddedIndex}-community-${baseName}${ext}`);
+        globalIndex++;
+      }
+    }
 
     for (const folder of folders) {
       const photosDir = path.join(photosBase, folder);
       if (!fs.existsSync(photosDir)) continue;
-      const files = fs.readdirSync(photosDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f));
+      const files = fs.readdirSync(photosDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f)).sort();
       for (const file of files) {
-        const filePath = path.join(photosDir, file);
-        const data = fs.readFileSync(filePath);
-        zip.file(`${folder}/${file}`, data);
-        totalFiles++;
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(file);
+        const baseName = path.basename(file, ext).replace(/^\d+-/, "");
+        addFileToZip(path.join(photosDir, file), `${paddedIndex}-${folder}-${baseName}${ext}`);
+        globalIndex++;
+      }
+    }
+
+    if (communityFolder && endPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of endPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        addFileToZip(path.join(communityDir, safePhoto), `${paddedIndex}-community-${baseName}${ext}`);
+        globalIndex++;
       }
     }
 

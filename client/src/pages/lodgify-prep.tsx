@@ -43,7 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { getUnitBuilderByPropertyId, getMultiUnitPropertyIds } from "@/data/unit-builder-data";
-import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
+import type { Unit, PropertyUnitBuilder, CommunityPhoto } from "@/data/unit-builder-data";
 import {
   LODGIFY_AMENITY_CATEGORIES,
   getDefaultAmenities,
@@ -246,6 +246,116 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
         The first photo becomes the main listing image in Lodgify.
       </p>
     </div>
+  );
+}
+
+function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder }) {
+  if (!property.communityPhotos || property.communityPhotos.length === 0) {
+    return null;
+  }
+
+  const beginningPhotos = property.communityPhotos.filter(p => p.position === "beginning");
+  const endPhotos = property.communityPhotos.filter(p => p.position === "end");
+  const unitFolders = property.units.map(u => u.photoFolder).join(",");
+  const beginningFilenames = beginningPhotos.map(p => p.filename).join(",");
+  const endFilenames = endPhotos.map(p => p.filename).join(",");
+  const totalUnitPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
+  const totalPhotos = totalUnitPhotos + property.communityPhotos.length;
+
+  const downloadUrl = `/api/photos/zip-multi?folders=${unitFolders}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningFilenames)}&endPhotos=${encodeURIComponent(endFilenames)}`;
+
+  return (
+    <Card className="p-4 md:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div>
+          <h3 className="text-sm font-bold flex items-center gap-2" data-testid="text-community-photos-title">
+            <Image className="h-4 w-4" />
+            Community & Resort Photos
+          </h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {property.communityPhotos.length} community photos + {totalUnitPhotos} unit photos = {totalPhotos} total
+          </p>
+        </div>
+        <Button
+          variant="default"
+          size="sm"
+          asChild
+          data-testid="button-download-all-photos"
+        >
+          <a href={downloadUrl} download={`${property.propertyName}-all-photos.zip`}>
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download All Photos (ZIP)
+          </a>
+        </Button>
+      </div>
+
+      <div className="space-y-4">
+        {beginningPhotos.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-2">
+              Community Photos - Beginning (uploaded first)
+            </p>
+            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
+              {beginningPhotos.map((photo, idx) => (
+                <div key={photo.filename} className="relative group" data-testid={`photo-community-begin-${idx}`}>
+                  <div className="aspect-square rounded overflow-hidden border border-blue-300 dark:border-blue-700">
+                    <img
+                      src={`/photos/${property.communityPhotoFolder}/${photo.filename}`}
+                      alt={photo.label}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="absolute top-0.5 left-0.5 bg-blue-600/80 text-white text-[10px] px-1 rounded">
+                    {idx + 1}
+                  </div>
+                  <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate visibility-visible">
+                    {photo.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-1">
+            Unit Photos (middle) - see individual unit tabs below
+          </p>
+        </div>
+
+        {endPhotos.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-2">
+              Community Photos - End (uploaded last)
+            </p>
+            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
+              {endPhotos.map((photo, idx) => (
+                <div key={photo.filename} className="relative group" data-testid={`photo-community-end-${idx}`}>
+                  <div className="aspect-square rounded overflow-hidden border border-blue-300 dark:border-blue-700">
+                    <img
+                      src={`/photos/${property.communityPhotoFolder}/${photo.filename}`}
+                      alt={photo.label}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="absolute top-0.5 left-0.5 bg-blue-600/80 text-white text-[10px] px-1 rounded">
+                    {beginningPhotos.length + totalUnitPhotos + idx + 1}
+                  </div>
+                  <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate visibility-visible">
+                    {photo.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <p className="text-[11px] text-muted-foreground mt-3">
+        Download includes: community photos at beginning, all unit photos in middle, community photos at end.
+        Files are numbered sequentially for correct Lodgify upload order.
+      </p>
+    </Card>
   );
 }
 
@@ -777,6 +887,10 @@ export default function LodgifyPrep() {
             </div>
           </>
         )}
+
+        <div className="mb-6">
+          <CommunityPhotosSection property={property} />
+        </div>
 
         <div className="space-y-6">
           {property.units.map((unit) => (
