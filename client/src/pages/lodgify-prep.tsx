@@ -28,7 +28,6 @@ import {
   FileText,
   ListChecks,
   ChevronRight,
-  FolderOpen,
   DollarSign,
   TrendingUp,
   Upload,
@@ -188,44 +187,21 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
-async function downloadPhotosToFolder(unit: Unit) {
-  if (unit.photos.length === 0) return;
-
-  if ("showDirectoryPicker" in window) {
-    try {
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: "readwrite",
-        startIn: "downloads",
-        suggestedName: `${unit.id}-photos`,
-      });
-
-      for (let i = 0; i < unit.photos.length; i++) {
-        const photo = unit.photos[i];
-        const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
-        const blob = await response.blob();
-        const paddedIdx = String(i + 1).padStart(2, "0");
-        const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
-        const fileHandle = await dirHandle.getFileHandle(safeName, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      }
-      return { success: true, method: "folder" as const };
-    } catch (err: any) {
-      if (err.name === "AbortError") return { success: false, method: "cancelled" as const };
-      throw err;
-    }
-  }
+async function downloadPhotosAsZip(unit: Unit) {
+  if (unit.photos.length === 0) return null;
 
   const zip = new JSZip();
-  for (let i = 0; i < unit.photos.length; i++) {
-    const photo = unit.photos[i];
+  const fetchPromises = unit.photos.map(async (photo, i) => {
     const response = await fetch(`/photos/${unit.photoFolder}/${photo.filename}`);
+    if (!response.ok) throw new Error(`Failed to fetch ${photo.filename}`);
     const blob = await response.blob();
     const paddedIdx = String(i + 1).padStart(2, "0");
     const safeName = `${paddedIdx}-${photo.label.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}.jpg`;
     zip.file(safeName, blob);
-  }
+  });
+
+  await Promise.all(fetchPromises);
+
   const zipBlob = await zip.generateAsync({ type: "blob" });
   const url = URL.createObjectURL(zipBlob);
   const a = document.createElement("a");
@@ -238,7 +214,7 @@ async function downloadPhotosToFolder(unit: Unit) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 100);
-  return { success: true, method: "zip" as const };
+  return true;
 }
 
 function PhotoOrderPreview({ unit }: { unit: Unit }) {
@@ -249,15 +225,11 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
     setDownloading(true);
     setDownloadResult(null);
     try {
-      const result = await downloadPhotosToFolder(unit);
-      let msg: string | null = null;
-      if (result?.success && result.method === "folder") {
-        msg = "Photos saved to folder";
-      } else if (result?.success && result.method === "zip") {
-        msg = "Photos downloaded as zip";
+      const result = await downloadPhotosAsZip(unit);
+      if (result) {
+        setDownloadResult(`${unit.photos.length} photos downloaded as zip`);
+        setTimeout(() => setDownloadResult(null), 4000);
       }
-      setDownloadResult(msg);
-      if (msg) setTimeout(() => setDownloadResult(null), 4000);
     } catch {
       setDownloadResult("Download failed - try again");
       setTimeout(() => setDownloadResult(null), 4000);
@@ -294,9 +266,9 @@ function PhotoOrderPreview({ unit }: { unit: Unit }) {
             {downloading ? (
               <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
             ) : (
-              <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+              <Download className="h-3.5 w-3.5 mr-1.5" />
             )}
-            {downloading ? "Downloading..." : "Download Photos to Folder"}
+            {downloading ? "Downloading..." : "Download All Photos (ZIP)"}
           </Button>
         </div>
       </div>
