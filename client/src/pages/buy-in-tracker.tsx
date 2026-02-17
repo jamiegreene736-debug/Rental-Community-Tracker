@@ -350,6 +350,7 @@ function BestBuyInFinder() {
   const [checkOut, setCheckOut] = useState("");
   const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [loading, setLoading] = useState(false);
+  const [feePercent, setFeePercent] = useState(15);
   const { toast } = useToast();
 
   const allProperties = getAllMultiUnitProperties();
@@ -471,13 +472,17 @@ function BestBuyInFinder() {
       {results !== null && !loading && (() => {
         const stayRates = selectedPropertyId ? calculateStaySellRate(parseInt(selectedPropertyId), results.checkIn, results.checkOut) : null;
 
-        const bestBuyInCost = results.unitsNeeded.reduce((total, need) => {
+        const feeMultiplier = 1 + feePercent / 100;
+
+        const listedBuyInCost = results.unitsNeeded.reduce((total, need) => {
           const key = `${need.bedrooms}BR`;
           const searchData = results.searches[key];
           if (!searchData || searchData.error) return total;
           const topPicks = searchData.properties.slice(0, need.count);
           return total + topPicks.reduce((sum, p) => sum + (p.price?.extracted_total_price ?? 0), 0);
         }, 0);
+
+        const estimatedBuyInCost = Math.round(listedBuyInCost * feeMultiplier);
 
         const hasAllPrices = results.unitsNeeded.every(need => {
           const key = `${need.bedrooms}BR`;
@@ -496,36 +501,61 @@ function BestBuyInFinder() {
             </span>
           </div>
 
-          {stayRates && hasAllPrices && bestBuyInCost > 0 && (
+          {stayRates && hasAllPrices && listedBuyInCost > 0 && (
             <Card className="p-4 border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/30" data-testid="card-profitability-summary">
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <DollarSign className="h-5 w-5 text-green-600 dark:text-green-400" />
                 <h3 className="font-semibold">Profitability Summary</h3>
                 <Badge variant="secondary" className="text-xs">{stayRates.totalNights} nights</Badge>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div data-testid="text-sell-rate">
                   <p className="text-xs text-muted-foreground mb-0.5">Guest Pays You (Sell Rate)</p>
                   <p className="text-lg font-bold">{formatCurrency(stayRates.totalSellRate)}</p>
-                  <p className="text-xs text-muted-foreground">{formatCurrency(Math.round(stayRates.totalSellRate / stayRates.totalNights))}/night all units combined</p>
+                  <p className="text-xs text-muted-foreground">{formatCurrency(Math.round(stayRates.totalSellRate / stayRates.totalNights))}/night all units</p>
+                </div>
+                <div data-testid="text-listed-cost">
+                  <p className="text-xs text-muted-foreground mb-0.5">Listed Price (Airbnb)</p>
+                  <p className="text-lg font-bold text-muted-foreground">{formatCurrency(listedBuyInCost)}</p>
+                  <p className="text-xs text-muted-foreground">Before fees & taxes</p>
                 </div>
                 <div data-testid="text-buyin-cost">
-                  <p className="text-xs text-muted-foreground mb-0.5">Best Buy-In Cost (Airbnb)</p>
-                  <p className="text-lg font-bold">{formatCurrency(bestBuyInCost)}</p>
-                  <p className="text-xs text-muted-foreground">Cheapest {results.unitsNeeded.reduce((s, n) => s + n.count, 0)} unit{results.unitsNeeded.reduce((s, n) => s + n.count, 0) > 1 ? "s" : ""} combined</p>
+                  <p className="text-xs text-muted-foreground mb-0.5">Est. Checkout Cost</p>
+                  <p className="text-lg font-bold">{formatCurrency(estimatedBuyInCost)}</p>
+                  <p className="text-xs text-muted-foreground">+{feePercent}% fees, cleaning & taxes</p>
                 </div>
                 <div data-testid="text-profit">
                   <p className="text-xs text-muted-foreground mb-0.5">Your Profit</p>
-                  <p className={`text-lg font-bold ${stayRates.totalSellRate - bestBuyInCost >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
-                    {formatCurrency(stayRates.totalSellRate - bestBuyInCost)}
+                  <p className={`text-lg font-bold ${stayRates.totalSellRate - estimatedBuyInCost >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                    {formatCurrency(stayRates.totalSellRate - estimatedBuyInCost)}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    {bestBuyInCost > 0 && stayRates.totalSellRate > 0 ? `${Math.round(((stayRates.totalSellRate - bestBuyInCost) / stayRates.totalSellRate) * 100)}% margin` : ""}
+                    {estimatedBuyInCost > 0 && stayRates.totalSellRate > 0 ? `${Math.round(((stayRates.totalSellRate - estimatedBuyInCost) / stayRates.totalSellRate) * 100)}% margin` : ""}
                   </p>
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground mt-3">
-                Sell rate based on your seasonal pricing. The 15% guest surcharge covers Booking.com fees and is not included above.
+              <div className="flex items-center gap-2 mt-3 flex-wrap">
+                <p className="text-xs text-muted-foreground">
+                  Airbnb checkout fee estimate:
+                </p>
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="number"
+                    value={feePercent}
+                    onChange={e => setFeePercent(Math.max(0, Math.min(50, parseInt(e.target.value) || 0)))}
+                    className="w-16 h-7 text-xs text-center"
+                    min={0}
+                    max={50}
+                    data-testid="input-fee-percent"
+                  />
+                  <span className="text-xs text-muted-foreground">%</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  (covers service fees, cleaning fees & taxes added at Airbnb checkout)
+                </p>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Your 15% guest surcharge covers Booking.com fees and is not included above.
               </p>
             </Card>
           )}
@@ -595,11 +625,17 @@ function BestBuyInFinder() {
 
                             <div className="flex items-center gap-4 mt-2 flex-wrap">
                               {prop.price && (
-                                <span className="font-semibold text-green-600 dark:text-green-400" data-testid={`text-price-${key}-${idx}`}>
-                                  {prop.price.total_price}
-                                  <span className="text-xs font-normal text-muted-foreground ml-1">
-                                    {prop.price.qualifier}
+                                <span data-testid={`text-price-${key}-${idx}`}>
+                                  <span className="font-semibold text-green-600 dark:text-green-400">
+                                    {formatCurrency(Math.round((prop.price.extracted_total_price ?? 0) * feeMultiplier))}
                                   </span>
+                                  <span className="text-xs font-normal text-muted-foreground ml-1">
+                                    est. checkout
+                                  </span>
+                                  <span className="text-xs text-muted-foreground ml-2 line-through">
+                                    {prop.price.total_price}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground ml-1">listed</span>
                                 </span>
                               )}
                               {prop.rating && (
@@ -661,9 +697,10 @@ function BestBuyInFinder() {
                                   <h4 className="font-medium text-sm truncate">{prop.title}</h4>
                                   <div className="flex items-center gap-3 mt-1 flex-wrap">
                                     {prop.price && (
-                                      <span className="text-sm font-semibold">
-                                        {prop.price.total_price}
-                                        <span className="text-xs font-normal text-muted-foreground ml-1">{prop.price.qualifier}</span>
+                                      <span className="text-sm">
+                                        <span className="font-semibold">{formatCurrency(Math.round((prop.price.extracted_total_price ?? 0) * feeMultiplier))}</span>
+                                        <span className="text-xs font-normal text-muted-foreground ml-1">est.</span>
+                                        <span className="text-xs text-muted-foreground ml-1 line-through">{prop.price.total_price}</span>
                                       </span>
                                     )}
                                     {prop.rating && (
