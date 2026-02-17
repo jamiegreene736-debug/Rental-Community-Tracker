@@ -1,9 +1,15 @@
 import { useState, useMemo } from "react";
 import { Link } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Table,
   TableBody,
@@ -33,8 +39,9 @@ import {
   MapPin,
   Hammer,
   ClipboardList,
+  Loader2,
 } from "lucide-react";
-import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
+import { getMultiUnitPropertyIds, getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
 type Property = {
   id: number;
@@ -666,6 +673,32 @@ export default function Home() {
 
   const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
 
+  const multiUnitProps = useMemo(() => getAllMultiUnitProperties(), []);
+
+  const { data: lodgifyData, isLoading: lodgifyLoading } = useQuery<{ count: number | null; items: any[] }>({
+    queryKey: ["/api/lodgify/properties"],
+  });
+
+  const lodgifyStatusMap = useMemo(() => {
+    const map = new Map<number, { found: boolean; lodgifyName?: string; lodgifyId?: number }>();
+    if (!lodgifyData?.items) return map;
+    const lodgifyProps = lodgifyData.items;
+    for (const mp of multiUnitProps) {
+      const match = lodgifyProps.find((lp: any) => {
+        const name = (lp.name || "").toLowerCase();
+        const complexLower = mp.complexName.toLowerCase();
+        const propNameLower = mp.propertyName.toLowerCase();
+        return name.includes(complexLower) || complexLower.includes(name) ||
+               name.includes(propNameLower) || propNameLower.includes(name);
+      });
+      map.set(mp.propertyId, match
+        ? { found: true, lodgifyName: match.name, lodgifyId: match.id }
+        : { found: false }
+      );
+    }
+    return map;
+  }, [lodgifyData, multiUnitProps]);
+
   const communityVariant = (community: string): "default" | "secondary" | "outline" => {
     const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Kiahuna Plantation"];
     if (poipuCommunities.includes(community)) return "default";
@@ -868,6 +901,7 @@ export default function Home() {
                   </Button>
                 </TableHead>
                 <TableHead className="text-center">Type</TableHead>
+                <TableHead className="text-center w-[60px]">Lodgify</TableHead>
                 <TableHead className="w-[40px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -931,6 +965,28 @@ export default function Home() {
                       <span className="text-xs text-muted-foreground">Single</span>
                     )}
                   </TableCell>
+                  <TableCell className="text-center">
+                    {property.multiUnit ? (
+                      lodgifyLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground mx-auto" data-testid={`status-lodgify-loading-${property.id}`} />
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex justify-center" data-testid={`status-lodgify-${property.id}`}>
+                              <div className={`h-3 w-3 rounded-full ${lodgifyStatusMap.get(property.id)?.found ? "bg-green-500" : "bg-red-500"}`} />
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {lodgifyStatusMap.get(property.id)?.found
+                              ? `In Lodgify: "${lodgifyStatusMap.get(property.id)?.lodgifyName}"`
+                              : "Not yet built out in Lodgify"}
+                          </TooltipContent>
+                        </Tooltip>
+                      )
+                    ) : (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1">
                       {unitBuilderIds.has(property.id) && (
@@ -963,7 +1019,7 @@ export default function Home() {
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={11} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
