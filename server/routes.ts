@@ -421,27 +421,15 @@ export async function registerRoutes(
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
   };
 
-  const COMMUNITY_SEARCH_LOCATIONS: Record<string, { query: string; boundingBox?: string }> = {
-    "Poipu Kai": {
-      query: "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
-      boundingBox: "[[21.882,-159.452],[21.868,-159.468]]",
-    },
-    "Kekaha Beachfront": { query: "Kekaha, Kauai, Hawaii" },
-    "Keauhou": { query: "Keauhou, Kailua-Kona, Big Island, Hawaii" },
-    "Princeville": { query: "Princeville, Kauai, Hawaii" },
-    "Kapaa Beachfront": { query: "Kapaa, Kauai, Hawaii" },
-    "Poipu Oceanfront": {
-      query: "Poipu Beach, Koloa, Kauai, Hawaii",
-      boundingBox: "[[21.882,-159.440],[21.870,-159.460]]",
-    },
-    "Poipu Brenneckes": {
-      query: "Brenneckes Beach, Poipu, Kauai, Hawaii",
-      boundingBox: "[[21.882,-159.440],[21.870,-159.460]]",
-    },
-    "Kiahuna Plantation": {
-      query: "Kiahuna Plantation Resort, Poipu, Kauai, Hawaii",
-      boundingBox: "[[21.882,-159.440],[21.870,-159.460]]",
-    },
+  const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
+    "Poipu Kai": "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
+    "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
+    "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
+    "Princeville": "Princeville, Kauai, Hawaii",
+    "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
+    "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
+    "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
+    "Kiahuna Plantation": "Kiahuna Plantation Resort, Poipu, Kauai, Hawaii",
   };
 
   app.get("/api/airbnb/search", async (req, res) => {
@@ -467,8 +455,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Property not found in multi-unit config" });
       }
 
-      const locationConfig = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || { query: `${propertyConfig.community}, Hawaii` };
-      const searchLocation = locationConfig.query;
+      const searchLocation = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
 
       const bedroomCounts: Record<number, number> = {};
       for (const unit of propertyConfig.units) {
@@ -500,11 +487,7 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
-        if (locationConfig.boundingBox) {
-          searchParams.bounding_box = locationConfig.boundingBox;
-        } else {
-          searchParams.q = searchLocation;
-        }
+        searchParams.q = searchLocation;
 
         const params = new URLSearchParams(searchParams);
 
