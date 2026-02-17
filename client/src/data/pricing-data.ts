@@ -347,4 +347,30 @@ export function getSeasonBadgeVariant(season: SeasonType): "destructive" | "seco
   }
 }
 
+export function getAllUnitPricings(): { propertyId: number; community: string; unit: UnitPricing }[] {
+  const results: { propertyId: number; community: string; unit: UnitPricing }[] = [];
+  for (const [id, config] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
+    const propertyId = parseInt(id, 10);
+    for (const unitCfg of config.units) {
+      const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms);
+      const baseSellRate = Math.round(baseBuyIn * MARKUP);
+      const monthlyRates = generateMonthlyRates(baseBuyIn);
+      results.push({
+        propertyId,
+        community: config.community,
+        unit: {
+          unitId: unitCfg.unitId,
+          unitLabel: unitCfg.unitLabel,
+          bedrooms: unitCfg.bedrooms,
+          community: config.community,
+          baseBuyIn,
+          baseSellRate,
+          monthlyRates,
+        },
+      });
+    }
+  }
+  return results;
+}
+
 export { MARKUP, SEASON_MULTIPLIERS, BUY_IN_RATES };

@@ -5,7 +5,7 @@ import {
   users, buyIns, lodgifyBookings,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
+import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -26,6 +26,8 @@ export interface IStorage {
     buyIns: BuyIn[];
     bookings: LodgifyBooking[];
   }>;
+
+  getBookedUnits(checkIn: string, checkOut: string): Promise<{ propertyId: number; unitId: string; source: string }[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -118,6 +120,38 @@ export class DatabaseStorage implements IStorage {
       .where(and(gte(lodgifyBookings.checkIn, startDate), lte(lodgifyBookings.checkIn, endDate)));
 
     return { buyIns: monthBuyIns, bookings: monthBookings };
+  }
+  async getBookedUnits(checkIn: string, checkOut: string): Promise<{ propertyId: number; unitId: string; source: string }[]> {
+    const bookedFromBuyIns = await db
+      .select({ propertyId: buyIns.propertyId, unitId: buyIns.unitId })
+      .from(buyIns)
+      .where(
+        and(
+          lt(buyIns.checkIn, checkOut),
+          sql`${buyIns.checkOut} > ${checkIn}`
+        )
+      );
+
+    const bookedFromLodgify = await db
+      .select({ propertyId: lodgifyBookings.propertyId, unitId: lodgifyBookings.unitId })
+      .from(lodgifyBookings)
+      .where(
+        and(
+          lt(lodgifyBookings.checkIn, checkOut),
+          sql`${lodgifyBookings.checkOut} > ${checkIn}`
+        )
+      );
+
+    const results: { propertyId: number; unitId: string; source: string }[] = [];
+    for (const b of bookedFromBuyIns) {
+      results.push({ propertyId: b.propertyId, unitId: b.unitId, source: "buy-in" });
+    }
+    for (const b of bookedFromLodgify) {
+      if (b.propertyId !== null && b.unitId !== null) {
+        results.push({ propertyId: b.propertyId, unitId: b.unitId, source: "lodgify" });
+      }
+    }
+    return results;
   }
 }
 

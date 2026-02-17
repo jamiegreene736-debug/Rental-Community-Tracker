@@ -394,6 +394,22 @@ export async function registerRoutes(
     }
   });
 
+  // ========== AVAILABILITY / RECOMMENDATIONS ==========
+
+  app.get("/api/availability", async (req, res) => {
+    try {
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+      if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required in YYYY-MM-DD format" });
+      }
+      const booked = await storage.getBookedUnits(checkIn, checkOut);
+      res.json(booked);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to check availability", message: err.message });
+    }
+  });
+
   // ========== LODGIFY BOOKING SYNC ==========
 
   app.post("/api/lodgify/sync-bookings", async (_req, res) => {

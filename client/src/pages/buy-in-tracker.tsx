@@ -46,11 +46,17 @@ import {
   CheckCircle2,
   AlertCircle,
   ExternalLink,
+  Search,
+  Star,
+  Sparkles,
+  Award,
+  BedDouble,
+  MapPin,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { BuyIn, LodgifyBooking } from "@shared/schema";
-import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
+import { getPropertyPricing, getAllUnitPricings, type PropertyPricing, type UnitPricing } from "@/data/pricing-data";
 import { getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
 type ReportSummary = {
@@ -298,6 +304,278 @@ function NewBuyInDialog({ onSuccess }: { onSuccess: () => void }) {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+type RankedUnit = {
+  propertyId: number;
+  propertyName: string;
+  community: string;
+  unitId: string;
+  unitLabel: string;
+  bedrooms: number;
+  buyInPerNight: number;
+  sellPerNight: number;
+  profitPerNight: number;
+  totalBuyInCost: number;
+  totalSellRevenue: number;
+  totalProfit: number;
+  nights: number;
+  available: boolean;
+};
+
+function BestBuyInFinder() {
+  const [checkIn, setCheckIn] = useState("");
+  const [checkOut, setCheckOut] = useState("");
+  const [results, setResults] = useState<RankedUnit[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const { toast } = useToast();
+
+  const allProperties = getAllMultiUnitProperties();
+  const propertyMap = new Map(allProperties.map(p => [p.propertyId, p.propertyName]));
+
+  const findBestUnits = async () => {
+    if (!checkIn || !checkOut) {
+      toast({ title: "Please select check-in and check-out dates", variant: "destructive" });
+      return;
+    }
+    if (checkOut <= checkIn) {
+      toast({ title: "Check-out must be after check-in", variant: "destructive" });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/availability?checkIn=${checkIn}&checkOut=${checkOut}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: "Server error" }));
+        throw new Error(errData.error || "Failed to check availability");
+      }
+      const bookedUnits: { propertyId: number; unitId: string; source: string }[] = await res.json();
+
+      const bookedSet = new Set(bookedUnits.map(b => `${b.propertyId}-${b.unitId}`));
+
+      const nights = Math.max(1, Math.ceil(
+        (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60 * 24)
+      ));
+
+      const monthNames = ["January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"];
+
+      const allUnits = getAllUnitPricings();
+
+      const ranked: RankedUnit[] = allUnits.map(({ propertyId, community, unit }) => {
+        let totalBuyInCost = 0;
+        let totalSellRevenue = 0;
+        const startDate = new Date(checkIn + "T12:00:00");
+
+        for (let i = 0; i < nights; i++) {
+          const nightDate = new Date(startDate);
+          nightDate.setDate(nightDate.getDate() + i);
+          const mIdx = nightDate.getMonth();
+          const yr = nightDate.getFullYear();
+
+          const monthRate = unit.monthlyRates.find(r => r.month === monthNames[mIdx] && r.year === yr);
+          totalBuyInCost += monthRate ? monthRate.buyInRate : unit.baseBuyIn;
+          totalSellRevenue += monthRate ? monthRate.sellRate : unit.baseSellRate;
+        }
+
+        const totalProfit = totalSellRevenue - totalBuyInCost;
+        const buyInPerNight = Math.round(totalBuyInCost / nights);
+        const sellPerNight = Math.round(totalSellRevenue / nights);
+        const profitPerNight = sellPerNight - buyInPerNight;
+        const isAvailable = !bookedSet.has(`${propertyId}-${unit.unitId}`);
+
+        return {
+          propertyId,
+          propertyName: propertyMap.get(propertyId) || `Property ${propertyId}`,
+          community,
+          unitId: unit.unitId,
+          unitLabel: unit.unitLabel,
+          bedrooms: unit.bedrooms,
+          buyInPerNight,
+          sellPerNight,
+          profitPerNight,
+          totalBuyInCost,
+          totalSellRevenue,
+          totalProfit,
+          nights,
+          available: isAvailable,
+        };
+      });
+
+      ranked.sort((a, b) => {
+        if (a.available !== b.available) return a.available ? -1 : 1;
+        return b.totalProfit - a.totalProfit;
+      });
+
+      setResults(ranked);
+    } catch (err: any) {
+      toast({ title: "Failed to find recommendations", description: err.message, variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const topTwo = results ? results.filter(r => r.available).slice(0, 2) : [];
+  const otherAvailable = results ? results.filter(r => r.available).slice(2) : [];
+  const unavailable = results ? results.filter(r => !r.available) : [];
+
+  return (
+    <Card className="p-4 sm:p-6 mb-6">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <Sparkles className="h-5 w-5 text-yellow-500" />
+        <h2 className="font-semibold text-lg">Find Best Buy-Ins</h2>
+      </div>
+      <p className="text-sm text-muted-foreground mb-4">
+        Pick your travel dates and we'll find the two most profitable units to buy in based on the highest profit margin (sell rate minus buy-in cost) and current availability.
+      </p>
+
+      <div className="flex items-end gap-3 flex-wrap">
+        <div>
+          <Label className="text-sm">Check-in</Label>
+          <Input
+            type="date"
+            value={checkIn}
+            onChange={e => { setCheckIn(e.target.value); setResults(null); }}
+            data-testid="input-finder-checkin"
+          />
+        </div>
+        <div>
+          <Label className="text-sm">Check-out</Label>
+          <Input
+            type="date"
+            value={checkOut}
+            onChange={e => { setCheckOut(e.target.value); setResults(null); }}
+            data-testid="input-finder-checkout"
+          />
+        </div>
+        <Button onClick={findBestUnits} disabled={loading} data-testid="button-find-best">
+          {loading ? (
+            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Searching...</>
+          ) : (
+            <><Search className="h-4 w-4 mr-2" /> Find Best Units</>
+          )}
+        </Button>
+      </div>
+
+      {results !== null && (
+        <div className="mt-6 space-y-4">
+          {topTwo.length === 0 ? (
+            <div className="text-center py-6">
+              <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+              <p className="text-muted-foreground">No available units found for these dates.</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 mb-2">
+                <Award className="h-4 w-4 text-yellow-500" />
+                <h3 className="font-semibold">Top 2 Recommendations</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {topTwo.map((unit, idx) => (
+                  <Card key={`${unit.propertyId}-${unit.unitId}`} className="p-4 relative" data-testid={`card-recommendation-${idx}`}>
+                    <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-center w-7 h-7 rounded-full bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 text-sm font-bold">
+                          {idx + 1}
+                        </div>
+                        <div>
+                          <div className="font-semibold text-sm leading-tight">{unit.propertyName}</div>
+                          <div className="text-xs text-muted-foreground">{unit.unitLabel}</div>
+                        </div>
+                      </div>
+                      <Badge variant="default">
+                        <Star className="h-3 w-3 mr-1" />
+                        Best Pick
+                      </Badge>
+                    </div>
+
+                    <div className="space-y-2 text-sm">
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <MapPin className="h-3 w-3" />
+                        <span>{unit.community}</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <BedDouble className="h-3 w-3" />
+                        <span>{unit.bedrooms} bedrooms</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 pt-3 border-t space-y-1">
+                      <div className="flex justify-between gap-2 text-sm">
+                        <span className="text-muted-foreground">Buy-in cost ({unit.nights} nights):</span>
+                        <span className="font-medium">{formatCurrency(unit.totalBuyInCost)}</span>
+                      </div>
+                      <div className="flex justify-between gap-2 text-sm">
+                        <span className="text-muted-foreground">Expected revenue:</span>
+                        <span className="font-medium">{formatCurrency(unit.totalSellRevenue)}</span>
+                      </div>
+                      <div className="flex justify-between gap-2 text-sm">
+                        <span className="text-muted-foreground">Per night rate:</span>
+                        <span className="font-medium">{formatCurrency(unit.buyInPerNight)}/night</span>
+                      </div>
+                      <div className="flex justify-between gap-2 text-sm font-semibold pt-1 border-t">
+                        <span className="text-green-600 dark:text-green-400">Estimated profit:</span>
+                        <span className="text-green-600 dark:text-green-400">{formatCurrency(unit.totalProfit)}</span>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+
+              {otherAvailable.length > 0 && (
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="button-show-all-available">
+                    View all {otherAvailable.length + topTwo.length} available units ranked by profit
+                  </summary>
+                  <div className="mt-3 overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Rank</TableHead>
+                          <TableHead>Property</TableHead>
+                          <TableHead>Unit</TableHead>
+                          <TableHead>Community</TableHead>
+                          <TableHead className="text-right">Buy-In Cost</TableHead>
+                          <TableHead className="text-right">Revenue</TableHead>
+                          <TableHead className="text-right">Profit</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {[...topTwo, ...otherAvailable].map((unit, idx) => (
+                          <TableRow key={`${unit.propertyId}-${unit.unitId}`} data-testid={`row-ranked-${idx}`}>
+                            <TableCell>
+                              <span className={`font-medium ${idx < 2 ? "text-yellow-600 dark:text-yellow-400" : ""}`}>
+                                #{idx + 1}
+                              </span>
+                            </TableCell>
+                            <TableCell className="font-medium max-w-[180px] truncate">{unit.propertyName}</TableCell>
+                            <TableCell>{unit.unitLabel} ({unit.bedrooms}BR)</TableCell>
+                            <TableCell>{unit.community}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(unit.totalBuyInCost)}</TableCell>
+                            <TableCell className="text-right">{formatCurrency(unit.totalSellRevenue)}</TableCell>
+                            <TableCell className="text-right font-medium text-green-600 dark:text-green-400">
+                              {formatCurrency(unit.totalProfit)}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </details>
+              )}
+
+              {unavailable.length > 0 && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  {unavailable.length} unit{unavailable.length !== 1 ? "s" : ""} unavailable for these dates (already booked)
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -655,6 +933,8 @@ export default function BuyInTracker() {
           </div>
           <NewBuyInDialog onSuccess={() => {}} />
         </div>
+
+        <BestBuyInFinder />
 
         <Tabs defaultValue="buy-ins" className="space-y-4">
           <TabsList data-testid="tabs-tracker">
