@@ -682,20 +682,57 @@ export default function Home() {
   const lodgifyStatusMap = useMemo(() => {
     const map = new Map<number, { found: boolean; lodgifyName?: string; lodgifyId?: number }>();
     if (!lodgifyData?.items) return map;
-    const lodgifyProps = lodgifyData.items;
+    const lodgifyProps = lodgifyData.items as any[];
+    const usedLodgifyIds = new Set<number>();
+
+    const candidates: { propertyId: number; lodgifyProp: any; score: number }[] = [];
+
     for (const mp of multiUnitProps) {
-      const match = lodgifyProps.find((lp: any) => {
+      const dashProp = properties.find(p => p.id === mp.propertyId);
+      if (!dashProp) continue;
+
+      for (const lp of lodgifyProps) {
         const name = (lp.name || "").toLowerCase();
         const complexLower = mp.complexName.toLowerCase();
         const propNameLower = mp.propertyName.toLowerCase();
-        return name.includes(complexLower) || complexLower.includes(name) ||
-               name.includes(propNameLower) || propNameLower.includes(name);
-      });
-      map.set(mp.propertyId, match
-        ? { found: true, lodgifyName: match.name, lodgifyId: match.id }
-        : { found: false }
-      );
+        const nameMatchesComplex = name.includes(complexLower) || complexLower.includes(name);
+        const nameMatchesProp = name.includes(propNameLower) || propNameLower.includes(name);
+        if (!nameMatchesComplex && !nameMatchesProp) continue;
+
+        let score = 0;
+        const brMatch = name.match(/(\d+)\s*br/i) || name.match(/(\d+)\s*bedroom/i);
+        const sleepsMatch = name.match(/sleeps\s*(\d+)/i);
+
+        if (brMatch) {
+          if (parseInt(brMatch[1]) === dashProp.bedrooms) score += 10;
+          else continue;
+        }
+        if (sleepsMatch) {
+          if (parseInt(sleepsMatch[1]) === dashProp.guests) score += 10;
+          else continue;
+        }
+        if (nameMatchesProp) score += 5;
+        if (nameMatchesComplex) score += 2;
+
+        candidates.push({ propertyId: mp.propertyId, lodgifyProp: lp, score });
+      }
     }
+
+    candidates.sort((a, b) => b.score - a.score);
+
+    for (const c of candidates) {
+      if (usedLodgifyIds.has(c.lodgifyProp.id)) continue;
+      if (map.has(c.propertyId) && map.get(c.propertyId)!.found) continue;
+      usedLodgifyIds.add(c.lodgifyProp.id);
+      map.set(c.propertyId, { found: true, lodgifyName: c.lodgifyProp.name, lodgifyId: c.lodgifyProp.id });
+    }
+
+    for (const mp of multiUnitProps) {
+      if (!map.has(mp.propertyId)) {
+        map.set(mp.propertyId, { found: false });
+      }
+    }
+
     return map;
   }, [lodgifyData, multiUnitProps]);
 
