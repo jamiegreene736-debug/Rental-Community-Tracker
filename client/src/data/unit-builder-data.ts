@@ -2005,3 +2005,11 @@ export function getUnitBuilderByPropertyId(propertyId: number): PropertyUnitBuil
 export function getMultiUnitPropertyIds(): number[] {
   return unitBuilderData.map((p) => p.propertyId);
 }
+
+export function getAllMultiUnitProperties(): { propertyId: number; propertyName: string; complexName: string }[] {
+  return unitBuilderData.map((p) => ({
+    propertyId: p.propertyId,
+    propertyName: p.propertyName,
+    complexName: p.complexName,
+  }));
+}

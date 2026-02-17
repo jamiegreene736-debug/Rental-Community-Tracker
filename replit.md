@@ -6,6 +6,7 @@ Property research dashboard for thevacationrentalexperts.com. Displays all 35 ca
 
 ## Recent Changes
 
+- **Feb 17, 2026**: Built Buy-In Tracker & Profitability Dashboard (`/buy-in-tracker`). Features: Record Airbnb buy-in purchases with property/unit selection, suggested buy-in rates from pricing data, check-in/check-out dates, cost tracking, Airbnb confirmation numbers. Lodgify booking sync pulls guest reservations (Booking.com, VRBO) from Lodgify API v2. Profitability reports tab shows total buy-in cost vs revenue, profit margins, and monthly breakdown. Database tables: `buy_ins` and `lodgify_bookings` in PostgreSQL via Drizzle ORM. Storage layer migrated from MemStorage to DatabaseStorage. API endpoints: `GET/POST/PATCH/DELETE /api/buy-ins`, `POST /api/lodgify/sync-bookings`, `GET /api/lodgify/bookings`, `GET /api/reports/summary`, `GET /api/reports/monthly`. Navigation: "Buy-In Tracker" button on dashboard, "Buy In" button on unit builder pages.
 - **Feb 16, 2026**: Added community/resort amenity photos for all 21 multi-unit properties. 52 stock photos across 10 resort communities (Regency at Poipu Kai, Kekaha Estate, Keauhou Estates, Mauna Kai, Kaha Lani, Lae Nani, Poipu Beachside, Kaiulani, Poipu Oceanfront, Kiahuna Plantation). Photos stored in `client/public/photos/community-{resort-name}/` folders. Each property has `communityPhotos` array with position ("beginning"/"end") and `communityPhotoFolder` field. Lodgify prep page shows community photos section with ordered preview. "Download All Photos (ZIP)" button generates combined zip with community photos at beginning, unit photos in middle, community photos at end, all sequentially numbered. Backend zip-multi endpoint updated to support `communityFolder`, `beginningPhotos`, `endPhotos` query params for ordered zip generation.
 - **Feb 14, 2026**: Added queen sleeper sofas to ~22 condo-style units across all multi-unit properties. Updated maxGuests (+2 per sofa bed) and descriptions. Added `combinedDescription` field to PropertyUnitBuilder - each property now has one unified description for Lodgify (describes all units together). Lodgify prep page shows combined description as a single copy field; removed per-unit description tabs from unit cards. Updated step-by-step entry guide to reference combined description.
 - **Feb 13, 2026**: Added "Prepare for Lodgify" workflow system. Each multi-unit property now has a dedicated Lodgify prep page (`/lodgify-prep/:id`) with one-click copy buttons for titles/descriptions, amenities checklists with Lodgify category names, ordered photo downloads as individual JPGs (File System Access API with fallback), Lodgify sync status checker via API proxy, and step-by-step entry guide. Photo downloads now save to folder (no zip). Backend route `GET /api/lodgify/properties` proxies Lodgify API for sync checking. Navigation added from dashboard and unit builder pages.
@@ -37,16 +38,16 @@ Preferred communication style: Simple, everyday language.
 - **Framework:** Express 5 on Node.js
 - **Language:** TypeScript, executed with `tsx`
 - **API Pattern:** All API routes should be prefixed with `/api`
-- **Storage Layer:** Abstracted through an `IStorage` interface in `server/storage.ts`. Currently uses in-memory storage (`MemStorage`), but the interface is designed to be swapped for database-backed storage.
+- **Storage Layer:** Abstracted through an `IStorage` interface in `server/storage.ts`. Uses `DatabaseStorage` backed by PostgreSQL via Drizzle ORM for buy-ins, bookings, and user data.
 - **Static Serving:** In production, the server serves the built Vite output from `dist/public`. In development, Vite's dev server middleware is used with HMR.
 
 ### Database
 - **ORM:** Drizzle ORM with PostgreSQL dialect
 - **Schema Location:** `shared/schema.ts` — defines tables and Zod validation schemas using `drizzle-zod`
-- **Current Schema:** A `users` table with `id` (UUID primary key), `username`, and `password` fields
+- **Current Schema:** `users` table (UUID PK), `buy_ins` table (serial PK - Airbnb buy-in purchases with property/unit IDs, dates, costs, confirmations), `lodgify_bookings` table (serial PK - synced guest reservations from Lodgify with guest info, dates, amounts, source)
 - **Schema Push:** Use `npm run db:push` (runs `drizzle-kit push`) to sync schema to the database
 - **Connection:** Requires `DATABASE_URL` environment variable pointing to a PostgreSQL database
-- **Note:** The current runtime storage uses in-memory `MemStorage`. When connecting to Postgres, replace `MemStorage` with a Drizzle-backed implementation of `IStorage`.
+- **Note:** Storage uses `DatabaseStorage` class backed by PostgreSQL/Drizzle. Connection via `server/db.ts`.
 
 ### Build Process
 - **Development:** `npm run dev` — runs the Express server with tsx, Vite dev middleware handles frontend with HMR

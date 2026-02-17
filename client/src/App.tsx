@@ -7,6 +7,7 @@ import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import UnitBuilder from "@/pages/unit-builder";
 import LodgifyPrep from "@/pages/lodgify-prep";
+import BuyInTracker from "@/pages/buy-in-tracker";
 
 function Router() {
   return (
@@ -14,6 +15,7 @@ function Router() {
       <Route path="/" component={Home} />
       <Route path="/unit-builder/:id" component={UnitBuilder} />
       <Route path="/lodgify-prep/:id" component={LodgifyPrep} />
+      <Route path="/buy-in-tracker" component={BuyInTracker} />
       <Route component={NotFound} />
     </Switch>
   );

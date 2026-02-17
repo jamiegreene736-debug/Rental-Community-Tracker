@@ -21,6 +21,7 @@ import {
   Ruler,
   AlertTriangle,
   ClipboardList,
+  DollarSign,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
@@ -351,8 +352,14 @@ export default function UnitBuilder() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Link href="/buy-in-tracker">
+              <Button variant="default" data-testid="button-buy-in">
+                <DollarSign className="h-4 w-4 mr-2" />
+                Buy In
+              </Button>
+            </Link>
             <Link href={`/lodgify-prep/${property.propertyId}`}>
-              <Button variant="default" data-testid="button-prepare-lodgify">
+              <Button variant="outline" data-testid="button-prepare-lodgify">
                 <ClipboardList className="h-4 w-4 mr-2" />
                 Prepare for Lodgify
               </Button>

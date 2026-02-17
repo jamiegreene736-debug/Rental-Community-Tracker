@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { insertBuyInSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
@@ -317,6 +318,271 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to push rates to Lodgify", message: err.message });
+    }
+  });
+
+  // ========== BUY-IN CRUD ==========
+
+  app.get("/api/buy-ins", async (_req, res) => {
+    try {
+      const buyIns = await storage.getBuyIns();
+      res.json(buyIns);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch buy-ins", message: err.message });
+    }
+  });
+
+  app.get("/api/buy-ins/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const buyIn = await storage.getBuyIn(id);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      res.json(buyIn);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch buy-in", message: err.message });
+    }
+  });
+
+  app.post("/api/buy-ins", async (req, res) => {
+    try {
+      const parsed = insertBuyInSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid buy-in data", details: parsed.error.flatten() });
+      }
+      const buyIn = await storage.createBuyIn(parsed.data);
+      res.status(201).json(buyIn);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to create buy-in", message: err.message });
+    }
+  });
+
+  app.patch("/api/buy-ins/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const allowed = ["propertyId", "unitId", "propertyName", "unitLabel", "checkIn", "checkOut", "costPaid", "airbnbConfirmation", "airbnbListingUrl", "notes", "status"];
+      const filtered: Record<string, any> = {};
+      for (const key of allowed) {
+        if (key in req.body) filtered[key] = req.body[key];
+      }
+      if (filtered.costPaid !== undefined) {
+        const cost = parseFloat(String(filtered.costPaid));
+        if (isNaN(cost) || cost < 0) return res.status(400).json({ error: "Invalid costPaid" });
+        filtered.costPaid = String(cost);
+      }
+      if (filtered.checkIn && !/^\d{4}-\d{2}-\d{2}$/.test(filtered.checkIn)) {
+        return res.status(400).json({ error: "Invalid checkIn date format (YYYY-MM-DD)" });
+      }
+      if (filtered.checkOut && !/^\d{4}-\d{2}-\d{2}$/.test(filtered.checkOut)) {
+        return res.status(400).json({ error: "Invalid checkOut date format (YYYY-MM-DD)" });
+      }
+      const buyIn = await storage.updateBuyIn(id, filtered);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      res.json(buyIn);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update buy-in", message: err.message });
+    }
+  });
+
+  app.delete("/api/buy-ins/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const deleted = await storage.deleteBuyIn(id);
+      if (!deleted) return res.status(404).json({ error: "Buy-in not found" });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to delete buy-in", message: err.message });
+    }
+  });
+
+  // ========== LODGIFY BOOKING SYNC ==========
+
+  app.post("/api/lodgify/sync-bookings", async (_req, res) => {
+    const apiKey = process.env.LODGIFY_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Lodgify API key not configured" });
+    }
+
+    try {
+      let allBookings: any[] = [];
+      let page = 1;
+      const size = 50;
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await fetch(
+          `https://api.lodgify.com/v2/reservations/bookings?page=${page}&size=${size}&includeCount=true&includeTransactions=false&includeExternal=true&includeQuoteDetails=true`,
+          {
+            headers: {
+              "X-ApiKey": apiKey,
+              "accept": "application/json",
+            },
+          }
+        );
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          return res.status(response.status).json({ error: "Failed to fetch Lodgify bookings", details: errorText });
+        }
+
+        const data: any = await response.json();
+        const items = data.items || data || [];
+
+        if (Array.isArray(items)) {
+          allBookings = allBookings.concat(items);
+        }
+
+        if (!Array.isArray(items) || items.length < size) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+
+        if (page > 20) break;
+      }
+
+      let synced = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+
+      for (const booking of allBookings) {
+        try {
+          const rawId = booking.id || booking.booking_id;
+          if (!rawId) {
+            skipped++;
+            continue;
+          }
+          const lodgifyBookingId = parseInt(String(rawId), 10);
+          if (isNaN(lodgifyBookingId)) {
+            skipped++;
+            continue;
+          }
+
+          const checkIn = booking.arrival || booking.check_in || booking.date_arrival;
+          const checkOut = booking.departure || booking.check_out || booking.date_departure;
+
+          if (!checkIn || !checkOut) {
+            skipped++;
+            continue;
+          }
+
+          const guestName = booking.guest?.name || booking.guest_name || `${booking.guest?.first_name || ""} ${booking.guest?.last_name || ""}`.trim() || null;
+          const guestEmail = booking.guest?.email || booking.guest_email || null;
+          const totalAmount = booking.total_amount || booking.amount || booking.quote?.total || null;
+          const source = booking.source || booking.booking_source || booking.channel || null;
+          const status = booking.status || booking.booking_status || null;
+          const lodgifyPropertyId = booking.property_id || booking.property?.id || null;
+          const lodgifyPropertyName = booking.property_name || booking.property?.name || null;
+          const nights = booking.nights || null;
+
+          const checkInDate = typeof checkIn === "string" ? checkIn.split("T")[0] : new Date(checkIn).toISOString().split("T")[0];
+          const checkOutDate = typeof checkOut === "string" ? checkOut.split("T")[0] : new Date(checkOut).toISOString().split("T")[0];
+
+          await storage.upsertLodgifyBooking({
+            lodgifyBookingId: lodgifyBookingId,
+            propertyId: null,
+            unitId: null,
+            lodgifyPropertyId,
+            lodgifyPropertyName,
+            guestName,
+            guestEmail,
+            checkIn: checkInDate,
+            checkOut: checkOutDate,
+            totalAmount: totalAmount ? String(totalAmount) : null,
+            source,
+            status,
+            currency: booking.currency || "USD",
+            nights,
+          });
+          synced++;
+        } catch (err: any) {
+          errors.push(`Booking ${booking.id}: ${err.message}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        totalFetched: allBookings.length,
+        synced,
+        skipped,
+        errors: errors.length > 0 ? errors : undefined,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to sync Lodgify bookings", message: err.message });
+    }
+  });
+
+  app.get("/api/lodgify/bookings", async (_req, res) => {
+    try {
+      const bookings = await storage.getLodgifyBookings();
+      res.json(bookings);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch stored bookings", message: err.message });
+    }
+  });
+
+  // ========== PROFITABILITY REPORTS ==========
+
+  app.get("/api/reports/monthly", async (req, res) => {
+    try {
+      const year = parseInt(req.query.year as string, 10) || new Date().getFullYear();
+      const month = parseInt(req.query.month as string, 10) || new Date().getMonth() + 1;
+
+      const report = await storage.getMonthlyReport(year, month);
+      const totalBuyInCost = report.buyIns.reduce((sum, b) => sum + parseFloat(b.costPaid || "0"), 0);
+      const totalRevenue = report.bookings.reduce((sum, b) => sum + parseFloat(b.totalAmount || "0"), 0);
+
+      res.json({
+        year,
+        month,
+        totalBuyInCost,
+        totalRevenue,
+        profit: totalRevenue - totalBuyInCost,
+        buyInCount: report.buyIns.length,
+        bookingCount: report.bookings.length,
+        buyIns: report.buyIns,
+        bookings: report.bookings,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to generate report", message: err.message });
+    }
+  });
+
+  app.get("/api/reports/summary", async (_req, res) => {
+    try {
+      const allBuyIns = await storage.getBuyIns();
+      const allBookings = await storage.getLodgifyBookings();
+
+      const totalBuyInCost = allBuyIns.reduce((sum, b) => sum + parseFloat(b.costPaid || "0"), 0);
+      const totalRevenue = allBookings.reduce((sum, b) => sum + parseFloat(b.totalAmount || "0"), 0);
+      const activeBuyIns = allBuyIns.filter(b => b.status === "active").length;
+
+      const monthlyData: Record<string, { buyInCost: number; revenue: number; buyIns: number; bookings: number }> = {};
+      for (const b of allBuyIns) {
+        const key = b.checkIn ? b.checkIn.substring(0, 7) : "unknown";
+        if (!monthlyData[key]) monthlyData[key] = { buyInCost: 0, revenue: 0, buyIns: 0, bookings: 0 };
+        monthlyData[key].buyInCost += parseFloat(b.costPaid || "0");
+        monthlyData[key].buyIns++;
+      }
+      for (const b of allBookings) {
+        const key = b.checkIn ? b.checkIn.substring(0, 7) : "unknown";
+        if (!monthlyData[key]) monthlyData[key] = { buyInCost: 0, revenue: 0, buyIns: 0, bookings: 0 };
+        monthlyData[key].revenue += parseFloat(b.totalAmount || "0");
+        monthlyData[key].bookings++;
+      }
+
+      res.json({
+        totalBuyInCost,
+        totalRevenue,
+        totalProfit: totalRevenue - totalBuyInCost,
+        totalBuyIns: allBuyIns.length,
+        activeBuyIns,
+        totalBookings: allBookings.length,
+        monthlyBreakdown: Object.entries(monthlyData)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([month, data]) => ({ month, ...data, profit: data.revenue - data.buyInCost })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to generate summary", message: err.message });
     }
   });
 

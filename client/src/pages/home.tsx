@@ -675,13 +675,21 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-[1400px] mx-auto px-4 py-6">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-            Vacation Rental Experts - Property Research
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
-          </p>
+        <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
+              Vacation Rental Experts - Property Research
+            </h1>
+            <p className="text-muted-foreground mt-1">
+              Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
+            </p>
+          </div>
+          <Link href="/buy-in-tracker">
+            <Button data-testid="button-buy-in-tracker">
+              <DollarSign className="h-4 w-4 mr-2" />
+              Buy-In Tracker
+            </Button>
+          </Link>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
