@@ -52,6 +52,8 @@ import {
   Award,
   BedDouble,
   MapPin,
+  Check,
+  CircleDot,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -351,9 +353,115 @@ function BestBuyInFinder() {
   const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [feePercent, setFeePercent] = useState(15);
+  const [selectedListings, setSelectedListings] = useState<Record<string, AirbnbProperty[]>>({});
+  const [recording, setRecording] = useState(false);
   const { toast } = useToast();
 
   const allProperties = getAllMultiUnitProperties();
+
+  const toggleListingSelection = (bedroomKey: string, property: AirbnbProperty, maxCount: number) => {
+    setSelectedListings(prev => {
+      const current = prev[bedroomKey] || [];
+      const isSelected = current.some(p => p.id === property.id);
+      if (isSelected) {
+        return { ...prev, [bedroomKey]: current.filter(p => p.id !== property.id) };
+      }
+      if (current.length >= maxCount) {
+        return { ...prev, [bedroomKey]: [...current.slice(1), property] };
+      }
+      return { ...prev, [bedroomKey]: [...current, property] };
+    });
+  };
+
+  const isListingSelected = (bedroomKey: string, propertyId: string) => {
+    return (selectedListings[bedroomKey] || []).some(p => p.id === propertyId);
+  };
+
+  const getSelectedTotalCost = () => {
+    const feeMultiplier = 1 + feePercent / 100;
+    let total = 0;
+    for (const listings of Object.values(selectedListings)) {
+      for (const listing of listings) {
+        total += Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
+      }
+    }
+    return total;
+  };
+
+  const getTotalSelectedCount = () => {
+    return Object.values(selectedListings).reduce((sum, arr) => sum + arr.length, 0);
+  };
+
+  const getTotalNeededCount = () => {
+    if (!results) return 0;
+    return results.unitsNeeded.reduce((sum, n) => sum + n.count, 0);
+  };
+
+  const allUnitsSelected = () => {
+    if (!results) return false;
+    return results.unitsNeeded.every(need => {
+      const key = `${need.bedrooms}BR`;
+      return (selectedListings[key] || []).length === need.count;
+    });
+  };
+
+  const recordBuyIns = async () => {
+    if (!results || !selectedPropertyId) return;
+    const propId = parseInt(selectedPropertyId);
+    const pricing = getPropertyPricing(propId);
+    const selectedProp = allProperties.find(p => p.propertyId === propId);
+    if (!pricing || !selectedProp) return;
+
+    const feeMultiplier = 1 + feePercent / 100;
+
+    setRecording(true);
+    try {
+      const unitsByBedroom: Record<number, typeof pricing.units> = {};
+      for (const unit of pricing.units) {
+        if (!unitsByBedroom[unit.bedrooms]) unitsByBedroom[unit.bedrooms] = [];
+        unitsByBedroom[unit.bedrooms].push(unit);
+      }
+
+      const unitAssignmentIndex: Record<number, number> = {};
+
+      for (const need of results.unitsNeeded) {
+        const key = `${need.bedrooms}BR`;
+        const selected = selectedListings[key] || [];
+        for (const listing of selected) {
+          if (!unitAssignmentIndex[need.bedrooms]) unitAssignmentIndex[need.bedrooms] = 0;
+          const assignIdx = unitAssignmentIndex[need.bedrooms];
+          const availableUnits = unitsByBedroom[need.bedrooms] || [];
+          const assignedUnit = availableUnits[assignIdx] || availableUnits[0];
+          unitAssignmentIndex[need.bedrooms] = assignIdx + 1;
+
+          const estimatedCost = Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
+
+          await apiRequest("POST", "/api/buy-ins", {
+            propertyId: propId,
+            unitId: assignedUnit?.unitId || "unknown",
+            propertyName: selectedProp.propertyName,
+            unitLabel: assignedUnit?.unitLabel || `${need.bedrooms}BR Unit`,
+            checkIn: results.checkIn,
+            checkOut: results.checkOut,
+            costPaid: String(estimatedCost),
+            airbnbConfirmation: null,
+            airbnbListingUrl: listing.link || null,
+            notes: `Airbnb listing: ${listing.title} (Listed: $${listing.price?.extracted_total_price ?? 0}, Est. checkout: $${estimatedCost})`,
+            status: "active",
+          });
+        }
+      }
+
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/reports/summary"] });
+      toast({ title: "Buy-ins recorded!", description: `${getTotalSelectedCount()} buy-in record${getTotalSelectedCount() > 1 ? "s" : ""} created` });
+      setSelectedListings({});
+    } catch (err: any) {
+      toast({ title: "Failed to record buy-ins", description: err.message, variant: "destructive" });
+    } finally {
+      setRecording(false);
+    }
+  };
 
   const findBestUnits = async () => {
     if (!selectedPropertyId) {
@@ -371,6 +479,7 @@ function BestBuyInFinder() {
 
     setLoading(true);
     setResults(null);
+    setSelectedListings({});
     try {
       const res = await fetch(`/api/airbnb/search?propertyId=${selectedPropertyId}&checkIn=${checkIn}&checkOut=${checkOut}`);
       if (!res.ok) {
@@ -578,6 +687,12 @@ function BestBuyInFinder() {
                   {!searchData.error && (
                     <Badge variant="secondary">{searchData.totalResults} found</Badge>
                   )}
+                  {!searchData.error && (selectedListings[key] || []).length > 0 && (
+                    <Badge variant="default">
+                      <Check className="h-3 w-3 mr-1" />
+                      {(selectedListings[key] || []).length}/{need.count} selected
+                    </Badge>
+                  )}
                 </div>
 
                 {searchData.error ? (
@@ -592,18 +707,31 @@ function BestBuyInFinder() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {searchData.properties.slice(0, need.count).map((prop, idx) => (
-                      <Card key={prop.id} className="p-4" data-testid={`card-airbnb-top-${key}-${idx}`}>
+                    {searchData.properties.map((prop, idx) => {
+                      const selected = isListingSelected(key, prop.id);
+                      return (
+                      <Card key={prop.id} className={`p-4 cursor-pointer transition-colors ${selected ? "border-green-500 dark:border-green-400 bg-green-50/30 dark:bg-green-950/20" : ""}`} data-testid={`card-airbnb-${key}-${idx}`} onClick={() => toggleListingSelection(key, prop, need.count)}>
                         <div className="flex gap-4">
-                          {prop.images.length > 0 && (
-                            <div className="flex-shrink-0 w-24 h-24 rounded-md overflow-hidden">
-                              <img
-                                src={prop.images[0]}
-                                alt={prop.title}
-                                className="w-full h-full object-cover"
-                              />
-                            </div>
-                          )}
+                          <div className="flex flex-col items-center gap-2 flex-shrink-0">
+                            {prop.images.length > 0 && (
+                              <div className="w-24 h-24 rounded-md overflow-hidden">
+                                <img
+                                  src={prop.images[0]}
+                                  alt={prop.title}
+                                  className="w-full h-full object-cover"
+                                />
+                              </div>
+                            )}
+                            <Button
+                              size="sm"
+                              variant={selected ? "default" : "outline"}
+                              className={selected ? "w-full" : "w-full"}
+                              onClick={(e) => { e.stopPropagation(); toggleListingSelection(key, prop, need.count); }}
+                              data-testid={`button-select-${key}-${idx}`}
+                            >
+                              {selected ? <><Check className="h-3 w-3 mr-1" /> Selected</> : <><CircleDot className="h-3 w-3 mr-1" /> Select</>}
+                            </Button>
+                          </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-start justify-between gap-2 flex-wrap">
                               <div className="min-w-0">
@@ -677,59 +805,56 @@ function BestBuyInFinder() {
                           </div>
                         </div>
                       </Card>
-                    ))}
-
-                    {searchData.properties.length > need.count && (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid={`button-show-more-${key}`}>
-                          View {searchData.properties.length - need.count} more {need.bedrooms}BR options
-                        </summary>
-                        <div className="mt-3 space-y-3">
-                          {searchData.properties.slice(need.count).map((prop, idx) => (
-                            <Card key={prop.id} className="p-3" data-testid={`card-airbnb-extra-${key}-${idx}`}>
-                              <div className="flex gap-3">
-                                {prop.images.length > 0 && (
-                                  <div className="flex-shrink-0 w-16 h-16 rounded-md overflow-hidden">
-                                    <img src={prop.images[0]} alt={prop.title} className="w-full h-full object-cover" />
-                                  </div>
-                                )}
-                                <div className="flex-1 min-w-0">
-                                  <h4 className="font-medium text-sm truncate">{prop.title}</h4>
-                                  <div className="flex items-center gap-3 mt-1 flex-wrap">
-                                    {prop.price && (
-                                      <span className="text-sm">
-                                        <span className="font-semibold">{formatCurrency(Math.round((prop.price.extracted_total_price ?? 0) * feeMultiplier))}</span>
-                                        <span className="text-xs font-normal text-muted-foreground ml-1">est.</span>
-                                        <span className="text-xs text-muted-foreground ml-1 line-through">{prop.price.total_price}</span>
-                                      </span>
-                                    )}
-                                    {prop.rating && (
-                                      <span className="text-xs text-muted-foreground flex items-center gap-1">
-                                        <Star className="h-3 w-3 fill-yellow-400 text-yellow-400" />
-                                        {prop.rating}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex gap-2 mt-2 flex-wrap">
-                                    <a href={prop.bookingLink || prop.link} target="_blank" rel="noopener noreferrer">
-                                      <Button size="sm">
-                                        <ExternalLink className="h-3 w-3 mr-1" />
-                                        Book on Airbnb
-                                      </Button>
-                                    </a>
-                                  </div>
-                                </div>
-                              </div>
-                            </Card>
-                          ))}
-                        </div>
-                      </details>
-                    )}
+                      );
+                    })}
                   </div>
                 )}
               </div>
             );
           })}
+
+          {getTotalSelectedCount() > 0 && stayRates && (
+            <Card className="p-4 border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 sticky bottom-0" data-testid="card-selection-summary">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Selected</p>
+                    <p className="font-semibold">{getTotalSelectedCount()}/{getTotalNeededCount()} units</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Est. Buy-In Cost</p>
+                    <p className="font-semibold">{formatCurrency(getSelectedTotalCost())}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Your Sell Rate</p>
+                    <p className="font-semibold">{formatCurrency(stayRates.totalSellRate)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Est. Profit</p>
+                    <p className={`font-semibold ${stayRates.totalSellRate - getSelectedTotalCost() >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                      {formatCurrency(stayRates.totalSellRate - getSelectedTotalCost())}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  onClick={recordBuyIns}
+                  disabled={recording || !allUnitsSelected()}
+                  data-testid="button-record-buyins"
+                >
+                  {recording ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Recording...</>
+                  ) : (
+                    <><ShoppingCart className="h-4 w-4 mr-2" /> Record {getTotalSelectedCount()} Buy-In{getTotalSelectedCount() > 1 ? "s" : ""}</>
+                  )}
+                </Button>
+              </div>
+              {!allUnitsSelected() && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  Select all {getTotalNeededCount()} units needed to record buy-ins
+                </p>
+              )}
+            </Card>
+          )}
         </div>
         );
       })()}
