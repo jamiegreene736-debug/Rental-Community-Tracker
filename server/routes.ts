@@ -394,6 +394,144 @@ export async function registerRoutes(
     }
   });
 
+  // ========== AIRBNB SEARCH VIA SEARCHAPI.IO ==========
+
+  const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
+    1: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
+    4: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    7: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
+    8: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    9: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    10: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    12: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    14: { community: "Keauhou", units: [{ bedrooms: 4 }, { bedrooms: 2 }] },
+    18: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    19: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    20: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    21: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
+    23: { community: "Kapaa Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    24: { community: "Poipu Oceanfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    26: { community: "Keauhou", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
+    27: { community: "Poipu Kai", units: [{ bedrooms: 2 }, { bedrooms: 2 }] },
+    28: { community: "Poipu Brenneckes", units: [{ bedrooms: 4 }, { bedrooms: 3 }] },
+    29: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 4 }] },
+    31: { community: "Poipu Brenneckes", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
+    32: { community: "Kiahuna Plantation", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    33: { community: "Kiahuna Plantation", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  };
+
+  const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
+    "Poipu Kai": "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
+    "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
+    "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
+    "Princeville": "Princeville, Kauai, Hawaii",
+    "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
+    "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
+    "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
+    "Kiahuna Plantation": "Kiahuna Plantation Resort, Poipu, Kauai, Hawaii",
+  };
+
+  app.get("/api/airbnb/search", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+    }
+
+    try {
+      const propertyId = parseInt(req.query.propertyId as string, 10);
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+
+      if (!propertyId || isNaN(propertyId)) {
+        return res.status(400).json({ error: "propertyId is required" });
+      }
+      if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required in YYYY-MM-DD format" });
+      }
+
+      const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
+      if (!propertyConfig) {
+        return res.status(404).json({ error: "Property not found in multi-unit config" });
+      }
+
+      const searchLocation = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+
+      const bedroomCounts: Record<number, number> = {};
+      for (const unit of propertyConfig.units) {
+        bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
+      }
+
+      const results: Record<string, any> = {
+        community: propertyConfig.community,
+        searchLocation,
+        checkIn,
+        checkOut,
+        unitsNeeded: Object.entries(bedroomCounts).map(([br, count]) => ({
+          bedrooms: parseInt(br),
+          count,
+        })),
+        searches: {},
+      };
+
+      for (const [bedroomStr, count] of Object.entries(bedroomCounts)) {
+        const bedrooms = parseInt(bedroomStr);
+        const params = new URLSearchParams({
+          engine: "airbnb",
+          q: searchLocation,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          bedrooms: String(bedrooms),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+        });
+
+        const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!response.ok) {
+          const errText = await response.text();
+          console.error(`SearchAPI error for ${bedrooms}BR:`, errText);
+          results.searches[`${bedrooms}BR`] = { error: `SearchAPI returned ${response.status}`, count, properties: [] };
+          continue;
+        }
+
+        const data = await response.json();
+        const properties = (data.properties || []).map((p: any) => ({
+          id: p.id,
+          title: p.title,
+          description: p.description,
+          link: p.link,
+          bookingLink: p.booking_link,
+          rating: p.rating,
+          reviews: p.reviews,
+          price: p.price,
+          accommodations: p.accommodations,
+          images: (p.images || []).slice(0, 3),
+          badges: p.badges,
+          gpsCoordinates: p.gps_coordinates,
+        }));
+
+        properties.sort((a: any, b: any) => {
+          const priceA = a.price?.extracted_total_price ?? Infinity;
+          const priceB = b.price?.extracted_total_price ?? Infinity;
+          return priceA - priceB;
+        });
+
+        results.searches[`${bedrooms}BR`] = {
+          count,
+          totalResults: properties.length,
+          properties: properties.slice(0, 10),
+        };
+      }
+
+      res.json(results);
+    } catch (err: any) {
+      console.error("Airbnb search error:", err);
+      res.status(500).json({ error: "Failed to search Airbnb", message: err.message });
+    }
+  });
+
   // ========== AVAILABILITY / RECOMMENDATIONS ==========
 
   app.get("/api/availability", async (req, res) => {

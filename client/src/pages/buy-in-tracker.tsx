@@ -307,34 +307,58 @@ function NewBuyInDialog({ onSuccess }: { onSuccess: () => void }) {
   );
 }
 
-type RankedUnit = {
-  propertyId: number;
-  propertyName: string;
+type AirbnbProperty = {
+  id: string;
+  title: string;
+  description: string;
+  link: string;
+  bookingLink: string;
+  rating: number | null;
+  reviews: number | null;
+  price: {
+    total_price: string;
+    extracted_total_price: number;
+    qualifier: string;
+    extracted_qualifier: number;
+    price_per_qualifier: string;
+    extracted_price_per_qualifier: number;
+    original_price?: string;
+    extracted_original_price?: number;
+  } | null;
+  accommodations: string[];
+  images: string[];
+  badges: string[];
+};
+
+type AirbnbSearchResults = {
   community: string;
-  unitId: string;
-  unitLabel: string;
-  bedrooms: number;
-  buyInPerNight: number;
-  sellPerNight: number;
-  profitPerNight: number;
-  totalBuyInCost: number;
-  totalSellRevenue: number;
-  totalProfit: number;
-  nights: number;
-  available: boolean;
+  searchLocation: string;
+  checkIn: string;
+  checkOut: string;
+  unitsNeeded: { bedrooms: number; count: number }[];
+  searches: Record<string, {
+    count: number;
+    totalResults: number;
+    properties: AirbnbProperty[];
+    error?: string;
+  }>;
 };
 
 function BestBuyInFinder() {
+  const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
   const [checkIn, setCheckIn] = useState("");
   const [checkOut, setCheckOut] = useState("");
-  const [results, setResults] = useState<RankedUnit[] | null>(null);
+  const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
 
   const allProperties = getAllMultiUnitProperties();
-  const propertyMap = new Map(allProperties.map(p => [p.propertyId, p.propertyName]));
 
   const findBestUnits = async () => {
+    if (!selectedPropertyId) {
+      toast({ title: "Please select a property", variant: "destructive" });
+      return;
+    }
     if (!checkIn || !checkOut) {
       toast({ title: "Please select check-in and check-out dates", variant: "destructive" });
       return;
@@ -345,81 +369,24 @@ function BestBuyInFinder() {
     }
 
     setLoading(true);
+    setResults(null);
     try {
-      const res = await fetch(`/api/availability?checkIn=${checkIn}&checkOut=${checkOut}`);
+      const res = await fetch(`/api/airbnb/search?propertyId=${selectedPropertyId}&checkIn=${checkIn}&checkOut=${checkOut}`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: "Server error" }));
-        throw new Error(errData.error || "Failed to check availability");
+        throw new Error(errData.error || "Failed to search Airbnb");
       }
-      const bookedUnits: { propertyId: number; unitId: string; source: string }[] = await res.json();
-
-      const bookedSet = new Set(bookedUnits.map(b => `${b.propertyId}-${b.unitId}`));
-
-      const nights = Math.max(1, Math.ceil(
-        (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60 * 24)
-      ));
-
-      const monthNames = ["January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"];
-
-      const allUnits = getAllUnitPricings();
-
-      const ranked: RankedUnit[] = allUnits.map(({ propertyId, community, unit }) => {
-        let totalBuyInCost = 0;
-        let totalSellRevenue = 0;
-        const startDate = new Date(checkIn + "T12:00:00");
-
-        for (let i = 0; i < nights; i++) {
-          const nightDate = new Date(startDate);
-          nightDate.setDate(nightDate.getDate() + i);
-          const mIdx = nightDate.getMonth();
-          const yr = nightDate.getFullYear();
-
-          const monthRate = unit.monthlyRates.find(r => r.month === monthNames[mIdx] && r.year === yr);
-          totalBuyInCost += monthRate ? monthRate.buyInRate : unit.baseBuyIn;
-          totalSellRevenue += monthRate ? monthRate.sellRate : unit.baseSellRate;
-        }
-
-        const totalProfit = totalSellRevenue - totalBuyInCost;
-        const buyInPerNight = Math.round(totalBuyInCost / nights);
-        const sellPerNight = Math.round(totalSellRevenue / nights);
-        const profitPerNight = sellPerNight - buyInPerNight;
-        const isAvailable = !bookedSet.has(`${propertyId}-${unit.unitId}`);
-
-        return {
-          propertyId,
-          propertyName: propertyMap.get(propertyId) || `Property ${propertyId}`,
-          community,
-          unitId: unit.unitId,
-          unitLabel: unit.unitLabel,
-          bedrooms: unit.bedrooms,
-          buyInPerNight,
-          sellPerNight,
-          profitPerNight,
-          totalBuyInCost,
-          totalSellRevenue,
-          totalProfit,
-          nights,
-          available: isAvailable,
-        };
-      });
-
-      ranked.sort((a, b) => {
-        if (a.available !== b.available) return a.available ? -1 : 1;
-        return b.totalProfit - a.totalProfit;
-      });
-
-      setResults(ranked);
+      const data: AirbnbSearchResults = await res.json();
+      setResults(data);
     } catch (err: any) {
-      toast({ title: "Failed to find recommendations", description: err.message, variant: "destructive" });
+      toast({ title: "Failed to search Airbnb", description: err.message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
   };
 
-  const topTwo = results ? results.filter(r => r.available).slice(0, 2) : [];
-  const otherAvailable = results ? results.filter(r => r.available).slice(2) : [];
-  const unavailable = results ? results.filter(r => !r.available) : [];
+  const selectedProp = allProperties.find(p => p.propertyId === parseInt(selectedPropertyId));
+  const pricing = selectedPropertyId ? getPropertyPricing(parseInt(selectedPropertyId)) : null;
 
   return (
     <Card className="p-4 sm:p-6 mb-6">
@@ -428,10 +395,28 @@ function BestBuyInFinder() {
         <h2 className="font-semibold text-lg">Find Best Buy-Ins</h2>
       </div>
       <p className="text-sm text-muted-foreground mb-4">
-        Pick your travel dates and we'll find the two most profitable units to buy in based on the highest profit margin (sell rate minus buy-in cost) and current availability.
+        Select your property, enter the guest's travel dates, and we'll search Airbnb in real-time for the cheapest available units to buy in for that stay.
       </p>
 
       <div className="flex items-end gap-3 flex-wrap">
+        <div className="min-w-[220px]">
+          <Label className="text-sm">Property</Label>
+          <Select
+            value={selectedPropertyId}
+            onValueChange={v => { setSelectedPropertyId(v); setResults(null); }}
+          >
+            <SelectTrigger data-testid="select-finder-property">
+              <SelectValue placeholder="Select property..." />
+            </SelectTrigger>
+            <SelectContent>
+              {allProperties.map(p => (
+                <SelectItem key={p.propertyId} value={String(p.propertyId)}>
+                  {p.propertyName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div>
           <Label className="text-sm">Check-in</Label>
           <Input
@@ -452,127 +437,209 @@ function BestBuyInFinder() {
         </div>
         <Button onClick={findBestUnits} disabled={loading} data-testid="button-find-best">
           {loading ? (
-            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Searching...</>
+            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Searching Airbnb...</>
           ) : (
-            <><Search className="h-4 w-4 mr-2" /> Find Best Units</>
+            <><Search className="h-4 w-4 mr-2" /> Find Best Buy-Ins</>
           )}
         </Button>
       </div>
 
-      {results !== null && (
-        <div className="mt-6 space-y-4">
-          {topTwo.length === 0 ? (
-            <div className="text-center py-6">
-              <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
-              <p className="text-muted-foreground">No available units found for these dates.</p>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center gap-2 mb-2">
-                <Award className="h-4 w-4 text-yellow-500" />
-                <h3 className="font-semibold">Top 2 Recommendations</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {topTwo.map((unit, idx) => (
-                  <Card key={`${unit.propertyId}-${unit.unitId}`} className="p-4 relative" data-testid={`card-recommendation-${idx}`}>
-                    <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center justify-center w-7 h-7 rounded-full bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 text-sm font-bold">
-                          {idx + 1}
-                        </div>
-                        <div>
-                          <div className="font-semibold text-sm leading-tight">{unit.propertyName}</div>
-                          <div className="text-xs text-muted-foreground">{unit.unitLabel}</div>
-                        </div>
-                      </div>
-                      <Badge variant="default">
-                        <Star className="h-3 w-3 mr-1" />
-                        Best Pick
-                      </Badge>
-                    </div>
+      {selectedProp && pricing && !results && !loading && (
+        <div className="mt-4 p-3 rounded-md bg-muted/50">
+          <p className="text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">{selectedProp.propertyName}</span> in {selectedProp.complexName} needs:
+          </p>
+          <div className="flex items-center gap-3 mt-2 flex-wrap">
+            {pricing.units.map((u, i) => (
+              <Badge key={i} variant="secondary">
+                <BedDouble className="h-3 w-3 mr-1" />
+                {u.bedrooms}BR - {u.unitLabel}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
 
-                    <div className="space-y-2 text-sm">
-                      <div className="flex items-center gap-2 text-muted-foreground">
-                        <MapPin className="h-3 w-3" />
-                        <span>{unit.community}</span>
-                      </div>
-                      <div className="flex items-center gap-2 text-muted-foreground">
-                        <BedDouble className="h-3 w-3" />
-                        <span>{unit.bedrooms} bedrooms</span>
-                      </div>
-                    </div>
+      {loading && (
+        <div className="mt-6 flex flex-col items-center py-8 gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">Searching Airbnb for available units...</p>
+          <p className="text-xs text-muted-foreground">This may take a few seconds</p>
+        </div>
+      )}
 
-                    <div className="mt-3 pt-3 border-t space-y-1">
-                      <div className="flex justify-between gap-2 text-sm">
-                        <span className="text-muted-foreground">Buy-in cost ({unit.nights} nights):</span>
-                        <span className="font-medium">{formatCurrency(unit.totalBuyInCost)}</span>
-                      </div>
-                      <div className="flex justify-between gap-2 text-sm">
-                        <span className="text-muted-foreground">Expected revenue:</span>
-                        <span className="font-medium">{formatCurrency(unit.totalSellRevenue)}</span>
-                      </div>
-                      <div className="flex justify-between gap-2 text-sm">
-                        <span className="text-muted-foreground">Per night rate:</span>
-                        <span className="font-medium">{formatCurrency(unit.buyInPerNight)}/night</span>
-                      </div>
-                      <div className="flex justify-between gap-2 text-sm font-semibold pt-1 border-t">
-                        <span className="text-green-600 dark:text-green-400">Estimated profit:</span>
-                        <span className="text-green-600 dark:text-green-400">{formatCurrency(unit.totalProfit)}</span>
-                      </div>
-                    </div>
-                  </Card>
-                ))}
-              </div>
+      {results !== null && !loading && (
+        <div className="mt-6 space-y-6">
+          <div className="flex items-center gap-2 flex-wrap">
+            <MapPin className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">
+              Searching near <span className="font-medium text-foreground">{results.community}</span> for {formatDate(results.checkIn)} - {formatDate(results.checkOut)}
+            </span>
+          </div>
 
-              {otherAvailable.length > 0 && (
-                <details className="mt-4">
-                  <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="button-show-all-available">
-                    View all {otherAvailable.length + topTwo.length} available units ranked by profit
-                  </summary>
-                  <div className="mt-3 overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Rank</TableHead>
-                          <TableHead>Property</TableHead>
-                          <TableHead>Unit</TableHead>
-                          <TableHead>Community</TableHead>
-                          <TableHead className="text-right">Buy-In Cost</TableHead>
-                          <TableHead className="text-right">Revenue</TableHead>
-                          <TableHead className="text-right">Profit</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {[...topTwo, ...otherAvailable].map((unit, idx) => (
-                          <TableRow key={`${unit.propertyId}-${unit.unitId}`} data-testid={`row-ranked-${idx}`}>
-                            <TableCell>
-                              <span className={`font-medium ${idx < 2 ? "text-yellow-600 dark:text-yellow-400" : ""}`}>
-                                #{idx + 1}
-                              </span>
-                            </TableCell>
-                            <TableCell className="font-medium max-w-[180px] truncate">{unit.propertyName}</TableCell>
-                            <TableCell>{unit.unitLabel} ({unit.bedrooms}BR)</TableCell>
-                            <TableCell>{unit.community}</TableCell>
-                            <TableCell className="text-right">{formatCurrency(unit.totalBuyInCost)}</TableCell>
-                            <TableCell className="text-right">{formatCurrency(unit.totalSellRevenue)}</TableCell>
-                            <TableCell className="text-right font-medium text-green-600 dark:text-green-400">
-                              {formatCurrency(unit.totalProfit)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
+          {results.unitsNeeded.map(need => {
+            const key = `${need.bedrooms}BR`;
+            const searchData = results.searches[key];
+            if (!searchData) return null;
+
+            return (
+              <div key={key} className="space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <BedDouble className="h-4 w-4" />
+                  <h3 className="font-semibold">
+                    {need.count}x {need.bedrooms}-Bedroom Unit{need.count > 1 ? "s" : ""} Needed
+                  </h3>
+                  {searchData.error && (
+                    <Badge variant="destructive">Search Error</Badge>
+                  )}
+                  {!searchData.error && (
+                    <Badge variant="secondary">{searchData.totalResults} found</Badge>
+                  )}
+                </div>
+
+                {searchData.error ? (
+                  <div className="p-4 rounded-md bg-destructive/10 text-sm">
+                    <AlertCircle className="h-4 w-4 inline mr-2" />
+                    {searchData.error}
                   </div>
-                </details>
-              )}
+                ) : searchData.properties.length === 0 ? (
+                  <div className="text-center py-6">
+                    <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+                    <p className="text-muted-foreground">No {need.bedrooms}-bedroom listings found for these dates.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {searchData.properties.slice(0, need.count).map((prop, idx) => (
+                      <Card key={prop.id} className="p-4" data-testid={`card-airbnb-top-${key}-${idx}`}>
+                        <div className="flex gap-4">
+                          {prop.images.length > 0 && (
+                            <div className="flex-shrink-0 w-24 h-24 rounded-md overflow-hidden">
+                              <img
+                                src={prop.images[0]}
+                                alt={prop.title}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-start justify-between gap-2 flex-wrap">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <div className="flex items-center justify-center w-6 h-6 rounded-full bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 text-xs font-bold flex-shrink-0">
+                                    {idx + 1}
+                                  </div>
+                                  <h4 className="font-semibold text-sm truncate">{prop.title}</h4>
+                                </div>
+                                <p className="text-xs text-muted-foreground mt-0.5 truncate">{prop.description}</p>
+                              </div>
+                              {idx === 0 && (
+                                <Badge variant="default">
+                                  <Star className="h-3 w-3 mr-1" />
+                                  Best Price
+                                </Badge>
+                              )}
+                            </div>
 
-              {unavailable.length > 0 && (
-                <p className="text-xs text-muted-foreground mt-2">
-                  {unavailable.length} unit{unavailable.length !== 1 ? "s" : ""} unavailable for these dates (already booked)
-                </p>
-              )}
-            </>
-          )}
+                            <div className="flex items-center gap-4 mt-2 flex-wrap">
+                              {prop.price && (
+                                <span className="font-semibold text-green-600 dark:text-green-400" data-testid={`text-price-${key}-${idx}`}>
+                                  {prop.price.total_price}
+                                  <span className="text-xs font-normal text-muted-foreground ml-1">
+                                    {prop.price.qualifier}
+                                  </span>
+                                </span>
+                              )}
+                              {prop.rating && (
+                                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                                  <Star className="h-3 w-3 fill-yellow-400 text-yellow-400" />
+                                  {prop.rating} ({prop.reviews} reviews)
+                                </span>
+                              )}
+                              {prop.accommodations && (
+                                <span className="text-xs text-muted-foreground">
+                                  {prop.accommodations.join(" · ")}
+                                </span>
+                              )}
+                            </div>
+
+                            {prop.badges && prop.badges.length > 0 && (
+                              <div className="flex gap-1 mt-1.5 flex-wrap">
+                                {prop.badges.map((badge, bi) => (
+                                  <Badge key={bi} variant="secondary" className="text-xs">
+                                    {badge}
+                                  </Badge>
+                                ))}
+                              </div>
+                            )}
+
+                            <div className="flex gap-2 mt-3 flex-wrap">
+                              <a href={prop.bookingLink || prop.link} target="_blank" rel="noopener noreferrer">
+                                <Button size="sm" data-testid={`button-book-${key}-${idx}`}>
+                                  <ExternalLink className="h-3 w-3 mr-1" />
+                                  Book on Airbnb
+                                </Button>
+                              </a>
+                              <a href={prop.link} target="_blank" rel="noopener noreferrer">
+                                <Button size="sm" variant="outline" data-testid={`button-view-${key}-${idx}`}>
+                                  View Listing
+                                </Button>
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+
+                    {searchData.properties.length > need.count && (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid={`button-show-more-${key}`}>
+                          View {searchData.properties.length - need.count} more {need.bedrooms}BR options
+                        </summary>
+                        <div className="mt-3 space-y-3">
+                          {searchData.properties.slice(need.count).map((prop, idx) => (
+                            <Card key={prop.id} className="p-3" data-testid={`card-airbnb-extra-${key}-${idx}`}>
+                              <div className="flex gap-3">
+                                {prop.images.length > 0 && (
+                                  <div className="flex-shrink-0 w-16 h-16 rounded-md overflow-hidden">
+                                    <img src={prop.images[0]} alt={prop.title} className="w-full h-full object-cover" />
+                                  </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-medium text-sm truncate">{prop.title}</h4>
+                                  <div className="flex items-center gap-3 mt-1 flex-wrap">
+                                    {prop.price && (
+                                      <span className="text-sm font-semibold">
+                                        {prop.price.total_price}
+                                        <span className="text-xs font-normal text-muted-foreground ml-1">{prop.price.qualifier}</span>
+                                      </span>
+                                    )}
+                                    {prop.rating && (
+                                      <span className="text-xs text-muted-foreground flex items-center gap-1">
+                                        <Star className="h-3 w-3 fill-yellow-400 text-yellow-400" />
+                                        {prop.rating}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex gap-2 mt-2 flex-wrap">
+                                    <a href={prop.bookingLink || prop.link} target="_blank" rel="noopener noreferrer">
+                                      <Button size="sm">
+                                        <ExternalLink className="h-3 w-3 mr-1" />
+                                        Book on Airbnb
+                                      </Button>
+                                    </a>
+                                  </div>
+                                </div>
+                              </div>
+                            </Card>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </Card>
