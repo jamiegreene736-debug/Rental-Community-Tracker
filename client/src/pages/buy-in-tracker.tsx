@@ -56,7 +56,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { BuyIn, LodgifyBooking } from "@shared/schema";
-import { getPropertyPricing, getAllUnitPricings, type PropertyPricing, type UnitPricing } from "@/data/pricing-data";
+import { getPropertyPricing, getAllUnitPricings, calculateStaySellRate, type PropertyPricing, type UnitPricing } from "@/data/pricing-data";
 import { getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
 type ReportSummary = {
@@ -468,7 +468,26 @@ function BestBuyInFinder() {
         </div>
       )}
 
-      {results !== null && !loading && (
+      {results !== null && !loading && (() => {
+        const stayRates = selectedPropertyId ? calculateStaySellRate(parseInt(selectedPropertyId), results.checkIn, results.checkOut) : null;
+
+        const bestBuyInCost = results.unitsNeeded.reduce((total, need) => {
+          const key = `${need.bedrooms}BR`;
+          const searchData = results.searches[key];
+          if (!searchData || searchData.error) return total;
+          const topPicks = searchData.properties.slice(0, need.count);
+          return total + topPicks.reduce((sum, p) => sum + (p.price?.extracted_total_price ?? 0), 0);
+        }, 0);
+
+        const hasAllPrices = results.unitsNeeded.every(need => {
+          const key = `${need.bedrooms}BR`;
+          const searchData = results.searches[key];
+          if (!searchData || searchData.error) return false;
+          const topPicks = searchData.properties.slice(0, need.count);
+          return topPicks.length === need.count && topPicks.every(p => p.price?.extracted_total_price);
+        });
+
+        return (
         <div className="mt-6 space-y-6">
           <div className="flex items-center gap-2 flex-wrap">
             <MapPin className="h-4 w-4 text-muted-foreground" />
@@ -476,6 +495,40 @@ function BestBuyInFinder() {
               Searching near <span className="font-medium text-foreground">{results.community}</span> for {formatDate(results.checkIn)} - {formatDate(results.checkOut)}
             </span>
           </div>
+
+          {stayRates && hasAllPrices && bestBuyInCost > 0 && (
+            <Card className="p-4 border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/30" data-testid="card-profitability-summary">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <DollarSign className="h-5 w-5 text-green-600 dark:text-green-400" />
+                <h3 className="font-semibold">Profitability Summary</h3>
+                <Badge variant="secondary" className="text-xs">{stayRates.totalNights} nights</Badge>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div data-testid="text-sell-rate">
+                  <p className="text-xs text-muted-foreground mb-0.5">Guest Pays You (Sell Rate)</p>
+                  <p className="text-lg font-bold">{formatCurrency(stayRates.totalSellRate)}</p>
+                  <p className="text-xs text-muted-foreground">{formatCurrency(Math.round(stayRates.totalSellRate / stayRates.totalNights))}/night all units combined</p>
+                </div>
+                <div data-testid="text-buyin-cost">
+                  <p className="text-xs text-muted-foreground mb-0.5">Best Buy-In Cost (Airbnb)</p>
+                  <p className="text-lg font-bold">{formatCurrency(bestBuyInCost)}</p>
+                  <p className="text-xs text-muted-foreground">Cheapest {results.unitsNeeded.reduce((s, n) => s + n.count, 0)} unit{results.unitsNeeded.reduce((s, n) => s + n.count, 0) > 1 ? "s" : ""} combined</p>
+                </div>
+                <div data-testid="text-profit">
+                  <p className="text-xs text-muted-foreground mb-0.5">Your Profit</p>
+                  <p className={`text-lg font-bold ${stayRates.totalSellRate - bestBuyInCost >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                    {formatCurrency(stayRates.totalSellRate - bestBuyInCost)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {bestBuyInCost > 0 && stayRates.totalSellRate > 0 ? `${Math.round(((stayRates.totalSellRate - bestBuyInCost) / stayRates.totalSellRate) * 100)}% margin` : ""}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">
+                Sell rate based on your seasonal pricing. The 15% guest surcharge covers Booking.com fees and is not included above.
+              </p>
+            </Card>
+          )}
 
           {results.unitsNeeded.map(need => {
             const key = `${need.bedrooms}BR`;
@@ -641,7 +694,8 @@ function BestBuyInFinder() {
             );
           })}
         </div>
-      )}
+        );
+      })()}
     </Card>
   );
 }

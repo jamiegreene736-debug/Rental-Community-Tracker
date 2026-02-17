@@ -373,4 +373,40 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
   return results;
 }
 
+export function calculateStaySellRate(propertyId: number, checkIn: string, checkOut: string): { totalSellRate: number; totalNights: number; nightlyBreakdown: { date: string; sellRate: number }[] } | null {
+  const config = PROPERTY_UNIT_CONFIGS[propertyId];
+  if (!config) return null;
+
+  const start = new Date(checkIn + "T12:00:00");
+  const end = new Date(checkOut + "T12:00:00");
+  const nightlyBreakdown: { date: string; sellRate: number }[] = [];
+  let totalSellRate = 0;
+  let totalNights = 0;
+
+  const current = new Date(start);
+  while (current < end) {
+    const monthIndex = current.getMonth();
+    const season = MONTH_SEASONS[monthIndex];
+    const multiplier = SEASON_MULTIPLIERS[season];
+
+    let nightlySellRate = 0;
+    for (const unit of config.units) {
+      const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
+      const buyInRate = Math.round(baseBuyIn * multiplier);
+      const sellRate = Math.round(buyInRate * MARKUP);
+      nightlySellRate += sellRate;
+    }
+
+    nightlyBreakdown.push({
+      date: current.toISOString().split("T")[0],
+      sellRate: nightlySellRate,
+    });
+    totalSellRate += nightlySellRate;
+    totalNights++;
+    current.setDate(current.getDate() + 1);
+  }
+
+  return { totalSellRate, totalNights, nightlyBreakdown };
+}
+
 export { MARKUP, SEASON_MULTIPLIERS, BUY_IN_RATES };
