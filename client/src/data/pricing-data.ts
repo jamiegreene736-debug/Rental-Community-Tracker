@@ -86,7 +86,7 @@ const BUY_IN_RATES: Record<string, Record<number, number>> = {
     4: 625,
     5: 800,
   },
-  "Kiahuna Plantation": {
+  "Pili Mai": {
     2: 600,
     3: 750,
   },
@@ -263,14 +263,14 @@ const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConf
     ],
   },
   32: {
-    community: "Kiahuna Plantation",
+    community: "Pili Mai",
     units: [
       { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
       { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 },
     ],
   },
   33: {
-    community: "Kiahuna Plantation",
+    community: "Pili Mai",
     units: [
       { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
       { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 },

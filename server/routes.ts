@@ -416,8 +416,8 @@ export async function registerRoutes(
     28: { community: "Poipu Brenneckes", units: [{ bedrooms: 4 }, { bedrooms: 3 }] },
     29: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 4 }] },
     31: { community: "Poipu Brenneckes", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
-    32: { community: "Kiahuna Plantation", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-    33: { community: "Kiahuna Plantation", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+    33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
   };
 
@@ -429,7 +429,7 @@ export async function registerRoutes(
     "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
-    "Kiahuna Plantation": "Kiahuna Plantation Resort, Poipu, Kauai, Hawaii",
+    "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
   };
 
   app.get("/api/airbnb/search", async (req, res) => {

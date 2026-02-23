@@ -528,7 +528,7 @@ const properties: Property[] = [
   {
     id: 32,
     name: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
-    community: "Kiahuna Plantation",
+    community: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 5,
@@ -543,7 +543,7 @@ const properties: Property[] = [
   {
     id: 33,
     name: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
-    community: "Kiahuna Plantation",
+    community: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 6,
@@ -737,7 +737,7 @@ export default function Home() {
   }, [lodgifyData, multiUnitProps]);
 
   const communityVariant = (community: string): "default" | "secondary" | "outline" => {
-    const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Kiahuna Plantation"];
+    const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Pili Mai"];
     if (poipuCommunities.includes(community)) return "default";
     return "secondary";
   };

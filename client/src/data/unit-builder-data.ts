@@ -1747,17 +1747,17 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
   {
     propertyId: 32,
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
-    complexName: "Kiahuna Plantation",
+    complexName: "Pili Mai",
     address: "2253 Poipu Rd, Unit A, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Sleeps 12 - 5BR Beachfront Garden Condos with AC - Poipu Beach, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
-    combinedDescription: `This listing is comprised of two condos within Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities, set among 35 acres of lush tropical gardens originally landscaped for Hawaiian royalty. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and a garden walk to Poipu Beach.
+    bookingTitle: "Pili Mai at Poipu - Sleeps 12 - 5BR Townhomes with AC - Poipu Beach, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Pili Mai at Poipu. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and easy access to Poipu Beach.
 
-Building 38 is a beachfront 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, a tropical garden setting, a full kitchen, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Building 38 is a 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a tropical garden setting, a full kitchen, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
 
-Building 2 is a garden view 2-bedroom, 2-bathroom condo (~1,100 sq ft) with AC, a full kitchen, and a lanai overlooking the tropical gardens. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa.
+Building 2 is a garden view 2-bedroom, 2-bathroom townhome (~1,100 sq ft) with AC, a full kitchen, and a lanai overlooking the tropical gardens. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa.
 
-Walk through the resort's spectacular gardens directly to Poipu Beach, consistently rated one of Hawaii's best. Nearby attractions include Spouting Horn, the National Tropical Botanical Garden, and the scenic Maha'ulepu Heritage Trail.`,
+Walk to Poipu Beach, consistently rated one of Hawaii's best. Nearby attractions include Spouting Horn, the National Tropical Botanical Garden, and the scenic Maha'ulepu Heritage Trail.`,
     hasPhotos: true,
     communityPhotos: COMMUNITY_KIAHUNA,
     communityPhotoFolder: "community-kiahuna",
@@ -1769,14 +1769,14 @@ Walk through the resort's spectacular gardens directly to Poipu Beach, consisten
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Beachfront 3BR/3BA condo at Kiahuna Plantation with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms plus queen sleeper sofa. Access to resort pool and grounds.",
-        longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, one of Poipu Beach's most beloved beachfront resort communities.
+        shortDescription: "3BR/3BA townhome at Pili Mai at Poipu with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms plus queen sleeper sofa. Access to resort pool and grounds.",
+        longDescription: `Welcome to this 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
-Set within 35 acres of lush tropical gardens originally designed for Hawaiian royalty, this spacious condo offers a perfect blend of historic charm and modern comfort. Air conditioning throughout ensures comfort, complemented by ceiling fans and tropical breezes.
+This spacious townhome offers modern comfort with air conditioning throughout, complemented by ceiling fans and tropical breezes. The tropical garden setting creates a relaxing atmosphere.
 
 The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers twin beds - each with its own bathroom. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
 
-Kiahuna Plantation's grounds are a destination themselves, with manicured gardens, meandering paths, and the resort pool. But the real treasure is the location: walk through the gardens and you're on Poipu Beach, consistently rated one of Hawaii's best.
+The resort grounds feature manicured gardens, meandering paths, and the resort pool. Walk to Poipu Beach, consistently rated one of Hawaii's best.
 
 The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail.`,
         photoFolder: "kiahuna-134",
@@ -1789,14 +1789,14 @@ The on-site restaurant, nearby shops, and Poipu's dining scene are all convenien
         bathrooms: "2",
         sqft: "~1,100",
         maxGuests: 6,
-        shortDescription: "Garden view 2BR/2BA condo at Kiahuna Plantation. AC, full kitchen, lanai, and direct access to Poipu Beach. King master and queen second bedroom plus queen sleeper sofa. Resort pool and tropical garden paths.",
-        longDescription: `Welcome to this 2-bedroom, 2-bathroom condominium at Kiahuna Plantation in Poipu, set among 35 acres of royal tropical gardens.
+        shortDescription: "Garden view 2BR/2BA townhome at Pili Mai at Poipu. AC, full kitchen, lanai, and easy access to Poipu Beach. King master and queen second bedroom plus queen sleeper sofa. Resort pool and tropical garden paths.",
+        longDescription: `Welcome to this 2-bedroom, 2-bathroom townhome at Pili Mai at Poipu, set among beautiful tropical gardens.
 
 This comfortable unit features air conditioning, a full kitchen with modern appliances, and a cozy living area that opens to a lanai overlooking the tropical gardens. The king-bedded master suite has a private en-suite bath, and the queen-bedded second bedroom is adjacent to the second full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 All linens, beach towels, WiFi, and basic kitchen supplies are provided. The resort pool and garden walking paths offer relaxation between beach adventures.
 
-Step through the gardens to reach Poipu Beach for swimming, snorkeling, and sunbathing. Kiahuna's beachfront location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
+Walk to Poipu Beach for swimming, snorkeling, and sunbathing. Poipu's location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
 
 Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Poipu's restaurants and shops are just a short walk away.`,
         photoFolder: "kiahuna-101",
@@ -1807,17 +1807,17 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
   {
     propertyId: 33,
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
-    complexName: "Kiahuna Plantation",
+    complexName: "Pili Mai",
     address: "2253 Poipu Rd, Unit B, Koloa, HI 96756",
-    bookingTitle: "Kiahuna Plantation - Sleeps 12 - 6BR Beachfront Garden Condos with AC - Poipu Beach, Kauai",
-    sampleDisclaimer: "Photos shown are representative samples of units within Kiahuna Plantation. Individual units may vary in decor, furnishings, and layout.",
-    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within Kiahuna Plantation, Poipu Beach's iconic beachfront resort set among 35 acres of royal tropical gardens. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and direct garden-path access to Poipu Beach.
+    bookingTitle: "Pili Mai at Poipu - Sleeps 12 - 6BR Townhomes with AC - Poipu Beach, Kauai",
+    sampleDisclaimer: "Photos shown are representative samples of units within Pili Mai at Poipu. Individual units may vary in decor, furnishings, and layout.",
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
 
-Building 10 is a tropical 3-bedroom, 3-bathroom condo (~1,500 sq ft) with AC, a full kitchen, covered lanai with garden views, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Building 10 is a tropical 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a full kitchen, covered lanai with garden views, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
 
-Building 26 is a stylish 3-bedroom, 3-bathroom condo (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Building 26 is a stylish 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
 
-Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at Koloa Landing.`,
+Walk to Poipu Beach from the resort. Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at Koloa Landing.`,
     hasPhotos: true,
     communityPhotos: COMMUNITY_KIAHUNA,
     communityPhotoFolder: "community-kiahuna",
@@ -1829,8 +1829,8 @@ Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Tropical 3BR/3BA condo in Kiahuna Plantation with AC, full kitchen, lanai with garden views, and beachfront access. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to Poipu Beach.",
-        longDescription: `Welcome to this 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, nestled within the resort's lush 35-acre tropical gardens on Poipu Beach.
+        shortDescription: "Tropical 3BR/3BA townhome at Pili Mai at Poipu with AC, full kitchen, lanai with garden views, and easy access to Poipu Beach. King master, queen and twin bedrooms plus queen sleeper sofa.",
+        longDescription: `Welcome to this 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
 This well-appointed unit features AC throughout, an open floor plan with the living room flowing into the fully equipped kitchen and dining area. The covered lanai provides a peaceful outdoor space surrounded by tropical plants and the resort's beautiful grounds.
 
@@ -1838,7 +1838,7 @@ Three bedrooms each have their own bathroom: the king-bedded master suite, queen
 
 The kitchen is fully stocked for home cooking, and the dining area accommodates the whole group. WiFi, cable TV, washer/dryer access, and all linens are provided.
 
-Kiahuna Plantation's beachfront location means Poipu Beach is a garden walk away. The resort pool, restaurant, and gorgeously maintained grounds make this an exceptional Kauai vacation base.
+Walk to Poipu Beach from the resort. The resort pool and beautifully maintained grounds make this an exceptional Kauai vacation base.
 
 Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at nearby Koloa Landing.`,
         photoFolder: "kiahuna-134",
@@ -1851,16 +1851,16 @@ Explore the south shore's attractions including Spouting Horn, the National Trop
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Stylish 3BR/3BA condo at Kiahuna Plantation. AC, modern kitchen, comfortable bedrooms with private baths, queen sleeper sofa, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
-        longDescription: `Welcome to this stylish 3-bedroom, 3-bathroom condominium at Kiahuna Plantation, located in the heart of Poipu's most iconic beachfront resort.
+        shortDescription: "Stylish 3BR/3BA townhome at Pili Mai at Poipu. AC, modern kitchen, comfortable bedrooms with private baths, queen sleeper sofa, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
+        longDescription: `Welcome to this stylish 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
-Updated with a modern aesthetic while honoring the property's historic Hawaiian heritage, this condo offers comfortable living with AC throughout. The open layout connects the living, dining, and kitchen areas for easy entertaining.
+Updated with a modern aesthetic, this townhome offers comfortable living with AC throughout. The open layout connects the living, dining, and kitchen areas for easy entertaining.
 
 Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen and twin-bedded rooms accommodate additional guests comfortably. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Ceiling fans supplement the AC.
 
 The modern kitchen has quality appliances, ample counter space, and all the essentials for preparing meals. The lanai overlooks the resort's spectacular gardens.
 
-Walk to Poipu Beach through the beautiful resort grounds. The Kiahuna Plantation's 35 acres of tropical gardens, originally landscaped for Hawaiian royalty, create a serene environment unlike any other resort on Kauai.
+Walk to Poipu Beach from the resort. The tropical gardens and beautifully maintained grounds create a serene environment.
 
 Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast.`,
         photoFolder: "kiahuna-101",
