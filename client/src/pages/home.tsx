@@ -600,6 +600,21 @@ const properties: Property[] = [
     unitDetails: "Single house near Disney World",
     url: "",
   },
+  {
+    id: 37,
+    name: "3 Bedroom Windsor Hills Condo",
+    community: "Windsor Hills",
+    location: "Kissimmee",
+    island: "Florida",
+    bedrooms: 3,
+    guests: 8,
+    bathrooms: 2,
+    lowPrice: 94,
+    highPrice: 156,
+    multiUnit: false,
+    unitDetails: "Resort condo with pool, lazy river, near Disney",
+    url: "",
+  },
 ];
 
 type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island";

@@ -2032,6 +2032,44 @@ Located in the Southern Dunes community near the Southern Dunes Golf Course, thi
       },
     ],
   },
+  {
+    propertyId: 37,
+    propertyName: "3 Bedroom Windsor Hills Condo",
+    complexName: "Windsor Hills",
+    address: "2778 Almaton Loop, Four Corners, FL 34747",
+    bookingTitle: "3 Bedroom Windsor Hills Condo - Resort Pool - Near Disney - Kissimmee, Florida",
+    sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `Welcome to this spacious 3-bedroom, 2-bathroom condo in the Windsor Hills resort community near Kissimmee, Florida. Located just minutes from Walt Disney World, this resort-style community offers a clubhouse, resort pool, lazy river, water slides, movie theater, game room, and fitness center.
+
+The condo features a fully equipped kitchen with modern appliances, comfortable living and dining areas, air conditioning, WiFi, and an in-unit washer/dryer. Three bedrooms and two bathrooms provide plenty of space for families or small groups.
+
+Windsor Hills is one of the most popular vacation rental communities near Disney World, offering resort amenities rivaling the on-site hotels at a fraction of the price. Universal Studios, SeaWorld, LEGOLAND, and International Drive dining and shopping are all within a short drive.`,
+    hasPhotos: false,
+    communityPhotos: [],
+    communityPhotoFolder: "",
+    units: [
+      {
+        id: "wh-main",
+        unitNumber: "Main",
+        bedrooms: 3,
+        bathrooms: "2",
+        sqft: "~1,200",
+        maxGuests: 8,
+        shortDescription: "3-bedroom, 2-bath resort condo in Windsor Hills. AC, WiFi, full kitchen, washer/dryer. Resort pool, lazy river, water slides. Minutes from Disney World.",
+        longDescription: `Welcome to this comfortable 3-bedroom, 2-bathroom condo in the Windsor Hills resort community near Kissimmee, Florida.
+
+The condo offers approximately 1,200 sq ft of living space with a well-equipped kitchen, spacious living and dining areas, and air conditioning throughout. WiFi and an in-unit washer/dryer are included for your convenience.
+
+Three bedrooms provide comfortable sleeping arrangements for up to 8 guests. The home is fully furnished and stocked with linens, towels, and kitchen essentials.
+
+Windsor Hills resort amenities include a large clubhouse pool, lazy river, water slides, a movie theater, game room, fitness center, and playground. The resort is gated and well-maintained.
+
+Located just minutes from Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND, this condo is perfectly positioned for exploring Central Florida's world-famous attractions.`,
+        photoFolder: "",
+        photos: [],
+      },
+    ],
+  },
 ];
 
 export function getUnitBuilderByPropertyId(propertyId: number): PropertyUnitBuilder | undefined {

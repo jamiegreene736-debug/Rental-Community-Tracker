@@ -93,6 +93,9 @@ const BUY_IN_RATES: Record<string, Record<number, number>> = {
   "Southern Dunes": {
     3: 125,
   },
+  "Windsor Hills": {
+    3: 125,
+  },
 };
 
 function getBuyInRate(community: string, bedrooms: number): number {
@@ -297,6 +300,12 @@ const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConf
     community: "Southern Dunes",
     units: [
       { unitId: "main", unitLabel: "Main House", bedrooms: 3 },
+    ],
+  },
+  37: {
+    community: "Windsor Hills",
+    units: [
+      { unitId: "main", unitLabel: "Main Condo", bedrooms: 3 },
     ],
   },
 };
