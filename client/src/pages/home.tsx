@@ -585,6 +585,21 @@ const properties: Property[] = [
     unitDetails: "Single estate with pool and guest quarters",
     url: "https://thevacationrentalexperts.com/en/incredible-heeia-bay-pool-home-whot-tub-for-16",
   },
+  {
+    id: 36,
+    name: "3 Bedroom Southern Dunes House",
+    community: "Southern Dunes",
+    location: "Haines City",
+    island: "Florida",
+    bedrooms: 3,
+    guests: 8,
+    bathrooms: 2,
+    lowPrice: 94,
+    highPrice: 156,
+    multiUnit: false,
+    unitDetails: "Single house near Disney World",
+    url: "",
+  },
 ];
 
 type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island";

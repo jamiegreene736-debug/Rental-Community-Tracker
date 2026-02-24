@@ -419,6 +419,7 @@ export async function registerRoutes(
     32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    36: { community: "Southern Dunes", units: [{ bedrooms: 3 }] },
   };
 
   const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
@@ -430,6 +431,7 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
+    "Southern Dunes": "Southern Dunes, Haines City, Florida",
   };
 
   app.get("/api/airbnb/search", async (req, res) => {
@@ -546,6 +548,7 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Hawaii",
     "Poipu Brenneckes": "Poipu Beach, Koloa, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Hawaii",
+    "Southern Dunes": "Southern Dunes, Haines City, Florida",
   };
 
   const COMMUNITY_SP_SLUGS: Record<string, string> = {

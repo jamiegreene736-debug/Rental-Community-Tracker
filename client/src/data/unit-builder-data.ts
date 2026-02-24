@@ -1996,6 +1996,42 @@ Kauai's famous south shore beaches are a leisurely 10-minute walk from the compl
       },
     ],
   },
+  {
+    propertyId: 36,
+    propertyName: "3 Bedroom Southern Dunes House",
+    complexName: "Southern Dunes",
+    address: "2041 Hemingway Ave, Haines City, FL 33844",
+    bookingTitle: "3 Bedroom Southern Dunes House - Near Disney - Haines City, Florida",
+    sampleDisclaimer: DEFAULT_DISCLAIMER,
+    combinedDescription: `Welcome to this charming 3-bedroom, 2-bathroom vacation home in the Southern Dunes community of Haines City, Florida. Located just minutes from Walt Disney World, Universal Studios, and other Central Florida attractions, this home is the perfect base for your Florida vacation.
+
+The house features a fully equipped kitchen, comfortable living areas, air conditioning, WiFi, and a washing machine. With 3 bedrooms and 2 bathrooms, there's plenty of space for families or small groups.
+
+Southern Dunes is a well-maintained residential community near the Southern Dunes Golf Course, offering a peaceful retreat after exciting days at the theme parks. Local dining, shopping, and entertainment are all within easy reach.`,
+    hasPhotos: false,
+    communityPhotos: [],
+    communityPhotoFolder: "",
+    units: [
+      {
+        id: "sd-main",
+        unitNumber: "Main",
+        bedrooms: 3,
+        bathrooms: "2",
+        sqft: "~1,500",
+        maxGuests: 8,
+        shortDescription: "3-bedroom, 2-bath vacation home in Southern Dunes community. AC, WiFi, full kitchen, washer. Near Disney World and Central Florida attractions.",
+        longDescription: `Welcome to this comfortable 3-bedroom, 2-bathroom vacation home in the Southern Dunes community of Haines City, Florida.
+
+The home offers approximately 1,500 sq ft of living space with a well-equipped kitchen, spacious living and dining areas, and air conditioning throughout. WiFi and a washing machine are included for your convenience.
+
+Three bedrooms provide comfortable sleeping arrangements for up to 8 guests. The home is fully furnished and stocked with linens, towels, and kitchen essentials.
+
+Located in the Southern Dunes community near the Southern Dunes Golf Course, this home is perfectly positioned for exploring Central Florida. Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND are all within a short drive.`,
+        photoFolder: "",
+        photos: [],
+      },
+    ],
+  },
 ];
 
 export function getUnitBuilderByPropertyId(propertyId: number): PropertyUnitBuilder | undefined {
