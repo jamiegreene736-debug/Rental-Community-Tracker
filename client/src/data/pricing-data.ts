@@ -94,7 +94,7 @@ const BUY_IN_RATES: Record<string, Record<number, number>> = {
     3: 125,
   },
   "Windsor Hills": {
-    3: 125,
+    3: 100,
   },
 };
 
