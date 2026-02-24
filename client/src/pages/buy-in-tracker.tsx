@@ -368,7 +368,7 @@ type OtherPlatformResults = {
 
 const PLATFORM_LABELS: Record<string, { name: string; color: string; bookLabel: string }> = {
   airbnb: { name: "Airbnb", color: "text-rose-600 dark:text-rose-400", bookLabel: "Book on Airbnb" },
-  vrbo: { name: "VRBO", color: "text-blue-600 dark:text-blue-400", bookLabel: "View on VRBO" },
+  vrbo: { name: "VRBO & Others", color: "text-blue-600 dark:text-blue-400", bookLabel: "View Listing" },
   "suite-paradise": { name: "Suite Paradise", color: "text-emerald-600 dark:text-emerald-400", bookLabel: "View on Suite Paradise" },
 };
 
@@ -770,7 +770,9 @@ function BestBuyInFinder() {
 
           {activePlatform !== "airbnb" && (
             <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
-              {activePlatform === "vrbo" ? "VRBO" : "Suite Paradise"} results are sourced via Google search. Prices shown (if available) are from listing snippets and may not reflect exact availability for your dates. Click through to verify pricing and availability on the platform.
+              {activePlatform === "vrbo"
+                ? "Results from VRBO, Booking.com, and other vacation rental platforms via Google. Prices shown are per-night rates multiplied by your stay length — actual totals may vary with cleaning fees and taxes."
+                : "Suite Paradise results from Google vacation rentals. Prices shown are per-night rates multiplied by your stay length — actual totals may vary. Book direct with Suite Paradise to save up to 15% vs third-party sites."}
             </div>
           )}
 
@@ -881,10 +883,19 @@ function BestBuyInFinder() {
                                       <span className="text-xs text-muted-foreground ml-1">listed</span>
                                     </>
                                   ) : (
-                                    <span className="font-semibold text-green-600 dark:text-green-400">
-                                      {prop.price.total_price}
-                                      <span className="text-xs font-normal text-muted-foreground ml-1">from snippet</span>
-                                    </span>
+                                    <>
+                                      <span className="font-semibold text-green-600 dark:text-green-400">
+                                        {formatCurrency(prop.price.extracted_total_price ?? 0)}
+                                      </span>
+                                      <span className="text-xs font-normal text-muted-foreground ml-1">
+                                        est. total
+                                      </span>
+                                      {(prop.price as any).price_per_night && (
+                                        <span className="text-xs text-muted-foreground ml-2">
+                                          ({formatCurrency((prop.price as any).price_per_night)}/night)
+                                        </span>
+                                      )}
+                                    </>
                                   )}
                                 </span>
                               )}
