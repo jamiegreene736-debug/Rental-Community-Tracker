@@ -768,11 +768,14 @@ function BestBuyInFinder() {
             </Button>
           </div>
 
-          {activePlatform !== "airbnb" && (
+          {activePlatform === "vrbo" && (
             <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
-              {activePlatform === "vrbo"
-                ? "Results from VRBO, Booking.com, and other vacation rental platforms via Google. Prices shown are per-night rates multiplied by your stay length — actual totals may vary with cleaning fees and taxes."
-                : "Suite Paradise results from Google vacation rentals. Prices shown are per-night rates multiplied by your stay length — actual totals may vary. Book direct with Suite Paradise to save up to 15% vs third-party sites."}
+              Vacation rental listings from Google's aggregated data (VRBO, Booking.com, and other platforms). Prices are per-night estimates multiplied by your stay length — actual totals may vary with cleaning fees and taxes. Use the direct VRBO links to see exact pricing.
+            </div>
+          )}
+          {activePlatform === "suite-paradise" && (
+            <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
+              Suite Paradise listings found in Google's vacation rental data, plus direct search links to browse their full inventory. Book direct with Suite Paradise to save up to 15% vs third-party sites.
             </div>
           )}
 
@@ -811,8 +814,31 @@ function BestBuyInFinder() {
                   </div>
                 ) : searchData.properties.length === 0 ? (
                   <div className="text-center py-6">
-                    <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
-                    <p className="text-muted-foreground">No {need.bedrooms}-bedroom listings found on {platformInfo.name}.</p>
+                    {(activePlatform === "suite-paradise" || activePlatform === "vrbo") && (searchData.searchUrl || searchData.vrboSearchUrl) ? (
+                      <>
+                        <ExternalLink className="h-8 w-8 mx-auto text-blue-500 mb-2" />
+                        <p className="text-muted-foreground mb-3">
+                          {searchData.note || `No ${need.bedrooms}-bedroom listings found in automated search. Try browsing directly.`}
+                        </p>
+                        <a
+                          href={searchData.searchUrl || searchData.vrboSearchUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={`inline-flex items-center gap-2 px-4 py-2 rounded-md text-white transition-colors text-sm font-medium ${
+                            activePlatform === "suite-paradise" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-blue-600 hover:bg-blue-700"
+                          }`}
+                          data-testid={`link-direct-search-${activePlatform}-${key}`}
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          {activePlatform === "suite-paradise" ? "Search Suite Paradise" : "Search VRBO Directly"}
+                        </a>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+                        <p className="text-muted-foreground">No {need.bedrooms}-bedroom listings found on {platformInfo.name}.</p>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -888,7 +914,7 @@ function BestBuyInFinder() {
                                         {formatCurrency(prop.price.extracted_total_price ?? 0)}
                                       </span>
                                       <span className="text-xs font-normal text-muted-foreground ml-1">
-                                        est. total
+                                        total (all fees incl.)
                                       </span>
                                       {(prop.price as any).price_per_night && (
                                         <span className="text-xs text-muted-foreground ml-2">
@@ -945,6 +971,34 @@ function BestBuyInFinder() {
                       </Card>
                       );
                     })}
+                    {activePlatform === "vrbo" && searchData.vrboSearchUrl && (
+                      <div className="text-center pt-2">
+                        <a
+                          href={searchData.vrboSearchUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:underline"
+                          data-testid={`link-vrbo-all-${key}`}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Browse all {need.bedrooms}BR listings on VRBO
+                        </a>
+                      </div>
+                    )}
+                    {activePlatform === "suite-paradise" && searchData.searchUrl && (
+                      <div className="text-center pt-2">
+                        <a
+                          href={searchData.searchUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 hover:underline"
+                          data-testid={`link-sp-all-${key}`}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Browse all listings on Suite Paradise
+                        </a>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

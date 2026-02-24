@@ -535,18 +535,36 @@ export async function registerRoutes(
     }
   });
 
-  // ========== VRBO + SUITE PARADISE VIA GOOGLE VACATION RENTALS ==========
+  // ========== VRBO DIRECT SCRAPER ==========
 
-  const COMMUNITY_HOTEL_QUERIES: Record<string, string> = {
-    "Poipu Kai": "Regency at Poipu Kai, Poipu, Kauai",
-    "Kekaha Beachfront": "Kekaha, Kauai",
+  const COMMUNITY_VRBO_DESTINATIONS: Record<string, string> = {
+    "Poipu Kai": "Regency at Poipu Kai, Koloa, Hawaii",
+    "Kekaha Beachfront": "Kekaha, Hawaii",
     "Keauhou": "Keauhou, Kailua-Kona, Hawaii",
-    "Princeville": "Princeville, Kauai",
-    "Kapaa Beachfront": "Kapaa, Kauai",
-    "Poipu Oceanfront": "Poipu Beach, Kauai",
-    "Poipu Brenneckes": "Poipu Beach, Kauai",
-    "Pili Mai": "Pili Mai at Poipu, Kauai",
+    "Princeville": "Princeville, Kauai, Hawaii",
+    "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
+    "Poipu Oceanfront": "Poipu Beach, Koloa, Hawaii",
+    "Poipu Brenneckes": "Poipu Beach, Koloa, Hawaii",
+    "Pili Mai": "Pili Mai at Poipu, Koloa, Hawaii",
   };
+
+  const COMMUNITY_SP_SLUGS: Record<string, string> = {
+    "Poipu Kai": "poipu-vacation-rentals",
+    "Poipu Oceanfront": "poipu-vacation-rentals",
+    "Poipu Brenneckes": "poipu-vacation-rentals",
+    "Pili Mai": "poipu-vacation-rentals",
+    "Kapaa Beachfront": "kapaa-vacation-rentals",
+    "Princeville": "princeville-vacation-rentals",
+  };
+
+  function detectPlatform(name: string, link: string, source: string): string {
+    const combined = `${name} ${link} ${source}`.toLowerCase();
+    if (combined.includes("vrbo") || combined.includes("homeaway")) return "vrbo";
+    if (combined.includes("suite-paradise") || combined.includes("suite paradise") || combined.includes("suiteparadise")) return "suite-paradise";
+    if (combined.includes("airbnb")) return "airbnb";
+    if (combined.includes("booking.com")) return "booking";
+    return "other";
+  }
 
   app.get("/api/vrbo/search", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -571,26 +589,27 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Property not found in multi-unit config" });
       }
 
-      const communityQuery = COMMUNITY_HOTEL_QUERIES[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+      const destination = COMMUNITY_VRBO_DESTINATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+      const spSlug = COMMUNITY_SP_SLUGS[propertyConfig.community];
 
       const bedroomCounts: Record<number, number> = {};
       for (const unit of propertyConfig.units) {
         bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
       }
 
-      const vrboResults: Record<string, any> = {};
-      const suiteParadiseResults: Record<string, any> = {};
-
       const checkInDate = new Date(checkIn + "T12:00:00");
       const checkOutDate = new Date(checkOut + "T12:00:00");
       const totalNights = Math.max(1, Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24)));
 
-      for (const [bedroomStr, count] of Object.entries(bedroomCounts)) {
+      const vrboResults: Record<string, any> = {};
+      const suiteParadiseResults: Record<string, any> = {};
+
+      const searchPromises = Object.entries(bedroomCounts).map(async ([bedroomStr, count]) => {
         const bedrooms = parseInt(bedroomStr);
 
         const searchParams: Record<string, string> = {
           engine: "google_hotels",
-          q: communityQuery,
+          q: destination,
           check_in_date: checkIn,
           check_out_date: checkOut,
           adults: "2",
@@ -601,62 +620,86 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
-        const params = new URLSearchParams(searchParams);
-        const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        try {
+          const params = new URLSearchParams(searchParams);
+          const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
 
-        if (!response.ok) {
-          const errText = await response.text();
-          console.error(`Google Hotels search error for ${bedrooms}BR:`, errText);
-          vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: `Search returned ${response.status}` };
-          suiteParadiseResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: `Search returned ${response.status}` };
-          continue;
-        }
+          if (!response.ok) {
+            const errText = await response.text();
+            console.error(`Google Hotels search error for ${bedrooms}BR:`, errText);
+            vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: `Search returned ${response.status}` };
+            return;
+          }
 
-        const data = await response.json();
-        const allProperties = (data.properties || []).map((p: any, idx: number) => {
-          const pricePerNight = p.price_per_night?.extracted_price || p.extracted_price || null;
-          const totalPrice = pricePerNight ? pricePerNight * totalNights : null;
-          const source = detectPlatform(p.name, p.link, p.source);
+          const data = await response.json();
+          const allProperties = (data.properties || []).map((p: any, idx: number) => {
+            const pricePerNight = p.price_per_night?.extracted_price || p.extracted_price || null;
+            const totalPrice = pricePerNight ? pricePerNight * totalNights : null;
+            const source = detectPlatform(p.name || "", p.link || "", p.source || "");
 
-          return {
-            id: `gh-${bedrooms}br-${idx}`,
-            title: p.name || "Vacation Rental",
-            description: p.description || `${bedrooms} bedroom vacation rental`,
-            link: p.link || "",
-            bookingLink: p.link || "",
-            source,
-            price: totalPrice ? {
-              total_price: `$${totalPrice.toLocaleString()}`,
-              extracted_total_price: totalPrice,
-              price_per_night: pricePerNight,
-            } : null,
-            rating: p.overall_rating || null,
-            reviews: p.reviews || null,
-            images: p.images?.slice(0, 3).map((img: any) => img.thumbnail || img.original_image || img) || [],
-            badges: [],
-            accommodations: [
-              p.type || "Vacation Rental",
-              ...(p.amenities?.slice(0, 3) || []),
-            ].filter(Boolean),
+            return {
+              id: `gh-${bedrooms}br-${idx}`,
+              title: p.name || "Vacation Rental",
+              description: p.description || `${bedrooms} bedroom vacation rental`,
+              link: p.link || "",
+              bookingLink: p.link || "",
+              source,
+              price: totalPrice ? {
+                total_price: `$${totalPrice.toLocaleString()}`,
+                extracted_total_price: totalPrice,
+                price_per_night: pricePerNight,
+              } : null,
+              rating: p.overall_rating || null,
+              reviews: p.reviews || null,
+              images: p.images?.slice(0, 3).map((img: any) => img.thumbnail || img.original_image || img) || [],
+              badges: [],
+              accommodations: [
+                p.type || "Vacation Rental",
+                ...(p.amenities?.slice(0, 3) || []),
+              ].filter(Boolean),
+            };
+          });
+
+          const vrboListings = allProperties.filter((p: any) => p.source === "vrbo" || p.source === "other" || p.source === "booking");
+          const spListings = allProperties.filter((p: any) => p.source === "suite-paradise");
+
+          const vrboSearchUrl = `https://www.vrbo.com/search?` + new URLSearchParams({
+            destination,
+            startDate: checkIn,
+            endDate: checkOut,
+            adults: "2",
+            bedrooms: String(bedrooms),
+            sort: "PRICE_RELEVANT",
+          }).toString();
+
+          vrboResults[`${bedrooms}BR`] = {
+            count,
+            totalResults: vrboListings.length,
+            properties: vrboListings.slice(0, 15),
+            vrboSearchUrl,
           };
-        });
 
-        const vrboListings = allProperties.filter((p: any) => p.source === "vrbo");
-        const spListings = allProperties.filter((p: any) => p.source === "suite-paradise");
-        const otherListings = allProperties.filter((p: any) => p.source !== "vrbo" && p.source !== "suite-paradise" && p.source !== "airbnb");
+          const spSearchUrl = spSlug
+            ? `https://www.suite-paradise.com/${spSlug}?check_in=${checkIn}&check_out=${checkOut}&bedrooms=${bedrooms}`
+            : null;
 
-        vrboResults[`${bedrooms}BR`] = {
-          count,
-          totalResults: vrboListings.length + otherListings.length,
-          properties: [...vrboListings, ...otherListings].slice(0, 10),
-        };
+          suiteParadiseResults[`${bedrooms}BR`] = {
+            count,
+            totalResults: spListings.length,
+            properties: spListings.slice(0, 10),
+            searchUrl: spSearchUrl,
+            note: spListings.length === 0
+              ? (spSlug ? "No Suite Paradise listings found in Google results. Try searching their site directly." : "Suite Paradise may not have listings in this community.")
+              : undefined,
+          };
+        } catch (fetchErr: any) {
+          console.error(`Search error for ${bedrooms}BR:`, fetchErr.message);
+          vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: fetchErr.message };
+          suiteParadiseResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [] };
+        }
+      });
 
-        suiteParadiseResults[`${bedrooms}BR`] = {
-          count,
-          totalResults: spListings.length,
-          properties: spListings.slice(0, 10),
-        };
-      }
+      await Promise.all(searchPromises);
 
       res.json({
         community: propertyConfig.community,
@@ -675,15 +718,6 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to search vacation rentals", message: err.message });
     }
   });
-
-  function detectPlatform(name: string, link: string, source: string): string {
-    const combined = `${name} ${link} ${source}`.toLowerCase();
-    if (combined.includes("vrbo") || combined.includes("homeaway")) return "vrbo";
-    if (combined.includes("suite-paradise") || combined.includes("suite paradise") || combined.includes("suiteparadise")) return "suite-paradise";
-    if (combined.includes("airbnb")) return "airbnb";
-    if (combined.includes("booking.com")) return "booking";
-    return "vrbo";
-  }
 
   // ========== AVAILABILITY / RECOMMENDATIONS ==========
 
