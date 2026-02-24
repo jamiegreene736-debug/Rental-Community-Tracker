@@ -535,6 +535,140 @@ export async function registerRoutes(
     }
   });
 
+  // ========== VRBO + SUITE PARADISE SEARCH VIA GOOGLE ==========
+
+  const COMMUNITY_VRBO_QUERIES: Record<string, string> = {
+    "Poipu Kai": "Regency at Poipu Kai",
+    "Kekaha Beachfront": "Kekaha Kauai beachfront",
+    "Keauhou": "Keauhou Big Island Hawaii",
+    "Princeville": "Princeville Kauai",
+    "Kapaa Beachfront": "Kapaa Kauai beachfront",
+    "Poipu Oceanfront": "Poipu Beach oceanfront",
+    "Poipu Brenneckes": "Poipu Beach Brenneckes",
+    "Pili Mai": "Pili Mai at Poipu",
+  };
+
+  app.get("/api/vrbo/search", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+    }
+
+    try {
+      const propertyId = parseInt(req.query.propertyId as string, 10);
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+
+      if (!propertyId || isNaN(propertyId)) {
+        return res.status(400).json({ error: "propertyId is required" });
+      }
+      if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required in YYYY-MM-DD format" });
+      }
+
+      const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
+      if (!propertyConfig) {
+        return res.status(404).json({ error: "Property not found in multi-unit config" });
+      }
+
+      const communityQuery = COMMUNITY_VRBO_QUERIES[propertyConfig.community] || propertyConfig.community;
+
+      const bedroomCounts: Record<number, number> = {};
+      for (const unit of propertyConfig.units) {
+        bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
+      }
+
+      const vrboResults: Record<string, any> = {};
+      const suiteParadiseResults: Record<string, any> = {};
+
+      for (const [bedroomStr, count] of Object.entries(bedroomCounts)) {
+        const bedrooms = parseInt(bedroomStr);
+
+        const vrboQuery = `site:vrbo.com "${bedrooms} bedroom" "${communityQuery}" Kauai Hawaii`;
+        const spQuery = `site:suite-paradise.com "${bedrooms} bedroom" "${communityQuery}"`;
+
+        const [vrboResponse, spResponse] = await Promise.all([
+          fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams({
+            engine: "google",
+            q: vrboQuery,
+            api_key: apiKey,
+            num: "10",
+          }).toString()}`),
+          fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams({
+            engine: "google",
+            q: spQuery,
+            api_key: apiKey,
+            num: "10",
+          }).toString()}`),
+        ]);
+
+        if (vrboResponse.ok) {
+          const vrboData = await vrboResponse.json();
+          const listings = (vrboData.organic_results || [])
+            .filter((r: any) => r.link && r.link.includes("vrbo.com"))
+            .map((r: any, idx: number) => ({
+              id: `vrbo-${bedrooms}br-${idx}`,
+              title: r.title || "VRBO Listing",
+              description: r.snippet || "",
+              link: r.link,
+              source: "vrbo" as const,
+              price: extractPriceFromSnippet(r.snippet || r.title || ""),
+              rating: null,
+              reviews: null,
+              images: r.thumbnail ? [r.thumbnail] : [],
+            }));
+          vrboResults[`${bedrooms}BR`] = { count, totalResults: listings.length, properties: listings.slice(0, 10) };
+        } else {
+          vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: "VRBO search failed" };
+        }
+
+        if (spResponse.ok) {
+          const spData = await spResponse.json();
+          const listings = (spData.organic_results || [])
+            .filter((r: any) => r.link && r.link.includes("suite-paradise.com"))
+            .map((r: any, idx: number) => ({
+              id: `sp-${bedrooms}br-${idx}`,
+              title: r.title || "Suite Paradise Listing",
+              description: r.snippet || "",
+              link: r.link,
+              source: "suite-paradise" as const,
+              price: extractPriceFromSnippet(r.snippet || r.title || ""),
+              rating: null,
+              reviews: null,
+              images: r.thumbnail ? [r.thumbnail] : [],
+            }));
+          suiteParadiseResults[`${bedrooms}BR`] = { count, totalResults: listings.length, properties: listings.slice(0, 10) };
+        } else {
+          suiteParadiseResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: "Suite Paradise search failed" };
+        }
+      }
+
+      res.json({
+        community: propertyConfig.community,
+        checkIn,
+        checkOut,
+        unitsNeeded: Object.entries(bedroomCounts).map(([br, count]) => ({
+          bedrooms: parseInt(br),
+          count,
+        })),
+        vrbo: vrboResults,
+        suiteParadise: suiteParadiseResults,
+      });
+    } catch (err: any) {
+      console.error("VRBO/SP search error:", err);
+      res.status(500).json({ error: "Failed to search VRBO/Suite Paradise", message: err.message });
+    }
+  });
+
+  function extractPriceFromSnippet(text: string): { total_price: string; extracted_total_price: number } | null {
+    const priceMatch = text.match(/\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/);
+    if (priceMatch) {
+      const amount = parseFloat(priceMatch[1].replace(/,/g, ""));
+      return { total_price: `$${amount}`, extracted_total_price: amount };
+    }
+    return null;
+  }
+
   // ========== AVAILABILITY / RECOMMENDATIONS ==========
 
   app.get("/api/availability", async (req, res) => {
