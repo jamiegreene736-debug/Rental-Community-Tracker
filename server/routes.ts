@@ -641,8 +641,8 @@ export async function registerRoutes(
               id: `gh-${bedrooms}br-${idx}`,
               title: p.name || "Vacation Rental",
               description: p.description || `${bedrooms} bedroom vacation rental`,
-              link: p.link || "",
-              bookingLink: p.link || "",
+              link: p.link && p.link.startsWith("/") ? `https://www.google.com${p.link}` : (p.link || ""),
+              bookingLink: p.link && p.link.startsWith("/") ? `https://www.google.com${p.link}` : (p.link || ""),
               source,
               price: totalPrice ? {
                 total_price: `$${totalPrice.toLocaleString()}`,

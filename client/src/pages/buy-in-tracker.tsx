@@ -410,10 +410,61 @@ function BestBuyInFinder() {
     let total = 0;
     for (const listings of Object.values(selectedListings)) {
       for (const listing of listings) {
-        total += Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
+        if (listing.source === "airbnb") {
+          total += Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
+        } else {
+          total += Math.round(listing.price?.extracted_total_price ?? 0);
+        }
       }
     }
     return total;
+  };
+
+  const autoSelectCheapest = (airbnbData: AirbnbSearchResults, otherData: OtherPlatformResults | null) => {
+    const fm = 1 + feePercent / 100;
+    const newSelections: Record<string, AirbnbProperty[]> = {};
+
+    for (const need of airbnbData.unitsNeeded) {
+      const key = `${need.bedrooms}BR`;
+      const allCandidates: AirbnbProperty[] = [];
+
+      const airbnbSearch = airbnbData.searches[key];
+      if (airbnbSearch && !airbnbSearch.error) {
+        for (const p of airbnbSearch.properties) {
+          allCandidates.push({ ...p, source: "airbnb" });
+        }
+      }
+
+      if (otherData) {
+        const vrboSearch = otherData.vrbo[key];
+        if (vrboSearch && !vrboSearch.error) {
+          for (const p of vrboSearch.properties) {
+            allCandidates.push({ ...p, source: "vrbo" });
+          }
+        }
+        const spSearch = otherData.suiteParadise[key];
+        if (spSearch && !spSearch.error) {
+          for (const p of spSearch.properties) {
+            allCandidates.push({ ...p, source: "suite-paradise" });
+          }
+        }
+      }
+
+      const withPrice = allCandidates.filter(p => p.price?.extracted_total_price);
+      withPrice.sort((a, b) => {
+        const costA = a.source === "airbnb"
+          ? (a.price!.extracted_total_price * fm)
+          : a.price!.extracted_total_price;
+        const costB = b.source === "airbnb"
+          ? (b.price!.extracted_total_price * fm)
+          : b.price!.extracted_total_price;
+        return costA - costB;
+      });
+
+      newSelections[key] = withPrice.slice(0, need.count);
+    }
+
+    setSelectedListings(newSelections);
   };
 
   const getTotalSelectedCount = () => {
@@ -462,7 +513,11 @@ function BestBuyInFinder() {
           const assignedUnit = availableUnits[assignIdx] || availableUnits[0];
           unitAssignmentIndex[need.bedrooms] = assignIdx + 1;
 
-          const estimatedCost = Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
+          const isAirbnb = listing.source === "airbnb";
+          const estimatedCost = isAirbnb
+            ? Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier)
+            : Math.round(listing.price?.extracted_total_price ?? 0);
+          const sourceName = (listing.source || "airbnb").charAt(0).toUpperCase() + (listing.source || "airbnb").slice(1);
 
           await apiRequest("POST", "/api/buy-ins", {
             propertyId: propId,
@@ -473,8 +528,8 @@ function BestBuyInFinder() {
             checkOut: results.checkOut,
             costPaid: String(estimatedCost),
             airbnbConfirmation: null,
-            airbnbListingUrl: listing.link || null,
-            notes: `${(listing.source || "airbnb").charAt(0).toUpperCase() + (listing.source || "airbnb").slice(1)} listing: ${listing.title} (Listed: $${listing.price?.extracted_total_price ?? 0}, Est. checkout: $${estimatedCost})`,
+            airbnbListingUrl: listing.bookingLink || listing.link || null,
+            notes: `${sourceName} listing: ${listing.title} (${isAirbnb ? `Listed: $${listing.price?.extracted_total_price ?? 0}, Est. checkout: $${estimatedCost}` : `Total: $${estimatedCost} (fees incl.)`})`,
             status: "active",
           });
         }
@@ -516,10 +571,13 @@ function BestBuyInFinder() {
         fetch(`/api/vrbo/search?propertyId=${selectedPropertyId}&checkIn=${checkIn}&checkOut=${checkOut}`),
       ]);
 
+      let airbnbData: AirbnbSearchResults | null = null;
+      let otherData: OtherPlatformResults | null = null;
+
       if (airbnbRes.ok) {
-        const airbnbData: AirbnbSearchResults = await airbnbRes.json();
-        for (const key of Object.keys(airbnbData.searches)) {
-          for (const prop of airbnbData.searches[key].properties) {
+        airbnbData = await airbnbRes.json();
+        for (const key of Object.keys(airbnbData!.searches)) {
+          for (const prop of airbnbData!.searches[key].properties) {
             prop.source = "airbnb";
           }
         }
@@ -530,18 +588,22 @@ function BestBuyInFinder() {
       }
 
       if (otherRes.ok) {
-        const otherData: OtherPlatformResults = await otherRes.json();
-        for (const key of Object.keys(otherData.vrbo)) {
-          for (const prop of otherData.vrbo[key].properties) {
+        otherData = await otherRes.json();
+        for (const key of Object.keys(otherData!.vrbo)) {
+          for (const prop of otherData!.vrbo[key].properties) {
             prop.source = "vrbo";
           }
         }
-        for (const key of Object.keys(otherData.suiteParadise)) {
-          for (const prop of otherData.suiteParadise[key].properties) {
+        for (const key of Object.keys(otherData!.suiteParadise)) {
+          for (const prop of otherData!.suiteParadise[key].properties) {
             prop.source = "suite-paradise";
           }
         }
         setOtherResults(otherData);
+      }
+
+      if (airbnbData) {
+        autoSelectCheapest(airbnbData, otherData);
       }
     } catch (err: any) {
       toast({ title: "Search failed", description: err.message, variant: "destructive" });
@@ -799,7 +861,7 @@ function BestBuyInFinder() {
                   {!searchData.error && (
                     <Badge variant="secondary">{searchData.totalResults} found on {platformInfo.name}</Badge>
                   )}
-                  {!searchData.error && activePlatform === "airbnb" && (selectedListings[key] || []).length > 0 && (
+                  {!searchData.error && (selectedListings[key] || []).length > 0 && (
                     <Badge variant="default">
                       <Check className="h-3 w-3 mr-1" />
                       {(selectedListings[key] || []).length}/{need.count} selected
@@ -843,9 +905,9 @@ function BestBuyInFinder() {
                 ) : (
                   <div className="space-y-3">
                     {searchData.properties.map((prop, idx) => {
-                      const selected = activePlatform === "airbnb" && isListingSelected(key, prop.id);
+                      const selected = isListingSelected(key, prop.id);
                       return (
-                      <Card key={prop.id} className={`p-4 ${activePlatform === "airbnb" ? "cursor-pointer" : ""} transition-colors ${selected ? "border-green-500 dark:border-green-400 bg-green-50/30 dark:bg-green-950/20" : ""}`} data-testid={`card-${activePlatform}-${key}-${idx}`} onClick={() => activePlatform === "airbnb" && toggleListingSelection(key, prop, need.count)}>
+                      <Card key={prop.id} className={`p-4 cursor-pointer transition-colors ${selected ? "border-green-500 dark:border-green-400 bg-green-50/30 dark:bg-green-950/20" : ""}`} data-testid={`card-${activePlatform}-${key}-${idx}`} onClick={() => toggleListingSelection(key, prop, need.count)}>
                         <div className="flex gap-4">
                           <div className="flex flex-col items-center gap-2 flex-shrink-0">
                             {prop.images && prop.images.length > 0 && (
@@ -857,17 +919,15 @@ function BestBuyInFinder() {
                                 />
                               </div>
                             )}
-                            {activePlatform === "airbnb" && (
-                              <Button
-                                size="sm"
-                                variant={selected ? "default" : "outline"}
-                                className="w-full"
-                                onClick={(e) => { e.stopPropagation(); toggleListingSelection(key, prop, need.count); }}
-                                data-testid={`button-select-${key}-${idx}`}
-                              >
-                                {selected ? <><Check className="h-3 w-3 mr-1" /> Selected</> : <><CircleDot className="h-3 w-3 mr-1" /> Select</>}
-                              </Button>
-                            )}
+                            <Button
+                              size="sm"
+                              variant={selected ? "default" : "outline"}
+                              className="w-full"
+                              onClick={(e) => { e.stopPropagation(); toggleListingSelection(key, prop, need.count); }}
+                              data-testid={`button-select-${key}-${idx}`}
+                            >
+                              {selected ? <><Check className="h-3 w-3 mr-1" /> Selected</> : <><CircleDot className="h-3 w-3 mr-1" /> Select</>}
+                            </Button>
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-start justify-between gap-2 flex-wrap">
@@ -884,10 +944,15 @@ function BestBuyInFinder() {
                                 </div>
                                 <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{prop.description}</p>
                               </div>
-                              {idx === 0 && activePlatform === "airbnb" && (
+                              {idx === 0 && (
                                 <Badge variant="default">
                                   <Star className="h-3 w-3 mr-1" />
                                   Best Price
+                                </Badge>
+                              )}
+                              {prop.source && prop.source !== activePlatform && (
+                                <Badge variant="outline" className="text-xs">
+                                  {PLATFORM_LABELS[prop.source]?.name || prop.source}
                                 </Badge>
                               )}
                             </div>
@@ -895,7 +960,7 @@ function BestBuyInFinder() {
                             <div className="flex items-center gap-4 mt-2 flex-wrap">
                               {prop.price && (
                                 <span data-testid={`text-price-${key}-${idx}`}>
-                                  {activePlatform === "airbnb" ? (
+                                  {prop.source === "airbnb" ? (
                                     <>
                                       <span className="font-semibold text-green-600 dark:text-green-400">
                                         {formatCurrency(Math.round((prop.price.extracted_total_price ?? 0) * feeMultiplier))}
@@ -925,7 +990,7 @@ function BestBuyInFinder() {
                                   )}
                                 </span>
                               )}
-                              {!prop.price && activePlatform !== "airbnb" && (
+                              {!prop.price && prop.source !== "airbnb" && (
                                 <span className="text-xs text-muted-foreground italic">Price not available - check listing</span>
                               )}
                               {prop.rating && (
@@ -952,14 +1017,16 @@ function BestBuyInFinder() {
                             )}
 
                             <div className="flex gap-2 mt-3 flex-wrap">
-                              <a href={prop.bookingLink || prop.link} target="_blank" rel="noopener noreferrer">
-                                <Button size="sm" data-testid={`button-book-${key}-${idx}`}>
-                                  <ExternalLink className="h-3 w-3 mr-1" />
-                                  {platformInfo.bookLabel}
-                                </Button>
-                              </a>
-                              {activePlatform === "airbnb" && prop.link !== prop.bookingLink && (
-                                <a href={prop.link} target="_blank" rel="noopener noreferrer">
+                              {(prop.bookingLink || prop.link) && (
+                                <a href={prop.bookingLink || prop.link} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+                                  <Button size="sm" data-testid={`button-book-${key}-${idx}`}>
+                                    <ExternalLink className="h-3 w-3 mr-1" />
+                                    {PLATFORM_LABELS[prop.source || activePlatform]?.bookLabel || "View Listing"}
+                                  </Button>
+                                </a>
+                              )}
+                              {prop.source === "airbnb" && prop.link && prop.link !== prop.bookingLink && (
+                                <a href={prop.link} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
                                   <Button size="sm" variant="outline" data-testid={`button-view-${key}-${idx}`}>
                                     View Listing
                                   </Button>
@@ -1005,13 +1072,23 @@ function BestBuyInFinder() {
             );
           })}
 
-          {getTotalSelectedCount() > 0 && stayRates && (
+          {getTotalSelectedCount() > 0 && stayRates && (() => {
+            const allSelected = Object.values(selectedListings).flat();
+            const sourceCounts: Record<string, number> = {};
+            for (const s of allSelected) {
+              const src = s.source || "unknown";
+              sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+            }
+            const sourceLabels = Object.entries(sourceCounts).map(([src, cnt]) => `${cnt} ${PLATFORM_LABELS[src]?.name || src}`).join(", ");
+
+            return (
             <Card className="p-4 border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 sticky bottom-0" data-testid="card-selection-summary">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div className="flex items-center gap-4 flex-wrap">
                   <div>
                     <p className="text-xs text-muted-foreground">Selected</p>
                     <p className="font-semibold">{getTotalSelectedCount()}/{getTotalNeededCount()} units</p>
+                    <p className="text-xs text-muted-foreground">{sourceLabels}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Est. Buy-In Cost</p>
@@ -1046,7 +1123,8 @@ function BestBuyInFinder() {
                 </p>
               )}
             </Card>
-          )}
+            );
+          })()}
         </div>
         );
       })()}
