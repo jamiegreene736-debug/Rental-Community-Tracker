@@ -836,8 +836,8 @@ function BestBuyInFinder() {
             </div>
           )}
           {activePlatform === "suite-paradise" && (
-            <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
-              Suite Paradise listings found in Google's vacation rental data, plus direct search links to browse their full inventory. Book direct with Suite Paradise to save up to 15% vs third-party sites.
+            <div className="p-3 rounded-md bg-emerald-50 dark:bg-emerald-950/30 text-xs text-muted-foreground">
+              Suite Paradise manages many vacation rentals in Poipu and across Kauai. Their inventory can't be searched automatically, so use the direct search links below to browse their full inventory with your dates pre-filled. Booking direct with Suite Paradise can save up to 15% vs third-party sites.
             </div>
           )}
 
@@ -875,25 +875,45 @@ function BestBuyInFinder() {
                     {searchData.error}
                   </div>
                 ) : searchData.properties.length === 0 ? (
-                  <div className="text-center py-6">
+                  <div className={`text-center py-6 rounded-lg ${activePlatform === "suite-paradise" ? "bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800" : ""}`}>
                     {(activePlatform === "suite-paradise" || activePlatform === "vrbo") && (searchData.searchUrl || searchData.vrboSearchUrl) ? (
                       <>
-                        <ExternalLink className="h-8 w-8 mx-auto text-blue-500 mb-2" />
-                        <p className="text-muted-foreground mb-3">
-                          {searchData.note || `No ${need.bedrooms}-bedroom listings found in automated search. Try browsing directly.`}
-                        </p>
-                        <a
-                          href={searchData.searchUrl || searchData.vrboSearchUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={`inline-flex items-center gap-2 px-4 py-2 rounded-md text-white transition-colors text-sm font-medium ${
-                            activePlatform === "suite-paradise" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-blue-600 hover:bg-blue-700"
-                          }`}
-                          data-testid={`link-direct-search-${activePlatform}-${key}`}
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          {activePlatform === "suite-paradise" ? "Search Suite Paradise" : "Search VRBO Directly"}
-                        </a>
+                        {activePlatform === "suite-paradise" ? (
+                          <>
+                            <div className="text-3xl mb-2">🏖️</div>
+                            <p className="font-medium text-sm mb-1">Search Suite Paradise for {need.bedrooms}-Bedroom Rentals</p>
+                            <p className="text-muted-foreground text-xs mb-4 max-w-md mx-auto">
+                              {searchData.note || "Browse Suite Paradise's full inventory with your dates pre-filled."}
+                            </p>
+                            <a
+                              href={searchData.searchUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-2 px-6 py-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors text-sm font-medium"
+                              data-testid={`link-direct-search-suite-paradise-${key}`}
+                            >
+                              <ExternalLink className="h-4 w-4" />
+                              Search {need.bedrooms}BR on Suite Paradise
+                            </a>
+                          </>
+                        ) : (
+                          <>
+                            <ExternalLink className="h-8 w-8 mx-auto text-blue-500 mb-2" />
+                            <p className="text-muted-foreground mb-3">
+                              {searchData.note || `No ${need.bedrooms}-bedroom listings found in automated search. Try browsing directly.`}
+                            </p>
+                            <a
+                              href={searchData.vrboSearchUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white transition-colors text-sm font-medium"
+                              data-testid={`link-direct-search-vrbo-${key}`}
+                            >
+                              <ExternalLink className="h-4 w-4" />
+                              Search VRBO Directly
+                            </a>
+                          </>
+                        )}
                       </>
                     ) : (
                       <>

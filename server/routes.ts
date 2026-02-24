@@ -679,8 +679,12 @@ export async function registerRoutes(
             vrboSearchUrl,
           };
 
+          const formatSpDate = (dateStr: string) => {
+            const [y, m, d] = dateStr.split("-");
+            return `${m}/${d}/${y}`;
+          };
           const spSearchUrl = spSlug
-            ? `https://www.suite-paradise.com/${spSlug}?check_in=${checkIn}&check_out=${checkOut}&bedrooms=${bedrooms}`
+            ? `https://www.suite-paradise.com/${spSlug}?check_in=${formatSpDate(checkIn)}&check_out=${formatSpDate(checkOut)}`
             : null;
 
           suiteParadiseResults[`${bedrooms}BR`] = {
@@ -689,7 +693,7 @@ export async function registerRoutes(
             properties: spListings.slice(0, 10),
             searchUrl: spSearchUrl,
             note: spListings.length === 0
-              ? (spSlug ? "No Suite Paradise listings found in Google results. Try searching their site directly." : "Suite Paradise may not have listings in this community.")
+              ? (spSlug ? "Suite Paradise listings can't be searched automatically. Use the link below to search their site directly — they often have great deals for booking direct." : "Suite Paradise may not have listings in this community.")
               : undefined,
           };
         } catch (fetchErr: any) {
