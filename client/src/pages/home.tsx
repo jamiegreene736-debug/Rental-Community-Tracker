@@ -784,12 +784,19 @@ export default function Home() {
               Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
             </p>
           </div>
-          <Link href="/buy-in-tracker">
-            <Button data-testid="button-buy-in-tracker">
-              <DollarSign className="h-4 w-4 mr-2" />
-              Buy-In Tracker
-            </Button>
-          </Link>
+          <div className="flex gap-2">
+            <Link href="/photo-audit">
+              <Button variant="outline" data-testid="button-photo-audit">
+                Photo Audit
+              </Button>
+            </Link>
+            <Link href="/buy-in-tracker">
+              <Button data-testid="button-buy-in-tracker">
+                <DollarSign className="h-4 w-4 mr-2" />
+                Buy-In Tracker
+              </Button>
+            </Link>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">

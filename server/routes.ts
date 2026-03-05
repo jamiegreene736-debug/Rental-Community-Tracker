@@ -937,5 +937,70 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/photo-audit/check-vrbo", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+    }
+
+    const unitNumber = req.query.unitNumber as string;
+    const complexName = req.query.complexName as string;
+    if (!unitNumber || !complexName) {
+      return res.status(400).json({ error: "Missing unitNumber or complexName" });
+    }
+
+    try {
+      const query = `${complexName} ${unitNumber} VRBO site:vrbo.com`;
+      const params = new URLSearchParams({
+        engine: "google",
+        q: query,
+        api_key: apiKey,
+        num: "5",
+      });
+
+      const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+      if (!response.ok) {
+        return res.status(500).json({ error: `Search failed with status ${response.status}` });
+      }
+
+      const data = await response.json() as any;
+      const organicResults = data.organic_results || [];
+
+      const vrboListings = organicResults
+        .filter((r: any) => {
+          const url = (r.link || "").toLowerCase();
+          const snippet = (r.snippet || "").toLowerCase();
+          const title = (r.title || "").toLowerCase();
+          return url.includes("vrbo.com") && (
+            snippet.includes(unitNumber) ||
+            title.includes(unitNumber) ||
+            title.includes(`#${unitNumber}`)
+          );
+        })
+        .map((r: any) => ({
+          title: r.title,
+          url: r.link,
+          snippet: r.snippet,
+        }));
+
+      const otherCompanies = ["parrish", "kauai exclusive", "cb island", "elite pacific", "gather", "ali'i resorts"];
+      const hasConflict = vrboListings.some((listing: any) => {
+        const text = `${listing.title} ${listing.snippet}`.toLowerCase();
+        return otherCompanies.some(company => text.includes(company));
+      });
+
+      res.json({
+        unitNumber,
+        complexName,
+        vrboListings,
+        hasConflict,
+        isListedOnVrbo: vrboListings.length > 0,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "VRBO check failed", message: err.message });
+    }
+  });
+
   return httpServer;
 }

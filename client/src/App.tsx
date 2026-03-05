@@ -8,6 +8,7 @@ import Home from "@/pages/home";
 import UnitBuilder from "@/pages/unit-builder";
 import LodgifyPrep from "@/pages/lodgify-prep";
 import BuyInTracker from "@/pages/buy-in-tracker";
+import PhotoAudit from "@/pages/photo-audit";
 
 function Router() {
   return (
@@ -16,6 +17,7 @@ function Router() {
       <Route path="/unit-builder/:id" component={UnitBuilder} />
       <Route path="/lodgify-prep/:id" component={LodgifyPrep} />
       <Route path="/buy-in-tracker" component={BuyInTracker} />
+      <Route path="/photo-audit" component={PhotoAudit} />
       <Route component={NotFound} />
     </Switch>
   );
