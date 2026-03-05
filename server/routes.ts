@@ -1002,5 +1002,112 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/photo-audit/find-non-vrbo", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+    }
+
+    const complexName = req.query.complexName as string;
+    const bedrooms = req.query.bedrooms as string;
+    if (!complexName || !bedrooms) {
+      return res.status(400).json({ error: "Missing complexName or bedrooms" });
+    }
+
+    try {
+      const searchQuery = `${bedrooms} bedroom ${complexName} Kauai rentals -site:vrbo.com -site:airbnb.com`;
+      const searchParams = new URLSearchParams({
+        engine: "google",
+        q: searchQuery,
+        api_key: apiKey,
+        num: "15",
+      });
+
+      const searchResponse = await fetch(`https://www.searchapi.io/api/v1/search?${searchParams.toString()}`);
+      if (!searchResponse.ok) {
+        return res.status(500).json({ error: `Search failed: ${searchResponse.status}` });
+      }
+
+      const searchData = await searchResponse.json() as any;
+      const candidates = (searchData.organic_results || [])
+        .filter((r: any) => {
+          const url = (r.link || "").toLowerCase();
+          return !url.includes("vrbo.com") && !url.includes("airbnb.com");
+        })
+        .slice(0, 10)
+        .map((r: any) => ({
+          title: r.title,
+          url: r.link,
+          snippet: r.snippet,
+          source: new URL(r.link).hostname,
+        }));
+
+      const unitPattern = /(?:#|unit\s*|room\s*)(\w+)/gi;
+      const candidatesWithUnits = candidates.map((c: any) => {
+        const text = `${c.title} ${c.snippet}`;
+        const matches = [...text.matchAll(unitPattern)];
+        const unitNumbers = [...new Set(matches.map(m => m[1]))];
+        return { ...c, extractedUnits: unitNumbers };
+      });
+
+      const verified: any[] = [];
+      for (const candidate of candidatesWithUnits) {
+        if (candidate.extractedUnits.length === 0) {
+          verified.push({ ...candidate, vrboStatus: "no_unit_number" });
+          continue;
+        }
+
+        for (const unitNum of candidate.extractedUnits.slice(0, 2)) {
+          const vrboQuery = `${complexName} ${unitNum} site:vrbo.com`;
+          const vrboParams = new URLSearchParams({
+            engine: "google",
+            q: vrboQuery,
+            api_key: apiKey,
+            num: "5",
+          });
+
+          await new Promise(r => setTimeout(r, 500));
+
+          try {
+            const vrboResponse = await fetch(`https://www.searchapi.io/api/v1/search?${vrboParams.toString()}`);
+            if (vrboResponse.ok) {
+              const vrboData = await vrboResponse.json() as any;
+              const vrboResults = (vrboData.organic_results || []).filter((r: any) => {
+                const url = (r.link || "").toLowerCase();
+                const title = (r.title || "").toLowerCase();
+                return url.includes("vrbo.com") && (title.includes(unitNum.toLowerCase()) || title.includes(`#${unitNum.toLowerCase()}`));
+              });
+
+              verified.push({
+                ...candidate,
+                checkedUnit: unitNum,
+                vrboStatus: vrboResults.length > 0 ? "on_vrbo" : "not_on_vrbo",
+                vrboMatches: vrboResults.length,
+              });
+            }
+          } catch {
+            verified.push({ ...candidate, checkedUnit: unitNum, vrboStatus: "check_failed" });
+          }
+        }
+      }
+
+      const safeUnits = verified.filter(v => v.vrboStatus === "not_on_vrbo");
+      const onVrbo = verified.filter(v => v.vrboStatus === "on_vrbo");
+
+      res.json({
+        complexName,
+        bedrooms,
+        totalCandidates: candidates.length,
+        verified,
+        safeUnits,
+        onVrboCount: onVrbo.length,
+        safeCount: safeUnits.length,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Search failed", message: err.message });
+    }
+  });
+
   return httpServer;
 }

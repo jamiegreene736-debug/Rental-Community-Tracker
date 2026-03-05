@@ -1,0 +1,12 @@
+Summary of Logic Used
+To find these units and verify they aren't on VRBO, I followed a systematic process that can be adapted into a Replit tool (e.g., using Python with libraries like requests for web requests, BeautifulSoup for HTML parsing, and perhaps Selenium for dynamic content if needed). Here's the step-by-step logic:
+
+Search for Potential Units: Performed a web search for "3 bedroom units Poipu Kai Kauai rentals" to get a list of listings from various sites. Focused on results from management companies or independent sites (e.g., poipu365.com, parrishkauai.com) rather than major platforms like VRBO or Airbnb, to increase chances of finding non-VRBO options. Retrieved 20 results for broader coverage.
+Select Candidates: Reviewed snippets for 3-bedroom units explicitly in Poipu Kai. Prioritized those with dedicated listing pages that likely include photos (based on site descriptions mentioning images or galleries). Ignored direct VRBO links. Selected initial candidates like Kai Nui, Villas E210, Regency 721, Makanui 221, and others.
+Verify Not on VRBO: For each candidate, ran targeted web searches using the unit name + "Poipu" or "Poipu Kai" with the operator site:vrbo.com (limited to 5 results for efficiency). If no exact or close matches appeared (e.g., same unit number and description), considered it not listed. For example:
+Kai Nui and Villas E210 returned direct VRBO matches, so excluded.
+Regency 721 and Makanui 221 returned no relevant VRBO results (only unrelated units or complexes).
+
+Confirm Details and Photos: Browsed each final candidate's listing page to extract/confirm unit name, bedrooms (ensured 3), location (Poipu Kai), description, and image URLs. Checked for any mentions of VRBO (none found). Photos weren't extractable via summarization (likely due to JavaScript loading), but the pages host them directly— in a Replit tool, use BeautifulSoup to parse HTML and collect src from <img> tags in gallery sections, filtering by size/alt text. Full URLs can then be used for downloads via requests.get().
+
+This process ensures good-faith verification without assuming listings are exhaustive (e.g., VRBO searches might miss if units use different names, but no evidence suggested that here). For a Replit tool, automate with loops over search results, error handling for dynamic pages, and output to a file/UI for units and photo links. If needed, add delays or proxies for scraping ethics.
