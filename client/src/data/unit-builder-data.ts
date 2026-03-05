@@ -858,8 +858,8 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Updated 3-bedroom, 3-bath Regency II condo with central AC, granite kitchen, private balcony, loft bedroom, and garden views. Sleeps 7 with King, Queen, 2 Twins, and a sofa bed.",
-        longDescription: `Welcome to this freshly updated 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and contemporary island-inspired interiors.
+        shortDescription: "Updated 3-bedroom, 3-bath Regency condo with central AC, granite kitchen, private balcony, loft bedroom, and garden views. Sleeps 7 with King, Queen, 2 Twins, and a sofa bed.",
+        longDescription: `Welcome to this freshly updated 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This condo features central air conditioning and contemporary island-inspired interiors.
 
 The approximately 1,800 sq ft home showcases updated finishes throughout, with a bright open floor plan that seamlessly connects the living room, dining area, and kitchen. A private balcony provides garden views and a quiet place to unwind with your morning coffee.
 
@@ -880,8 +880,8 @@ Kauai's famous south shore beaches are just a 10-minute walk away. Discover vibr
         bathrooms: "2",
         sqft: "~1,400",
         maxGuests: 5,
-        shortDescription: "Corner ground-floor 2-bedroom, 2-bath Regency II condo with central AC, Queen and King beds, a modern kitchen, and a garden lanai. This spacious 1,400 sq ft unit sleeps 5.",
-        longDescription: `Welcome to this spacious corner ground-floor 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and an extra-generous 1,400 sq ft layout thanks to its corner position.
+        shortDescription: "Corner ground-floor 2-bedroom, 2-bath Regency condo with central AC, Queen and King beds, a modern kitchen, and a garden lanai. This spacious 1,400 sq ft unit sleeps 5.",
+        longDescription: `Welcome to this spacious corner ground-floor 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This condo features central air conditioning and an extra-generous 1,400 sq ft layout thanks to its corner position.
 
 The bright, airy interior features a modern open floor plan with the living area opening to a private garden lanai. The corner location provides additional windows and natural light, creating an especially welcoming atmosphere.
 
@@ -1120,8 +1120,8 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Renovated 3-bedroom, 3-bath two-story Regency II condo with AC throughout, stainless steel kitchen appliances, marble master bath, and an upstairs loft bedroom. Sleeps 7 with King, Queen, 2 Twins, and futon.",
-        longDescription: `Welcome to this beautifully renovated 3-bedroom, 3-bathroom two-story condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning throughout and modern upgrades.
+        shortDescription: "Renovated 3-bedroom, 3-bath two-story Regency condo with AC throughout, stainless steel kitchen appliances, marble master bath, and an upstairs loft bedroom. Sleeps 7 with King, Queen, 2 Twins, and futon.",
+        longDescription: `Welcome to this beautifully renovated 3-bedroom, 3-bathroom two-story condominium at the Regency at Poipu Kai resort. This condo features central air conditioning throughout and modern upgrades.
 
 The approximately 1,800 sq ft layout spans two levels, providing a wonderful sense of space and privacy. The main level features an open living and dining area with sliding doors that open to the tropical gardens beyond. Natural light floods the interior through generously sized windows.
 
@@ -1142,8 +1142,8 @@ Three of Poipu's most beautiful beaches are within easy walking distance. Explor
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Designer-furnished 3-bedroom, 3-bath Regency II condo with full AC, granite kitchen, private garden-view lanai, and three full bathrooms. Sleeps 7 with King, Queen, 2 Twins, and a sofa bed.",
-        longDescription: `Welcome to this tastefully appointed 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features full central air conditioning and designer furnishings that blend island style with modern comfort.
+        shortDescription: "Designer-furnished 3-bedroom, 3-bath Regency condo with full AC, granite kitchen, private garden-view lanai, and three full bathrooms. Sleeps 7 with King, Queen, 2 Twins, and a sofa bed.",
+        longDescription: `Welcome to this tastefully appointed 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This condo features full central air conditioning and designer furnishings that blend island style with modern comfort.
 
 The approximately 1,800 sq ft interior opens to a generous great room where the living area, dining space, and kitchen create one cohesive entertaining space. The private lanai overlooks a lush garden setting, offering a peaceful outdoor retreat.
 
@@ -1197,7 +1197,7 @@ The king-bedded master suite, queen-bedded second bedroom, and queen-bedded thir
 
 Guests enjoy access to the shared outdoor pool and hot tub, perfect for relaxing after a day of North Shore adventures. Water sports gear is available for guest use.
 
-Princeville offers jaw-dropping beaches, top golf courses, and breathtaking cliffs. Hideaways Beach is just two miles away, Hanalei Bay and its famous pier are four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby.`,
+Princeville offers jaw-dropping beaches, top golf courses, and breathtaking cliffs. Hideaways Beach is just two miles away, Hanalei Bay and its famous pier are four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "mauna-kai-6a",
         photos: PHOTOS_MAUNA_KAI_6A,
       },
@@ -1219,7 +1219,7 @@ A covered lanai provides the perfect spot for morning coffee or evening relaxati
 
 Guests enjoy access to the Mauna Kai shared pool and BBQ area. The resort's convenient Princeville location puts you close to shopping, dining, and some of Kauai's most spectacular scenery.
 
-Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture to Hanalei for surfing and dining. The Na Pali Coast's dramatic cliffs and hiking trails are a short drive away.`,
+Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture to Hanalei for surfing and dining. The Na Pali Coast's dramatic cliffs and hiking trails are a short drive away. Nearby you'll find Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "mauna-kai-6a",
         photos: PHOTOS_MAUNA_KAI_6A,
       },
@@ -1263,7 +1263,7 @@ The kitchen has everything you need for home cooking, from quality appliances to
 
 Mauna Kai's shared pool and hot tub are just steps away. The resort location in Princeville puts you close to Hideaways Beach, the Princeville Botanical Gardens, and the gateway to the North Shore's most spectacular scenery.
 
-From Hanalei Bay's famous crescent beach to the dramatic Na Pali Coast trails, Kauai's North Shore offers some of Hawaii's most breathtaking experiences right at your doorstep.`,
+From Hanalei Bay's famous crescent beach to the dramatic Na Pali Coast trails, Kauai's North Shore offers some of Hawaii's most breathtaking experiences right at your doorstep. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "mauna-kai-t3",
         photos: PHOTOS_MAUNA_KAI_T3,
       },
@@ -1285,7 +1285,7 @@ The king-bedded master suite is on the main level with an en-suite bath. Two ups
 
 The shared pool and hot tub provide a refreshing retreat. Princeville's convenient location offers easy access to grocery stores, restaurants, and the Princeville golf courses.
 
-Kauai's North Shore stretches before you with endless possibilities - from the turquoise waters of Anini Beach to the towering waterfalls along the Na Pali Coast. Hanalei's charming shops and restaurants are just a short drive away.`,
+Kauai's North Shore stretches before you with endless possibilities - from the turquoise waters of Anini Beach to the towering waterfalls along the Na Pali Coast. Hanalei's charming shops and restaurants are just a short drive away. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "mauna-kai-t3",
         photos: PHOTOS_MAUNA_KAI_T3,
       },
@@ -1320,8 +1320,8 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Spacious 3-bedroom, 3-bath Regency II condo with central AC, open floor plan, full granite kitchen, covered dining lanai, and a master suite with jetted tub. Sleeps 7 with King, Queen, 2 Twins, and futon.",
-        longDescription: `Welcome to this generously proportioned 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and an inviting open floor plan designed for comfortable group living.
+        shortDescription: "Spacious 3-bedroom, 3-bath Regency condo with central AC, open floor plan, full granite kitchen, covered dining lanai, and a master suite with jetted tub. Sleeps 7 with King, Queen, 2 Twins, and futon.",
+        longDescription: `Welcome to this generously proportioned 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This condo features central air conditioning and an inviting open floor plan designed for comfortable group living.
 
 The approximately 1,800 sq ft interior centers around a spacious great room where living, dining, and kitchen areas blend together. The covered dining lanai extends the entertaining space outdoors, ideal for tropical dining under the stars or lazy afternoon relaxation.
 
@@ -1342,8 +1342,8 @@ Walk to three world-class Poipu beaches in under 10 minutes. Snorkel with sea tu
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Hawaiian-inspired 3-bedroom, 3-bath Regency II condo with AC, open living/dining/kitchen layout, garden views, private balcony, and walk-in shower. Sleeps 7 with King, Queen, 2 Twins, and sofa bed.",
-        longDescription: `Welcome to this warmly decorated 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and charming Hawaiian decor that reflects the beauty of the islands.
+        shortDescription: "Hawaiian-inspired 3-bedroom, 3-bath Regency condo with AC, open living/dining/kitchen layout, garden views, private balcony, and walk-in shower. Sleeps 7 with King, Queen, 2 Twins, and sofa bed.",
+        longDescription: `Welcome to this warmly decorated 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This condo features central air conditioning and charming Hawaiian decor that reflects the beauty of the islands.
 
 The approximately 1,800 sq ft home offers an open living, dining, and kitchen layout that encourages togetherness. Garden views from the living area and a private balcony create a connection with the lush tropical surroundings that make Kauai special.
 
@@ -1364,8 +1364,8 @@ Poipu's celebrated beaches are mere minutes away on foot. Discover the vibrant u
         bathrooms: "2",
         sqft: "~1,250",
         maxGuests: 6,
-        shortDescription: "Modern 2-bedroom, 2-bath Regency II condo with central AC, King beds in both rooms, stainless steel kitchen, and a private lanai. Sleeps 6 with two King beds and a queen sleeper sofa.",
-        longDescription: `Welcome to this sleek and modern 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This Regency II unit features central air conditioning and tasteful contemporary updates throughout.
+        shortDescription: "Modern 2-bedroom, 2-bath Regency condo with central AC, King beds in both rooms, stainless steel kitchen, and a private lanai. Sleeps 6 with two King beds and a queen sleeper sofa.",
+        longDescription: `Welcome to this sleek and modern 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This condo features central air conditioning and tasteful contemporary updates throughout.
 
 The approximately 1,250 sq ft layout is efficiently designed with an open living area that connects to the kitchen and dining space. A private lanai offers a quiet retreat with views of the tropical gardens. Smart TVs are available in the living area and bedrooms.
 
@@ -1419,7 +1419,7 @@ The private lanai is perfect for morning coffee while watching the sunrise over 
 
 Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directly adjacent to Lydgate Beach Park, one of Kauai's best family beaches with a protected swimming lagoon, snorkeling, and the expansive Kamalani Playground.
 
-Kapaa's Coconut Coast is centrally located on Kauai, making it easy to explore both the North Shore and South Shore. The charming Kapaa town offers eclectic shopping, dining, and the scenic coastal bike path.`,
+Kapaa's Coconut Coast is centrally located on Kauai, making it easy to explore both the North Shore and South Shore. The charming Kapaa town offers eclectic shopping, dining, and the scenic coastal bike path. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Local restaurants, shops, and the Kauai Path along the coast make this an ideal home base.`,
         photoFolder: "kaha-lani-109",
         photos: PHOTOS_KAHA_LANI_109,
       },
@@ -1439,7 +1439,7 @@ The king-bedded master suite has an en-suite bathroom, and the queen-bedded seco
 
 Take advantage of Kaha Lani Resort's pool, hot tub, and BBQ facilities. Walk directly to Lydgate Beach Park's protected swimming lagoon, ideal for families with its calm waters and abundant sea life.
 
-Kapaa town is minutes away with its bike path, shopping, and diverse dining options. The Coconut Coast location provides easy access to attractions across the island.`,
+Kapaa town is minutes away with its bike path, shopping, and diverse dining options. The Coconut Coast location provides easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Local restaurants, shops, and the Kauai Path along the coast are all nearby.`,
         photoFolder: "kaha-lani-123",
         photos: PHOTOS_KAHA_LANI_123,
       },
@@ -1481,7 +1481,7 @@ The fully equipped kitchen features modern appliances and plenty of counter spac
 
 Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
 
-Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Central Kauai location makes day trips to any part of the island easy and convenient.`,
+Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Central Kauai location makes day trips to any part of the island easy and convenient.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },
@@ -1501,7 +1501,7 @@ WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer
 
 Lae Nani's private beach cove offers some of the best swimming on Kauai's east side. The resort pool, tennis court, and landscaped grounds provide a relaxing base for your Kauai vacation.
 
-Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
+Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },
@@ -1597,7 +1597,7 @@ Important: This listing represents our managed portfolio of similar properties. 
         sqft: "~2,200",
         maxGuests: 10,
         shortDescription: "Ocean view 4-bedroom, 3-bath home just 60 yards from Brennecke's Beach. Open floor plan, fully equipped kitchen, covered lanai with ocean views, and tropical landscaping. King master suite, queen and twin bedrooms, and queen sleeper sofa.",
-        longDescription: `Welcome to Beach House A, a spacious 4-bedroom, 3-bathroom home located just 60 yards from famous Brennecke's Beach on Kauai's sunny south shore.
+        longDescription: `Welcome to this spacious 4-bedroom, 3-bathroom home located just 60 yards from famous Brennecke's Beach on Kauai's sunny south shore.
 
 This well-appointed home features an open floor plan with the living room, dining area, and kitchen flowing together to create a perfect gathering space. Large windows frame ocean views, and the covered lanai extends your living space outdoors with comfortable seating and dining.
 
@@ -1607,7 +1607,7 @@ The king-bedded master suite includes a private en-suite bathroom. Additional be
 
 Step outside and walk to Brennecke's Beach in just minutes for world-class body surfing and boogie boarding. Poipu Beach Park is equally close for calm-water swimming and snorkeling. Shipwreck Beach's dramatic cliffs are a short walk along the coast.
 
-The Poipu area offers excellent dining, shopping, and the National Tropical Botanical Garden. This is Kauai's premier resort coast with the island's most consistent sunny weather.`,
+The Poipu area offers excellent dining, shopping, and the National Tropical Botanical Garden. This is Kauai's premier resort coast with the island's most consistent sunny weather. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the historic Koloa Town district. Watch for sea turtles and monk seals at the beach, and enjoy great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "poipu-beachside",
         photos: PHOTOS_POIPU_BEACHSIDE,
       },
@@ -1619,7 +1619,7 @@ The Poipu area offers excellent dining, shopping, and the National Tropical Bota
         sqft: "~1,800",
         maxGuests: 7,
         shortDescription: "Charming 3-bedroom, 3-bath home steps from Brennecke's Beach. Island-style decor, lanai with ocean views, full kitchen, and private bathrooms for each bedroom. King, queen, and twin beds, plus queen sleeper sofa.",
-        longDescription: `Welcome to Beach House B, a charming 3-bedroom, 3-bathroom home located steps from Brennecke's Beach on Poipu's renowned south shore.
+        longDescription: `Welcome to this charming 3-bedroom, 3-bathroom home located steps from Brennecke's Beach on Poipu's renowned south shore.
 
 Island-style decor and comfortable furnishings create a welcoming atmosphere throughout this well-maintained home. Each of the three bedrooms has its own private bathroom - a rare luxury that ensures comfort for all guests.
 
@@ -1627,7 +1627,7 @@ The king-bedded master, queen second bedroom, and twin-bedded third bedroom prov
 
 AC, ceiling fans, WiFi, cable TV, washer/dryer, beach chairs, beach towels, and all linens are provided. A BBQ grill on the lanai makes outdoor cooking a pleasure.
 
-The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach are all within a short walk. Enjoy some of Hawaii's best snorkeling, body surfing, and sunset watching right at your doorstep.`,
+The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach are all within a short walk. Enjoy some of Hawaii's best snorkeling, body surfing, and sunset watching right at your doorstep. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools are all close by.`,
         photoFolder: "poipu-beachside",
         photos: PHOTOS_POIPU_BEACHSIDE,
       },
@@ -1669,7 +1669,7 @@ The upstairs king-bedded master suite features an en-suite bathroom and views of
 
 This townhome community features a shared pool and tropical landscaped grounds. The quiet residential setting offers privacy and peace while being conveniently located in Princeville.
 
-Anini Beach, one of Kauai's most beautiful and protected beaches, is just down the hill - perfect for swimming, snorkeling, and windsurfing. The North Shore's legendary attractions including Hanalei Bay, Na Pali Coast, and the Kilauea Lighthouse are all easily accessible.`,
+Anini Beach, one of Kauai's most beautiful and protected beaches, is just down the hill - perfect for swimming, snorkeling, and windsurfing. The North Shore's legendary attractions including Hanalei Bay, Na Pali Coast, and the Kilauea Lighthouse are all easily accessible. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "kaiulani-52",
         photos: PHOTOS_KAIULANI,
       },
@@ -1691,7 +1691,7 @@ The covered lanais offer views of the mountains and ocean, perfect for relaxing 
 
 Kaiulani's shared pool and landscaped grounds create a peaceful retreat. Anini Beach below offers some of the calmest, clearest waters on Kauai - ideal for swimming, snorkeling, and kayaking.
 
-Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach for unforgettable day trips.`,
+Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach for unforgettable day trips. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
         photoFolder: "kaiulani-52",
         photos: PHOTOS_KAIULANI,
       },
@@ -1735,7 +1735,7 @@ Five bedrooms include a king-bedded master suite with ocean-view en-suite bathro
 
 The private pool is the centerpiece of the outdoor living space, surrounded by tropical landscaping and ocean views. The covered lanai offers al fresco dining, lounging, and sunset watching. Beach chairs, towels, and snorkel gear are provided.
 
-Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations.`,
+Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This is one of Poipu's most coveted oceanfront locations. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Snorkeling with sea turtles and monk seals. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "poipu-oceanfront",
         photos: PHOTOS_POIPU_OCEANFRONT,
       },
@@ -1753,7 +1753,7 @@ Two comfortable bedrooms each feature queen beds, and a private bathroom serves 
 
 Full access to the main home's gourmet kitchen, living areas, private pool, and outdoor amenities is included. The poolside location means you can step right out to the pool deck.
 
-The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach all within walking distance. Enjoy Kauai's sunniest coast with its world-class snorkeling, dining, and dramatic coastal scenery.`,
+The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Shipwreck Beach all within walking distance. Enjoy Kauai's sunniest coast with its world-class snorkeling, dining, and dramatic coastal scenery. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "poipu-oceanfront",
         photos: PHOTOS_POIPU_OCEANFRONT,
       },
@@ -1795,7 +1795,7 @@ The king-bedded master suite features a private en-suite bathroom. The second be
 
 The resort grounds feature manicured gardens, meandering paths, and the resort pool. Walk to Poipu Beach, consistently rated one of Hawaii's best.
 
-The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail.`,
+The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail. Walk to Poipu Beach for snorkeling with sea turtles and monk seals. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "pili-mai-unit-a",
         photos: PHOTOS_PILI_MAI_UNIT_A,
       },
@@ -1815,7 +1815,7 @@ All linens, beach towels, WiFi, and basic kitchen supplies are provided. The res
 
 Walk to Poipu Beach for swimming, snorkeling, and sunbathing. Poipu's location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
 
-Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Poipu's restaurants and shops are just a short walk away.`,
+Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Walk to Poipu Beach for snorkeling with sea turtles and monk seals. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "pili-mai-unit-b",
         photos: PHOTOS_PILI_MAI_UNIT_B,
       },
@@ -1881,7 +1881,7 @@ The modern kitchen has quality appliances, ample counter space, and all the esse
 
 Walk to Poipu Beach from the resort. The tropical gardens and beautifully maintained grounds create a serene environment.
 
-Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast.`,
+Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "pili-mai-unit-b",
         photos: PHOTOS_PILI_MAI_UNIT_B,
       },
@@ -1896,9 +1896,9 @@ Poipu's south shore offers year-round sunshine, world-class snorkeling, and the 
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 15 guests, a wonderful option for groups seeking a sunny south shore Kauai vacation.
 
-Unit A is a 3-bedroom, 2.5-bathroom Regency I condo (~1,800 sq ft) with a breakfast bar kitchen, covered lanai, master suite with private bath, and a loft bedroom. Sleeps 8 with a King bed, Queen bed, 2 Twins, and a sofa bed. AC in bedrooms.
+Unit A is a 3-bedroom, 2.5-bathroom condo (~1,800 sq ft) with a breakfast bar kitchen, covered lanai, master suite with private bath, and a loft bedroom. Sleeps 8 with a King bed, Queen bed, 2 Twins, and a sofa bed. AC in bedrooms.
 
-Unit B is a bright 3-bedroom, 3-bathroom Regency I condo (~1,800 sq ft) with an open-concept design, fully equipped kitchen, garden views, three full baths, and a lanai dining area. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a futon. AC in bedrooms.
+Unit B is a bright 3-bedroom, 3-bathroom condo (~1,800 sq ft) with an open-concept design, fully equipped kitchen, garden views, three full baths, and a lanai dining area. Sleeps 7 with a King bed, Queen bed, 2 Twins, and a futon. AC in bedrooms.
 
 All guests enjoy resort amenities including a pool, hot tub, tennis and pickleball courts, and beautifully landscaped tropical gardens. Walk to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach in about 10 minutes. Nearby: Poipu Shopping Village, Kukui'ula Village (dining/shops), Spouting Horn blowhole, National Tropical Botanical Garden, Koloa Town historic district. Snorkeling at Poipu Beach, sea turtles, monk seals. Great restaurants including The Beach House, Merriman's, Tidepools.
 
@@ -1914,8 +1914,8 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "2.5",
         sqft: "~1,800",
         maxGuests: 8,
-        shortDescription: "Spacious 3-bedroom, 2.5-bath Regency I condo with a breakfast bar kitchen, covered lanai, master suite with private bath, and a loft bedroom. AC in bedrooms. Sleeps 8 with King, Queen, 2 Twins, and a sofa bed.",
-        longDescription: `Welcome to this roomy 3-bedroom, 2.5-bathroom condominium at the Regency at Poipu Kai resort. This Regency I unit offers a spacious layout with classic island-style decor and air conditioning in the bedrooms.
+        shortDescription: "Spacious 3-bedroom, 2.5-bath Regency condo with a breakfast bar kitchen, covered lanai, master suite with private bath, and a loft bedroom. AC in bedrooms. Sleeps 8 with King, Queen, 2 Twins, and a sofa bed.",
+        longDescription: `Welcome to this roomy 3-bedroom, 2.5-bathroom condominium at the Regency at Poipu Kai resort. This Regency condo offers a spacious layout with classic island-style decor and air conditioning in the bedrooms.
 
 The approximately 1,800 sq ft interior features a welcoming open floor plan with a comfortable living area, dedicated dining space, and a well-equipped kitchen with breakfast bar. The covered lanai provides an ideal space for outdoor dining and enjoying the tropical garden surroundings.
 
@@ -1936,8 +1936,8 @@ From this convenient south shore location, walk to Poipu Beach Park, Brennecke's
         bathrooms: "3",
         sqft: "~1,800",
         maxGuests: 7,
-        shortDescription: "Open-concept 3-bedroom, 3-bath Regency I condo with a fully equipped kitchen, garden views, three full baths, and a lanai dining area. AC in bedrooms. Sleeps 7 with King, Queen, 2 Twins, and futon.",
-        longDescription: `Welcome to this bright and airy 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency I unit features an open-concept design with air conditioning in the bedrooms and ceiling fans throughout.
+        shortDescription: "Open-concept 3-bedroom, 3-bath Regency condo with a fully equipped kitchen, garden views, three full baths, and a lanai dining area. AC in bedrooms. Sleeps 7 with King, Queen, 2 Twins, and futon.",
+        longDescription: `Welcome to this bright and airy 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This Regency condo features an open-concept design with air conditioning in the bedrooms and ceiling fans throughout.
 
 The approximately 1,800 sq ft layout creates a generous living space with the open-concept design connecting the living room, dining area, and kitchen. Garden views from the main living area and lanai dining area bring the beauty of the tropics indoors.
 
@@ -1981,7 +1981,7 @@ Important: This listing represents our managed portfolio of similar units within
         sqft: "~1,200",
         maxGuests: 6,
         shortDescription: "Stylish ground-floor 2-bedroom, 2-bath Regency condo with central AC, renovated granite kitchen, garden lanai, King master and Queen second bedroom, plus queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
-        longDescription: `Welcome to Unit A, a stylishly renovated 2-bedroom, 2-bathroom ground-floor condominium at the Regency at Poipu Kai resort on Kauai's coveted south shore.
+        longDescription: `Welcome to this stylishly renovated 2-bedroom, 2-bathroom ground-floor condominium at the Regency at Poipu Kai resort on Kauai's coveted south shore.
 
 This approximately 1,200 sq ft retreat features central air conditioning and a bright, inviting interior with updated finishes throughout. The open-concept living and dining area flows seamlessly to a private garden lanai, perfect for morning coffee or evening relaxation.
 
@@ -2003,7 +2003,7 @@ Three of Poipu's best beaches are within a 10-minute walk. Discover vibrant cora
         sqft: "~1,250",
         maxGuests: 6,
         shortDescription: "Modern 2-bedroom, 2-bath Regency condo with central AC, stainless steel kitchen, garden lanai, King beds in both rooms, plus queen sleeper sofa. Steps to pool, tennis courts, and three Poipu beaches.",
-        longDescription: `Welcome to Unit B, a sleek and modern 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This unit features central air conditioning and tasteful contemporary updates throughout.
+        longDescription: `Welcome to this sleek and modern 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This unit features central air conditioning and tasteful contemporary updates throughout.
 
 The approximately 1,250 sq ft layout is efficiently designed with an open living area that connects to the kitchen and dining space. A private lanai offers a quiet retreat with views of the tropical gardens.
 
@@ -2051,7 +2051,7 @@ The home offers approximately 1,500 sq ft of living space with a well-equipped k
 
 Three bedrooms provide comfortable sleeping arrangements for up to 8 guests. The home is fully furnished and stocked with linens, towels, and kitchen essentials.
 
-Located in the Southern Dunes community near the Southern Dunes Golf Course, this home is perfectly positioned for exploring Central Florida. Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND are all within a short drive.`,
+Located in the Southern Dunes community near the Southern Dunes Golf Course, this home is perfectly positioned for exploring Central Florida. Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND are all within a short drive. Close to US-27 dining and shopping, Lake Eva Park, and Ridge Island Groves for citrus tours. Just 30 minutes to International Drive and all the major Orlando attractions.`,
         photoFolder: "",
         photos: [],
       },
@@ -2091,7 +2091,7 @@ Three bedrooms provide comfortable sleeping arrangements for up to 8 guests. The
 
 Windsor Hills resort amenities include a large clubhouse pool, lazy river, water slides, a movie theater, game room, fitness center, and playground. The resort is gated and well-maintained.
 
-Located just minutes from Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND, this condo is perfectly positioned for exploring Central Florida's world-famous attractions.`,
+Located just minutes from Walt Disney World, Universal Studios, SeaWorld, and LEGOLAND, this condo is perfectly positioned for exploring Central Florida's world-famous attractions. Near US-192 (Irlo Bronson) for dining and shopping, Fun Spot, and Old Town Kissimmee. International Drive is just 20 minutes away with endless entertainment, dining, and shopping options.`,
         photoFolder: "",
         photos: [],
       },
