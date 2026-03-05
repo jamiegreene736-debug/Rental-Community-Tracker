@@ -112,13 +112,13 @@ const COMMUNITY_POIPU_OCEANFRONT: CommunityPhoto[] = [
   { filename: "04-garden.jpg", label: "Tropical Garden", position: "end" },
 ];
 
-const COMMUNITY_KIAHUNA: CommunityPhoto[] = [
-  { filename: "01-plantation-grounds.jpg", label: "Plantation Grounds", position: "beginning" },
-  { filename: "02-beach.jpg", label: "Kiahuna Beach", position: "beginning" },
-  { filename: "03-pool.jpg", label: "Pool & Athletic Club", position: "beginning" },
-  { filename: "04-gardens.jpg", label: "Tropical Gardens", position: "end" },
-  { filename: "05-bbq.jpg", label: "BBQ Area", position: "end" },
-  { filename: "06-sunset.jpg", label: "Beach Sunset", position: "end" },
+const COMMUNITY_PILI_MAI: CommunityPhoto[] = [
+  { filename: "01-resort-pool.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-tropical-pool.jpg", label: "Tropical Pool Area", position: "beginning" },
+  { filename: "03-sunset.jpg", label: "Hawaiian Sunset", position: "beginning" },
+  { filename: "04-nearby-beach.jpg", label: "Nearby Beach", position: "end" },
+  { filename: "05-coastline.jpg", label: "South Shore Coastline", position: "end" },
+  { filename: "06-palm-trees.jpg", label: "Tropical Palms", position: "end" },
 ];
 
 const PHOTOS_924: UnitPhoto[] = [
@@ -495,48 +495,27 @@ const PHOTOS_KAIULANI: UnitPhoto[] = [
   { filename: "photo_19.jpg", label: "Princeville Sunset", category: "Views" },
 ];
 
-const PHOTOS_KIAHUNA_134: UnitPhoto[] = [
-  { filename: "photo_00.jpg", label: "Garden Resort Entrance", category: "Exterior" },
+const PHOTOS_PILI_MAI_UNIT_A: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Modern Kitchen", category: "Kitchen" },
   { filename: "photo_01.jpg", label: "Comfortable Living Room", category: "Living Areas" },
-  { filename: "photo_03.jpg", label: "Full Kitchen", category: "Kitchen" },
-  { filename: "photo_04.jpg", label: "Kitchen with Modern Appliances", category: "Kitchen" },
-  { filename: "photo_05.jpg", label: "Dining Area", category: "Living Areas" },
-  { filename: "photo_06.jpg", label: "King Master Bedroom", category: "Bedrooms" },
-  { filename: "photo_07.jpg", label: "Master Suite with AC", category: "Bedrooms" },
-  { filename: "photo_08.jpg", label: "Master En-Suite Bath", category: "Bathrooms" },
-  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
-  { filename: "photo_10.jpg", label: "Twin Guest Room", category: "Bedrooms" },
-  { filename: "photo_11.jpg", label: "Second Bathroom", category: "Bathrooms" },
-  { filename: "photo_12.jpg", label: "Garden View Lanai", category: "Exterior" },
-  { filename: "photo_13.jpg", label: "Tropical Garden Path", category: "Exterior" },
-  { filename: "photo_14.jpg", label: "Resort Pool Area", category: "Amenities" },
-  { filename: "photo_15.jpg", label: "Pool Deck and Loungers", category: "Amenities" },
-  { filename: "photo_16.jpg", label: "Poipu Beach Access", category: "Views" },
-  { filename: "photo_17.jpg", label: "Royal Garden Grounds", category: "Views" },
-  { filename: "photo_18.jpg", label: "South Shore Sunset", category: "Views" },
+  { filename: "photo_02.jpg", label: "Open Floor Plan", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Dining Area", category: "Living Areas" },
+  { filename: "photo_04.jpg", label: "Living Space", category: "Living Areas" },
+  { filename: "photo_05.jpg", label: "Bright Bedroom", category: "Bedrooms" },
+  { filename: "photo_06.jpg", label: "Master Bedroom Suite", category: "Bedrooms" },
+  { filename: "photo_07.jpg", label: "Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_08.jpg", label: "Modern Bathroom", category: "Bathrooms" },
+  { filename: "photo_09.jpg", label: "Townhome Interior", category: "Living Areas" },
 ];
 
-const PHOTOS_KIAHUNA_101: UnitPhoto[] = [
-  { filename: "photo_00.jpg", label: "Plantation Resort Exterior", category: "Exterior" },
-  { filename: "photo_01.jpg", label: "Bright Living Room", category: "Living Areas" },
-  { filename: "photo_02.jpg", label: "Living Area with Garden View", category: "Living Areas" },
-  { filename: "photo_03.jpg", label: "Well-Appointed Kitchen", category: "Kitchen" },
-  { filename: "photo_04.jpg", label: "Kitchen and Counter Space", category: "Kitchen" },
-  { filename: "photo_05.jpg", label: "Dining Table", category: "Living Areas" },
-  { filename: "photo_06.jpg", label: "King Master Suite", category: "Bedrooms" },
-  { filename: "photo_07.jpg", label: "Master Bedroom Retreat", category: "Bedrooms" },
-  { filename: "photo_08.jpg", label: "Master Bathroom", category: "Bathrooms" },
-  { filename: "photo_09.jpg", label: "Queen Guest Bedroom", category: "Bedrooms" },
-  { filename: "photo_10.jpg", label: "Second Guest Room", category: "Bedrooms" },
-  { filename: "photo_11.jpg", label: "Guest Bathroom", category: "Bathrooms" },
-  { filename: "photo_12.jpg", label: "Private Lanai", category: "Exterior" },
-  { filename: "photo_13.jpg", label: "Lanai and Garden Setting", category: "Exterior" },
-  { filename: "photo_14.jpg", label: "Beachfront Pool", category: "Amenities" },
-  { filename: "photo_15.jpg", label: "Pool with Ocean View", category: "Amenities" },
-  { filename: "photo_16.jpg", label: "Poipu Beach Shoreline", category: "Views" },
-  { filename: "photo_17.jpg", label: "Botanical Garden Walkway", category: "Views" },
-  { filename: "photo_18.jpg", label: "Tropical Sunset from Resort", category: "Views" },
-  { filename: "photo_19.jpg", label: "South Shore Coastline", category: "Views" },
+const PHOTOS_PILI_MAI_UNIT_B: UnitPhoto[] = [
+  { filename: "photo_00.jpg", label: "Spacious Interior", category: "Living Areas" },
+  { filename: "photo_01.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Open Layout", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Dining and Kitchen", category: "Kitchen" },
+  { filename: "photo_04.jpg", label: "King Bedroom", category: "Bedrooms" },
+  { filename: "photo_05.jpg", label: "Guest Bedroom", category: "Bedrooms" },
+  { filename: "photo_06.jpg", label: "Second Guest Bedroom", category: "Bedrooms" },
 ];
 
 export const unitBuilderData: PropertyUnitBuilder[] = [
@@ -1797,8 +1776,8 @@ Walk to Poipu Beach, consistently rated one of Hawaii's best. Nearby: Poipu Shop
 
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     hasPhotos: true,
-    communityPhotos: COMMUNITY_KIAHUNA,
-    communityPhotoFolder: "community-kiahuna",
+    communityPhotos: COMMUNITY_PILI_MAI,
+    communityPhotoFolder: "community-pili-mai",
     units: [
       {
         id: "prop32-kia-3br",
@@ -1817,8 +1796,8 @@ The king-bedded master suite features a private en-suite bathroom. The second be
 The resort grounds feature manicured gardens, meandering paths, and the resort pool. Walk to Poipu Beach, consistently rated one of Hawaii's best.
 
 The on-site restaurant, nearby shops, and Poipu's dining scene are all convenient. Explore Spouting Horn, the National Tropical Botanical Garden, or the dramatic coastline of Maha'ulepu Heritage Trail.`,
-        photoFolder: "kiahuna-134",
-        photos: PHOTOS_KIAHUNA_134,
+        photoFolder: "pili-mai-unit-a",
+        photos: PHOTOS_PILI_MAI_UNIT_A,
       },
       {
         id: "prop32-kia-2br",
@@ -1837,8 +1816,8 @@ All linens, beach towels, WiFi, and basic kitchen supplies are provided. The res
 Walk to Poipu Beach for swimming, snorkeling, and sunbathing. Poipu's location on Kauai's south shore guarantees the island's best weather and most consistent sunshine.
 
 Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scenic Maha'ulepu coastal trail. Poipu's restaurants and shops are just a short walk away.`,
-        photoFolder: "kiahuna-101",
-        photos: PHOTOS_KIAHUNA_101,
+        photoFolder: "pili-mai-unit-b",
+        photos: PHOTOS_PILI_MAI_UNIT_B,
       },
     ],
   },
@@ -1859,8 +1838,8 @@ Walk to Poipu Beach from the resort. Nearby: Poipu Shopping Village, Kukui'ula V
 
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     hasPhotos: true,
-    communityPhotos: COMMUNITY_KIAHUNA,
-    communityPhotoFolder: "community-kiahuna",
+    communityPhotos: COMMUNITY_PILI_MAI,
+    communityPhotoFolder: "community-pili-mai",
     units: [
       {
         id: "prop33-kia-3br-a",
@@ -1881,8 +1860,8 @@ The kitchen is fully stocked for home cooking, and the dining area accommodates 
 Walk to Poipu Beach from the resort. The resort pool and beautifully maintained grounds make this an exceptional Kauai vacation base.
 
 Explore the south shore's attractions including Spouting Horn, the National Tropical Botanical Garden, and outstanding snorkeling at nearby Koloa Landing.`,
-        photoFolder: "kiahuna-134",
-        photos: PHOTOS_KIAHUNA_134,
+        photoFolder: "pili-mai-unit-a",
+        photos: PHOTOS_PILI_MAI_UNIT_A,
       },
       {
         id: "prop33-kia-3br-b",
@@ -1903,8 +1882,8 @@ The modern kitchen has quality appliances, ample counter space, and all the esse
 Walk to Poipu Beach from the resort. The tropical gardens and beautifully maintained grounds create a serene environment.
 
 Poipu's south shore offers year-round sunshine, world-class snorkeling, and the best dining and shopping on Kauai's south coast.`,
-        photoFolder: "kiahuna-101",
-        photos: PHOTOS_KIAHUNA_101,
+        photoFolder: "pili-mai-unit-b",
+        photos: PHOTOS_PILI_MAI_UNIT_B,
       },
     ],
   },
