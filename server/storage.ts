@@ -2,7 +2,9 @@ import {
   type User, type InsertUser,
   type BuyIn, type InsertBuyIn,
   type LodgifyBooking, type InsertLodgifyBooking,
-  users, buyIns, lodgifyBookings,
+  type ScannerRun, type InsertScannerRun,
+  type AvailabilityScan, type InsertAvailabilityScan,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -28,6 +30,15 @@ export interface IStorage {
   }>;
 
   getBookedUnits(checkIn: string, checkOut: string): Promise<{ propertyId: number; unitId: string; source: string }[]>;
+
+  createScannerRun(run: InsertScannerRun): Promise<ScannerRun>;
+  updateScannerRun(id: number, data: Partial<InsertScannerRun>): Promise<ScannerRun | undefined>;
+  getScannerRuns(limit?: number): Promise<ScannerRun[]>;
+  getLatestScannerRun(): Promise<ScannerRun | undefined>;
+
+  createAvailabilityScan(scan: InsertAvailabilityScan): Promise<AvailabilityScan>;
+  getAvailabilityScans(filters?: { runId?: number; community?: string; status?: string }): Promise<AvailabilityScan[]>;
+  deleteAvailabilityScansForRun(runId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -152,6 +163,46 @@ export class DatabaseStorage implements IStorage {
       }
     }
     return results;
+  }
+
+  async createScannerRun(run: InsertScannerRun): Promise<ScannerRun> {
+    const [result] = await db.insert(scannerRuns).values(run).returning();
+    return result;
+  }
+
+  async updateScannerRun(id: number, data: Partial<InsertScannerRun>): Promise<ScannerRun | undefined> {
+    const [result] = await db.update(scannerRuns).set(data).where(eq(scannerRuns.id, id)).returning();
+    return result;
+  }
+
+  async getScannerRuns(limit = 20): Promise<ScannerRun[]> {
+    return db.select().from(scannerRuns).orderBy(desc(scannerRuns.startedAt)).limit(limit);
+  }
+
+  async getLatestScannerRun(): Promise<ScannerRun | undefined> {
+    const [result] = await db.select().from(scannerRuns).orderBy(desc(scannerRuns.startedAt)).limit(1);
+    return result;
+  }
+
+  async createAvailabilityScan(scan: InsertAvailabilityScan): Promise<AvailabilityScan> {
+    const [result] = await db.insert(availabilityScans).values(scan).returning();
+    return result;
+  }
+
+  async getAvailabilityScans(filters?: { runId?: number; community?: string; status?: string }): Promise<AvailabilityScan[]> {
+    const conditions = [];
+    if (filters?.runId) conditions.push(eq(availabilityScans.runId, filters.runId));
+    if (filters?.community) conditions.push(eq(availabilityScans.community, filters.community));
+    if (filters?.status) conditions.push(eq(availabilityScans.status, filters.status));
+
+    if (conditions.length > 0) {
+      return db.select().from(availabilityScans).where(and(...conditions)).orderBy(availabilityScans.checkIn);
+    }
+    return db.select().from(availabilityScans).orderBy(desc(availabilityScans.createdAt)).limit(500);
+  }
+
+  async deleteAvailabilityScansForRun(runId: number): Promise<void> {
+    await db.delete(availabilityScans).where(eq(availabilityScans.runId, runId));
   }
 }
 

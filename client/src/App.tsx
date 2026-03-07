@@ -9,6 +9,7 @@ import UnitBuilder from "@/pages/unit-builder";
 import LodgifyPrep from "@/pages/lodgify-prep";
 import BuyInTracker from "@/pages/buy-in-tracker";
 import PhotoAudit from "@/pages/photo-audit";
+import AvailabilityScanner from "@/pages/availability-scanner";
 
 function Router() {
   return (
@@ -18,6 +19,7 @@ function Router() {
       <Route path="/lodgify-prep/:id" component={LodgifyPrep} />
       <Route path="/buy-in-tracker" component={BuyInTracker} />
       <Route path="/photo-audit" component={PhotoAudit} />
+      <Route path="/availability-scanner" component={AvailabilityScanner} />
       <Route component={NotFound} />
     </Switch>
   );

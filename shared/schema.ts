@@ -67,3 +67,46 @@ export const insertLodgifyBookingSchema = createInsertSchema(lodgifyBookings).om
 
 export type InsertLodgifyBooking = z.infer<typeof insertLodgifyBookingSchema>;
 export type LodgifyBooking = typeof lodgifyBookings.$inferSelect;
+
+export const scannerRuns = pgTable("scanner_runs", {
+  id: serial("id").primaryKey(),
+  startedAt: timestamp("started_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+  totalWeeksScanned: integer("total_weeks_scanned").default(0),
+  totalBlocked: integer("total_blocked").default(0),
+  totalAvailable: integer("total_available").default(0),
+  totalErrors: integer("total_errors").default(0),
+  status: text("status").notNull().default("running"),
+});
+
+export const insertScannerRunSchema = createInsertSchema(scannerRuns).omit({
+  id: true,
+  startedAt: true,
+});
+
+export type InsertScannerRun = z.infer<typeof insertScannerRunSchema>;
+export type ScannerRun = typeof scannerRuns.$inferSelect;
+
+export const availabilityScans = pgTable("availability_scans", {
+  id: serial("id").primaryKey(),
+  runId: integer("run_id"),
+  community: text("community").notNull(),
+  checkIn: date("check_in").notNull(),
+  checkOut: date("check_out").notNull(),
+  bedroomConfig: text("bedroom_config").notNull(),
+  airbnbResults: integer("airbnb_results").default(0),
+  vrboResults: integer("vrbo_results").default(0),
+  totalResults: integer("total_results").default(0),
+  blocked: text("blocked").notNull().default("false"),
+  lodgifyBlockIds: text("lodgify_block_ids"),
+  status: text("status").notNull().default("available"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAvailabilityScanSchema = createInsertSchema(availabilityScans).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertAvailabilityScan = z.infer<typeof insertAvailabilityScanSchema>;
+export type AvailabilityScan = typeof availabilityScans.$inferSelect;

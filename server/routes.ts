@@ -5,6 +5,7 @@ import { insertBuyInSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
+import { runAvailabilityScan, isScannerRunning } from "./availability-scanner";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -1106,6 +1107,51 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Search failed", message: err.message });
+    }
+  });
+
+  app.post("/api/scanner/run", async (_req, res) => {
+    if (isScannerRunning()) {
+      return res.status(409).json({ error: "A scan is already running" });
+    }
+    const weeksAhead = 78;
+    runAvailabilityScan(weeksAhead).catch(err => {
+      console.error("Scanner run error:", err);
+    });
+    res.json({ message: "Scan started", weeksAhead });
+  });
+
+  app.get("/api/scanner/status", async (_req, res) => {
+    try {
+      const latest = await storage.getLatestScannerRun();
+      res.json({
+        running: isScannerRunning(),
+        latestRun: latest || null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/scanner/runs", async (_req, res) => {
+    try {
+      const runs = await storage.getScannerRuns(20);
+      res.json(runs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/scanner/results", async (req, res) => {
+    try {
+      const filters: { runId?: number; community?: string; status?: string } = {};
+      if (req.query.runId) filters.runId = parseInt(req.query.runId as string);
+      if (req.query.community) filters.community = req.query.community as string;
+      if (req.query.status) filters.status = req.query.status as string;
+      const results = await storage.getAvailabilityScans(filters);
+      res.json(results);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 

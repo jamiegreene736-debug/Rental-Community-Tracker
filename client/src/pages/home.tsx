@@ -40,6 +40,7 @@ import {
   Hammer,
   ClipboardList,
   Loader2,
+  CalendarSearch,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
@@ -788,6 +789,12 @@ export default function Home() {
             <Link href="/photo-audit">
               <Button variant="outline" data-testid="button-photo-audit">
                 Photo Audit
+              </Button>
+            </Link>
+            <Link href="/availability-scanner">
+              <Button variant="outline" data-testid="button-availability-scanner">
+                <CalendarSearch className="h-4 w-4 mr-2" />
+                Availability Scanner
               </Button>
             </Link>
             <Link href="/buy-in-tracker">
