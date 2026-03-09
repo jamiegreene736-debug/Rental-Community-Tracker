@@ -92,12 +92,22 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+let consecutiveRateLimits = 0;
+
 async function fetchWithRetry(url: string, label: string, maxRetries = 3): Promise<Response | null> {
+  if (consecutiveRateLimits >= 5) {
+    const cooldown = 120;
+    log(`Too many rate limits in a row, cooling down ${cooldown}s before ${label}`, "scanner");
+    await sleep(cooldown * 1000);
+    consecutiveRateLimits = 0;
+  }
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetch(url);
       if (response.status === 429) {
-        const waitTime = Math.min(5000 * Math.pow(2, attempt), 30000);
+        consecutiveRateLimits++;
+        const waitTime = Math.min(15000 * Math.pow(2, attempt), 120000);
         log(`Rate limited on ${label}, waiting ${waitTime / 1000}s (attempt ${attempt + 1}/${maxRetries + 1})`, "scanner");
         await sleep(waitTime);
         continue;
@@ -106,11 +116,12 @@ async function fetchWithRetry(url: string, label: string, maxRetries = 3): Promi
         log(`${label}: HTTP ${response.status}`, "scanner");
         return null;
       }
+      consecutiveRateLimits = 0;
       return response;
     } catch (err: any) {
       log(`${label} failed: ${err.message}`, "scanner");
       if (attempt < maxRetries) {
-        await sleep(3000 * (attempt + 1));
+        await sleep(5000 * (attempt + 1));
         continue;
       }
       return null;
@@ -319,7 +330,7 @@ async function searchCommunityBedroom(
   }
 
   const airbnbCount = await searchAirbnb(community, bedrooms, checkIn, checkOut);
-  await sleep(2000);
+  await sleep(5000);
   const vrboCount = await searchVRBO(community, bedrooms, checkIn, checkOut);
 
   const error = airbnbCount === -1 && vrboCount === -1;
@@ -330,7 +341,7 @@ async function searchCommunityBedroom(
   };
 
   cache.set(cacheKey, entry);
-  await sleep(3000);
+  await sleep(5000);
 
   return entry;
 }
