@@ -1129,12 +1129,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Property ${propertyId} is not a scannable listing` });
       }
     }
+    let lodgifyPropertyId: number | undefined;
+    if (req.body?.lodgifyPropertyId) {
+      lodgifyPropertyId = parseInt(req.body.lodgifyPropertyId);
+      if (isNaN(lodgifyPropertyId)) {
+        return res.status(400).json({ error: "Invalid lodgifyPropertyId" });
+      }
+    }
     const weeksAhead = 52;
-    runAvailabilityScan(weeksAhead, propertyId).catch(err => {
+    runAvailabilityScan(weeksAhead, propertyId, lodgifyPropertyId).catch(err => {
       console.error("Scanner run error:", err);
     });
     const label = propertyId ? getPropertyName(propertyId) : "all properties";
-    res.json({ message: `Scan started for ${label}`, weeksAhead, propertyId });
+    res.json({ message: `Scan started for ${label}`, weeksAhead, propertyId, lodgifyPropertyId });
   });
 
   app.get("/api/scanner/status", async (_req, res) => {

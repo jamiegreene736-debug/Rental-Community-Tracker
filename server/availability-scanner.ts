@@ -344,7 +344,7 @@ export function getPropertyName(propertyId: number): string {
   return PROPERTY_UNIT_NEEDS[propertyId]?.name || `Property #${propertyId}`;
 }
 
-export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number): Promise<number> {
+export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number, lodgifyPropertyId?: number): Promise<number> {
   if (scannerRunning) {
     log("Scanner already running, skipping", "scanner");
     return -1;
@@ -379,8 +379,20 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     });
     runId = run.id;
 
-    const lodgifyProperties = await fetchLodgifyProperties();
-    log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
+    let lodgifyProperties: LodgifyPropertyInfo[] = [];
+    if (lodgifyPropertyId) {
+      const allProps = await fetchLodgifyProperties();
+      const match = allProps.find(p => p.lodgifyId === lodgifyPropertyId);
+      if (match) {
+        lodgifyProperties = [match];
+        log(`Will block Lodgify property ${lodgifyPropertyId} (${match.name})`, "scanner");
+      } else {
+        log(`Lodgify property ${lodgifyPropertyId} not found, skipping blocks`, "scanner");
+      }
+    } else if (!targetPropertyId) {
+      lodgifyProperties = await fetchLodgifyProperties();
+      log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
+    }
 
     const windows = generateWeeklyWindows(weeksAhead);
 

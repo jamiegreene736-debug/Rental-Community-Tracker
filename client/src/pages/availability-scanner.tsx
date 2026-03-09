@@ -50,6 +50,11 @@ type ScannableProperty = {
   bedrooms: number[];
 };
 
+type LodgifyProperty = {
+  id: number;
+  name: string;
+};
+
 function formatDateTime(dateStr: string | Date | null): string {
   if (!dateStr) return "—";
   const d = new Date(dateStr);
@@ -79,6 +84,7 @@ function getNextMonday(): string {
 
 export default function AvailabilityScanner() {
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
+  const [selectedLodgifyId, setSelectedLodgifyId] = useState<string>("");
   const [communityFilter, setCommunityFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedRunId, setSelectedRunId] = useState<string>("latest");
@@ -86,6 +92,10 @@ export default function AvailabilityScanner() {
 
   const propertiesQuery = useQuery<ScannableProperty[]>({
     queryKey: ["/api/scanner/properties"],
+  });
+
+  const lodgifyQuery = useQuery<any>({
+    queryKey: ["/api/lodgify/properties"],
   });
 
   const statusQuery = useQuery<ScannerStatus>({
@@ -122,6 +132,9 @@ export default function AvailabilityScanner() {
       if (selectedPropertyId) {
         body.propertyId = parseInt(selectedPropertyId);
       }
+      if (selectedLodgifyId) {
+        body.lodgifyPropertyId = parseInt(selectedLodgifyId);
+      }
       const res = await apiRequest("POST", "/api/scanner/run", body);
       return res.json();
     },
@@ -129,9 +142,12 @@ export default function AvailabilityScanner() {
       const propName = selectedPropertyId
         ? properties.find(p => p.id === parseInt(selectedPropertyId))?.name || `Property #${selectedPropertyId}`
         : "all properties";
+      const lodgifyName = selectedLodgifyId
+        ? lodgifyProperties.find((p: LodgifyProperty) => p.id === parseInt(selectedLodgifyId))?.name || ""
+        : "";
       toast({
         title: "Scan started",
-        description: `Scanning 52 weeks for ${propName}. Results will appear as they come in.`,
+        description: `Scanning 52 weeks for ${propName}.${lodgifyName ? ` Blackouts → ${lodgifyName}.` : ""}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
@@ -145,6 +161,7 @@ export default function AvailabilityScanner() {
   const runs = runsQuery.data || [];
   const results = resultsQuery.data || [];
   const properties = propertiesQuery.data || [];
+  const lodgifyProperties: LodgifyProperty[] = (lodgifyQuery.data?.items || lodgifyQuery.data || []).map((p: any) => ({ id: p.id, name: p.name }));
 
   const communities = [...new Set(results.map(r => r.community))].sort();
   const blockedResults = results.filter(r => r.status === "blocked");
@@ -193,6 +210,24 @@ export default function AvailabilityScanner() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="min-w-[250px] flex-1 max-w-sm">
+              <Select value={selectedLodgifyId} onValueChange={v => setSelectedLodgifyId(v)}>
+                <SelectTrigger data-testid="select-lodgify-property">
+                  <SelectValue placeholder="Lodgify listing for blackouts..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {lodgifyProperties.length === 0 ? (
+                    <SelectItem value="none" disabled>Loading Lodgify properties...</SelectItem>
+                  ) : (
+                    lodgifyProperties.map((p: LodgifyProperty) => (
+                      <SelectItem key={p.id} value={String(p.id)} data-testid={`option-lodgify-${p.id}`}>
+                        {p.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
             <Button
               onClick={() => triggerScan.mutate()}
               disabled={triggerScan.isPending || status?.running || !selectedPropertyId}
@@ -207,7 +242,7 @@ export default function AvailabilityScanner() {
           </div>
           {!selectedPropertyId && !status?.running && (
             <p className="text-xs text-muted-foreground mt-2">
-              Choose a listing above to scan its community for buy-in availability across the next 12 months.
+              Choose a listing to scan, then pick which Lodgify property should receive blackout blocks when no buy-in inventory is found.
             </p>
           )}
         </Card>
