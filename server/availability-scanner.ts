@@ -92,6 +92,34 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function fetchWithRetry(url: string, label: string, maxRetries = 3): Promise<Response | null> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url);
+      if (response.status === 429) {
+        const waitTime = Math.min(5000 * Math.pow(2, attempt), 30000);
+        log(`Rate limited on ${label}, waiting ${waitTime / 1000}s (attempt ${attempt + 1}/${maxRetries + 1})`, "scanner");
+        await sleep(waitTime);
+        continue;
+      }
+      if (!response.ok) {
+        log(`${label}: HTTP ${response.status}`, "scanner");
+        return null;
+      }
+      return response;
+    } catch (err: any) {
+      log(`${label} failed: ${err.message}`, "scanner");
+      if (attempt < maxRetries) {
+        await sleep(3000 * (attempt + 1));
+        continue;
+      }
+      return null;
+    }
+  }
+  log(`${label}: all ${maxRetries + 1} attempts exhausted`, "scanner");
+  return null;
+}
+
 async function searchAirbnb(
   community: string,
   bedrooms: number,
@@ -102,32 +130,26 @@ async function searchAirbnb(
   if (!apiKey) return -1;
 
   const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+  const params = new URLSearchParams({
+    engine: "airbnb",
+    check_in_date: checkIn,
+    check_out_date: checkOut,
+    adults: "2",
+    bedrooms: String(bedrooms),
+    type_of_place: "entire_home",
+    currency: "USD",
+    api_key: apiKey,
+    q: searchLocation,
+  });
 
-  try {
-    const params = new URLSearchParams({
-      engine: "airbnb",
-      check_in_date: checkIn,
-      check_out_date: checkOut,
-      adults: "2",
-      bedrooms: String(bedrooms),
-      type_of_place: "entire_home",
-      currency: "USD",
-      api_key: apiKey,
-      q: searchLocation,
-    });
+  const response = await fetchWithRetry(
+    `https://www.searchapi.io/api/v1/search?${params.toString()}`,
+    `Airbnb ${community} ${bedrooms}BR ${checkIn}`
+  );
+  if (!response) return -1;
 
-    const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-    if (!response.ok) {
-      log(`Airbnb search error for ${community} ${bedrooms}BR ${checkIn}: ${response.status}`, "scanner");
-      return -1;
-    }
-
-    const data = await response.json();
-    return (data.properties || []).length;
-  } catch (err: any) {
-    log(`Airbnb search failed for ${community} ${bedrooms}BR: ${err.message}`, "scanner");
-    return -1;
-  }
+  const data = await response.json();
+  return (data.properties || []).length;
 }
 
 async function searchVRBO(
@@ -140,33 +162,27 @@ async function searchVRBO(
   if (!apiKey) return -1;
 
   const destination = COMMUNITY_VRBO_DESTINATIONS[community] || `${community}, Hawaii`;
+  const params = new URLSearchParams({
+    engine: "google_hotels",
+    q: destination,
+    check_in_date: checkIn,
+    check_out_date: checkOut,
+    adults: "2",
+    bedrooms: String(bedrooms),
+    property_type: "vacation_rental",
+    sort_by: "lowest_price",
+    currency: "USD",
+    api_key: apiKey,
+  });
 
-  try {
-    const params = new URLSearchParams({
-      engine: "google_hotels",
-      q: destination,
-      check_in_date: checkIn,
-      check_out_date: checkOut,
-      adults: "2",
-      bedrooms: String(bedrooms),
-      property_type: "vacation_rental",
-      sort_by: "lowest_price",
-      currency: "USD",
-      api_key: apiKey,
-    });
+  const response = await fetchWithRetry(
+    `https://www.searchapi.io/api/v1/search?${params.toString()}`,
+    `VRBO ${community} ${bedrooms}BR ${checkIn}`
+  );
+  if (!response) return -1;
 
-    const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-    if (!response.ok) {
-      log(`VRBO search error for ${community} ${bedrooms}BR ${checkIn}: ${response.status}`, "scanner");
-      return -1;
-    }
-
-    const data = await response.json();
-    return (data.properties || []).length;
-  } catch (err: any) {
-    log(`VRBO search failed for ${community} ${bedrooms}BR: ${err.message}`, "scanner");
-    return -1;
-  }
+  const data = await response.json();
+  return (data.properties || []).length;
 }
 
 async function fetchLodgifyProperties(): Promise<LodgifyPropertyInfo[]> {
@@ -302,10 +318,9 @@ async function searchCommunityBedroom(
     return cache.get(cacheKey)!;
   }
 
-  const [airbnbCount, vrboCount] = await Promise.all([
-    searchAirbnb(community, bedrooms, checkIn, checkOut),
-    searchVRBO(community, bedrooms, checkIn, checkOut),
-  ]);
+  const airbnbCount = await searchAirbnb(community, bedrooms, checkIn, checkOut);
+  await sleep(2000);
+  const vrboCount = await searchVRBO(community, bedrooms, checkIn, checkOut);
 
   const error = airbnbCount === -1 && vrboCount === -1;
   const entry: CacheEntry = {
@@ -315,7 +330,7 @@ async function searchCommunityBedroom(
   };
 
   cache.set(cacheKey, entry);
-  await sleep(1500);
+  await sleep(3000);
 
   return entry;
 }
