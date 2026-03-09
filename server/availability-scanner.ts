@@ -552,6 +552,17 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
   }
 }
 
+export async function cleanupStaleRuns() {
+  try {
+    const count = await storage.cleanupStaleRuns();
+    if (count > 0) {
+      log(`Cleaned up ${count} stale scan run(s) from previous session`, "scanner");
+    }
+  } catch (err: any) {
+    log(`Failed to cleanup stale runs: ${err.message}`, "scanner");
+  }
+}
+
 export function startWeeklyScheduler() {
   const MONDAY = 1;
   const HOUR = 3;

@@ -35,6 +35,7 @@ export interface IStorage {
   updateScannerRun(id: number, data: Partial<InsertScannerRun>): Promise<ScannerRun | undefined>;
   getScannerRuns(limit?: number): Promise<ScannerRun[]>;
   getLatestScannerRun(): Promise<ScannerRun | undefined>;
+  cleanupStaleRuns(): Promise<number>;
 
   createAvailabilityScan(scan: InsertAvailabilityScan): Promise<AvailabilityScan>;
   getAvailabilityScans(filters?: { runId?: number; community?: string; status?: string }): Promise<AvailabilityScan[]>;
@@ -182,6 +183,14 @@ export class DatabaseStorage implements IStorage {
   async getLatestScannerRun(): Promise<ScannerRun | undefined> {
     const [result] = await db.select().from(scannerRuns).orderBy(desc(scannerRuns.startedAt)).limit(1);
     return result;
+  }
+
+  async cleanupStaleRuns(): Promise<number> {
+    const staleRuns = await db.update(scannerRuns)
+      .set({ status: "failed", completedAt: new Date() })
+      .where(eq(scannerRuns.status, "running"))
+      .returning();
+    return staleRuns.length;
   }
 
   async createAvailabilityScan(scan: InsertAvailabilityScan): Promise<AvailabilityScan> {
