@@ -54,33 +54,14 @@ const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms
   37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
 };
 
-interface CommunityBedroomNeeds {
-  community: string;
-  bedroomConfigs: number[];
-  propertyIds: number[];
+interface LodgifyPropertyInfo {
+  lodgifyId: number;
+  name: string;
+  rooms: { id: number; name: string }[];
 }
 
-function getCommunityNeeds(): CommunityBedroomNeeds[] {
-  const communityMap = new Map<string, { bedrooms: Set<number>; propertyIds: Set<number> }>();
-
-  for (const [pidStr, config] of Object.entries(PROPERTY_UNIT_NEEDS)) {
-    const pid = parseInt(pidStr);
-    if (!communityMap.has(config.community)) {
-      communityMap.set(config.community, { bedrooms: new Set(), propertyIds: new Set() });
-    }
-    const entry = communityMap.get(config.community)!;
-    entry.propertyIds.add(pid);
-    for (const unit of config.units) {
-      entry.bedrooms.add(unit.bedrooms);
-    }
-  }
-
-  return Array.from(communityMap.entries()).map(([community, data]) => ({
-    community,
-    bedroomConfigs: Array.from(data.bedrooms).sort((a, b) => a - b),
-    propertyIds: Array.from(data.propertyIds),
-  }));
-}
+type CacheEntry = { airbnb: number; vrbo: number; error: boolean };
+type SearchCache = Map<string, CacheEntry>;
 
 function formatDate(date: Date): string {
   return date.toISOString().split("T")[0];
@@ -92,7 +73,9 @@ function generateWeeklyWindows(weeksAhead: number): { checkIn: string; checkOut:
   today.setHours(0, 0, 0, 0);
 
   const startDate = new Date(today);
-  startDate.setDate(startDate.getDate() + ((7 - startDate.getDay()) % 7 || 7));
+  const dayOfWeek = startDate.getDay();
+  const daysUntilSaturday = (6 - dayOfWeek + 7) % 7 || 7;
+  startDate.setDate(startDate.getDate() + daysUntilSaturday);
 
   for (let i = 0; i < weeksAhead; i++) {
     const checkIn = new Date(startDate);
@@ -135,7 +118,7 @@ async function searchAirbnb(
 
     const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
     if (!response.ok) {
-      log(`Airbnb search error for ${community} ${bedrooms}BR: ${response.status}`, "scanner");
+      log(`Airbnb search error for ${community} ${bedrooms}BR ${checkIn}: ${response.status}`, "scanner");
       return -1;
     }
 
@@ -174,7 +157,7 @@ async function searchVRBO(
 
     const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
     if (!response.ok) {
-      log(`VRBO search error for ${community} ${bedrooms}BR: ${response.status}`, "scanner");
+      log(`VRBO search error for ${community} ${bedrooms}BR ${checkIn}: ${response.status}`, "scanner");
       return -1;
     }
 
@@ -183,6 +166,68 @@ async function searchVRBO(
   } catch (err: any) {
     log(`VRBO search failed for ${community} ${bedrooms}BR: ${err.message}`, "scanner");
     return -1;
+  }
+}
+
+async function fetchLodgifyProperties(): Promise<LodgifyPropertyInfo[]> {
+  const apiKey = process.env.LODGIFY_API_KEY;
+  if (!apiKey) {
+    log("Lodgify API key not configured, cannot fetch properties for blocking", "scanner");
+    return [];
+  }
+
+  try {
+    const response = await fetch("https://api.lodgify.com/v2/properties?page=1&size=50", {
+      headers: {
+        "X-ApiKey": apiKey,
+        "accept": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      log(`Failed to fetch Lodgify properties: ${response.status}`, "scanner");
+      return [];
+    }
+
+    const data = await response.json();
+    const items = data.items || data;
+    if (!Array.isArray(items)) {
+      log("Unexpected Lodgify properties response format", "scanner");
+      return [];
+    }
+
+    const results: LodgifyPropertyInfo[] = [];
+    for (const prop of items) {
+      const propId = prop.id;
+      const propName = prop.name || "";
+
+      const detailResponse = await fetch(`https://api.lodgify.com/v2/properties/${propId}`, {
+        headers: {
+          "X-ApiKey": apiKey,
+          "accept": "application/json",
+        },
+      });
+
+      if (!detailResponse.ok) {
+        log(`Failed to fetch Lodgify property ${propId} details: ${detailResponse.status}`, "scanner");
+        continue;
+      }
+
+      const detail = await detailResponse.json();
+      const rooms = (detail.rooms || []).map((r: any) => ({
+        id: r.id,
+        name: r.name || `Room ${r.id}`,
+      }));
+
+      results.push({ lodgifyId: propId, name: propName, rooms });
+      await sleep(300);
+    }
+
+    log(`Fetched ${results.length} Lodgify properties with room types`, "scanner");
+    return results;
+  } catch (err: any) {
+    log(`Error fetching Lodgify properties: ${err.message}`, "scanner");
+    return [];
   }
 }
 
@@ -206,7 +251,7 @@ async function createLodgifyBlock(
       },
       body: JSON.stringify({
         guest: {
-          name: "Availability Block",
+          name: "No Availability - Auto Block",
           email: "scanner@thevacationrentalexperts.com",
         },
         status: "Declined",
@@ -217,7 +262,7 @@ async function createLodgifyBlock(
         origin: "manual",
         total: 0,
         currency_code: "USD",
-        source_text: "Availability Scanner - No buy-in inventory",
+        source_text: "Availability Scanner",
         rooms: [
           {
             room_type_id: roomTypeId,
@@ -230,16 +275,49 @@ async function createLodgifyBlock(
 
     if (!response.ok) {
       const errText = await response.text();
-      log(`Lodgify block failed for property ${lodgifyPropertyId}: ${response.status} - ${errText}`, "scanner");
+      log(`Lodgify block failed for property ${lodgifyPropertyId} room ${roomTypeId}: ${response.status} - ${errText}`, "scanner");
       return null;
     }
 
     const data = await response.json();
-    return String(data.id || data.booking_id || "created");
+    const blockId = String(data.id || data.booking_id || "created");
+    log(`Lodgify block created: property ${lodgifyPropertyId}, room ${roomTypeId}, ${checkIn}-${checkOut} (ID: ${blockId})`, "scanner");
+    return blockId;
   } catch (err: any) {
-    log(`Lodgify block error: ${err.message}`, "scanner");
+    log(`Lodgify block error for property ${lodgifyPropertyId}: ${err.message}`, "scanner");
     return null;
   }
+}
+
+async function searchCommunityBedroom(
+  cache: SearchCache,
+  community: string,
+  bedrooms: number,
+  checkIn: string,
+  checkOut: string
+): Promise<CacheEntry> {
+  const cacheKey = `${community}|${bedrooms}|${checkIn}|${checkOut}`;
+
+  if (cache.has(cacheKey)) {
+    return cache.get(cacheKey)!;
+  }
+
+  const [airbnbCount, vrboCount] = await Promise.all([
+    searchAirbnb(community, bedrooms, checkIn, checkOut),
+    searchVRBO(community, bedrooms, checkIn, checkOut),
+  ]);
+
+  const error = airbnbCount === -1 && vrboCount === -1;
+  const entry: CacheEntry = {
+    airbnb: Math.max(0, airbnbCount),
+    vrbo: Math.max(0, vrboCount),
+    error,
+  };
+
+  cache.set(cacheKey, entry);
+  await sleep(1500);
+
+  return entry;
 }
 
 let scannerRunning = false;
@@ -248,56 +326,73 @@ export function isScannerRunning(): boolean {
   return scannerRunning;
 }
 
-export async function runAvailabilityScan(weeksAhead = 78): Promise<number> {
+export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
   if (scannerRunning) {
     log("Scanner already running, skipping", "scanner");
     return -1;
   }
 
   scannerRunning = true;
-  log(`Starting availability scan for ${weeksAhead} weeks`, "scanner");
-
-  const run = await storage.createScannerRun({
-    status: "running",
-    totalWeeksScanned: 0,
-    totalBlocked: 0,
-    totalAvailable: 0,
-    totalErrors: 0,
-  });
+  let runId = -1;
 
   try {
-    const communityNeeds = getCommunityNeeds();
+    log(`Starting availability scan for ${weeksAhead} weeks (${Math.round(weeksAhead / 4.3)} months)`, "scanner");
+
+    const run = await storage.createScannerRun({
+      status: "running",
+      totalWeeksScanned: 0,
+      totalBlocked: 0,
+      totalAvailable: 0,
+      totalErrors: 0,
+    });
+    runId = run.id;
+
+    const lodgifyProperties = await fetchLodgifyProperties();
+    log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
+
     const windows = generateWeeklyWindows(weeksAhead);
+    const propertyIds = Object.keys(PROPERTY_UNIT_NEEDS).map(Number);
 
     let totalScanned = 0;
     let totalBlocked = 0;
     let totalAvailable = 0;
     let totalErrors = 0;
 
+    const searchCache: SearchCache = new Map();
+
     for (const window of windows) {
-      for (const communityInfo of communityNeeds) {
+      for (const propertyId of propertyIds) {
+        const config = PROPERTY_UNIT_NEEDS[propertyId];
+        const uniqueBedrooms = [...new Set(config.units.map(u => u.bedrooms))];
+
         let totalAirbnb = 0;
         let totalVrbo = 0;
         let hasError = false;
+        let anyBedroomMissing = false;
 
-        for (const bedrooms of communityInfo.bedroomConfigs) {
-          const [airbnbCount, vrboCount] = await Promise.all([
-            searchAirbnb(communityInfo.community, bedrooms, window.checkIn, window.checkOut),
-            searchVRBO(communityInfo.community, bedrooms, window.checkIn, window.checkOut),
-          ]);
+        for (const bedrooms of uniqueBedrooms) {
+          const result = await searchCommunityBedroom(
+            searchCache,
+            config.community,
+            bedrooms,
+            window.checkIn,
+            window.checkOut
+          );
 
-          if (airbnbCount === -1 && vrboCount === -1) {
+          if (result.error) {
             hasError = true;
           }
 
-          totalAirbnb += Math.max(0, airbnbCount);
-          totalVrbo += Math.max(0, vrboCount);
+          totalAirbnb += result.airbnb;
+          totalVrbo += result.vrbo;
 
-          await sleep(1500);
+          if (result.airbnb + result.vrbo === 0 && !result.error) {
+            anyBedroomMissing = true;
+          }
         }
 
         const totalResults = totalAirbnb + totalVrbo;
-        const shouldBlock = totalResults === 0 && !hasError;
+        const shouldBlock = anyBedroomMissing && !hasError;
         let status: string;
 
         if (hasError && totalResults === 0) {
@@ -311,37 +406,55 @@ export async function runAvailabilityScan(weeksAhead = 78): Promise<number> {
           totalAvailable++;
         }
 
-        let lodgifyBlockIds: string | undefined;
+        let lodgifyBlockIds: string[] = [];
 
-        if (shouldBlock) {
-          log(`No availability for ${communityInfo.community} ${window.checkIn}-${window.checkOut}, blocking`, "scanner");
+        if (shouldBlock && lodgifyProperties.length > 0) {
+          for (const lp of lodgifyProperties) {
+            for (const room of lp.rooms) {
+              const blockId = await createLodgifyBlock(
+                lp.lodgifyId,
+                room.id,
+                window.checkIn,
+                window.checkOut,
+                `Auto-block: No ${uniqueBedrooms.map(b => `${b}BR`).join("/")} buy-in availability found in ${config.community} for ${window.checkIn} to ${window.checkOut}`
+              );
+              if (blockId) {
+                lodgifyBlockIds.push(`${lp.lodgifyId}:${room.id}:${blockId}`);
+              }
+              await sleep(500);
+            }
+          }
         }
 
         await storage.createAvailabilityScan({
           runId: run.id,
-          community: communityInfo.community,
+          propertyId,
+          community: config.community,
           checkIn: window.checkIn,
           checkOut: window.checkOut,
-          bedroomConfig: JSON.stringify(communityInfo.bedroomConfigs),
+          bedroomConfig: JSON.stringify(uniqueBedrooms),
           airbnbResults: totalAirbnb,
           vrboResults: totalVrbo,
           totalResults,
           blocked: shouldBlock ? "true" : "false",
-          lodgifyBlockIds: lodgifyBlockIds || null,
+          lodgifyBlockIds: lodgifyBlockIds.length > 0 ? JSON.stringify(lodgifyBlockIds) : null,
           status,
         });
 
         totalScanned++;
+
+        if (totalScanned % 20 === 0) {
+          await storage.updateScannerRun(run.id, {
+            totalWeeksScanned: totalScanned,
+            totalBlocked,
+            totalAvailable,
+            totalErrors,
+          });
+          log(`Scan progress: ${totalScanned}/${propertyIds.length * windows.length} scanned, ${totalBlocked} blocked, ${totalAvailable} available`, "scanner");
+        }
       }
 
-      if (totalScanned % 10 === 0) {
-        await storage.updateScannerRun(run.id, {
-          totalWeeksScanned: totalScanned,
-          totalBlocked,
-          totalAvailable,
-          totalErrors,
-        });
-      }
+      searchCache.clear();
     }
 
     await storage.updateScannerRun(run.id, {
@@ -353,15 +466,17 @@ export async function runAvailabilityScan(weeksAhead = 78): Promise<number> {
       status: "completed",
     });
 
-    log(`Scan completed: ${totalScanned} scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
+    log(`Scan completed: ${totalScanned} property-weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
     return run.id;
   } catch (err: any) {
     log(`Scan failed: ${err.message}`, "scanner");
-    await storage.updateScannerRun(run.id, {
-      completedAt: new Date(),
-      status: "failed",
-    });
-    return run.id;
+    if (runId > 0) {
+      await storage.updateScannerRun(runId, {
+        completedAt: new Date(),
+        status: "failed",
+      }).catch(() => {});
+    }
+    return runId;
   } finally {
     scannerRunning = false;
   }
@@ -377,11 +492,11 @@ export function startWeeklyScheduler() {
     const next = new Date(now);
     next.setHours(HOUR, MINUTE, 0, 0);
 
-    const daysUntilMonday = (MONDAY - now.getDay() + 7) % 7 || 7;
-    if (daysUntilMonday === 7 && now < next) {
-      // today is Monday and it's before scheduled time
-    } else {
-      next.setDate(next.getDate() + (daysUntilMonday === 0 ? 7 : daysUntilMonday));
+    const daysUntilMonday = (MONDAY - now.getDay() + 7) % 7;
+    if (daysUntilMonday === 0 && now >= next) {
+      next.setDate(next.getDate() + 7);
+    } else if (daysUntilMonday > 0) {
+      next.setDate(next.getDate() + daysUntilMonday);
     }
 
     const msUntilNext = next.getTime() - now.getTime();
@@ -389,7 +504,7 @@ export function startWeeklyScheduler() {
 
     setTimeout(async () => {
       try {
-        await runAvailabilityScan(78);
+        await runAvailabilityScan(52);
       } catch (err: any) {
         log(`Scheduled scan error: ${err.message}`, "scanner");
       }
@@ -398,5 +513,5 @@ export function startWeeklyScheduler() {
   }
 
   scheduleNext();
-  log("Weekly availability scanner scheduler started", "scanner");
+  log("Weekly availability scanner scheduler started (every Monday 3am)", "scanner");
 }

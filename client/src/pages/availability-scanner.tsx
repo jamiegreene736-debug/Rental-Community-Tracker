@@ -109,7 +109,7 @@ export default function AvailabilityScanner() {
       return res.json();
     },
     onSuccess: () => {
-      toast({ title: "Scan started", description: "Searching all platforms for availability across 78 weeks..." });
+      toast({ title: "Scan started", description: "Searching Airbnb & VRBO for availability across 52 weeks. Blocking Lodgify when empty." });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
     },
@@ -143,7 +143,7 @@ export default function AvailabilityScanner() {
                 Availability Scanner
               </h1>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Scans Airbnb & VRBO weekly for buy-in availability, blocks Lodgify calendar when none found
+                Searches Airbnb & VRBO every 7 days for 12 months per listing. Auto-blocks Lodgify when no buy-in inventory.
               </p>
             </div>
           </div>
@@ -199,7 +199,7 @@ export default function AvailabilityScanner() {
             <p className="text-lg font-bold text-red-600 dark:text-red-400">
               {status?.latestRun?.totalBlocked || 0}
             </p>
-            <p className="text-xs text-muted-foreground mt-1">No buy-in inventory found</p>
+            <p className="text-xs text-muted-foreground mt-1">Lodgify calendar auto-blocked</p>
           </Card>
 
           <Card className="p-4" data-testid="card-available-count">
@@ -335,6 +335,7 @@ export default function AvailabilityScanner() {
                           <TableHead className="text-center">VRBO/Other</TableHead>
                           <TableHead className="text-center">Total</TableHead>
                           <TableHead>Status</TableHead>
+                          <TableHead>Lodgify</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -370,6 +371,17 @@ export default function AvailabilityScanner() {
                                 <Badge variant="outline" className="text-xs text-amber-600">
                                   <AlertTriangle className="h-3 w-3 mr-1" /> Error
                                 </Badge>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {scan.lodgifyBlockIds ? (
+                                <Badge variant="secondary" className="text-xs">
+                                  <Shield className="h-3 w-3 mr-1" /> Pushed
+                                </Badge>
+                              ) : scan.status === "blocked" ? (
+                                <span className="text-xs text-muted-foreground">Pending</span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
                               )}
                             </TableCell>
                           </TableRow>

@@ -1114,7 +1114,7 @@ export async function registerRoutes(
     if (isScannerRunning()) {
       return res.status(409).json({ error: "A scan is already running" });
     }
-    const weeksAhead = 78;
+    const weeksAhead = 52;
     runAvailabilityScan(weeksAhead).catch(err => {
       console.error("Scanner run error:", err);
     });

@@ -90,6 +90,7 @@ export type ScannerRun = typeof scannerRuns.$inferSelect;
 export const availabilityScans = pgTable("availability_scans", {
   id: serial("id").primaryKey(),
   runId: integer("run_id"),
+  propertyId: integer("property_id"),
   community: text("community").notNull(),
   checkIn: date("check_in").notNull(),
   checkOut: date("check_out").notNull(),
