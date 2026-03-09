@@ -48,6 +48,7 @@ type ScannableProperty = {
   name: string;
   community: string;
   bedrooms: number[];
+  totalBedrooms: number;
 };
 
 type LodgifyProperty = {
@@ -147,7 +148,7 @@ export default function AvailabilityScanner() {
         : "";
       toast({
         title: "Scan started",
-        description: `Scanning 52 weeks for ${propName}.${lodgifyName ? ` Blackouts → ${lodgifyName}.` : ""}`,
+        description: `Scanning 26 periods (14-day blocks) for ${propName}.${lodgifyName ? ` Blackouts → ${lodgifyName}.` : ""}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
@@ -188,7 +189,7 @@ export default function AvailabilityScanner() {
                 Availability Scanner
               </h1>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Pick a listing and scan 52 weeks of Airbnb & VRBO for buy-in availability.
+                Pick a listing and scan 26 two-week periods of Airbnb for buy-in availability.
               </p>
             </div>
           </div>
@@ -204,7 +205,7 @@ export default function AvailabilityScanner() {
                 <SelectContent>
                   {properties.map(p => (
                     <SelectItem key={p.id} value={String(p.id)} data-testid={`option-property-${p.id}`}>
-                      #{p.id} — {p.name} ({p.community}, {p.bedrooms.map(b => `${b}BR`).join("+")} )
+                      {p.community} — {p.totalBedrooms} Bedroom ({p.bedrooms.map(b => `${b}BR`).join(" + ")})
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -253,10 +254,10 @@ export default function AvailabilityScanner() {
               <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
               <div>
                 <p className="font-medium">
-                  Scan in progress{currentScanProperty ? `: ${currentScanProperty.name}` : ""}...
+                  Scan in progress{currentScanProperty ? `: ${currentScanProperty.community} ${currentScanProperty.totalBedrooms}BR` : ""}...
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {status.latestRun?.totalWeeksScanned || 0} weeks scanned so far.
+                  {status.latestRun?.totalWeeksScanned || 0} periods scanned so far.
                   {(status.latestRun?.totalBlocked || 0) > 0 && ` ${status.latestRun!.totalBlocked} blocked.`}
                   {(status.latestRun?.totalAvailable || 0) > 0 && ` ${status.latestRun!.totalAvailable} available.`}
                 </p>
@@ -292,14 +293,14 @@ export default function AvailabilityScanner() {
               {status?.latestRun ? formatDateTime(status.latestRun.completedAt || status.latestRun.startedAt) : "Never"}
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              {status?.latestRun?.totalWeeksScanned || 0} weeks scanned
+              {status?.latestRun?.totalWeeksScanned || 0} periods scanned
             </p>
           </Card>
 
           <Card className="p-4" data-testid="card-blocked-count">
             <div className="flex items-center gap-2 mb-1">
               <Shield className="h-4 w-4 text-red-500" />
-              <p className="text-xs text-muted-foreground font-medium">Weeks Blocked</p>
+              <p className="text-xs text-muted-foreground font-medium">Periods Blocked</p>
             </div>
             <p className="text-lg font-bold text-red-600 dark:text-red-400">
               {status?.latestRun?.totalBlocked || 0}
@@ -310,7 +311,7 @@ export default function AvailabilityScanner() {
           <Card className="p-4" data-testid="card-available-count">
             <div className="flex items-center gap-2 mb-1">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <p className="text-xs text-muted-foreground font-medium">Weeks Available</p>
+              <p className="text-xs text-muted-foreground font-medium">Periods Available</p>
             </div>
             <p className="text-lg font-bold text-green-600 dark:text-green-400">
               {status?.latestRun?.totalAvailable || 0}
@@ -418,11 +419,9 @@ export default function AvailabilityScanner() {
                       <TableHeader>
                         <TableRow>
                           <TableHead>Community</TableHead>
-                          <TableHead>Week</TableHead>
+                          <TableHead>Period</TableHead>
                           <TableHead>Bedrooms</TableHead>
-                          <TableHead className="text-center">Airbnb</TableHead>
-                          <TableHead className="text-center">VRBO/Other</TableHead>
-                          <TableHead className="text-center">Total</TableHead>
+                          <TableHead className="text-center">Airbnb Results</TableHead>
                           <TableHead>Status</TableHead>
                           <TableHead>Lodgify</TableHead>
                         </TableRow>
@@ -445,8 +444,6 @@ export default function AvailabilityScanner() {
                               })()}
                             </TableCell>
                             <TableCell className="text-center text-sm">{scan.airbnbResults}</TableCell>
-                            <TableCell className="text-center text-sm">{scan.vrboResults}</TableCell>
-                            <TableCell className="text-center text-sm font-medium">{scan.totalResults}</TableCell>
                             <TableCell>
                               {scan.status === "blocked" ? (
                                 <Badge variant="destructive" className="text-xs">

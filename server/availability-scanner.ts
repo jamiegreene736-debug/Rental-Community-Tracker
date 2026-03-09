@@ -14,19 +14,6 @@ const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
   "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
 };
 
-const COMMUNITY_VRBO_DESTINATIONS: Record<string, string> = {
-  "Poipu Kai": "Regency at Poipu Kai, Koloa, Hawaii",
-  "Kekaha Beachfront": "Kekaha, Hawaii",
-  "Keauhou": "Keauhou, Kailua-Kona, Hawaii",
-  "Princeville": "Princeville, Kauai, Hawaii",
-  "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
-  "Poipu Oceanfront": "Poipu Beach, Koloa, Hawaii",
-  "Poipu Brenneckes": "Poipu Beach, Koloa, Hawaii",
-  "Pili Mai": "Pili Mai at Poipu, Koloa, Hawaii",
-  "Southern Dunes": "Southern Dunes, Haines City, Florida",
-  "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
-};
-
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
   1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
   4: { name: "Poipu Kai Ocean Breeze", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
@@ -50,9 +37,9 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
   32: { name: "Pili Mai Resort A", community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
   33: { name: "Pili Mai Resort B", community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
   34: { name: "Poipu Kai Palms", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  36: { name: "Southern Dunes Villa", community: "Southern Dunes", units: [{ bedrooms: 3 }] },
-  37: { name: "Windsor Hills Villa", community: "Windsor Hills", units: [{ bedrooms: 3 }] },
 };
+
+const AVAILABILITY_THRESHOLD = 10;
 
 interface LodgifyPropertyInfo {
   lodgifyId: number;
@@ -60,14 +47,14 @@ interface LodgifyPropertyInfo {
   rooms: { id: number; name: string }[];
 }
 
-type CacheEntry = { airbnb: number; vrbo: number; error: boolean };
+type CacheEntry = { airbnb: number; error: boolean };
 type SearchCache = Map<string, CacheEntry>;
 
 function formatDate(date: Date): string {
   return date.toISOString().split("T")[0];
 }
 
-function generateWeeklyWindows(weeksAhead: number): { checkIn: string; checkOut: string }[] {
+function generateScanWindows(periodsAhead: number): { checkIn: string; checkOut: string }[] {
   const windows: { checkIn: string; checkOut: string }[] = [];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -77,11 +64,11 @@ function generateWeeklyWindows(weeksAhead: number): { checkIn: string; checkOut:
   const daysUntilSaturday = (6 - dayOfWeek + 7) % 7 || 7;
   startDate.setDate(startDate.getDate() + daysUntilSaturday);
 
-  for (let i = 0; i < weeksAhead; i++) {
+  for (let i = 0; i < periodsAhead; i++) {
     const checkIn = new Date(startDate);
-    checkIn.setDate(checkIn.getDate() + i * 7);
+    checkIn.setDate(checkIn.getDate() + i * 14);
     const checkOut = new Date(checkIn);
-    checkOut.setDate(checkOut.getDate() + 7);
+    checkOut.setDate(checkOut.getDate() + 14);
     windows.push({ checkIn: formatDate(checkIn), checkOut: formatDate(checkOut) });
   }
 
@@ -175,47 +162,6 @@ async function searchAirbnb(
   const data = await response.json();
   if (data.error) {
     log(`SearchAPI error (Airbnb ${community} ${bedrooms}BR): ${data.error}`, "scanner");
-    if (data.error.includes("used all") || data.error.includes("upgrade")) {
-      consecutiveRateLimits = 10;
-      scanAborted = true;
-    }
-    return -1;
-  }
-  return (data.properties || []).length;
-}
-
-async function searchVRBO(
-  community: string,
-  bedrooms: number,
-  checkIn: string,
-  checkOut: string
-): Promise<number> {
-  const apiKey = process.env.SEARCHAPI_API_KEY;
-  if (!apiKey) return -1;
-
-  const destination = COMMUNITY_VRBO_DESTINATIONS[community] || `${community}, Hawaii`;
-  const params = new URLSearchParams({
-    engine: "google_hotels",
-    q: destination,
-    check_in_date: checkIn,
-    check_out_date: checkOut,
-    adults: "2",
-    bedrooms: String(bedrooms),
-    property_type: "vacation_rental",
-    sort_by: "lowest_price",
-    currency: "USD",
-    api_key: apiKey,
-  });
-
-  const response = await fetchWithRetry(
-    `https://www.searchapi.io/api/v1/search?${params.toString()}`,
-    `VRBO ${community} ${bedrooms}BR ${checkIn}`
-  );
-  if (!response) return -1;
-
-  const data = await response.json();
-  if (data.error) {
-    log(`SearchAPI error (VRBO ${community} ${bedrooms}BR): ${data.error}`, "scanner");
     if (data.error.includes("used all") || data.error.includes("upgrade")) {
       consecutiveRateLimits = 10;
       scanAborted = true;
@@ -359,18 +305,15 @@ async function searchCommunityBedroom(
   }
 
   const airbnbCount = await searchAirbnb(community, bedrooms, checkIn, checkOut);
-  await sleep(5000);
-  const vrboCount = await searchVRBO(community, bedrooms, checkIn, checkOut);
 
-  const error = airbnbCount === -1 && vrboCount === -1;
+  const error = airbnbCount === -1;
   const entry: CacheEntry = {
     airbnb: Math.max(0, airbnbCount),
-    vrbo: Math.max(0, vrboCount),
     error,
   };
 
   cache.set(cacheKey, entry);
-  await sleep(5000);
+  await sleep(3000);
 
   return entry;
 }
@@ -387,13 +330,16 @@ export function getCurrentScanPropertyId(): number | null {
   return currentScanPropertyId;
 }
 
-export function getScannableProperties(): { id: number; name: string; community: string; bedrooms: number[] }[] {
-  return Object.entries(PROPERTY_UNIT_NEEDS).map(([id, config]) => ({
-    id: Number(id),
-    name: config.name,
-    community: config.community,
-    bedrooms: [...new Set(config.units.map(u => u.bedrooms))].sort(),
-  }));
+export function getScannableProperties(): { id: number; name: string; community: string; bedrooms: number[]; totalBedrooms: number }[] {
+  return Object.entries(PROPERTY_UNIT_NEEDS)
+    .filter(([, config]) => config.units.length >= 2)
+    .map(([id, config]) => ({
+      id: Number(id),
+      name: config.name,
+      community: config.community,
+      bedrooms: [...new Set(config.units.map(u => u.bedrooms))].sort(),
+      totalBedrooms: config.units.reduce((sum, u) => sum + u.bedrooms, 0),
+    }));
 }
 
 export function getPropertyName(propertyId: number): string {
@@ -424,7 +370,8 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
       ? `property #${targetPropertyId} (${PROPERTY_UNIT_NEEDS[targetPropertyId].name})`
       : `all ${propertyIds.length} properties`;
 
-    log(`Starting availability scan: ${label}, ${weeksAhead} weeks`, "scanner");
+    const periodsAhead = Math.ceil(weeksAhead / 2);
+    log(`Starting availability scan: ${label}, ${periodsAhead} periods (14-day blocks)`, "scanner");
 
     const run = await storage.createScannerRun({
       status: "running",
@@ -450,7 +397,7 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
       log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
     }
 
-    const windows = generateWeeklyWindows(weeksAhead);
+    const windows = generateScanWindows(periodsAhead);
 
     let totalScanned = 0;
     let totalBlocked = 0;
@@ -472,9 +419,8 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
         const uniqueBedrooms = [...new Set(config.units.map(u => u.bedrooms))];
 
         let totalAirbnb = 0;
-        let totalVrbo = 0;
         let hasError = false;
-        let anyBedroomMissing = false;
+        let belowThreshold = false;
 
         for (const bedrooms of uniqueBedrooms) {
           if (scanAborted) break;
@@ -492,15 +438,14 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
           }
 
           totalAirbnb += result.airbnb;
-          totalVrbo += result.vrbo;
 
-          if (result.airbnb + result.vrbo === 0 && !result.error) {
-            anyBedroomMissing = true;
+          if (result.airbnb < AVAILABILITY_THRESHOLD && !result.error) {
+            belowThreshold = true;
           }
         }
 
-        const totalResults = totalAirbnb + totalVrbo;
-        const shouldBlock = anyBedroomMissing && !hasError;
+        const totalResults = totalAirbnb;
+        const shouldBlock = belowThreshold && !hasError;
         let status: string;
 
         if (hasError && totalResults === 0) {
@@ -524,7 +469,7 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
                 room.id,
                 window.checkIn,
                 window.checkOut,
-                `Auto-block: No ${uniqueBedrooms.map(b => `${b}BR`).join("/")} buy-in availability found in ${config.community} for ${window.checkIn} to ${window.checkOut}`
+                `Auto-block: Under ${AVAILABILITY_THRESHOLD} Airbnb listings (${totalAirbnb} found) for ${uniqueBedrooms.map(b => `${b}BR`).join("/")} in ${config.community} ${window.checkIn} to ${window.checkOut}`
               );
               if (blockId) {
                 lodgifyBlockIds.push(`${lp.lodgifyId}:${room.id}:${blockId}`);
@@ -542,7 +487,7 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
           checkOut: window.checkOut,
           bedroomConfig: JSON.stringify(uniqueBedrooms),
           airbnbResults: totalAirbnb,
-          vrboResults: totalVrbo,
+          vrboResults: 0,
           totalResults,
           blocked: shouldBlock ? "true" : "false",
           lodgifyBlockIds: lodgifyBlockIds.length > 0 ? JSON.stringify(lodgifyBlockIds) : null,
