@@ -27,31 +27,31 @@ const COMMUNITY_VRBO_DESTINATIONS: Record<string, string> = {
   "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
 };
 
-const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
-  1: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
-  4: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  7: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
-  8: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  9: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  10: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  12: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  14: { community: "Keauhou", units: [{ bedrooms: 4 }, { bedrooms: 2 }] },
-  18: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  19: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  20: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  21: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
-  23: { community: "Kapaa Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  24: { community: "Poipu Oceanfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  26: { community: "Keauhou", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
-  27: { community: "Poipu Kai", units: [{ bedrooms: 2 }, { bedrooms: 2 }] },
-  28: { community: "Poipu Brenneckes", units: [{ bedrooms: 4 }, { bedrooms: 3 }] },
-  29: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 4 }] },
-  31: { community: "Poipu Brenneckes", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
-  32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-  33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-  36: { community: "Southern Dunes", units: [{ bedrooms: 3 }] },
-  37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
+const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
+  1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
+  4: { name: "Poipu Kai Ocean Breeze", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  7: { name: "Poipu Kai Grand", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
+  8: { name: "Poipu Kai Twin Palms", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  9: { name: "Poipu Kai Reef", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  10: { name: "Kekaha Beach House", community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  12: { name: "Kekaha Oceanside", community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  14: { name: "Keauhou Estates", community: "Keauhou", units: [{ bedrooms: 4 }, { bedrooms: 2 }] },
+  18: { name: "Poipu Kai Aloha", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  19: { name: "Princeville Cliffs", community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  20: { name: "Princeville Paradise", community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  21: { name: "Poipu Kai Triple", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
+  23: { name: "Kapaa Sands", community: "Kapaa Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  24: { name: "Poipu Oceanfront", community: "Poipu Oceanfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  26: { name: "Keauhou Grand", community: "Keauhou", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
+  27: { name: "Poipu Kai Duo", community: "Poipu Kai", units: [{ bedrooms: 2 }, { bedrooms: 2 }] },
+  28: { name: "Poipu Brenneckes", community: "Poipu Brenneckes", units: [{ bedrooms: 4 }, { bedrooms: 3 }] },
+  29: { name: "Princeville Views", community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 4 }] },
+  31: { name: "Poipu Brenneckes Grand", community: "Poipu Brenneckes", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
+  32: { name: "Pili Mai Resort A", community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
+  33: { name: "Pili Mai Resort B", community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  34: { name: "Poipu Kai Palms", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+  36: { name: "Southern Dunes Villa", community: "Southern Dunes", units: [{ bedrooms: 3 }] },
+  37: { name: "Windsor Hills Villa", community: "Windsor Hills", units: [{ bedrooms: 3 }] },
 };
 
 interface LodgifyPropertyInfo {
@@ -321,22 +321,54 @@ async function searchCommunityBedroom(
 }
 
 let scannerRunning = false;
+let currentScanPropertyId: number | null = null;
 
 export function isScannerRunning(): boolean {
   return scannerRunning;
 }
 
-export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
+export function getCurrentScanPropertyId(): number | null {
+  return currentScanPropertyId;
+}
+
+export function getScannableProperties(): { id: number; name: string; community: string; bedrooms: number[] }[] {
+  return Object.entries(PROPERTY_UNIT_NEEDS).map(([id, config]) => ({
+    id: Number(id),
+    name: config.name,
+    community: config.community,
+    bedrooms: [...new Set(config.units.map(u => u.bedrooms))].sort(),
+  }));
+}
+
+export function getPropertyName(propertyId: number): string {
+  return PROPERTY_UNIT_NEEDS[propertyId]?.name || `Property #${propertyId}`;
+}
+
+export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number): Promise<number> {
   if (scannerRunning) {
     log("Scanner already running, skipping", "scanner");
     return -1;
   }
 
   scannerRunning = true;
+  currentScanPropertyId = targetPropertyId || null;
   let runId = -1;
 
   try {
-    log(`Starting availability scan for ${weeksAhead} weeks (${Math.round(weeksAhead / 4.3)} months)`, "scanner");
+    const propertyIds = targetPropertyId
+      ? [targetPropertyId]
+      : Object.keys(PROPERTY_UNIT_NEEDS).map(Number);
+
+    if (targetPropertyId && !PROPERTY_UNIT_NEEDS[targetPropertyId]) {
+      log(`Property ${targetPropertyId} not found in scanner configuration`, "scanner");
+      return -1;
+    }
+
+    const label = targetPropertyId
+      ? `property #${targetPropertyId} (${PROPERTY_UNIT_NEEDS[targetPropertyId].name})`
+      : `all ${propertyIds.length} properties`;
+
+    log(`Starting availability scan: ${label}, ${weeksAhead} weeks`, "scanner");
 
     const run = await storage.createScannerRun({
       status: "running",
@@ -351,7 +383,6 @@ export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
     log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
 
     const windows = generateWeeklyWindows(weeksAhead);
-    const propertyIds = Object.keys(PROPERTY_UNIT_NEEDS).map(Number);
 
     let totalScanned = 0;
     let totalBlocked = 0;
@@ -443,14 +474,14 @@ export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
 
         totalScanned++;
 
-        if (totalScanned % 20 === 0) {
+        if (totalScanned % 10 === 0) {
           await storage.updateScannerRun(run.id, {
             totalWeeksScanned: totalScanned,
             totalBlocked,
             totalAvailable,
             totalErrors,
           });
-          log(`Scan progress: ${totalScanned}/${propertyIds.length * windows.length} scanned, ${totalBlocked} blocked, ${totalAvailable} available`, "scanner");
+          log(`Scan progress: ${totalScanned}/${propertyIds.length * windows.length} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available`, "scanner");
         }
       }
 
@@ -466,7 +497,7 @@ export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
       status: "completed",
     });
 
-    log(`Scan completed: ${totalScanned} property-weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
+    log(`Scan completed: ${totalScanned} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
     return run.id;
   } catch (err: any) {
     log(`Scan failed: ${err.message}`, "scanner");
@@ -479,6 +510,7 @@ export async function runAvailabilityScan(weeksAhead = 52): Promise<number> {
     return runId;
   } finally {
     scannerRunning = false;
+    currentScanPropertyId = null;
   }
 }
 

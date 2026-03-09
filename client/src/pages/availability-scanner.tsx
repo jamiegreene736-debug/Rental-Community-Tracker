@@ -39,7 +39,15 @@ import type { ScannerRun, AvailabilityScan } from "@shared/schema";
 
 type ScannerStatus = {
   running: boolean;
+  currentPropertyId: number | null;
   latestRun: ScannerRun | null;
+};
+
+type ScannableProperty = {
+  id: number;
+  name: string;
+  community: string;
+  bedrooms: number[];
 };
 
 function formatDateTime(dateStr: string | Date | null): string {
@@ -70,10 +78,15 @@ function getNextMonday(): string {
 }
 
 export default function AvailabilityScanner() {
+  const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
   const [communityFilter, setCommunityFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedRunId, setSelectedRunId] = useState<string>("latest");
   const { toast } = useToast();
+
+  const propertiesQuery = useQuery<ScannableProperty[]>({
+    queryKey: ["/api/scanner/properties"],
+  });
 
   const statusQuery = useQuery<ScannerStatus>({
     queryKey: ["/api/scanner/status"],
@@ -105,11 +118,21 @@ export default function AvailabilityScanner() {
 
   const triggerScan = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/scanner/run");
+      const body: any = {};
+      if (selectedPropertyId) {
+        body.propertyId = parseInt(selectedPropertyId);
+      }
+      const res = await apiRequest("POST", "/api/scanner/run", body);
       return res.json();
     },
-    onSuccess: () => {
-      toast({ title: "Scan started", description: "Searching Airbnb & VRBO for availability across 52 weeks. Blocking Lodgify when empty." });
+    onSuccess: (data: any) => {
+      const propName = selectedPropertyId
+        ? properties.find(p => p.id === parseInt(selectedPropertyId))?.name || `Property #${selectedPropertyId}`
+        : "all properties";
+      toast({
+        title: "Scan started",
+        description: `Scanning 52 weeks for ${propName}. Results will appear as they come in.`,
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
     },
@@ -121,11 +144,16 @@ export default function AvailabilityScanner() {
   const status = statusQuery.data;
   const runs = runsQuery.data || [];
   const results = resultsQuery.data || [];
+  const properties = propertiesQuery.data || [];
 
   const communities = [...new Set(results.map(r => r.community))].sort();
   const blockedResults = results.filter(r => r.status === "blocked");
   const availableResults = results.filter(r => r.status === "available");
   const errorResults = results.filter(r => r.status === "error");
+
+  const currentScanProperty = status?.currentPropertyId
+    ? properties.find(p => p.id === status.currentPropertyId)
+    : null;
 
   return (
     <div className="min-h-screen bg-background">
@@ -143,22 +171,64 @@ export default function AvailabilityScanner() {
                 Availability Scanner
               </h1>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Searches Airbnb & VRBO every 7 days for 12 months per listing. Auto-blocks Lodgify when no buy-in inventory.
+                Pick a listing and scan 52 weeks of Airbnb & VRBO for buy-in availability.
               </p>
             </div>
           </div>
-          <Button
-            onClick={() => triggerScan.mutate()}
-            disabled={triggerScan.isPending || status?.running}
-            data-testid="button-run-scan"
-          >
-            {status?.running ? (
-              <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Scan Running...</>
-            ) : (
-              <><Play className="h-4 w-4 mr-2" /> Run Scan Now</>
-            )}
-          </Button>
         </div>
+
+        <Card className="p-4 mb-6" data-testid="card-scan-controls">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="min-w-[280px] flex-1 max-w-md">
+              <Select value={selectedPropertyId} onValueChange={v => setSelectedPropertyId(v)}>
+                <SelectTrigger data-testid="select-property">
+                  <SelectValue placeholder="Select a listing to scan..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {properties.map(p => (
+                    <SelectItem key={p.id} value={String(p.id)} data-testid={`option-property-${p.id}`}>
+                      #{p.id} — {p.name} ({p.community}, {p.bedrooms.map(b => `${b}BR`).join("+")} )
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              onClick={() => triggerScan.mutate()}
+              disabled={triggerScan.isPending || status?.running || !selectedPropertyId}
+              data-testid="button-run-scan"
+            >
+              {status?.running ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Scanning...</>
+              ) : (
+                <><Play className="h-4 w-4 mr-2" /> Scan This Listing</>
+              )}
+            </Button>
+          </div>
+          {!selectedPropertyId && !status?.running && (
+            <p className="text-xs text-muted-foreground mt-2">
+              Choose a listing above to scan its community for buy-in availability across the next 12 months.
+            </p>
+          )}
+        </Card>
+
+        {status?.running && (
+          <Card className="p-4 mb-6 border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30" data-testid="card-scan-progress">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
+              <div>
+                <p className="font-medium">
+                  Scan in progress{currentScanProperty ? `: ${currentScanProperty.name}` : ""}...
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {status.latestRun?.totalWeeksScanned || 0} weeks scanned so far.
+                  {(status.latestRun?.totalBlocked || 0) > 0 && ` ${status.latestRun!.totalBlocked} blocked.`}
+                  {(status.latestRun?.totalAvailable || 0) > 0 && ` ${status.latestRun!.totalAvailable} available.`}
+                </p>
+              </div>
+            </div>
+          </Card>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <Card className="p-4" data-testid="card-status">
@@ -187,7 +257,7 @@ export default function AvailabilityScanner() {
               {status?.latestRun ? formatDateTime(status.latestRun.completedAt || status.latestRun.startedAt) : "Never"}
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              {status?.latestRun?.totalWeeksScanned || 0} community-weeks scanned
+              {status?.latestRun?.totalWeeksScanned || 0} weeks scanned
             </p>
           </Card>
 
@@ -213,22 +283,6 @@ export default function AvailabilityScanner() {
             <p className="text-xs text-muted-foreground mt-1">Buy-in inventory exists</p>
           </Card>
         </div>
-
-        {status?.running && status?.latestRun && (
-          <Card className="p-4 mb-6 border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30" data-testid="card-scan-progress">
-            <div className="flex items-center gap-3">
-              <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
-              <div>
-                <p className="font-medium">Scan in progress...</p>
-                <p className="text-sm text-muted-foreground">
-                  {status.latestRun.totalWeeksScanned} community-weeks scanned so far.
-                  {status.latestRun.totalBlocked > 0 && ` ${status.latestRun.totalBlocked} blocked.`}
-                  {status.latestRun.totalAvailable > 0 && ` ${status.latestRun.totalAvailable} available.`}
-                </p>
-              </div>
-            </div>
-          </Card>
-        )}
 
         <Tabs defaultValue="results" className="space-y-4">
           <TabsList>
@@ -306,7 +360,7 @@ export default function AvailabilityScanner() {
               ) : results.length === 0 ? (
                 <div className="text-center py-12">
                   <CalendarSearch className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
-                  <p className="text-muted-foreground">No scan results yet. Run a scan to check availability.</p>
+                  <p className="text-muted-foreground">No scan results yet. Select a listing above and run a scan.</p>
                 </div>
               ) : (
                 <>

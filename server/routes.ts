@@ -5,7 +5,7 @@ import { insertBuyInSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
-import { runAvailabilityScan, isScannerRunning } from "./availability-scanner";
+import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -1110,15 +1110,31 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/scanner/run", async (_req, res) => {
+  app.get("/api/scanner/properties", async (_req, res) => {
+    res.json(getScannableProperties());
+  });
+
+  app.post("/api/scanner/run", async (req, res) => {
     if (isScannerRunning()) {
       return res.status(409).json({ error: "A scan is already running" });
     }
+    let propertyId: number | undefined;
+    if (req.body?.propertyId) {
+      propertyId = parseInt(req.body.propertyId);
+      if (isNaN(propertyId)) {
+        return res.status(400).json({ error: "Invalid propertyId" });
+      }
+      const validIds = getScannableProperties().map(p => p.id);
+      if (!validIds.includes(propertyId)) {
+        return res.status(400).json({ error: `Property ${propertyId} is not a scannable listing` });
+      }
+    }
     const weeksAhead = 52;
-    runAvailabilityScan(weeksAhead).catch(err => {
+    runAvailabilityScan(weeksAhead, propertyId).catch(err => {
       console.error("Scanner run error:", err);
     });
-    res.json({ message: "Scan started", weeksAhead });
+    const label = propertyId ? getPropertyName(propertyId) : "all properties";
+    res.json({ message: `Scan started for ${label}`, weeksAhead, propertyId });
   });
 
   app.get("/api/scanner/status", async (_req, res) => {
@@ -1126,6 +1142,7 @@ export async function registerRoutes(
       const latest = await storage.getLatestScannerRun();
       res.json({
         running: isScannerRunning(),
+        currentPropertyId: getCurrentScanPropertyId(),
         latestRun: latest || null,
       });
     } catch (err: any) {
