@@ -95,11 +95,16 @@ async function sleep(ms: number): Promise<void> {
 let consecutiveRateLimits = 0;
 
 async function fetchWithRetry(url: string, label: string, maxRetries = 3): Promise<Response | null> {
+  if (consecutiveRateLimits >= 10) {
+    log(`API quota appears exhausted (${consecutiveRateLimits} consecutive rate limits). Aborting scan.`, "scanner");
+    scanAborted = true;
+    return null;
+  }
+
   if (consecutiveRateLimits >= 5) {
     const cooldown = 120;
     log(`Too many rate limits in a row, cooling down ${cooldown}s before ${label}`, "scanner");
     await sleep(cooldown * 1000);
-    consecutiveRateLimits = 0;
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -348,6 +353,7 @@ async function searchCommunityBedroom(
 
 let scannerRunning = false;
 let currentScanPropertyId: number | null = null;
+let scanAborted = false;
 
 export function isScannerRunning(): boolean {
   return scannerRunning;
@@ -428,8 +434,15 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     let totalErrors = 0;
 
     const searchCache: SearchCache = new Map();
+    scanAborted = false;
+    consecutiveRateLimits = 0;
 
     for (const window of windows) {
+      if (scanAborted) {
+        log(`Scan aborted due to API quota exhaustion after ${totalScanned} weeks`, "scanner");
+        break;
+      }
+
       for (const propertyId of propertyIds) {
         const config = PROPERTY_UNIT_NEEDS[propertyId];
         const uniqueBedrooms = [...new Set(config.units.map(u => u.bedrooms))];
@@ -440,6 +453,8 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
         let anyBedroomMissing = false;
 
         for (const bedrooms of uniqueBedrooms) {
+          if (scanAborted) break;
+
           const result = await searchCommunityBedroom(
             searchCache,
             config.community,
@@ -512,30 +527,32 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
 
         totalScanned++;
 
-        if (totalScanned % 10 === 0) {
-          await storage.updateScannerRun(run.id, {
-            totalWeeksScanned: totalScanned,
-            totalBlocked,
-            totalAvailable,
-            totalErrors,
-          });
-          log(`Scan progress: ${totalScanned}/${propertyIds.length * windows.length} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available`, "scanner");
+        await storage.updateScannerRun(run.id, {
+          totalWeeksScanned: totalScanned,
+          totalBlocked,
+          totalAvailable,
+          totalErrors,
+        });
+
+        if (totalScanned % 5 === 0) {
+          log(`Scan progress: ${totalScanned}/${propertyIds.length * windows.length} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
         }
       }
 
       searchCache.clear();
     }
 
+    const finalStatus = scanAborted ? "aborted" : "completed";
     await storage.updateScannerRun(run.id, {
       completedAt: new Date(),
       totalWeeksScanned: totalScanned,
       totalBlocked,
       totalAvailable,
       totalErrors,
-      status: "completed",
+      status: finalStatus,
     });
 
-    log(`Scan completed: ${totalScanned} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
+    log(`Scan ${finalStatus}: ${totalScanned} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
     return run.id;
   } catch (err: any) {
     log(`Scan failed: ${err.message}`, "scanner");
