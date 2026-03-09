@@ -111,6 +111,14 @@ async function fetchWithRetry(url: string, label: string, maxRetries = 3): Promi
     try {
       const response = await fetch(url);
       if (response.status === 429) {
+        let body = "";
+        try { body = await response.text(); } catch {}
+        if (body.includes("used all") || body.includes("upgrade your plan")) {
+          log(`SearchAPI monthly quota exhausted: ${body.trim()}`, "scanner");
+          consecutiveRateLimits = 10;
+          scanAborted = true;
+          return null;
+        }
         consecutiveRateLimits++;
         const waitTime = Math.min(15000 * Math.pow(2, attempt), 120000);
         log(`Rate limited on ${label}, waiting ${waitTime / 1000}s (attempt ${attempt + 1}/${maxRetries + 1})`, "scanner");
@@ -165,6 +173,14 @@ async function searchAirbnb(
   if (!response) return -1;
 
   const data = await response.json();
+  if (data.error) {
+    log(`SearchAPI error (Airbnb ${community} ${bedrooms}BR): ${data.error}`, "scanner");
+    if (data.error.includes("used all") || data.error.includes("upgrade")) {
+      consecutiveRateLimits = 10;
+      scanAborted = true;
+    }
+    return -1;
+  }
   return (data.properties || []).length;
 }
 
@@ -198,6 +214,14 @@ async function searchVRBO(
   if (!response) return -1;
 
   const data = await response.json();
+  if (data.error) {
+    log(`SearchAPI error (VRBO ${community} ${bedrooms}BR): ${data.error}`, "scanner");
+    if (data.error.includes("used all") || data.error.includes("upgrade")) {
+      consecutiveRateLimits = 10;
+      scanAborted = true;
+    }
+    return -1;
+  }
   return (data.properties || []).length;
 }
 
