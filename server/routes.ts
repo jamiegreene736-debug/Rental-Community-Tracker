@@ -120,6 +120,223 @@ export async function registerRoutes(
     res.send(zipBuffer);
   });
 
+  // AI photo makeover - sends interior room photos through Replicate SDXL img2img
+  // to completely reimagine the room style, then returns a ZIP of processed images
+  app.post("/api/photos/ai-makeover", async (req, res) => {
+    const apiKey = process.env.REPLICATE_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "REPLICATE_API_KEY not configured" });
+    }
+
+    const { folders, communityFolder, beginningPhotos, endPhotos, name } = req.body as {
+      folders: string[];
+      communityFolder?: string;
+      beginningPhotos?: string[];
+      endPhotos?: string[];
+      name?: string;
+    };
+
+    if (!folders || folders.length === 0) {
+      return res.status(400).json({ error: "No folders provided" });
+    }
+
+    const photosBase = path.join(process.cwd(), "client", "public", "photos");
+
+    // Keywords that indicate interior photos with furniture
+    const interiorKeywords = ["living", "bedroom", "kitchen", "dining", "bathroom", "lounge", "family", "master", "bed", "bath", "office", "room", "interior", "sofa", "couch", "great-room", "great_room", "greatroom", "overview", "detail", "area", "space", "hallway", "foyer", "entry", "loft"];
+    // Keywords that indicate exterior / no furniture — skip these
+    const exteriorKeywords = ["pool", "community", "exterior", "outside", "beach", "ocean", "view", "patio", "balcony", "garden", "yard", "front", "aerial", "court", "tennis", "hot-tub", "hottub"];
+
+    function isInteriorWithFurniture(filename: string): boolean {
+      const lower = filename.toLowerCase();
+      const hasExterior = exteriorKeywords.some(k => lower.includes(k));
+      if (hasExterior) return false;
+      const hasInterior = interiorKeywords.some(k => lower.includes(k));
+      return hasInterior;
+    }
+
+    // Collect all image file paths with their desired ZIP names
+    interface PhotoEntry {
+      filePath: string;
+      zipName: string;
+      shouldProcess: boolean;
+    }
+
+    const allPhotos: PhotoEntry[] = [];
+    let globalIndex = 1;
+
+    // Community beginning photos (never process these — resort amenities)
+    if (communityFolder && beginningPhotos && beginningPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of beginningPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        allPhotos.push({
+          filePath: path.join(communityDir, safePhoto),
+          zipName: `${paddedIndex}-community-${baseName}${ext}`,
+          shouldProcess: false,
+        });
+        globalIndex++;
+      }
+    }
+
+    // Unit photos
+    for (const folder of folders) {
+      const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, "");
+      const photosDir = path.join(photosBase, safeFolder);
+      if (!fs.existsSync(photosDir)) continue;
+      const files = fs.readdirSync(photosDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f)).sort();
+      for (const file of files) {
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(file);
+        const baseName = path.basename(file, ext).replace(/^\d+-/, "");
+        allPhotos.push({
+          filePath: path.join(photosDir, file),
+          zipName: `${paddedIndex}-${safeFolder}-${baseName}${ext}`,
+          shouldProcess: isInteriorWithFurniture(file),
+        });
+        globalIndex++;
+      }
+    }
+
+    // Community end photos (never process)
+    if (communityFolder && endPhotos && endPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of endPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const paddedIndex = String(globalIndex).padStart(3, "0");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        allPhotos.push({
+          filePath: path.join(photosBase, communityFolder, safePhoto),
+          zipName: `${paddedIndex}-community-${baseName}${ext}`,
+          shouldProcess: false,
+        });
+        globalIndex++;
+      }
+    }
+
+    const validPhotos = allPhotos.filter(p => fs.existsSync(p.filePath));
+    if (validPhotos.length === 0) {
+      return res.status(404).json({ error: "No photos found" });
+    }
+
+    const toProcess = validPhotos.filter(p => p.shouldProcess);
+    const processCount = toProcess.length;
+
+    // Send progress info in the response header
+    res.setHeader("X-Photos-Total", String(validPhotos.length));
+    res.setHeader("X-Photos-Processing", String(processCount));
+
+    // AI makeover style prompt — high-end vacation rental interior redesign
+    const stylePrompt = "luxury vacation rental interior, modern coastal style, light and airy, high-end furniture, professional real estate photography, bright natural light, clean and elegant, 4K quality";
+    const negativePrompt = "low quality, blurry, dark, cluttered, old furniture, dated decor, people, text, watermark";
+
+    async function processImageWithReplicate(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
+      try {
+        // Convert to base64 data URL
+        const base64 = imageBuffer.toString("base64");
+        const dataUrl = `data:${mimeType};base64,${base64}`;
+
+        // Use Replicate's SDXL img2img model
+        const createResponse = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/versions/7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc/predictions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            input: {
+              image: dataUrl,
+              prompt: stylePrompt,
+              negative_prompt: negativePrompt,
+              prompt_strength: 0.65,
+              guidance_scale: 7.5,
+              num_inference_steps: 30,
+              scheduler: "K_EULER",
+            },
+          }),
+        });
+
+        if (!createResponse.ok) {
+          const errText = await createResponse.text();
+          console.error("Replicate create error:", createResponse.status, errText);
+          return null;
+        }
+
+        const prediction = await createResponse.json() as { id: string; status: string; output?: string[]; error?: string };
+        const predictionId = prediction.id;
+
+        // Poll for completion (max 2 minutes)
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const pollResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+            headers: { "Authorization": `Bearer ${apiKey}` },
+          });
+          const result = await pollResponse.json() as { status: string; output?: string[]; error?: string };
+
+          if (result.status === "succeeded" && result.output && result.output.length > 0) {
+            const imgResponse = await fetch(result.output[0]);
+            if (!imgResponse.ok) return null;
+            const arrayBuffer = await imgResponse.arrayBuffer();
+            return Buffer.from(arrayBuffer);
+          } else if (result.status === "failed" || result.error) {
+            console.error("Replicate prediction failed:", result.error);
+            return null;
+          }
+        }
+        return null; // Timed out
+      } catch (err) {
+        console.error("Error processing image:", err);
+        return null;
+      }
+    }
+
+    // Process all photos, applying AI to interior ones
+    const zip = new JSZip();
+    let processed = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const photo of validPhotos) {
+      const rawData = fs.readFileSync(photo.filePath);
+      const ext = path.extname(photo.filePath).toLowerCase();
+      const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
+
+      if (photo.shouldProcess) {
+        console.log(`AI processing: ${photo.zipName}`);
+        const result = await processImageWithReplicate(rawData, mimeType);
+        if (result) {
+          zip.file(photo.zipName, result);
+          processed++;
+        } else {
+          // Fall back to original on failure
+          zip.file(photo.zipName, rawData);
+          failed++;
+        }
+      } else {
+        zip.file(photo.zipName, rawData);
+        skipped++;
+      }
+    }
+
+    console.log(`AI makeover complete: ${processed} processed, ${skipped} skipped, ${failed} fallback`);
+
+    const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+    const safeName = (name || "ai-makeover").replace(/[^a-zA-Z0-9_-]/g, "");
+    res.set({
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${safeName}-ai-makeover.zip"`,
+      "Content-Length": String(zipBuffer.length),
+      "X-Photos-Processed": String(processed),
+      "X-Photos-Skipped": String(skipped),
+      "X-Photos-Failed": String(failed),
+    });
+    res.send(zipBuffer);
+  });
+
   app.get("/api/lodgify/properties", async (_req, res) => {
     const apiKey = process.env.LODGIFY_API_KEY;
     if (!apiKey) {

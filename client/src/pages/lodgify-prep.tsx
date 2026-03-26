@@ -31,6 +31,8 @@ import {
   TrendingUp,
   Upload,
   AlertCircle,
+  Sparkles,
+  Wand2,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { apiRequest } from "@/lib/queryClient";
@@ -186,7 +188,53 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
+function useAiMakeover() {
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const triggerMakeover = async (params: {
+    folders: string[];
+    communityFolder?: string;
+    beginningPhotos?: string[];
+    endPhotos?: string[];
+    name: string;
+  }) => {
+    setStatus("loading");
+    setErrorMsg(null);
+    try {
+      const response = await fetch("/api/photos/ai-makeover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(err.error || `Server error ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${params.name.replace(/[^a-zA-Z0-9_-]/g, "-")}-ai-makeover.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStatus("done");
+      setTimeout(() => setStatus("idle"), 4000);
+    } catch (err: any) {
+      setErrorMsg(err.message || "AI makeover failed");
+      setStatus("error");
+      setTimeout(() => setStatus("idle"), 5000);
+    }
+  };
+
+  return { status, errorMsg, triggerMakeover };
+}
+
 function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
+  const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
+
   if (unit.photos.length === 0) {
     return (
       <div className="text-sm text-muted-foreground p-4 text-center">
@@ -204,24 +252,60 @@ function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { un
     ? `/api/photos/zip-multi?folders=${unit.photoFolder}&name=${encodeURIComponent(unit.id)}&communityFolder=${communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningPhotos.map(p => p.filename).join(","))}&endPhotos=${encodeURIComponent(endPhotos.map(p => p.filename).join(","))}`
     : `/api/photos/zip/${unit.photoFolder}`;
 
+  const handleAiMakeover = () => {
+    triggerMakeover({
+      folders: [unit.photoFolder],
+      communityFolder: communityPhotoFolder,
+      beginningPhotos: beginningPhotos.map(p => p.filename),
+      endPhotos: endPhotos.map(p => p.filename),
+      name: unit.id,
+    });
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground">
           {totalPhotos} photos total ({unit.photos.length} unit{hasCommunity ? ` + ${communityPhotos.length} community` : ""}) in Lodgify upload order
         </p>
-        <Button
-          variant="default"
-          size="sm"
-          asChild
-          data-testid={`button-download-photos-${unit.id}`}
-        >
-          <a href={downloadUrl} download={`${unit.id}-photos.zip`}>
-            <Download className="h-3.5 w-3.5 mr-1.5" />
-            Download All Photos (ZIP)
-          </a>
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleAiMakeover}
+            disabled={aiStatus === "loading"}
+            data-testid={`button-ai-makeover-${unit.id}`}
+            title="Reimagines interior rooms in a modern luxury style using AI. Exterior and pool photos are kept as-is."
+          >
+            {aiStatus === "loading" ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Processing...</>
+            ) : aiStatus === "done" ? (
+              <><Check className="h-3.5 w-3.5 mr-1.5 text-green-500" />Downloaded!</>
+            ) : aiStatus === "error" ? (
+              <><AlertCircle className="h-3.5 w-3.5 mr-1.5 text-red-500" />{aiError || "Error"}</>
+            ) : (
+              <><Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover + ZIP</>
+            )}
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            asChild
+            data-testid={`button-download-photos-${unit.id}`}
+          >
+            <a href={downloadUrl} download={`${unit.id}-photos.zip`}>
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              Download ZIP
+            </a>
+          </Button>
+        </div>
       </div>
+      {aiStatus === "loading" && (
+        <div className="text-xs text-muted-foreground bg-muted/50 rounded px-3 py-2 flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
+          AI is reimagining interior rooms in a modern luxury style. This takes 2–4 minutes depending on how many rooms have furniture. Exterior, pool, and community photos are passed through unchanged.
+        </div>
+      )}
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
         {unit.photos.map((photo, idx) => (
           <div
@@ -239,7 +323,7 @@ function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { un
             <div className="absolute top-0.5 left-0.5 bg-black/70 text-white text-[10px] px-1 rounded">
               {idx + 1}
             </div>
-            <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate visibility-visible">
+            <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate">
               {photo.label}
             </div>
             {idx === 0 && (
@@ -259,19 +343,31 @@ function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { un
 }
 
 function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder }) {
+  const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
+
   if (!property.communityPhotos || property.communityPhotos.length === 0) {
     return null;
   }
 
   const beginningPhotos = property.communityPhotos.filter(p => p.position === "beginning");
   const endPhotos = property.communityPhotos.filter(p => p.position === "end");
-  const unitFolders = property.units.map(u => u.photoFolder).join(",");
-  const beginningFilenames = beginningPhotos.map(p => p.filename).join(",");
-  const endFilenames = endPhotos.map(p => p.filename).join(",");
+  const unitFolders = property.units.map(u => u.photoFolder);
+  const beginningFilenames = beginningPhotos.map(p => p.filename);
+  const endFilenames = endPhotos.map(p => p.filename);
   const totalUnitPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
   const totalPhotos = totalUnitPhotos + property.communityPhotos.length;
 
-  const downloadUrl = `/api/photos/zip-multi?folders=${unitFolders}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningFilenames)}&endPhotos=${encodeURIComponent(endFilenames)}`;
+  const downloadUrl = `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningFilenames.join(","))}&endPhotos=${encodeURIComponent(endFilenames.join(","))}`;
+
+  const handleAiMakeover = () => {
+    triggerMakeover({
+      folders: unitFolders,
+      communityFolder: property.communityPhotoFolder,
+      beginningPhotos: beginningFilenames,
+      endPhotos: endFilenames,
+      name: property.propertyName,
+    });
+  };
 
   return (
     <Card className="p-4 md:p-6">
@@ -285,18 +381,44 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
             {property.communityPhotos.length} community photos + {totalUnitPhotos} unit photos = {totalPhotos} total
           </p>
         </div>
-        <Button
-          variant="default"
-          size="sm"
-          asChild
-          data-testid="button-download-all-photos"
-        >
-          <a href={downloadUrl} download={`${property.propertyName}-all-photos.zip`}>
-            <Download className="h-3.5 w-3.5 mr-1.5" />
-            Download All Photos (ZIP)
-          </a>
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleAiMakeover}
+            disabled={aiStatus === "loading"}
+            data-testid="button-ai-makeover-all"
+            title="Reimagines interior rooms across all units in a modern luxury style. Community and exterior photos are kept as-is."
+          >
+            {aiStatus === "loading" ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Processing all units...</>
+            ) : aiStatus === "done" ? (
+              <><Check className="h-3.5 w-3.5 mr-1.5 text-green-500" />Downloaded!</>
+            ) : aiStatus === "error" ? (
+              <><AlertCircle className="h-3.5 w-3.5 mr-1.5 text-red-500" />{aiError || "Error"}</>
+            ) : (
+              <><Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover All + ZIP</>
+            )}
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            asChild
+            data-testid="button-download-all-photos"
+          >
+            <a href={downloadUrl} download={`${property.propertyName}-all-photos.zip`}>
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              Download All Photos (ZIP)
+            </a>
+          </Button>
+        </div>
       </div>
+      {aiStatus === "loading" && (
+        <div className="text-xs text-muted-foreground bg-muted/50 rounded px-3 py-2 mb-4 flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
+          AI is reimagining interior rooms in a modern luxury style across all units. This may take 5–10 minutes for a full property. Community and exterior photos are passed through unchanged.
+        </div>
+      )}
 
       <div className="space-y-4">
         {beginningPhotos.length > 0 && (
