@@ -254,7 +254,7 @@ async function createLodgifyBlock(
       body: JSON.stringify({
         guest: {
           name: "No Availability - Auto Block",
-          email: "scanner@thevacationrentalexperts.com",
+          email: "scanner@nexstay.com",
         },
         status: "Declined",
         property_id: lodgifyPropertyId,

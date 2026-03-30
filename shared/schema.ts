@@ -111,3 +111,36 @@ export const insertAvailabilityScanSchema = createInsertSchema(availabilityScans
 
 export type InsertAvailabilityScan = z.infer<typeof insertAvailabilityScanSchema>;
 export type AvailabilityScan = typeof availabilityScans.$inferSelect;
+
+export const communityDrafts = pgTable("community_drafts", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  city: text("city").notNull(),
+  state: text("state").notNull(),
+  estimatedLowRate: integer("estimated_low_rate"),
+  estimatedHighRate: integer("estimated_high_rate"),
+  unitTypes: text("unit_types"),
+  confidenceScore: integer("confidence_score"),
+  researchSummary: text("research_summary"),
+  sourceUrl: text("source_url"),
+  status: text("status").notNull().default("researching"),
+  unit1Url: text("unit1_url"),
+  unit1Bedrooms: integer("unit1_bedrooms"),
+  unit1Description: text("unit1_description"),
+  unit2Url: text("unit2_url"),
+  unit2Bedrooms: integer("unit2_bedrooms"),
+  unit2Description: text("unit2_description"),
+  combinedBedrooms: integer("combined_bedrooms"),
+  suggestedRate: integer("suggested_rate"),
+  listingTitle: text("listing_title"),
+  listingDescription: text("listing_description"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertCommunityDraftSchema = createInsertSchema(communityDrafts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertCommunityDraft = z.infer<typeof insertCommunityDraftSchema>;
+export type CommunityDraft = typeof communityDrafts.$inferSelect;

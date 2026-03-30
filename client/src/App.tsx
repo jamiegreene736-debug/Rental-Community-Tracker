@@ -11,11 +11,13 @@ import BuyInTracker from "@/pages/buy-in-tracker";
 import PhotoAudit from "@/pages/photo-audit";
 import AvailabilityScanner from "@/pages/availability-scanner";
 import CommunityPhotoFinder from "@/pages/community-photo-finder";
+import AddCommunity from "@/pages/add-community";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/add-community" component={AddCommunity} />
       <Route path="/unit-builder/:id" component={UnitBuilder} />
       <Route path="/lodgify-prep/:id" component={LodgifyPrep} />
       <Route path="/buy-in-tracker" component={BuyInTracker} />

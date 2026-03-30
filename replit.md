@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is a property research dashboard designed for thevacationrentalexperts.com. Its primary purpose is to display and manage information for 35 cataloged vacation rental properties. Key functionalities include a sortable and filterable table showing property names, resort communities, bedroom counts, guest capacity, pricing ranges, and multi-unit indicators. Beyond the core dashboard, the project offers advanced tools for property management, including an Availability Scanner to identify and block unrentable inventory, a Photo Audit tool to manage and verify property photos, and a Buy-In Tracker for monitoring Airbnb purchases and profitability. It also facilitates the preparation of property data for integration with Lodgify, a property management system. The system aims to streamline property research, inventory management, and marketing efforts for vacation rental experts.
+This project is **NexStay** — a property research and management dashboard for bundled vacation rental listings. It manages 35+ cataloged multi-unit vacation rental properties, allowing operators to combine individually-owned units in the same community into single large-group listings. Key features include: a sortable/filterable property dashboard, a 5-step Add New Community wizard (research → unit selection → photos → listing draft), an Availability Scanner, a Photo Audit tool, a Buy-In Tracker, and Lodgify integration for property management. The tool is rebranded as NexStay throughout (previously thevacationrentalexperts.com).
 
 ## User Preferences
 
@@ -32,7 +32,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Database
 - **ORM**: Drizzle ORM with PostgreSQL dialect.
-- **Schema**: Defined in `shared/schema.ts`, including tables for `users`, `buy_ins`, `lodgify_bookings`, `scanner_runs`, and `availability_scans`.
+- **Schema**: Defined in `shared/schema.ts`, including tables for `users`, `buy_ins`, `lodgify_bookings`, `scanner_runs`, `availability_scans`, and `community_drafts`.
 - **Connection**: Requires `DATABASE_URL` environment variable.
 
 ### Key Design Decisions
@@ -48,6 +48,8 @@ Preferred communication style: Simple, everyday language.
 -   **Photo Audit**: Analyzes property photos, identifies unit numbers, flags potential VRBO conflicts, and validates community photo folders (`/photo-audit`).
 -   **Availability Scanner**: Scans Airbnb and VRBO/Google Hotels for listing availability, automatically creating blackout blocks on Lodgify calendar for unrentable weeks (`/availability-scanner`).
 -   **Community Photo Finder**: Searches Google Images for community-specific photos, filters irrelevant images, and allows direct saving to project folders (`/community-photo-finder`).
+-   **Add New Community Wizard** (`/add-community`): 5-step workflow to research, validate, and draft new bundled listings. Step 1: State/city selection. Step 2: SearchAPI + Claude (claude-3-5-sonnet-20241022) research with 0-100 confidence scoring. Step 3: Zillow/Homes.com unit pair selection. Step 4: Photo fetch + platform check (reverse image search). Step 5: AI-generated VRBO listing draft with legal disclosure. Saved communities appear on the main dashboard.
+-   **Legal Disclosure**: All listing `combinedDescription` fields are automatically prepended with the required two-unit disclosure language when rendered in the Lodgify prep page. The `LISTING_DISCLOSURE` constant is exported from `unit-builder-data.ts`.
 
 ## External Dependencies
 

@@ -37,7 +37,13 @@ export type PropertyUnitBuilder = {
   communityPhotoFolder: string;
 };
 
-const DEFAULT_DISCLAIMER = "This listing represents a managed portfolio of similar units within the same resort complex. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count, amenities, and quality standard. Photos are representative of units in our portfolio and individual unit decor and furnishings may vary.";
+const DEFAULT_DISCLAIMER = "This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.";
+
+export const LISTING_DISCLOSURE = `⚠️ IMPORTANT DISCLOSURE
+
+This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.
+
+---`;
 
 const COMMUNITY_REGENCY: CommunityPhoto[] = [
   { filename: "01-resort-pool.jpg", label: "Resort Pool", position: "beginning" },

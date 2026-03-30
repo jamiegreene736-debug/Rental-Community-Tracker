@@ -1,0 +1,61 @@
+PART 1 — Rebrand the tool
+Remove all references to "VacationRentalExperts" or any similar placeholder name throughout the entire codebase — variable names, UI labels, comments, page titles, everything. Rename the tool "NexStay" across the entire app. Update the UI header, page title, any logo text, and all internal references accordingly.
+
+PART 2 — Update all existing listing descriptions
+For every listing description currently in the app, ensure the following disclosure language is present and prominent — add it if it's missing, update it if it's vague. It must clearly state:
+
+This listing combines two separate, individually owned units within the same community.
+The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count.
+Guests will receive two separate unit keys/access codes at check-in.
+Both units are located within the same building cluster or immediate community grounds.
+
+This language must appear near the top of the description, not buried at the bottom.
+
+PART 3 — "Add a New Community" feature on the main dashboard
+Add a prominent "Add New Community" button to the main dashboard. When clicked, it opens a workflow with the following steps:
+Step 1 — Location selection
+Show a dropdown to select a US state, then a second dropdown or text input to enter/select a city within that state.
+Step 2 — Community research
+Once the user submits a city and state, the app should automatically research and return a list of suitable vacation rental communities in that area. Use the SerpAPI Google search endpoint to run queries like:
+
+"[city] [state] condo community vacation rental individual owners"
+"[city] [state] townhome resort community short term rental"
+"[city] [state] condo complex multiple units VRBO Airbnb"
+
+Filter results to only show communities that meet ALL of the following criteria — use Claude (Anthropic API, claude-sonnet-4-20250514) to evaluate each result and score it:
+
+Individually owned condos or townhomes (not hotel-owned, not timeshare, not managed by a single resort entity)
+Multiple units available within the same complex (minimum ~10 units)
+Units are combinable — meaning there are multiple bedroom configurations (e.g. 2BR + 3BR, or 3BR + 3BR) within the same community that could be bundled into a single larger listing
+Active vacation rental presence (units already appearing on Airbnb, VRBO, or Booking.com confirms this)
+Average nightly rate is high — target communities where 3BR units rent for $500+/night, as the bundled markup only works when the base rate is already premium. Use SerpAPI to spot-check nightly rates on VRBO or Airbnb for each community before surfacing it.
+
+Display each qualifying community as a card showing: community name, city/state, estimated nightly rate range, unit types available, and a confidence score from Claude (0–100) on how well it fits the bundling model.
+Step 3 — Unit pair selection
+When the user clicks on a community card, the app should:
+
+Search Zillow and Homes.com for currently for-sale listings within that community
+Display available units grouped by bedroom count
+Allow the user to select two units to combine (e.g. a 3BR and a 2BR, or two 3BRs)
+Show the combined bedroom total (e.g. "5BR combined listing") and an estimated bundled nightly rate based on the sum of both units' individual market rates plus a 20–30% markup
+
+Step 4 — Photo fetch and platform check
+Once the user confirms a unit pair:
+
+Fetch photos from the MLS listing pages for both selected units on Zillow or Homes.com
+Automatically run the platform check (reverse image search via SerpAPI) on the fetched photos
+Display badges (✅ / 🚫) on each photo as results come in
+Show the "Find Another Property" button if any photos are flagged
+
+Step 5 — Listing draft
+Auto-generate a draft VRBO-ready listing for the combined unit including:
+
+A headline (max 80 characters, VRBO compliant)
+A full description that leads with the two-unit disclosure language from Part 2 above, followed by community amenities, location highlights, and bedroom/bathroom breakdown
+The combined bedroom and bathroom count
+A suggested nightly rate (sum of both units' market rates + 25% markup)
+
+Store any new communities and their unit pairs in the app's existing data store so they appear on the main dashboard alongside existing listings.
+
+
+The Part 2 description update is the most important thing to get right legally — making sure it's prominent and not buried is the key ask there. If Replit's AI asks where to pull nightly rate data from in Step 2, tell it to use the Apify VRBO actor you already have configured, since that's already in the project.

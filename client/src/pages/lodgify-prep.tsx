@@ -49,7 +49,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { getUnitBuilderByPropertyId, getMultiUnitPropertyIds } from "@/data/unit-builder-data";
+import { getUnitBuilderByPropertyId, getMultiUnitPropertyIds, LISTING_DISCLOSURE } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder, CommunityPhoto } from "@/data/unit-builder-data";
 import {
   LODGIFY_AMENITY_CATEGORIES,
@@ -1270,7 +1270,7 @@ export default function LodgifyPrep() {
         </div>
 
         <div className="mb-6">
-          <CopyField label="Combined Property Description (copy into Lodgify)" value={property.combinedDescription} multiline />
+          <CopyField label="Combined Property Description (copy into Lodgify)" value={LISTING_DISCLOSURE + "\n\n" + property.combinedDescription} multiline />
         </div>
 
         {pricing && (

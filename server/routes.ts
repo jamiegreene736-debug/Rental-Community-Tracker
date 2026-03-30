@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertBuyInSchema } from "@shared/schema";
+import { insertBuyInSchema, insertCommunityDraftSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
@@ -2145,6 +2145,412 @@ export async function registerRoutes(
       photos: [],
       error: "Could not find a replacement unit automatically — please select photos manually.",
     });
+  });
+
+  // ============================================================
+  // Step 4: Fetch unit photos from a Zillow/Homes.com URL
+  // ============================================================
+  app.post("/api/community/fetch-unit-photos", async (req, res) => {
+    const { url } = req.body as { url: string };
+    if (!url) return res.status(400).json({ error: "url required" });
+    try {
+      const photos = await scrapeListingPhotos(url);
+      res.json({ photos: photos.map(p => ({ url: p.url, label: p.title || "Photo" })) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Step 4: Platform check on a public image URL (no ImgBB needed — URL is already public)
+  app.post("/api/community/check-photo-url", async (req, res) => {
+    const { imageUrl } = req.body as { imageUrl: string };
+    if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
+
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    try {
+      const resp = await fetch(
+        `https://www.searchapi.io/api/v1/search?engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}&api_key=${searchApiKey}`,
+      );
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return res.status(resp.status).json({ error: `SearchAPI error: ${errText}` });
+      }
+      const data = await resp.json() as any;
+      const matches: Array<{ platform: string; url: string }> = [];
+      const allLinks = [
+        ...(data.organic_results || []),
+        ...(data.image_results || []),
+      ] as Array<{ link: string; title?: string; source?: string }>;
+
+      for (const r of allLinks) {
+        const link = r.link || "";
+        if (link.includes("airbnb.com")) matches.push({ platform: "Airbnb", url: link });
+        else if (link.includes("vrbo.com")) matches.push({ platform: "VRBO", url: link });
+        else if (link.includes("booking.com")) matches.push({ platform: "Booking.com", url: link });
+      }
+
+      res.json({ matches, clean: matches.length === 0 });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================================
+  // Community Draft CRUD
+  // ============================================================
+  app.get("/api/community/drafts", async (_req, res) => {
+    const drafts = await storage.getCommunityDrafts();
+    res.json(drafts);
+  });
+
+  app.post("/api/community/save", async (req, res) => {
+    const result = insertCommunityDraftSchema.safeParse(req.body);
+    if (!result.success) return res.status(400).json({ error: result.error.flatten() });
+    const draft = await storage.createCommunityDraft(result.data);
+    res.json(draft);
+  });
+
+  app.patch("/api/community/:id", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+    const draft = await storage.updateCommunityDraft(id, req.body);
+    if (!draft) return res.status(404).json({ error: "Not found" });
+    res.json(draft);
+  });
+
+  app.delete("/api/community/:id", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+    const ok = await storage.deleteCommunityDraft(id);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.json({ success: true });
+  });
+
+  // ============================================================
+  // Step 2: Research communities in a city/state via SearchAPI + Claude scoring
+  // ============================================================
+  app.post("/api/community/research", async (req, res) => {
+    const { city, state } = req.body as { city: string; state: string };
+    if (!city || !state) return res.status(400).json({ error: "city and state required" });
+
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const queries = [
+      `"${city}" "${state}" condo community vacation rental individual owners site:airbnb.com OR site:vrbo.com`,
+      `"${city}" "${state}" resort condo complex multiple units short term rental`,
+      `"${city}" "${state}" townhome community Airbnb VRBO individually owned units`,
+    ];
+
+    const allResults: Array<{ title: string; link: string; snippet: string }> = [];
+
+    for (const q of queries) {
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=8&api_key=${searchApiKey}`,
+        );
+        if (!resp.ok) continue;
+        const data = await resp.json() as any;
+        const organic = (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
+        allResults.push(...organic);
+      } catch (e: any) {
+        console.warn("[community/research] SearchAPI error:", e.message);
+      }
+    }
+
+    // Deduplicate by URL domain+title
+    const seen = new Set<string>();
+    const unique = allResults.filter(r => {
+      const key = r.title?.toLowerCase().slice(0, 60) ?? r.link;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 15);
+
+    if (unique.length === 0) {
+      return res.json({ communities: [] });
+    }
+
+    // Rate-spot-check via SearchAPI VRBO/Airbnb for first 5 results
+    async function spotCheckRate(communityName: string): Promise<{ low: number | null; high: number | null }> {
+      try {
+        const q = `${communityName} ${city} ${state} nightly rate VRBO Airbnb`;
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=5&api_key=${searchApiKey}`,
+        );
+        if (!resp.ok) return { low: null, high: null };
+        const data = await resp.json() as any;
+        const text = JSON.stringify(data).toLowerCase();
+        const prices: number[] = [];
+        const priceMatches = text.match(/\$\s*(\d{3,4})\s*(?:\/night|per night|a night)/g) || [];
+        for (const m of priceMatches) {
+          const num = parseInt(m.replace(/[^\d]/g, ""));
+          if (num >= 100 && num <= 5000) prices.push(num);
+        }
+        if (prices.length === 0) return { low: null, high: null };
+        return { low: Math.min(...prices), high: Math.max(...prices) };
+      } catch {
+        return { low: null, high: null };
+      }
+    }
+
+    // Score with Claude
+    let communities: Array<{
+      name: string;
+      city: string;
+      state: string;
+      estimatedLowRate: number | null;
+      estimatedHighRate: number | null;
+      unitTypes: string;
+      confidenceScore: number;
+      researchSummary: string;
+      sourceUrl: string;
+    }> = [];
+
+    if (anthropicKey) {
+      const prompt = `You are evaluating vacation rental communities for a bundled multi-unit listing model (NexStay). We are looking for communities where:
+1. Units are individually owned condos or townhomes (NOT hotel-owned, NOT timeshare, NOT managed by single resort)
+2. The complex has at least 10+ units
+3. Multiple bedroom configurations exist (2BR + 3BR, 3BR + 3BR, etc.) that can be bundled
+4. Active vacation rental presence on Airbnb/VRBO
+5. Premium nightly rates ($500+/night for 3BR units)
+
+Here are search results for "${city}, ${state}":
+${unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")}
+
+For each result that could be a qualifying community, extract:
+- communityName: the name of the condo/resort complex
+- unitTypes: estimated bedroom configurations available (e.g. "2BR, 3BR")
+- confidenceScore: 0-100 how well it fits the bundling model
+- reason: 1-2 sentence explanation
+- sourceUrl: the URL from the result
+
+Return ONLY a JSON array (no markdown, no code fences). Each element: {"communityName":"...","unitTypes":"...","confidenceScore":0,"reason":"...","sourceUrl":"..."}.
+Only include communities with confidenceScore >= 40. Max 8 results.`;
+
+      try {
+        const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": anthropicKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 2000,
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+
+        if (claudeResp.ok) {
+          const claudeData = await claudeResp.json() as any;
+          const text: string = claudeData?.content?.[0]?.text ?? "";
+          const jsonMatch = text.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const scored = JSON.parse(jsonMatch[0]) as Array<{
+              communityName: string;
+              unitTypes: string;
+              confidenceScore: number;
+              reason: string;
+              sourceUrl: string;
+            }>;
+
+            for (const s of scored.slice(0, 8)) {
+              const rates = await spotCheckRate(s.communityName);
+              communities.push({
+                name: s.communityName,
+                city,
+                state,
+                estimatedLowRate: rates.low,
+                estimatedHighRate: rates.high,
+                unitTypes: s.unitTypes,
+                confidenceScore: s.confidenceScore,
+                researchSummary: s.reason,
+                sourceUrl: s.sourceUrl,
+              });
+            }
+          }
+        }
+      } catch (e: any) {
+        console.warn("[community/research] Claude error:", e.message);
+      }
+    } else {
+      // Fallback without Claude: return raw results as low-confidence candidates
+      communities = unique.slice(0, 8).map(r => ({
+        name: r.title?.split(" - ")[0]?.split(" | ")[0] ?? r.title,
+        city,
+        state,
+        estimatedLowRate: null,
+        estimatedHighRate: null,
+        unitTypes: "Unknown",
+        confidenceScore: 50,
+        researchSummary: r.snippet,
+        sourceUrl: r.link,
+      }));
+    }
+
+    communities.sort((a, b) => b.confidenceScore - a.confidenceScore);
+    res.json({ communities });
+  });
+
+  // ============================================================
+  // Step 3: Search Zillow/Homes.com for units in a community
+  // ============================================================
+  app.post("/api/community/search-units", async (req, res) => {
+    const { communityName, city, state } = req.body as { communityName: string; city: string; state: string };
+    if (!communityName) return res.status(400).json({ error: "communityName required" });
+
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const queries = [
+      `site:zillow.com "${communityName}" ${city} ${state}`,
+      `site:homes.com "${communityName}" ${city} ${state}`,
+    ];
+
+    const units: Array<{ url: string; title: string; bedrooms: number | null; price: number | null; source: string }> = [];
+
+    for (const q of queries) {
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+        );
+        if (!resp.ok) continue;
+        const data = await resp.json() as any;
+        const organic = (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
+        for (const r of organic) {
+          const isZillow = r.link?.includes("zillow.com/homedetails");
+          const isHomes = r.link?.includes("homes.com/property");
+          if (!isZillow && !isHomes) continue;
+
+          // Extract bedroom count from title/snippet
+          const bedroomMatch = (r.title + " " + r.snippet).match(/(\d+)\s*(?:bed|br|bedroom)/i);
+          const bedrooms = bedroomMatch ? parseInt(bedroomMatch[1]) : null;
+
+          // Extract price from snippet
+          const priceMatch = r.snippet?.match(/\$[\s]*([\d,]+)/);
+          const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, "")) : null;
+
+          units.push({
+            url: r.link,
+            title: r.title,
+            bedrooms,
+            price,
+            source: isZillow ? "Zillow" : "Homes.com",
+          });
+        }
+      } catch (e: any) {
+        console.warn("[community/search-units] error:", e.message);
+      }
+    }
+
+    // Deduplicate by URL
+    const seen = new Set<string>();
+    const deduped = units.filter(u => {
+      if (seen.has(u.url)) return false;
+      seen.add(u.url);
+      return true;
+    });
+
+    // Group by bedroom count
+    const grouped: Record<number | string, typeof deduped> = {};
+    for (const u of deduped) {
+      const key = u.bedrooms ?? "unknown";
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(u);
+    }
+
+    res.json({ units: deduped, grouped });
+  });
+
+  // ============================================================
+  // Step 5: Generate listing draft with Claude
+  // ============================================================
+  app.post("/api/community/generate-listing", async (req, res) => {
+    const { communityName, city, state, unit1, unit2, suggestedRate } = req.body as {
+      communityName: string;
+      city: string;
+      state: string;
+      unit1: { bedrooms: number; url: string; description?: string };
+      unit2: { bedrooms: number; url: string; description?: string };
+      suggestedRate: number;
+    };
+
+    if (!communityName || !unit1 || !unit2) {
+      return res.status(400).json({ error: "communityName, unit1, unit2 required" });
+    }
+
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const combinedBedrooms = (unit1.bedrooms || 0) + (unit2.bedrooms || 0);
+
+    const DISCLOSURE = `⚠️ IMPORTANT DISCLOSURE
+
+This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.
+
+---`;
+
+    if (!anthropicKey) {
+      const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
+      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. Unit 1 is a ${unit1.bedrooms}-bedroom residence and Unit 2 is a ${unit2.bedrooms}-bedroom residence, totaling ${combinedBedrooms} bedrooms. Guests receive separate access codes for each unit at check-in.`;
+      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate });
+    }
+
+    const prompt = `Generate a VRBO-ready vacation rental listing for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
+
+The listing combines:
+- Unit 1: ${unit1.bedrooms}-bedroom unit at ${communityName}
+- Unit 2: ${unit2.bedrooms}-bedroom unit at ${communityName}
+- Combined total: ${combinedBedrooms} bedrooms
+- Suggested nightly rate: $${suggestedRate}
+
+Requirements:
+1. HEADLINE: Max 80 characters, VRBO-compliant, exciting and descriptive
+2. DESCRIPTION: Must start with this EXACT disclosure block (copy it verbatim):
+
+${DISCLOSURE}
+
+Then follow with:
+- Engaging community/location highlights (2-3 paragraphs)
+- Bedroom and bathroom breakdown for both units
+- Key amenities
+- Local attractions
+
+Keep the total description under 800 words. Write for VRBO. Be specific about ${city}, ${state}.
+
+Return ONLY valid JSON: {"title": "...", "description": "..."}`;
+
+    try {
+      const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const claudeData = await claudeResp.json() as any;
+      const text: string = claudeData?.content?.[0]?.text ?? "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON in Claude response");
+
+      const { title, description } = JSON.parse(jsonMatch[0]);
+      return res.json({ title: title.slice(0, 80), description, combinedBedrooms, suggestedRate });
+    } catch (e: any) {
+      console.warn("[community/generate-listing] Claude error:", e.message);
+      const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
+      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}.`;
+      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate });
+    }
   });
 
   return httpServer;

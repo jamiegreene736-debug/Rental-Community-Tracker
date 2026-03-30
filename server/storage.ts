@@ -4,7 +4,8 @@ import {
   type LodgifyBooking, type InsertLodgifyBooking,
   type ScannerRun, type InsertScannerRun,
   type AvailabilityScan, type InsertAvailabilityScan,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans,
+  type CommunityDraft, type InsertCommunityDraft,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -40,6 +41,12 @@ export interface IStorage {
   createAvailabilityScan(scan: InsertAvailabilityScan): Promise<AvailabilityScan>;
   getAvailabilityScans(filters?: { runId?: number; community?: string; status?: string }): Promise<AvailabilityScan[]>;
   deleteAvailabilityScansForRun(runId: number): Promise<void>;
+
+  createCommunityDraft(draft: InsertCommunityDraft): Promise<CommunityDraft>;
+  getCommunityDrafts(): Promise<CommunityDraft[]>;
+  getCommunityDraft(id: number): Promise<CommunityDraft | undefined>;
+  updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
+  deleteCommunityDraft(id: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -212,6 +219,30 @@ export class DatabaseStorage implements IStorage {
 
   async deleteAvailabilityScansForRun(runId: number): Promise<void> {
     await db.delete(availabilityScans).where(eq(availabilityScans.runId, runId));
+  }
+
+  async createCommunityDraft(draft: InsertCommunityDraft): Promise<CommunityDraft> {
+    const [result] = await db.insert(communityDrafts).values(draft).returning();
+    return result;
+  }
+
+  async getCommunityDrafts(): Promise<CommunityDraft[]> {
+    return db.select().from(communityDrafts).orderBy(desc(communityDrafts.createdAt));
+  }
+
+  async getCommunityDraft(id: number): Promise<CommunityDraft | undefined> {
+    const [result] = await db.select().from(communityDrafts).where(eq(communityDrafts.id, id));
+    return result;
+  }
+
+  async updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined> {
+    const [result] = await db.update(communityDrafts).set(data).where(eq(communityDrafts.id, id)).returning();
+    return result;
+  }
+
+  async deleteCommunityDraft(id: number): Promise<boolean> {
+    const result = await db.delete(communityDrafts).where(eq(communityDrafts.id, id)).returning();
+    return result.length > 0;
   }
 }
 

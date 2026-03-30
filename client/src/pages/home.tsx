@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { Link } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -42,8 +42,19 @@ import {
   Loader2,
   CalendarSearch,
   Images,
+  Plus,
+  Star,
+  Trash2,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getAllMultiUnitProperties } from "@/data/unit-builder-data";
+import { apiRequest } from "@/lib/queryClient";
+import type { CommunityDraft } from "@shared/schema";
+
+const STATUS_LABELS: Record<string, string> = {
+  researching: "Researching",
+  draft_ready: "Draft Ready",
+  active: "Active",
+};
 
 type Property = {
   id: number;
@@ -486,6 +497,21 @@ export default function Home() {
     queryKey: ["/api/lodgify/properties"],
   });
 
+  const { data: communityDraftsData } = useQuery<CommunityDraft[]>({
+    queryKey: ["/api/community/drafts"],
+  });
+
+  const queryClient = useQueryClient();
+
+  const deleteDraftMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/community/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+    },
+  });
+
   const lodgifyStatusMap = useMemo(() => {
     const map = new Map<number, { found: boolean; lodgifyName?: string; lodgifyId?: number }>();
     if (!lodgifyData?.items) return map;
@@ -555,13 +581,19 @@ export default function Home() {
         <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-              Vacation Rental Experts - Property Research
+              NexStay — Property Research
             </h1>
             <p className="text-muted-foreground mt-1">
-              Cataloged properties from thevacationrentalexperts.com with community assignments and pricing
+              NexStay portfolio of vacation rental communities with pricing and performance data
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Link href="/add-community">
+              <Button data-testid="button-add-community">
+                <Plus className="h-4 w-4 mr-2" />
+                Add New Community
+              </Button>
+            </Link>
             <Link href="/community-photo-finder">
               <Button variant="outline" data-testid="button-community-photo-finder">
                 <Images className="h-4 w-4 mr-2" />
@@ -580,7 +612,7 @@ export default function Home() {
               </Button>
             </Link>
             <Link href="/buy-in-tracker">
-              <Button data-testid="button-buy-in-tracker">
+              <Button variant="outline" data-testid="button-buy-in-tracker">
                 <DollarSign className="h-4 w-4 mr-2" />
                 Buy-In Tracker
               </Button>
@@ -891,8 +923,73 @@ export default function Home() {
           </Table>
         </Card>
 
+        {/* Community Drafts Section */}
+        {communityDraftsData && communityDraftsData.length > 0 && (
+          <div className="mt-8">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <Plus className="h-5 w-5 text-primary" />
+                  New Communities in Research
+                </h2>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  Communities discovered through the Add New Community workflow
+                </p>
+              </div>
+              <Link href="/add-community">
+                <Button size="sm" data-testid="button-add-community-small">
+                  <Plus className="h-4 w-4 mr-1" /> Add Another
+                </Button>
+              </Link>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {communityDraftsData.map(draft => (
+                <Card key={draft.id} className="p-4 relative" data-testid={`card-draft-${draft.id}`}>
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="min-w-0">
+                      <h3 className="font-semibold text-sm truncate" data-testid={`text-draft-name-${draft.id}`}>{draft.name}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        <MapPin className="h-3 w-3 inline mr-0.5" />{draft.city}, {draft.state}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Badge variant="outline" className="text-xs">
+                        {STATUS_LABELS[draft.status] ?? draft.status}
+                      </Badge>
+                      <button
+                        className="text-muted-foreground hover:text-destructive transition-colors p-1"
+                        onClick={() => deleteDraftMutation.mutate(draft.id)}
+                        data-testid={`button-delete-draft-${draft.id}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground mb-2">
+                    {draft.combinedBedrooms && (
+                      <span><BedDouble className="h-3 w-3 inline mr-0.5" />{draft.combinedBedrooms}BR combined</span>
+                    )}
+                    {draft.suggestedRate && (
+                      <span><DollarSign className="h-3 w-3 inline" />${draft.suggestedRate}/night</span>
+                    )}
+                    {draft.confidenceScore && (
+                      <span><Star className="h-3 w-3 inline mr-0.5" />{draft.confidenceScore}/100</span>
+                    )}
+                  </div>
+                  {draft.researchSummary && (
+                    <p className="text-xs text-muted-foreground line-clamp-2">{draft.researchSummary}</p>
+                  )}
+                  {draft.listingTitle && (
+                    <p className="text-xs font-medium mt-1 truncate">{draft.listingTitle}</p>
+                  )}
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="mt-4 text-xs text-muted-foreground text-center">
-          Data sourced from thevacationrentalexperts.com sitemap. Prices shown are nightly rates and may vary by season.
+          NexStay portfolio data. Prices shown are nightly rates and may vary by season.
         </div>
       </div>
     </div>
