@@ -46,85 +46,86 @@ This listing combines two separate, individually owned units within the same com
 ---`;
 
 const COMMUNITY_REGENCY: CommunityPhoto[] = [
-  { filename: "01-resort-pool.jpg", label: "Resort Pool", position: "beginning" },
-  { filename: "02-tennis-courts.jpg", label: "Tennis Courts", position: "beginning" },
-  { filename: "03-garden-walkway.jpg", label: "Garden Walkway", position: "beginning" },
-  { filename: "04-poipu-beach.jpg", label: "Poipu Beach", position: "end" },
-  { filename: "05-bbq-area.jpg", label: "BBQ Area", position: "beginning" },
-  { filename: "06-sunset-view.jpg", label: "Sunset View", position: "end" },
-  { filename: "07-hot-tub.jpg", label: "Hot Tub & Spa", position: "beginning" },
-  { filename: "08-tropical-grounds.jpg", label: "Tropical Grounds", position: "end" },
+  { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-community.jpg", label: "Tennis Courts", position: "beginning" },
+  { filename: "03-community.jpg", label: "Garden Walkway", position: "beginning" },
+  { filename: "04-community.jpg", label: "Poipu Beach", position: "end" },
+  { filename: "05-community.jpg", label: "BBQ Area", position: "beginning" },
+  { filename: "06-community.jpg", label: "Tropical Grounds", position: "end" },
 ];
 
 const COMMUNITY_KEKAHA: CommunityPhoto[] = [
-  { filename: "01-beach-sunset.jpg", label: "Beach Sunset", position: "beginning" },
-  { filename: "02-beach-ocean.jpg", label: "Beach & Ocean", position: "beginning" },
-  { filename: "03-tropical-garden.jpg", label: "Tropical Garden", position: "beginning" },
-  { filename: "04-ocean-sunset.jpg", label: "Ocean Sunset View", position: "end" },
-  { filename: "05-oceanfront-view.jpg", label: "Oceanfront View", position: "end" },
-  { filename: "06-estate-grounds.jpg", label: "Estate Grounds", position: "end" },
+  { filename: "01-community.jpg", label: "Beach Sunset", position: "beginning" },
+  { filename: "02-community.jpg", label: "Beach & Ocean", position: "beginning" },
+  { filename: "03-community.jpg", label: "Tropical Garden", position: "beginning" },
+  { filename: "04-community.jpg", label: "Ocean Sunset View", position: "end" },
+  { filename: "05-community.jpg", label: "Oceanfront View", position: "end" },
+  { filename: "06-community.jpg", label: "Estate Grounds", position: "end" },
 ];
 
 const COMMUNITY_KEAUHOU: CommunityPhoto[] = [
-  { filename: "01-coastline.jpg", label: "Big Island Coastline", position: "beginning" },
-  { filename: "02-estate-grounds.jpg", label: "Estate Grounds", position: "beginning" },
-  { filename: "03-ocean-view.jpg", label: "Ocean View", position: "end" },
-  { filename: "04-sunset.jpg", label: "Sunset", position: "end" },
-  { filename: "05-outdoor-dining.jpg", label: "Outdoor Dining", position: "beginning" },
+  { filename: "01-community.jpg", label: "Big Island Coastline", position: "beginning" },
+  { filename: "02-community.jpg", label: "Estate Grounds", position: "beginning" },
+  { filename: "03-community.jpg", label: "Ocean View", position: "end" },
+  { filename: "04-community.jpg", label: "Sunset", position: "end" },
+  { filename: "05-community.jpg", label: "Outdoor Dining", position: "beginning" },
+  { filename: "06-community.jpg", label: "Community Grounds", position: "end" },
 ];
 
 const COMMUNITY_MAUNA_KAI: CommunityPhoto[] = [
-  { filename: "01-mountain-view.jpg", label: "Mountain View", position: "beginning" },
-  { filename: "02-hanalei-bay.jpg", label: "Hanalei Bay", position: "beginning" },
-  { filename: "03-pool-area.jpg", label: "Pool Area", position: "beginning" },
-  { filename: "04-garden-path.jpg", label: "Garden Path", position: "end" },
-  { filename: "05-north-shore.jpg", label: "North Shore View", position: "end" },
+  { filename: "01-community.jpg", label: "Mountain View", position: "beginning" },
+  { filename: "02-community.jpg", label: "Hanalei Bay", position: "beginning" },
+  { filename: "03-community.jpg", label: "Pool Area", position: "beginning" },
+  { filename: "04-community.jpg", label: "Garden Path", position: "end" },
+  { filename: "05-community.jpg", label: "North Shore View", position: "end" },
+  { filename: "06-community.jpg", label: "Community Grounds", position: "end" },
 ];
 
 const COMMUNITY_KAHA_LANI: CommunityPhoto[] = [
-  { filename: "01-pool.jpg", label: "Oceanfront Pool", position: "beginning" },
-  { filename: "02-beach-path.jpg", label: "Beach Path", position: "beginning" },
-  { filename: "03-tennis-court.jpg", label: "Tennis Court", position: "beginning" },
-  { filename: "04-coastal-path.jpg", label: "Coastal Walking Path", position: "end" },
-  { filename: "05-resort-grounds.jpg", label: "Resort Grounds", position: "end" },
+  { filename: "01-community.jpg", label: "Oceanfront Pool", position: "beginning" },
+  { filename: "02-community.jpg", label: "Beach Path", position: "beginning" },
+  { filename: "03-community.jpg", label: "Tennis Court", position: "beginning" },
+  { filename: "04-community.jpg", label: "Coastal Walking Path", position: "end" },
+  { filename: "05-community.jpg", label: "Resort Grounds", position: "end" },
+  { filename: "06-community.jpg", label: "Community View", position: "end" },
 ];
 
 const COMMUNITY_LAE_NANI: CommunityPhoto[] = [
-  { filename: "01-pool.jpg", label: "Resort Pool", position: "beginning" },
-  { filename: "02-beach.jpg", label: "Beach", position: "beginning" },
-  { filename: "03-garden.jpg", label: "Garden Courtyard", position: "end" },
-  { filename: "04-ocean-view.jpg", label: "Ocean View", position: "end" },
-  { filename: "05-bbq-area.jpg", label: "BBQ Area", position: "beginning" },
+  { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-community.jpg", label: "Beach Cove", position: "beginning" },
+  { filename: "03-community.jpg", label: "Garden Courtyard", position: "end" },
+  { filename: "04-community.jpg", label: "Ocean View", position: "end" },
+  { filename: "05-community.jpg", label: "BBQ Area", position: "beginning" },
+  { filename: "06-community.jpg", label: "Community Grounds", position: "end" },
 ];
 
-const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [
-  { filename: "01-poipu-beach.jpg", label: "Poipu Beach", position: "beginning" },
-  { filename: "02-exterior.jpg", label: "Condo Exterior", position: "beginning" },
-  { filename: "03-ocean-shore.jpg", label: "Ocean Shore", position: "end" },
-  { filename: "04-sunset.jpg", label: "Beach Sunset", position: "end" },
-];
+const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [];
 
 const COMMUNITY_KAIULANI: CommunityPhoto[] = [
-  { filename: "01-princeville-view.jpg", label: "Princeville View", position: "beginning" },
-  { filename: "02-pool.jpg", label: "Pool Area", position: "beginning" },
-  { filename: "03-garden.jpg", label: "Garden", position: "end" },
-  { filename: "04-cliff-view.jpg", label: "Cliff View", position: "end" },
+  { filename: "01-community.jpg", label: "Princeville View", position: "beginning" },
+  { filename: "02-community.jpg", label: "Pool Area", position: "beginning" },
+  { filename: "03-community.jpg", label: "Garden", position: "end" },
+  { filename: "04-community.jpg", label: "Cliff View", position: "end" },
+  { filename: "05-community.jpg", label: "Community Grounds", position: "beginning" },
+  { filename: "06-community.jpg", label: "Community View", position: "end" },
 ];
 
 const COMMUNITY_POIPU_OCEANFRONT: CommunityPhoto[] = [
-  { filename: "01-ocean-view.jpg", label: "Ocean View", position: "beginning" },
-  { filename: "02-sunset.jpg", label: "Sunset", position: "beginning" },
-  { filename: "03-coastline.jpg", label: "Coastline", position: "end" },
-  { filename: "04-garden.jpg", label: "Tropical Garden", position: "end" },
+  { filename: "01-community.jpg", label: "Ocean View", position: "beginning" },
+  { filename: "02-community.jpg", label: "Sunset", position: "beginning" },
+  { filename: "03-community.jpg", label: "Coastline", position: "end" },
+  { filename: "04-community.jpg", label: "Tropical Garden", position: "end" },
+  { filename: "05-community.jpg", label: "Community Grounds", position: "beginning" },
+  { filename: "06-community.jpg", label: "Community View", position: "end" },
 ];
 
 const COMMUNITY_PILI_MAI: CommunityPhoto[] = [
-  { filename: "01-resort-pool.jpg", label: "Resort Pool", position: "beginning" },
-  { filename: "02-tropical-pool.jpg", label: "Tropical Pool Area", position: "beginning" },
-  { filename: "03-sunset.jpg", label: "Hawaiian Sunset", position: "beginning" },
-  { filename: "04-nearby-beach.jpg", label: "Nearby Beach", position: "end" },
-  { filename: "05-coastline.jpg", label: "South Shore Coastline", position: "end" },
-  { filename: "06-palm-trees.jpg", label: "Tropical Palms", position: "end" },
+  { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-community.jpg", label: "Tropical Pool Area", position: "beginning" },
+  { filename: "03-community.jpg", label: "Hawaiian Sunset", position: "beginning" },
+  { filename: "04-community.jpg", label: "Nearby Beach", position: "end" },
+  { filename: "05-community.jpg", label: "South Shore Coastline", position: "end" },
+  { filename: "06-community.jpg", label: "Tropical Palms", position: "end" },
 ];
 
 const PHOTOS_924: UnitPhoto[] = [
@@ -321,19 +322,6 @@ const PHOTOS_KEAUHOU: UnitPhoto[] = [
   { filename: "photo_3.jpg", label: "Circular Kitchen", category: "Kitchen" },
   { filename: "photo_4.jpg", label: "Master Suite", category: "Bedrooms" },
   { filename: "photo_5.jpg", label: "Garden and Pool", category: "Exterior" },
-  { filename: "photo_6.jpg", label: "Pool Area", category: "Exterior" },
-  { filename: "photo_7.jpg", label: "Lanai Dining", category: "Exterior" },
-  { filename: "photo_8.jpg", label: "Guest Suite", category: "Bedrooms" },
-  { filename: "photo_9.jpg", label: "Kitchen Island", category: "Kitchen" },
-  { filename: "photo_10.jpg", label: "Master Bathroom", category: "Bathrooms" },
-  { filename: "photo_11.jpg", label: "Ocean View from Lanai", category: "Exterior" },
-  { filename: "photo_12.jpg", label: "Tropical Gardens", category: "Exterior" },
-  { filename: "photo_13.jpg", label: "Guest Bathroom", category: "Bathrooms" },
-  { filename: "photo_14.jpg", label: "Bedroom 3", category: "Bedrooms" },
-  { filename: "photo_15.jpg", label: "Bedroom 4", category: "Bedrooms" },
-  { filename: "photo_16.jpg", label: "Estate Exterior", category: "Exterior" },
-  { filename: "photo_17.jpg", label: "Casita Guest Quarters", category: "Bedrooms" },
-  { filename: "photo_18.jpg", label: "Sunset View", category: "Exterior" },
 ];
 
 const PHOTOS_MAUNA_KAI_6A: UnitPhoto[] = [
