@@ -345,6 +345,16 @@ const PHOTOS_MAUNA_KAI_6A: UnitPhoto[] = [
   { filename: "photo_17.jpg", label: "Tropical Garden Path", category: "Views" },
   { filename: "photo_18.jpg", label: "Ocean Glimpse from Lanai", category: "Views" },
   { filename: "photo_19.jpg", label: "Sunset over Hanalei", category: "Views" },
+  { filename: "photo_20.jpg", label: "Resort Grounds", category: "Exterior" },
+  { filename: "photo_21.jpg", label: "Garden Detail", category: "Exterior" },
+  { filename: "photo_22.jpg", label: "Community Area", category: "Amenities" },
+  { filename: "photo_23.jpg", label: "Outdoor Space", category: "Exterior" },
+  { filename: "photo_24.jpg", label: "Princeville View", category: "Views" },
+  { filename: "photo_25.jpg", label: "North Shore Landscape", category: "Views" },
+  { filename: "photo_26.jpg", label: "Hanalei Valley", category: "Views" },
+  { filename: "photo_27.jpg", label: "Tropical Setting", category: "Exterior" },
+  { filename: "photo_28.jpg", label: "Resort Detail", category: "Amenities" },
+  { filename: "photo_29.jpg", label: "Coastal Panorama", category: "Views" },
 ];
 
 const PHOTOS_MAUNA_KAI_T3: UnitPhoto[] = [
@@ -391,6 +401,11 @@ const PHOTOS_KAHA_LANI_109: UnitPhoto[] = [
   { filename: "photo_17.jpg", label: "Oceanfront Sunrise", category: "Views" },
   { filename: "photo_18.jpg", label: "Coastal Walking Path", category: "Views" },
   { filename: "photo_19.jpg", label: "Tropical Resort Grounds", category: "Views" },
+  { filename: "photo_20.jpg", label: "Resort Entrance", category: "Exterior" },
+  { filename: "photo_21.jpg", label: "Garden Walkway", category: "Exterior" },
+  { filename: "photo_22.jpg", label: "Community Amenities", category: "Amenities" },
+  { filename: "photo_23.jpg", label: "Ocean Coastline", category: "Views" },
+  { filename: "photo_24.jpg", label: "Wailua Bay View", category: "Views" },
 ];
 
 const PHOTOS_KAHA_LANI_123: UnitPhoto[] = [
@@ -412,6 +427,9 @@ const PHOTOS_KAHA_LANI_123: UnitPhoto[] = [
   { filename: "photo_15.jpg", label: "Pool Deck and Lounge Chairs", category: "Amenities" },
   { filename: "photo_16.jpg", label: "Ocean View from Property", category: "Views" },
   { filename: "photo_17.jpg", label: "Beach Access Path", category: "Views" },
+  { filename: "photo_18.jpg", label: "Lydgate Park Shoreline", category: "Views" },
+  { filename: "photo_19.jpg", label: "Coastal Views", category: "Views" },
+  { filename: "photo_20.jpg", label: "Wailua Coast", category: "Views" },
 ];
 
 const PHOTOS_LAE_NANI: UnitPhoto[] = [
@@ -487,6 +505,14 @@ const PHOTOS_KAIULANI: UnitPhoto[] = [
   { filename: "photo_17.jpg", label: "North Shore Coastline", category: "Views" },
   { filename: "photo_18.jpg", label: "Mountain and Ocean Panorama", category: "Views" },
   { filename: "photo_19.jpg", label: "Princeville Sunset", category: "Views" },
+  { filename: "photo_20.jpg", label: "Princeville Golf Course", category: "Views" },
+  { filename: "photo_21.jpg", label: "Hanalei Valley Lookout", category: "Views" },
+  { filename: "photo_22.jpg", label: "North Shore Scenery", category: "Views" },
+  { filename: "photo_23.jpg", label: "Community Grounds", category: "Exterior" },
+  { filename: "photo_24.jpg", label: "Garden Paths", category: "Exterior" },
+  { filename: "photo_25.jpg", label: "Outdoor Living", category: "Exterior" },
+  { filename: "photo_26.jpg", label: "Tropical Landscape", category: "Exterior" },
+  { filename: "photo_27.jpg", label: "Cliffside Ocean Views", category: "Views" },
 ];
 
 const PHOTOS_PILI_MAI_UNIT_A: UnitPhoto[] = [
