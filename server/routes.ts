@@ -1383,6 +1383,162 @@ export async function registerRoutes(
     }
   });
 
+  // Community Photo Finder
+  app.get("/api/community-photos/search", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+    }
+
+    const communityName = req.query.communityName as string;
+    if (!communityName || !communityName.trim()) {
+      return res.status(400).json({ error: "Missing communityName parameter" });
+    }
+
+    const name = communityName.trim();
+
+    // Known aliases / extra terms that help narrow results to the specific community
+    const COMMUNITY_EXTRAS: Record<string, string> = {
+      "Regency at Poipu Kai": "Poipu Kai resort Kauai",
+      "Kekaha Beachfront Estate": "Kekaha Kauai beachfront",
+      "Keauhou Estates": "Keauhou Kona Hawaii",
+      "Mauna Kai Princeville": "Princeville Kauai resort",
+      "Kaha Lani Resort": "Kapaa Kauai resort",
+      "Lae Nani Resort": "Kapaa Kauai oceanfront",
+      "Poipu Brenneckes Beachside": "Poipu Beach Kauai",
+      "Kaiulani of Princeville": "Princeville Kauai",
+      "Poipu Brenneckes Oceanfront": "Poipu Beach Kauai oceanfront",
+      "Pili Mai": "Pili Mai Poipu Kauai",
+      "Southern Dunes": "Southern Dunes Florida vacation",
+      "Windsor Hills": "Windsor Hills Orlando Florida",
+    };
+
+    const extras = COMMUNITY_EXTRAS[name] || "resort Kauai";
+
+    // Three focused queries: pool/grounds, aerial/exterior, amenities
+    const queries = [
+      `"${name}" pool grounds resort`,
+      `"${name}" exterior buildings aerial ${extras}`,
+      `"${name}" amenities community common area`,
+    ];
+
+    // Keywords that indicate an individual unit interior — reject these
+    const interiorKeywords = [
+      "bedroom", "kitchen", "bathroom", "bath", "living room", "dining room",
+      "interior", "couch", "sofa", "bed ", "master", "loft", "hallway",
+      "floor plan", "floorplan", "map", "square feet",
+    ];
+
+    // Sources to deprioritize (individual listing platforms show unit interiors)
+    const lowTrustSources = ["airbnb.com", "vrbo.com", "booking.com", "homeaway.com"];
+
+    // Sources known to have accurate community property photos
+    const highTrustSources = [
+      "tripadvisor.com", "suiteparadise.com", "outrigger.com",
+      "castleresorts.com", "parrish.com", "google.com", "maps.google.com",
+      "jeanandabbott.com", "kauaibeachrentals.com", "remax.com", "zillow.com",
+    ];
+
+    const nameWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+
+    function scoreAndValidate(img: any): { valid: boolean; label: string; score: number } {
+      const title = (img.title || "").toLowerCase();
+      const sourceLink = (img.source?.link || "").toLowerCase();
+      const sourceName = (img.source?.name || "").toLowerCase();
+      const imageUrl = (img.original?.link || "").toLowerCase();
+
+      // Must have an original image URL
+      if (!img.original?.link) return { valid: false, label: "", score: 0 };
+
+      // Skip SVG/GIF/tiny images
+      if (imageUrl.endsWith(".svg") || imageUrl.endsWith(".gif")) return { valid: false, label: "", score: 0 };
+      const w = img.original?.width || 0;
+      const h = img.original?.height || 0;
+      if (w > 0 && h > 0 && (w < 300 || h < 200)) return { valid: false, label: "", score: 0 };
+
+      // Reject if title strongly suggests interior unit photo
+      const hasInterior = interiorKeywords.some(kw => title.includes(kw));
+      if (hasInterior) return { valid: false, label: "", score: 0 };
+
+      // Reject low-trust individual listing platforms
+      if (lowTrustSources.some(s => sourceLink.includes(s) || imageUrl.includes(s))) {
+        return { valid: false, label: "", score: 0 };
+      }
+
+      // Community name validation: at least one significant word from community name
+      // must appear in the title, source URL, or image URL
+      const contextText = `${title} ${sourceLink} ${sourceName} ${imageUrl}`;
+      const nameMatch = nameWords.some(w => contextText.includes(w));
+      if (!nameMatch) return { valid: false, label: "", score: 0 };
+
+      // Build a human-readable label
+      let label = img.title || name;
+      if (label.length > 80) label = label.substring(0, 77) + "...";
+
+      // Score: higher = better
+      let score = 50;
+      if (highTrustSources.some(s => sourceLink.includes(s))) score += 30;
+
+      // Boost for community/resort/pool keywords in title
+      const boostWords = ["pool", "resort", "grounds", "exterior", "building", "aerial", "community", "clubhouse", "tennis", "complex", "property"];
+      boostWords.forEach(w => { if (title.includes(w)) score += 5; });
+
+      return { valid: true, label, score };
+    }
+
+    try {
+      // Run all three queries in parallel
+      const searchPromises = queries.map(async (q) => {
+        const params = new URLSearchParams({
+          engine: "google_images",
+          q,
+          api_key: apiKey,
+          num: "30",
+          safe: "active",
+        });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!resp.ok) return [];
+        const data = await resp.json() as any;
+        return (data.images || []) as any[];
+      });
+
+      const allResults = await Promise.all(searchPromises);
+      const combined = allResults.flat();
+
+      // Deduplicate by original image URL
+      const seen = new Set<string>();
+      const validated: any[] = [];
+
+      for (const img of combined) {
+        const url = img.original?.link;
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+
+        const { valid, label, score } = scoreAndValidate(img);
+        if (!valid) continue;
+
+        validated.push({
+          url,
+          thumbnail: img.thumbnail || url,
+          title: label,
+          source: img.source?.name || img.source?.link || "Unknown",
+          sourceLink: img.source?.link || "",
+          width: img.original?.width,
+          height: img.original?.height,
+          score,
+        });
+      }
+
+      // Sort by score descending, take top 40
+      validated.sort((a, b) => b.score - a.score);
+      const top = validated.slice(0, 40);
+
+      res.json({ communityName: name, results: top, totalFound: top.length });
+    } catch (err: any) {
+      res.status(500).json({ error: "Community photo search failed", message: err.message });
+    }
+  });
+
   app.get("/api/scanner/results", async (req, res) => {
     try {
       const filters: { runId?: number; community?: string; status?: string } = {};

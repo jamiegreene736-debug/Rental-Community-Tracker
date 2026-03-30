@@ -41,6 +41,7 @@ import {
   ClipboardList,
   Loader2,
   CalendarSearch,
+  Images,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
@@ -786,6 +787,12 @@ export default function Home() {
             </p>
           </div>
           <div className="flex gap-2">
+            <Link href="/community-photo-finder">
+              <Button variant="outline" data-testid="button-community-photo-finder">
+                <Images className="h-4 w-4 mr-2" />
+                Community Photos
+              </Button>
+            </Link>
             <Link href="/photo-audit">
               <Button variant="outline" data-testid="button-photo-audit">
                 Photo Audit

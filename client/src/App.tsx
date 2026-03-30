@@ -10,6 +10,7 @@ import LodgifyPrep from "@/pages/lodgify-prep";
 import BuyInTracker from "@/pages/buy-in-tracker";
 import PhotoAudit from "@/pages/photo-audit";
 import AvailabilityScanner from "@/pages/availability-scanner";
+import CommunityPhotoFinder from "@/pages/community-photo-finder";
 
 function Router() {
   return (
@@ -20,6 +21,7 @@ function Router() {
       <Route path="/buy-in-tracker" component={BuyInTracker} />
       <Route path="/photo-audit" component={PhotoAudit} />
       <Route path="/availability-scanner" component={AvailabilityScanner} />
+      <Route path="/community-photo-finder" component={CommunityPhotoFinder} />
       <Route component={NotFound} />
     </Switch>
   );
