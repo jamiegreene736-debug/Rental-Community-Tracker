@@ -255,12 +255,15 @@ export async function registerRoutes(
     res.send(zipBuffer);
   });
 
-  // AI photo makeover - sends interior room photos through Replicate SDXL img2img
-  // to completely reimagine the room style, then returns a ZIP of processed images
+  // AI photo makeover: uses Claude vision to describe each interior photo, then generates
+  // a new luxury-style version via Stability AI or Replicate SDXL. Returns a ZIP.
   app.post("/api/photos/ai-makeover", async (req, res) => {
-    const apiKey = process.env.REPLICATE_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "REPLICATE_API_KEY not configured" });
+    const replicateKey = process.env.REPLICATE_API_KEY;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const stabilityKey = process.env.STABILITY_API_KEY;
+
+    if (!replicateKey && !stabilityKey) {
+      return res.status(500).json({ error: "No AI image generation API key configured (need REPLICATE_API_KEY or STABILITY_API_KEY)" });
     }
 
     const { folders, communityFolder, beginningPhotos, endPhotos, name } = req.body as {
@@ -277,17 +280,177 @@ export async function registerRoutes(
 
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
 
-    // Keywords that indicate interior photos with furniture
+    // Interior keywords → these photos get AI treatment
     const interiorKeywords = ["living", "bedroom", "kitchen", "dining", "bathroom", "lounge", "family", "master", "bed", "bath", "office", "room", "interior", "sofa", "couch", "great-room", "great_room", "greatroom", "overview", "detail", "area", "space", "hallway", "foyer", "entry", "loft"];
-    // Keywords that indicate exterior / no furniture — skip these
+    // Exterior keywords → pass through unchanged
     const exteriorKeywords = ["pool", "community", "exterior", "outside", "beach", "ocean", "view", "patio", "balcony", "garden", "yard", "front", "aerial", "court", "tennis", "hot-tub", "hottub"];
 
     function isInteriorWithFurniture(filename: string): boolean {
       const lower = filename.toLowerCase();
-      const hasExterior = exteriorKeywords.some(k => lower.includes(k));
-      if (hasExterior) return false;
-      const hasInterior = interiorKeywords.some(k => lower.includes(k));
-      return hasInterior;
+      if (exteriorKeywords.some(k => lower.includes(k))) return false;
+      return interiorKeywords.some(k => lower.includes(k));
+    }
+
+    function getFilenamePrompt(filename: string): string {
+      const lower = filename.toLowerCase();
+      if (lower.includes("bedroom") || lower.includes("master") || lower.includes("bed"))
+        return "luxurious master bedroom, king bed with crisp white linens, coastal decor, bright natural light through large windows, modern furniture";
+      if (lower.includes("kitchen"))
+        return "modern vacation rental kitchen, white shaker cabinets, stainless steel appliances, quartz countertops, bright and clean, coastal style";
+      if (lower.includes("bathroom") || lower.includes("bath"))
+        return "luxury vacation rental bathroom, marble tiles, rainfall shower, modern fixtures, bright spa-like lighting";
+      if (lower.includes("living") || lower.includes("lounge") || lower.includes("great"))
+        return "elegant vacation rental living room, comfortable linen sofas, coastal modern decor, large windows with natural light, bright and airy";
+      if (lower.includes("dining"))
+        return "bright vacation rental dining room, wooden farmhouse table, upholstered chairs, pendant lighting, natural light";
+      if (lower.includes("loft"))
+        return "airy vacation rental loft space, comfortable seating, natural light from skylights, modern coastal decor";
+      return "luxury vacation rental interior, modern coastal style, bright natural light, high-end furniture, professional real estate photography";
+    }
+
+    // --- Step 1: Describe image with Claude vision (optional enhancement) ---
+    async function describeWithClaude(imageBuffer: Buffer, mimeType: string): Promise<string | null> {
+      if (!anthropicKey) return null;
+      try {
+        const resp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": anthropicKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 250,
+            messages: [{
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: mimeType, data: imageBuffer.toString("base64") } },
+                { type: "text", text: "Describe this vacation rental interior for an AI image generation prompt. Focus on: room type, furniture style, color palette, lighting, and overall aesthetic. Be specific, under 180 words, no preamble." },
+              ],
+            }],
+          }),
+        });
+        if (!resp.ok) return null;
+        const data = await resp.json() as any;
+        return (data.content?.[0]?.text as string) || null;
+      } catch {
+        return null;
+      }
+    }
+
+    // --- Step 2a: Generate with Stability AI ---
+    async function generateWithStabilityAI(prompt: string): Promise<Buffer | null> {
+      if (!stabilityKey) return null;
+      try {
+        const resp = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image", {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${stabilityKey}`,
+          },
+          body: JSON.stringify({
+            text_prompts: [
+              { text: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K`, weight: 1 },
+              { text: "low quality, blurry, dark, cluttered, people, text, watermark, bad anatomy", weight: -1 },
+            ],
+            cfg_scale: 7,
+            height: 1024,
+            width: 1024,
+            samples: 1,
+            steps: 30,
+          }),
+        });
+        if (!resp.ok) {
+          console.error("Stability AI error:", resp.status, await resp.text());
+          return null;
+        }
+        const data = await resp.json() as any;
+        const b64 = data.artifacts?.[0]?.base64 as string | undefined;
+        return b64 ? Buffer.from(b64, "base64") : null;
+      } catch (err) {
+        console.error("Stability AI exception:", err);
+        return null;
+      }
+    }
+
+    // --- Step 2b: Generate with Replicate SDXL text-to-image ---
+    async function generateWithReplicate(prompt: string): Promise<Buffer | null> {
+      if (!replicateKey) return null;
+      try {
+        const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${replicateKey}`,
+            "Content-Type": "application/json",
+            "Prefer": "wait=60",
+          },
+          body: JSON.stringify({
+            input: {
+              prompt: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K high resolution`,
+              negative_prompt: "low quality, blurry, dark, cluttered, people, text, watermark, deformed",
+              width: 1024,
+              height: 1024,
+              num_inference_steps: 25,
+              guidance_scale: 7.5,
+              scheduler: "K_EULER",
+            },
+          }),
+        });
+
+        if (!createResp.ok) {
+          console.error("Replicate SDXL error:", createResp.status, await createResp.text());
+          return null;
+        }
+
+        const prediction = await createResp.json() as { id?: string; status: string; output?: string[]; error?: string };
+
+        // Synchronous success (Prefer: wait hit)
+        if (prediction.status === "succeeded" && prediction.output?.length) {
+          const imgResp = await fetch(prediction.output[0]);
+          if (!imgResp.ok) return null;
+          return Buffer.from(await imgResp.arrayBuffer());
+        }
+
+        // Fall back to polling if still processing
+        if (prediction.id) {
+          for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+              headers: { "Authorization": `Bearer ${replicateKey}` },
+            });
+            const result = await pollResp.json() as { status: string; output?: string[]; error?: string };
+            if (result.status === "succeeded" && result.output?.length) {
+              const imgResp = await fetch(result.output[0]);
+              if (!imgResp.ok) return null;
+              return Buffer.from(await imgResp.arrayBuffer());
+            }
+            if (result.status === "failed") {
+              console.error("Replicate prediction failed:", result.error);
+              return null;
+            }
+          }
+        }
+        return null;
+      } catch (err) {
+        console.error("Replicate exception:", err);
+        return null;
+      }
+    }
+
+    // --- Orchestrate: describe → generate ---
+    async function processPhotoWithAI(imageBuffer: Buffer, mimeType: string, filename: string): Promise<Buffer | null> {
+      // Get a description from Claude if available, otherwise derive from filename
+      const claudeDesc = await describeWithClaude(imageBuffer, mimeType);
+      const prompt = claudeDesc || getFilenamePrompt(filename);
+      console.log(`[ai-makeover] ${filename} → prompt: ${prompt.substring(0, 80)}...`);
+
+      // Try Stability AI first, then fall back to Replicate
+      const stabilityResult = await generateWithStabilityAI(prompt);
+      if (stabilityResult) return stabilityResult;
+
+      return await generateWithReplicate(prompt);
     }
 
     // Collect all image file paths with their desired ZIP names
@@ -300,7 +463,7 @@ export async function registerRoutes(
     const allPhotos: PhotoEntry[] = [];
     let globalIndex = 1;
 
-    // Community beginning photos (never process these — resort amenities)
+    // Community beginning photos (never process — resort amenities)
     if (communityFolder && beginningPhotos && beginningPhotos.length > 0) {
       const communityDir = path.join(photosBase, communityFolder);
       for (const photo of beginningPhotos) {
@@ -308,11 +471,7 @@ export async function registerRoutes(
         const paddedIndex = String(globalIndex).padStart(3, "0");
         const ext = path.extname(safePhoto);
         const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
-        allPhotos.push({
-          filePath: path.join(communityDir, safePhoto),
-          zipName: `${paddedIndex}-community-${baseName}${ext}`,
-          shouldProcess: false,
-        });
+        allPhotos.push({ filePath: path.join(communityDir, safePhoto), zipName: `${paddedIndex}-community-${baseName}${ext}`, shouldProcess: false });
         globalIndex++;
       }
     }
@@ -327,11 +486,7 @@ export async function registerRoutes(
         const paddedIndex = String(globalIndex).padStart(3, "0");
         const ext = path.extname(file);
         const baseName = path.basename(file, ext).replace(/^\d+-/, "");
-        allPhotos.push({
-          filePath: path.join(photosDir, file),
-          zipName: `${paddedIndex}-${safeFolder}-${baseName}${ext}`,
-          shouldProcess: isInteriorWithFurniture(file),
-        });
+        allPhotos.push({ filePath: path.join(photosDir, file), zipName: `${paddedIndex}-${safeFolder}-${baseName}${ext}`, shouldProcess: isInteriorWithFurniture(file) });
         globalIndex++;
       }
     }
@@ -344,11 +499,7 @@ export async function registerRoutes(
         const paddedIndex = String(globalIndex).padStart(3, "0");
         const ext = path.extname(safePhoto);
         const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
-        allPhotos.push({
-          filePath: path.join(photosBase, communityFolder, safePhoto),
-          zipName: `${paddedIndex}-community-${baseName}${ext}`,
-          shouldProcess: false,
-        });
+        allPhotos.push({ filePath: path.join(photosBase, communityFolder, safePhoto), zipName: `${paddedIndex}-community-${baseName}${ext}`, shouldProcess: false });
         globalIndex++;
       }
     }
@@ -358,78 +509,11 @@ export async function registerRoutes(
       return res.status(404).json({ error: "No photos found" });
     }
 
-    const toProcess = validPhotos.filter(p => p.shouldProcess);
-    const processCount = toProcess.length;
-
-    // Send progress info in the response header
+    const processCount = validPhotos.filter(p => p.shouldProcess).length;
     res.setHeader("X-Photos-Total", String(validPhotos.length));
     res.setHeader("X-Photos-Processing", String(processCount));
 
-    // AI makeover style prompt — high-end vacation rental interior redesign
-    const stylePrompt = "luxury vacation rental interior, modern coastal style, light and airy, high-end furniture, professional real estate photography, bright natural light, clean and elegant, 4K quality";
-    const negativePrompt = "low quality, blurry, dark, cluttered, old furniture, dated decor, people, text, watermark";
-
-    async function processImageWithReplicate(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
-      try {
-        // Convert to base64 data URL
-        const base64 = imageBuffer.toString("base64");
-        const dataUrl = `data:${mimeType};base64,${base64}`;
-
-        // Use Replicate's SDXL img2img model
-        const createResponse = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/versions/7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc/predictions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            input: {
-              image: dataUrl,
-              prompt: stylePrompt,
-              negative_prompt: negativePrompt,
-              prompt_strength: 0.65,
-              guidance_scale: 7.5,
-              num_inference_steps: 30,
-              scheduler: "K_EULER",
-            },
-          }),
-        });
-
-        if (!createResponse.ok) {
-          const errText = await createResponse.text();
-          console.error("Replicate create error:", createResponse.status, errText);
-          return null;
-        }
-
-        const prediction = await createResponse.json() as { id: string; status: string; output?: string[]; error?: string };
-        const predictionId = prediction.id;
-
-        // Poll for completion (max 2 minutes)
-        for (let i = 0; i < 60; i++) {
-          await new Promise(r => setTimeout(r, 2000));
-          const pollResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
-            headers: { "Authorization": `Bearer ${apiKey}` },
-          });
-          const result = await pollResponse.json() as { status: string; output?: string[]; error?: string };
-
-          if (result.status === "succeeded" && result.output && result.output.length > 0) {
-            const imgResponse = await fetch(result.output[0]);
-            if (!imgResponse.ok) return null;
-            const arrayBuffer = await imgResponse.arrayBuffer();
-            return Buffer.from(arrayBuffer);
-          } else if (result.status === "failed" || result.error) {
-            console.error("Replicate prediction failed:", result.error);
-            return null;
-          }
-        }
-        return null; // Timed out
-      } catch (err) {
-        console.error("Error processing image:", err);
-        return null;
-      }
-    }
-
-    // Process all photos, applying AI to interior ones
+    // Process all photos
     const zip = new JSZip();
     let processed = 0;
     let skipped = 0;
@@ -441,15 +525,15 @@ export async function registerRoutes(
       const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
 
       if (photo.shouldProcess) {
-        console.log(`AI processing: ${photo.zipName}`);
-        const result = await processImageWithReplicate(rawData, mimeType);
+        console.log(`[ai-makeover] Processing: ${photo.zipName}`);
+        const result = await processPhotoWithAI(rawData, mimeType, photo.zipName);
         if (result) {
-          zip.file(photo.zipName, result);
+          zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), result);
           processed++;
         } else {
-          // Fall back to original on failure
           zip.file(photo.zipName, rawData);
           failed++;
+          console.warn(`[ai-makeover] Fell back to original for: ${photo.zipName}`);
         }
       } else {
         zip.file(photo.zipName, rawData);
@@ -457,7 +541,7 @@ export async function registerRoutes(
       }
     }
 
-    console.log(`AI makeover complete: ${processed} processed, ${skipped} skipped, ${failed} fallback`);
+    console.log(`[ai-makeover] Done: ${processed} AI-generated, ${skipped} passed through, ${failed} fell back to original`);
 
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
     const safeName = (name || "ai-makeover").replace(/[^a-zA-Z0-9_-]/g, "");

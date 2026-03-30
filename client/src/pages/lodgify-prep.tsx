@@ -188,9 +188,21 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
+// Same keyword logic as server — determines which photos get AI generation
+const INTERIOR_KEYWORDS = ["living", "bedroom", "kitchen", "dining", "bathroom", "lounge", "family", "master", "bed", "bath", "office", "room", "interior", "sofa", "couch", "great-room", "great_room", "greatroom", "overview", "detail", "area", "space", "hallway", "foyer", "entry", "loft"];
+const EXTERIOR_KEYWORDS = ["pool", "community", "exterior", "outside", "beach", "ocean", "view", "patio", "balcony", "garden", "yard", "front", "aerial", "court", "tennis", "hot-tub", "hottub"];
+
+function isInteriorPhoto(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  if (EXTERIOR_KEYWORDS.some(k => lower.includes(k))) return false;
+  return INTERIOR_KEYWORDS.some(k => lower.includes(k));
+}
+
 function useAiMakeover() {
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [processedCount, setProcessedCount] = useState<number>(0);
+  const [totalCount, setTotalCount] = useState<number>(0);
 
   const triggerMakeover = async (params: {
     folders: string[];
@@ -201,6 +213,8 @@ function useAiMakeover() {
   }) => {
     setStatus("loading");
     setErrorMsg(null);
+    setProcessedCount(0);
+    setTotalCount(0);
     try {
       const response = await fetch("/api/photos/ai-makeover", {
         method: "POST",
@@ -211,6 +225,10 @@ function useAiMakeover() {
         const err = await response.json().catch(() => ({ error: "Unknown error" }));
         throw new Error(err.error || `Server error ${response.status}`);
       }
+      const aiProcessed = parseInt(response.headers.get("X-Photos-Processed") || "0");
+      const aiTotal = parseInt(response.headers.get("X-Photos-Total") || "0");
+      setProcessedCount(aiProcessed);
+      setTotalCount(aiTotal);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -221,7 +239,7 @@ function useAiMakeover() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       setStatus("done");
-      setTimeout(() => setStatus("idle"), 4000);
+      setTimeout(() => setStatus("idle"), 5000);
     } catch (err: any) {
       setErrorMsg(err.message || "AI makeover failed");
       setStatus("error");
@@ -229,11 +247,11 @@ function useAiMakeover() {
     }
   };
 
-  return { status, errorMsg, triggerMakeover };
+  return { status, errorMsg, triggerMakeover, processedCount, totalCount };
 }
 
 function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
-  const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
+  const { status: aiStatus, errorMsg: aiError, triggerMakeover, processedCount, totalCount } = useAiMakeover();
 
   const { data: fileData } = useQuery<{ folder: string; files: string[] }>({
     queryKey: [`/api/photos/community-files?folder=${communityPhotoFolder}`],
@@ -304,38 +322,55 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
         </div>
       </div>
       {aiStatus === "loading" && (
-        <div className="text-xs text-muted-foreground bg-muted/50 rounded px-3 py-2 flex items-center gap-2">
-          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
-          AI is reimagining interior rooms in a modern luxury style. This takes 2–4 minutes depending on how many rooms have furniture. Exterior, pool, and community photos are passed through unchanged.
+        <div className="text-xs text-muted-foreground bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-3 py-2 flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 animate-pulse" />
+          <span>
+            <strong className="text-purple-700 dark:text-purple-300">AI generation in progress</strong> — Claude is describing each interior photo, then generating a new luxury-style version. Exterior, pool, and community photos pass through unchanged. This takes 2–5 minutes.
+          </span>
+        </div>
+      )}
+      {aiStatus === "done" && processedCount > 0 && (
+        <div className="text-xs text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded px-3 py-2 flex items-center gap-2">
+          <Check className="h-3.5 w-3.5 flex-shrink-0" />
+          ZIP downloaded — {processedCount} AI-generated image{processedCount !== 1 ? "s" : ""} out of {totalCount} total photos.
         </div>
       )}
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
-        {unit.photos.map((photo, idx) => (
-          <div
-            key={photo.filename}
-            className="relative group"
-            data-testid={`photo-preview-${unit.id}-${idx}`}
-          >
-            <div className={`aspect-square rounded overflow-hidden border ${idx === 0 ? "border-primary ring-2 ring-primary/30" : "border-transparent"}`}>
-              <img
-                src={`/photos/${unit.photoFolder}/${photo.filename}`}
-                alt={photo.label}
-                className="w-full h-full object-cover"
-              />
+        {unit.photos.map((photo, idx) => {
+          const willBeProcessed = aiStatus === "loading" && isInteriorPhoto(photo.filename);
+          return (
+            <div
+              key={photo.filename}
+              className="relative group"
+              data-testid={`photo-preview-${unit.id}-${idx}`}
+            >
+              <div className={`aspect-square rounded overflow-hidden border ${idx === 0 ? "border-primary ring-2 ring-primary/30" : "border-transparent"}`}>
+                <img
+                  src={`/photos/${unit.photoFolder}/${photo.filename}`}
+                  alt={photo.label}
+                  className={`w-full h-full object-cover transition-opacity ${willBeProcessed ? "opacity-40" : "opacity-100"}`}
+                />
+                {willBeProcessed && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-purple-900/40 rounded">
+                    <Loader2 className="h-4 w-4 text-purple-300 animate-spin" />
+                    <span className="text-[8px] text-purple-200 mt-0.5 font-medium">AI</span>
+                  </div>
+                )}
+              </div>
+              <div className="absolute top-0.5 left-0.5 bg-black/70 text-white text-[10px] px-1 rounded">
+                {idx + 1}
+              </div>
+              <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate">
+                {photo.label}
+              </div>
+              {idx === 0 && (
+                <Badge variant="default" className="absolute -top-1.5 -right-1.5 text-[9px] px-1 py-0">
+                  Main
+                </Badge>
+              )}
             </div>
-            <div className="absolute top-0.5 left-0.5 bg-black/70 text-white text-[10px] px-1 rounded">
-              {idx + 1}
-            </div>
-            <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate">
-              {photo.label}
-            </div>
-            {idx === 0 && (
-              <Badge variant="default" className="absolute -top-1.5 -right-1.5 text-[9px] px-1 py-0">
-                Main
-              </Badge>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
       <p className="text-[11px] text-muted-foreground">
         Photos are numbered in optimal order: living/main areas first, then bedrooms/bathrooms, then exterior/community.
@@ -346,7 +381,7 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
 }
 
 function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder }) {
-  const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
+  const { status: aiStatus, errorMsg: aiError, triggerMakeover, processedCount, totalCount } = useAiMakeover();
 
   const { data: fileData, isLoading: filesLoading } = useQuery<{ folder: string; files: string[] }>({
     queryKey: [`/api/photos/community-files?folder=${property.communityPhotoFolder}`],
@@ -419,9 +454,17 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
         </div>
       </div>
       {aiStatus === "loading" && (
-        <div className="text-xs text-muted-foreground bg-muted/50 rounded px-3 py-2 mb-4 flex items-center gap-2">
-          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
-          AI is reimagining interior rooms in a modern luxury style across all units. This may take 5–10 minutes for a full property. Community and exterior photos are passed through unchanged.
+        <div className="text-xs text-muted-foreground bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-3 py-2 mb-4 flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 animate-pulse" />
+          <span>
+            <strong className="text-purple-700 dark:text-purple-300">AI generation in progress</strong> — Claude is describing each interior room photo across all units, then generating a new luxury-style version of each. Community and exterior photos pass through unchanged. This may take 5–10 minutes.
+          </span>
+        </div>
+      )}
+      {aiStatus === "done" && processedCount > 0 && (
+        <div className="text-xs text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded px-3 py-2 mb-4 flex items-center gap-2">
+          <Check className="h-3.5 w-3.5 flex-shrink-0" />
+          ZIP downloaded — {processedCount} AI-generated image{processedCount !== 1 ? "s" : ""} out of {totalCount} total photos across all units.
         </div>
       )}
 
