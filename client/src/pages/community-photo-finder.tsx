@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Search, Copy, ExternalLink, ImageOff, CheckSquare, Square } from "lucide-react";
+import { ArrowLeft, Search, Copy, ExternalLink, ImageOff, CheckSquare, Square, FolderDown, Loader2 } from "lucide-react";
 
 const COMMUNITIES = [
   "Regency at Poipu Kai",
@@ -19,9 +19,20 @@ const COMMUNITIES = [
   "Kaiulani of Princeville",
   "Poipu Brenneckes Oceanfront",
   "Pili Mai",
-  "Southern Dunes",
-  "Windsor Hills",
 ];
+
+const COMMUNITY_FOLDERS: Record<string, string> = {
+  "Regency at Poipu Kai": "community-regency-poipu-kai",
+  "Kekaha Beachfront Estate": "community-kekaha-estate",
+  "Keauhou Estates": "community-keauhou-estates",
+  "Mauna Kai Princeville": "community-mauna-kai",
+  "Kaha Lani Resort": "community-kaha-lani",
+  "Lae Nani Resort": "community-lae-nani",
+  "Poipu Brenneckes Beachside": "community-poipu-beachside",
+  "Kaiulani of Princeville": "community-kaiulani",
+  "Poipu Brenneckes Oceanfront": "community-poipu-oceanfront",
+  "Pili Mai": "community-pili-mai",
+};
 
 interface PhotoResult {
   url: string;
@@ -42,6 +53,8 @@ export default function CommunityPhotoFinder() {
   const [checkedCommunity, setCheckedCommunity] = useState<string>("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set());
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<{ saved: number; failed: number } | null>(null);
 
   async function handleSearch() {
     if (!selectedCommunity) return;
@@ -49,6 +62,7 @@ export default function CommunityPhotoFinder() {
     setResults([]);
     setSelected(new Set());
     setFailedImages(new Set());
+    setSaveResult(null);
 
     try {
       const params = new URLSearchParams({ communityName: selectedCommunity });
@@ -98,6 +112,36 @@ export default function CommunityPhotoFinder() {
     results.filter(r => selected.has(r.url)).forEach(r => {
       window.open(r.url, "_blank", "noopener");
     });
+  }
+
+  async function saveToProject() {
+    if (!checkedCommunity || selected.size === 0) return;
+    const folder = COMMUNITY_FOLDERS[checkedCommunity];
+    if (!folder) {
+      toast({ title: "No folder mapped for this community", variant: "destructive" });
+      return;
+    }
+    setIsSaving(true);
+    setSaveResult(null);
+    try {
+      const imageUrls = results.filter(r => selected.has(r.url)).map(r => r.url);
+      const resp = await fetch("/api/community-photos/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ communityFolder: folder, imageUrls }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Save failed");
+      setSaveResult({ saved: data.saved.length, failed: data.failed.length });
+      toast({
+        title: `Saved ${data.saved.length} photo${data.saved.length !== 1 ? "s" : ""} to project`,
+        description: data.failed.length > 0 ? `${data.failed.length} photo(s) could not be downloaded.` : "Community folder updated successfully.",
+      });
+    } catch (err: any) {
+      toast({ title: "Save failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function markImageFailed(url: string) {
@@ -191,13 +235,28 @@ export default function CommunityPhotoFinder() {
                 </Button>
                 {selected.size > 0 && (
                   <>
+                    <Button
+                      size="sm"
+                      onClick={saveToProject}
+                      disabled={isSaving}
+                      data-testid="button-save-to-project"
+                      className={saveResult ? "bg-green-600 hover:bg-green-700 text-white" : ""}
+                    >
+                      {isSaving ? (
+                        <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Saving...</>
+                      ) : saveResult ? (
+                        <><FolderDown className="h-4 w-4 mr-1" />Saved {saveResult.saved} photos</>
+                      ) : (
+                        <><FolderDown className="h-4 w-4 mr-1" />Save {selected.size} to Project</>
+                      )}
+                    </Button>
                     <Button variant="outline" size="sm" onClick={copySelectedUrls} data-testid="button-copy-urls">
                       <Copy className="h-4 w-4 mr-1" />
-                      Copy {selected.size} URL{selected.size !== 1 ? "s" : ""}
+                      Copy URLs
                     </Button>
                     <Button variant="outline" size="sm" onClick={openSelected} data-testid="button-open-selected">
                       <ExternalLink className="h-4 w-4 mr-1" />
-                      Open Selected
+                      Open
                     </Button>
                   </>
                 )}

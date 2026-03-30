@@ -637,8 +637,6 @@ export async function registerRoutes(
     32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-    36: { community: "Southern Dunes", units: [{ bedrooms: 3 }] },
-    37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
   };
 
   const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
@@ -650,8 +648,6 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
-    "Southern Dunes": "Southern Dunes, Haines City, Florida",
-    "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
   };
 
   app.get("/api/airbnb/search", async (req, res) => {
@@ -768,8 +764,6 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Hawaii",
     "Poipu Brenneckes": "Poipu Beach, Koloa, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Hawaii",
-    "Southern Dunes": "Southern Dunes, Haines City, Florida",
-    "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
   };
 
   const COMMUNITY_SP_SLUGS: Record<string, string> = {
@@ -1409,8 +1403,6 @@ export async function registerRoutes(
       "Kaiulani of Princeville": "Princeville Kauai",
       "Poipu Brenneckes Oceanfront": "Poipu Beach Kauai oceanfront",
       "Pili Mai": "Pili Mai Poipu Kauai",
-      "Southern Dunes": "Southern Dunes Florida vacation",
-      "Windsor Hills": "Windsor Hills Orlando Florida",
     };
 
     const extras = COMMUNITY_EXTRAS[name] || "resort Kauai";
@@ -1537,6 +1529,171 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(500).json({ error: "Community photo search failed", message: err.message });
     }
+  });
+
+  // Save selected community photos directly into the community folder
+  app.post("/api/community-photos/save", async (req, res) => {
+    const { communityFolder, imageUrls } = req.body as { communityFolder: string; imageUrls: string[] };
+    if (!communityFolder || !imageUrls?.length) {
+      return res.status(400).json({ error: "Missing communityFolder or imageUrls" });
+    }
+    if (!/^community-[\w-]+$/.test(communityFolder)) {
+      return res.status(400).json({ error: "Invalid communityFolder name" });
+    }
+
+    const folderPath = path.join(process.cwd(), "client/public/photos", communityFolder);
+    await fs.promises.mkdir(folderPath, { recursive: true });
+
+    // Clear existing files in folder
+    const existing = await fs.promises.readdir(folderPath).catch(() => []);
+    for (const f of existing) {
+      if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
+        await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+      }
+    }
+
+    const saved: string[] = [];
+    const failed: string[] = [];
+
+    for (let i = 0; i < imageUrls.length; i++) {
+      const url = imageUrls[i];
+      try {
+        const imgResp = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!imgResp.ok) { failed.push(url); continue; }
+        const contentType = imgResp.headers.get("content-type") || "";
+        const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
+        const filename = `${String(i + 1).padStart(2, "0")}-community.${ext}`;
+        const buffer = Buffer.from(await imgResp.arrayBuffer());
+        if (buffer.length < 5000) { failed.push(url); continue; } // skip tiny/broken images
+        await fs.promises.writeFile(path.join(folderPath, filename), buffer);
+        saved.push(filename);
+      } catch {
+        failed.push(url);
+      }
+    }
+
+    res.json({ saved, failed, folder: communityFolder });
+  });
+
+  // Batch-populate all community photo folders from web search (one-time operation)
+  app.post("/api/community-photos/populate-all", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SearchAPI.io API key not configured" });
+
+    const COMMUNITIES_MAP: Record<string, string> = {
+      "Regency at Poipu Kai": "community-regency-poipu-kai",
+      "Kekaha Beachfront Estate": "community-kekaha-estate",
+      "Keauhou Estates": "community-keauhou-estates",
+      "Mauna Kai Princeville": "community-mauna-kai",
+      "Kaha Lani Resort": "community-kaha-lani",
+      "Lae Nani Resort": "community-lae-nani",
+      "Poipu Brenneckes Beachside": "community-poipu-beachside",
+      "Kaiulani of Princeville": "community-kaiulani",
+      "Poipu Brenneckes Oceanfront": "community-poipu-oceanfront",
+      "Pili Mai": "community-pili-mai",
+    };
+
+    const COMMUNITY_EXTRAS: Record<string, string> = {
+      "Regency at Poipu Kai": "Poipu Kai resort Kauai",
+      "Kekaha Beachfront Estate": "Kekaha Kauai beachfront",
+      "Keauhou Estates": "Keauhou Kona Hawaii",
+      "Mauna Kai Princeville": "Princeville Kauai resort",
+      "Kaha Lani Resort": "Kapaa Kauai resort",
+      "Lae Nani Resort": "Kapaa Kauai oceanfront",
+      "Poipu Brenneckes Beachside": "Poipu Beach Kauai",
+      "Kaiulani of Princeville": "Princeville Kauai",
+      "Poipu Brenneckes Oceanfront": "Poipu Beach Kauai oceanfront",
+      "Pili Mai": "Pili Mai Poipu Kauai",
+    };
+
+    const interiorKeywords = ["bedroom", "kitchen", "bathroom", "bath", "living room", "dining room", "interior", "couch", "sofa", "bed ", "master", "loft", "hallway", "floor plan", "floorplan", "map", "square feet"];
+    const lowTrustSources = ["airbnb.com", "vrbo.com", "booking.com", "homeaway.com"];
+    const highTrustSources = ["tripadvisor.com", "suiteparadise.com", "outrigger.com", "castleresorts.com", "parrish.com", "google.com", "jeanandabbott.com"];
+
+    const results: Record<string, { saved: number; failed: number }> = {};
+
+    for (const [communityName, folderName] of Object.entries(COMMUNITIES_MAP)) {
+      try {
+        const extras = COMMUNITY_EXTRAS[communityName] || "resort Kauai";
+        const queries = [
+          `"${communityName}" pool grounds resort`,
+          `"${communityName}" exterior buildings aerial ${extras}`,
+          `"${communityName}" amenities community common area`,
+        ];
+        const nameWords = communityName.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+
+        const allImages: any[] = [];
+        for (const q of queries) {
+          const params = new URLSearchParams({ engine: "google_images", q, api_key: apiKey, num: "30", safe: "active" });
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+          if (resp.ok) {
+            const data = await resp.json() as any;
+            allImages.push(...(data.images || []));
+          }
+          await new Promise(r => setTimeout(r, 500)); // rate limit between queries
+        }
+
+        // Deduplicate and score
+        const seen = new Set<string>();
+        const validated: any[] = [];
+        for (const img of allImages) {
+          const url = img.original?.link;
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          const title = (img.title || "").toLowerCase();
+          const sourceLink = (img.source?.link || "").toLowerCase();
+          const imageUrl = url.toLowerCase();
+          if (!img.original?.link) continue;
+          if (imageUrl.endsWith(".svg") || imageUrl.endsWith(".gif")) continue;
+          const w = img.original?.width || 0; const h = img.original?.height || 0;
+          if (w > 0 && h > 0 && (w < 300 || h < 200)) continue;
+          if (interiorKeywords.some(kw => title.includes(kw))) continue;
+          if (lowTrustSources.some(s => sourceLink.includes(s) || imageUrl.includes(s))) continue;
+          const contextText = `${title} ${sourceLink} ${imageUrl}`;
+          if (!nameWords.some(w => contextText.includes(w))) continue;
+          let score = 50;
+          if (highTrustSources.some(s => sourceLink.includes(s))) score += 30;
+          ["pool", "resort", "grounds", "exterior", "building", "aerial", "community", "clubhouse"].forEach(w => { if (title.includes(w)) score += 5; });
+          validated.push({ url, score });
+        }
+        validated.sort((a, b) => b.score - a.score);
+        const top6 = validated.slice(0, 6).map(v => v.url);
+
+        // Save to folder
+        const folderPath = path.join(process.cwd(), "client/public/photos", folderName);
+        await fs.promises.mkdir(folderPath, { recursive: true });
+        const existing = await fs.promises.readdir(folderPath).catch(() => []);
+        for (const f of existing) {
+          if (/\.(jpg|jpeg|png|webp)$/i.test(f)) await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+        }
+
+        let saved = 0; let failed = 0;
+        for (let i = 0; i < top6.length; i++) {
+          try {
+            const imgResp = await fetch(top6[i], {
+              headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
+              signal: AbortSignal.timeout(12000),
+            });
+            if (!imgResp.ok) { failed++; continue; }
+            const ct = imgResp.headers.get("content-type") || "";
+            const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+            const buffer = Buffer.from(await imgResp.arrayBuffer());
+            if (buffer.length < 5000) { failed++; continue; }
+            await fs.promises.writeFile(path.join(folderPath, `${String(i + 1).padStart(2, "0")}-community.${ext}`), buffer);
+            saved++;
+          } catch { failed++; }
+        }
+        results[communityName] = { saved, failed };
+      } catch (err: any) {
+        results[communityName] = { saved: 0, failed: -1 };
+      }
+      await new Promise(r => setTimeout(r, 1000)); // rate limit between communities
+    }
+
+    res.json({ status: "complete", results });
   });
 
   app.get("/api/scanner/results", async (req, res) => {
