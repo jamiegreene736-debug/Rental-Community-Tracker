@@ -232,8 +232,16 @@ function useAiMakeover() {
   return { status, errorMsg, triggerMakeover };
 }
 
-function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
+function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
   const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
+
+  const { data: fileData } = useQuery<{ folder: string; files: string[] }>({
+    queryKey: [`/api/photos/community-files?folder=${communityPhotoFolder}`],
+    enabled: !!communityPhotoFolder,
+  });
+  const communityFiles = fileData?.files || [];
+  const hasCommunity = communityPhotoFolder && communityFiles.length > 0;
+  const totalPhotos = unit.photos.length + communityFiles.length;
 
   if (unit.photos.length === 0) {
     return (
@@ -243,21 +251,16 @@ function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { un
     );
   }
 
-  const beginningPhotos = communityPhotos?.filter(p => p.position === "beginning") || [];
-  const endPhotos = communityPhotos?.filter(p => p.position === "end") || [];
-  const hasCommunity = communityPhotoFolder && communityPhotos && communityPhotos.length > 0;
-  const totalPhotos = unit.photos.length + (hasCommunity ? communityPhotos.length : 0);
-
   const downloadUrl = hasCommunity
-    ? `/api/photos/zip-multi?folders=${unit.photoFolder}&name=${encodeURIComponent(unit.id)}&communityFolder=${communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningPhotos.map(p => p.filename).join(","))}&endPhotos=${encodeURIComponent(endPhotos.map(p => p.filename).join(","))}`
+    ? `/api/photos/zip-multi?folders=${unit.photoFolder}&name=${encodeURIComponent(unit.id)}&communityFolder=${communityPhotoFolder}&beginningPhotos=${encodeURIComponent(communityFiles.join(","))}&endPhotos=`
     : `/api/photos/zip/${unit.photoFolder}`;
 
   const handleAiMakeover = () => {
     triggerMakeover({
       folders: [unit.photoFolder],
       communityFolder: communityPhotoFolder,
-      beginningPhotos: beginningPhotos.map(p => p.filename),
-      endPhotos: endPhotos.map(p => p.filename),
+      beginningPhotos: communityFiles,
+      endPhotos: [],
       name: unit.id,
     });
   };
@@ -345,29 +348,31 @@ function PhotoOrderPreview({ unit, communityPhotos, communityPhotoFolder }: { un
 function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder }) {
   const { status: aiStatus, errorMsg: aiError, triggerMakeover } = useAiMakeover();
 
-  if (!property.communityPhotos || property.communityPhotos.length === 0) {
-    return null;
-  }
+  const { data: fileData, isLoading: filesLoading } = useQuery<{ folder: string; files: string[] }>({
+    queryKey: [`/api/photos/community-files?folder=${property.communityPhotoFolder}`],
+    enabled: !!property.communityPhotoFolder,
+  });
 
-  const beginningPhotos = property.communityPhotos.filter(p => p.position === "beginning");
-  const endPhotos = property.communityPhotos.filter(p => p.position === "end");
-  const unitFolders = property.units.map(u => u.photoFolder);
-  const beginningFilenames = beginningPhotos.map(p => p.filename);
-  const endFilenames = endPhotos.map(p => p.filename);
+  const communityFiles = fileData?.files || [];
+  const unitFolders = property.units.map(u => u.photoFolder).filter(Boolean);
   const totalUnitPhotos = property.units.reduce((sum, u) => sum + u.photos.length, 0);
-  const totalPhotos = totalUnitPhotos + property.communityPhotos.length;
+  const totalPhotos = totalUnitPhotos + communityFiles.length;
 
-  const downloadUrl = `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(beginningFilenames.join(","))}&endPhotos=${encodeURIComponent(endFilenames.join(","))}`;
+  const downloadUrl = communityFiles.length > 0
+    ? `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(communityFiles.join(","))}&endPhotos=`
+    : `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}`;
 
   const handleAiMakeover = () => {
     triggerMakeover({
       folders: unitFolders,
       communityFolder: property.communityPhotoFolder,
-      beginningPhotos: beginningFilenames,
-      endPhotos: endFilenames,
+      beginningPhotos: communityFiles,
+      endPhotos: [],
       name: property.propertyName,
     });
   };
+
+  if (!property.communityPhotoFolder) return null;
 
   return (
     <Card className="p-4 md:p-6">
@@ -378,7 +383,7 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
             Community & Resort Photos
           </h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {property.communityPhotos.length} community photos + {totalUnitPhotos} unit photos = {totalPhotos} total
+            {filesLoading ? "Loading community photos..." : `${communityFiles.length} community photos + ${totalUnitPhotos} unit photos = ${totalPhotos} total`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -420,71 +425,52 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
         </div>
       )}
 
-      <div className="space-y-4">
-        {beginningPhotos.length > 0 && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-2">
-              Community Photos - Beginning (uploaded first)
-            </p>
-            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
-              {beginningPhotos.map((photo, idx) => (
-                <div key={photo.filename} className="relative group" data-testid={`photo-community-begin-${idx}`}>
-                  <div className="aspect-square rounded overflow-hidden border border-blue-300 dark:border-blue-700">
-                    <img
-                      src={`/photos/${property.communityPhotoFolder}/${photo.filename}`}
-                      alt={photo.label}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                  <div className="absolute top-0.5 left-0.5 bg-blue-600/80 text-white text-[10px] px-1 rounded">
-                    {idx + 1}
-                  </div>
-                  <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate visibility-visible">
-                    {photo.label}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+      {filesLoading && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground py-4">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading community photos...
+        </div>
+      )}
 
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">
-            Unit Photos (middle) - see individual unit tabs below
+      {!filesLoading && communityFiles.length === 0 && (
+        <div className="text-xs text-muted-foreground bg-muted/30 rounded px-3 py-3">
+          No community photos found. Use the <strong>Community Photos</strong> tool from the dashboard to find and save photos for this resort.
+        </div>
+      )}
+
+      {!filesLoading && communityFiles.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs font-medium text-muted-foreground">
+            Community Photos (uploaded before unit photos)
+          </p>
+          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
+            {communityFiles.map((filename, idx) => (
+              <div key={filename} className="relative group" data-testid={`photo-community-${idx}`}>
+                <div className="aspect-square rounded overflow-hidden border border-blue-300 dark:border-blue-700">
+                  <img
+                    src={`/photos/${property.communityPhotoFolder}/${filename}`}
+                    alt={`Community photo ${idx + 1}`}
+                    className="w-full h-full object-cover"
+                    onError={(e) => { (e.target as HTMLImageElement).style.opacity = "0.2"; }}
+                  />
+                </div>
+                <div className="absolute top-0.5 left-0.5 bg-blue-600/80 text-white text-[10px] px-1 rounded">
+                  {idx + 1}
+                </div>
+                <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate">
+                  {filename}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs font-medium text-muted-foreground">
+            Unit Photos (follow after community photos) — see individual unit tabs below
           </p>
         </div>
-
-        {endPhotos.length > 0 && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-2">
-              Community Photos - End (uploaded last)
-            </p>
-            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
-              {endPhotos.map((photo, idx) => (
-                <div key={photo.filename} className="relative group" data-testid={`photo-community-end-${idx}`}>
-                  <div className="aspect-square rounded overflow-hidden border border-blue-300 dark:border-blue-700">
-                    <img
-                      src={`/photos/${property.communityPhotoFolder}/${photo.filename}`}
-                      alt={photo.label}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                  <div className="absolute top-0.5 left-0.5 bg-blue-600/80 text-white text-[10px] px-1 rounded">
-                    {beginningPhotos.length + totalUnitPhotos + idx + 1}
-                  </div>
-                  <div className="absolute inset-x-0 bottom-0 bg-black/70 text-white text-[9px] px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate visibility-visible">
-                    {photo.label}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+      )}
 
       <p className="text-[11px] text-muted-foreground mt-3">
-        Download includes: community photos at beginning, all unit photos in middle, community photos at end.
-        Files are numbered sequentially for correct Lodgify upload order.
+        Download includes: community photos first, then all unit photos. Files are numbered sequentially for correct Lodgify upload order.
       </p>
     </Card>
   );

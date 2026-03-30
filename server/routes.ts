@@ -1377,6 +1377,22 @@ export async function registerRoutes(
     }
   });
 
+  // List actual files in a community photo folder (dynamic — doesn't rely on hardcoded data)
+  app.get("/api/photos/community-files", async (req, res) => {
+    const folder = (req.query.folder as string || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    if (!folder) return res.status(400).json({ error: "Missing folder" });
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    try {
+      const files = await fs.promises.readdir(folderPath).catch(() => []);
+      const imageFiles = files
+        .filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f))
+        .sort();
+      res.json({ folder, files: imageFiles });
+    } catch {
+      res.json({ folder, files: [] });
+    }
+  });
+
   // Community Photo Finder
   app.get("/api/community-photos/search", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
