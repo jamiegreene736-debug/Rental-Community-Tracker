@@ -17,6 +17,20 @@ const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string
   },
 };
 
+// Maps communityPhotoFolder folder names to their display community names
+const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
+  "community-regency-poipu-kai": "Regency at Poipu Kai",
+  "community-kekaha-estate": "Kekaha Beachfront Estate",
+  "community-keauhou-estates": "Keauhou Estates",
+  "community-mauna-kai": "Mauna Kai Princeville",
+  "community-kaha-lani": "Kaha Lani Resort",
+  "community-lae-nani": "Lae Nani Resort",
+  "community-poipu-beachside": "Poipu Brenneckes Beachside",
+  "community-kaiulani": "Kaiulani of Princeville",
+  "community-poipu-oceanfront": "Poipu Brenneckes Oceanfront",
+  "community-pili-mai": "Pili Mai",
+};
+
 interface ScrapedPhoto {
   url: string;
   title: string;
@@ -1965,6 +1979,172 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ========== PLATFORM CHECK (reverse image search) ==========
+  // Checks whether a photo (local or via URL) appears on Airbnb, VRBO, or Booking.com.
+  // Local photos are first uploaded to ImgBB to get a public URL.
+  app.post("/api/photos/platform-check", async (req, res) => {
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    const imgbbKey = process.env.IMGBB_API_KEY;
+
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { folder, filename, imageUrl } = req.body as {
+      folder?: string;
+      filename?: string;
+      imageUrl?: string;
+    };
+
+    let publicUrl: string | null = null;
+
+    if (imageUrl) {
+      // External photo — use URL directly
+      publicUrl = imageUrl;
+    } else if (folder && filename) {
+      // Local photo — upload to ImgBB first
+      if (!imgbbKey) {
+        return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to upload local photos for reverse search" });
+      }
+      const photosBase = path.join(process.cwd(), "client", "public", "photos");
+      const safeFolder = (folder || "").replace(/[^a-zA-Z0-9_-]/g, "");
+      const safeFile = (filename || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+      const filePath = path.join(photosBase, safeFolder, safeFile);
+
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: "Photo not found" });
+      }
+
+      const base64Data = fs.readFileSync(filePath).toString("base64");
+      const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `image=${encodeURIComponent(base64Data)}`,
+      });
+
+      if (!imgbbResp.ok) {
+        const errText = await imgbbResp.text();
+        console.error("[platform-check] ImgBB upload failed:", imgbbResp.status, errText);
+        return res.status(500).json({ error: "Failed to upload image for reverse search" });
+      }
+
+      const imgbbData = await imgbbResp.json() as any;
+      publicUrl = imgbbData?.data?.url || null;
+      if (!publicUrl) return res.status(500).json({ error: "ImgBB did not return a URL" });
+    } else {
+      return res.status(400).json({ error: "Provide either folder+filename (local photo) or imageUrl (external photo)" });
+    }
+
+    // Run Google Reverse Image Search via SearchAPI
+    const searchResp = await fetch(
+      `https://www.searchapi.io/api/v1/search?engine=google_reverse_image&image_url=${encodeURIComponent(publicUrl)}&api_key=${searchApiKey}`,
+    );
+
+    if (!searchResp.ok) {
+      const errText = await searchResp.text();
+      console.error("[platform-check] SearchAPI failed:", searchResp.status, errText);
+      return res.status(500).json({ error: "Reverse image search failed" });
+    }
+
+    const searchData = await searchResp.json() as any;
+
+    // Check all result arrays for vacation rental platform URLs
+    const PLATFORMS: Record<string, string> = {
+      "airbnb.com": "Airbnb",
+      "vrbo.com": "VRBO",
+      "booking.com": "Booking.com",
+    };
+
+    const found: { name: string; url: string }[] = [];
+
+    const allResults = [
+      ...(searchData.organic_results || []),
+      ...(searchData.image_results || []),
+      ...(searchData.inline_images || []),
+      ...(searchData.pages_with_matching_images || []),
+    ];
+
+    for (const result of allResults) {
+      const url: string = result.link || result.source_url || result.url || result.source?.link || "";
+      for (const [domain, platformName] of Object.entries(PLATFORMS)) {
+        if (url.includes(domain) && !found.some(f => f.name === platformName && f.url === url)) {
+          found.push({ name: platformName, url });
+        }
+      }
+    }
+
+    console.log(`[platform-check] ${filename || imageUrl}: ${found.length > 0 ? found.map(f => f.name).join(", ") : "clear"}`);
+    res.json({ filename: filename || null, platforms: found, checkedUrl: publicUrl });
+  });
+
+  // ========== FIND REPLACEMENT LISTING ==========
+  // Searches for a different MLS unit at the same community and returns its photos.
+  app.post("/api/photos/find-replacement", async (req, res) => {
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { communityFolder, currentZillowUrl } = req.body as {
+      communityFolder: string;
+      currentZillowUrl?: string;
+    };
+
+    const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
+    if (!communityName) {
+      return res.status(400).json({ error: "Unknown community folder" });
+    }
+
+    const knownPrimary = COMMUNITY_SOURCE_URLS[communityName]?.primary || currentZillowUrl || null;
+
+    // Search for Zillow listings at this community using SearchAPI Google search
+    let candidateUrls: string[] = [];
+    for (const siteQuery of [`site:zillow.com "${communityName}"`, `site:homes.com "${communityName}"`]) {
+      try {
+        const searchResp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=8&api_key=${searchApiKey}`,
+        );
+        if (!searchResp.ok) continue;
+        const searchData = await searchResp.json() as any;
+        const urls: string[] = (searchData.organic_results || [])
+          .map((r: any) => r.link as string)
+          .filter((u: string) => (u.includes("zillow.com/homedetails") || u.includes("homes.com/property")) && u !== knownPrimary);
+        candidateUrls = [...candidateUrls, ...urls];
+        if (candidateUrls.length >= 5) break;
+      } catch {}
+    }
+
+    candidateUrls = [...new Set(candidateUrls)].slice(0, 5);
+
+    // Try to scrape photos from each candidate (up to 3 attempts)
+    let attempts = 0;
+    for (const url of candidateUrls) {
+      if (attempts >= 3) break;
+      attempts++;
+      console.log(`[find-replacement] Trying: ${url}`);
+      try {
+        const photos = await scrapeListingPhotos(url);
+        if (photos.length >= 3) {
+          // Extract unit identifier from URL path
+          const unitMatch = url.match(/apt-([a-z0-9]+)/i)
+            || url.match(/unit-([a-z0-9]+)/i)
+            || url.match(/-([a-z0-9]+)[-/]?.*zpid/i);
+          const unitLabel = unitMatch ? `Unit #${unitMatch[1].toUpperCase()}` : "a different unit";
+          return res.json({
+            photos: photos.map(p => ({ url: p.url, label: p.title || "Photo" })),
+            source: `${communityName} — ${unitLabel}`,
+            communityName,
+            sourceUrl: url,
+          });
+        }
+      } catch (err: any) {
+        console.warn(`[find-replacement] Failed for ${url}:`, err.message);
+      }
+    }
+
+    return res.json({
+      photos: [],
+      error: "Could not find a replacement unit automatically — please select photos manually.",
+    });
   });
 
   return httpServer;

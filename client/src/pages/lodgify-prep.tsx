@@ -33,6 +33,11 @@ import {
   AlertCircle,
   Sparkles,
   Wand2,
+  ShieldCheck,
+  ShieldAlert,
+  Shield,
+  RefreshCw,
+  ExternalLink,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { apiRequest } from "@/lib/queryClient";
@@ -250,8 +255,145 @@ function useAiMakeover() {
   return { status, errorMsg, triggerMakeover, processedCount, totalCount };
 }
 
+type PlatformMatch = { name: string; url: string };
+type PhotoCheckStatus = "idle" | "checking" | "clear" | "found" | "error";
+type PhotoCheckResult = { status: PhotoCheckStatus; platforms: PlatformMatch[] };
+type ReplacementPhoto = { url: string; label: string };
+
+function usePlatformCheck(folder: string, communityFolder?: string) {
+  const [results, setResults] = useState<Record<string, PhotoCheckResult>>({});
+  const [isChecking, setIsChecking] = useState(false);
+  const [replacement, setReplacement] = useState<null | { photos: ReplacementPhoto[]; source: string; error?: string }>(null);
+  const [findingReplacement, setFindingReplacement] = useState(false);
+  const [replacementCheckResults, setReplacementCheckResults] = useState<Record<number, PhotoCheckResult>>({});
+
+  const checkPhotos = async (filenames: string[]) => {
+    setIsChecking(true);
+    const init: Record<string, PhotoCheckResult> = {};
+    for (const f of filenames) init[f] = { status: "checking", platforms: [] };
+    setResults(init);
+
+    await Promise.all(
+      filenames.map(async (filename) => {
+        try {
+          const resp = await fetch("/api/photos/platform-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ folder, filename }),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          setResults(prev => ({
+            ...prev,
+            [filename]: { status: data.platforms.length > 0 ? "found" : "clear", platforms: data.platforms },
+          }));
+        } catch {
+          setResults(prev => ({ ...prev, [filename]: { status: "error", platforms: [] } }));
+        }
+      })
+    );
+    setIsChecking(false);
+  };
+
+  const checkReplacementPhotos = async (photos: ReplacementPhoto[]) => {
+    const init: Record<number, PhotoCheckResult> = {};
+    for (let i = 0; i < photos.length; i++) init[i] = { status: "checking", platforms: [] };
+    setReplacementCheckResults(init);
+
+    await Promise.all(
+      photos.map(async (photo, idx) => {
+        try {
+          const resp = await fetch("/api/photos/platform-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageUrl: photo.url }),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          setReplacementCheckResults(prev => ({
+            ...prev,
+            [idx]: { status: data.platforms.length > 0 ? "found" : "clear", platforms: data.platforms },
+          }));
+        } catch {
+          setReplacementCheckResults(prev => ({ ...prev, [idx]: { status: "error", platforms: [] } }));
+        }
+      })
+    );
+  };
+
+  const findReplacement = async () => {
+    if (!communityFolder) return;
+    setFindingReplacement(true);
+    setReplacement(null);
+    setReplacementCheckResults({});
+    try {
+      const resp = await fetch("/api/photos/find-replacement", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ communityFolder }),
+      });
+      const data = await resp.json();
+      setReplacement(data);
+      if (data.photos?.length > 0) {
+        await checkReplacementPhotos(data.photos.slice(0, 3));
+      }
+    } catch {
+      setReplacement({ photos: [], error: "Failed to search for a replacement unit.", source: "" });
+    }
+    setFindingReplacement(false);
+  };
+
+  const hasFlags = Object.values(results).some(r => r.status === "found");
+  const replacementHasFlags = Object.values(replacementCheckResults).some(r => r.status === "found");
+
+  return { results, isChecking, checkPhotos, hasFlags, findReplacement, findingReplacement, replacement, replacementCheckResults, replacementHasFlags };
+}
+
+function PlatformBadge({ result }: { result?: PhotoCheckResult }) {
+  if (!result || result.status === "idle") return null;
+  if (result.status === "checking") {
+    return (
+      <div className="flex items-center gap-0.5 text-[9px] text-muted-foreground mt-0.5">
+        <Loader2 className="h-2.5 w-2.5 animate-spin" />
+        <span>Checking...</span>
+      </div>
+    );
+  }
+  if (result.status === "error") {
+    return <div className="text-[9px] text-muted-foreground mt-0.5">Check failed</div>;
+  }
+  if (result.status === "clear") {
+    return (
+      <div className="flex items-center gap-0.5 text-[9px] text-green-700 dark:text-green-400 mt-0.5">
+        <ShieldCheck className="h-2.5 w-2.5" />
+        <span>Not found</span>
+      </div>
+    );
+  }
+  // found
+  return (
+    <div className="mt-0.5 space-y-0.5">
+      {result.platforms.map((p, i) => (
+        <a
+          key={i}
+          href={p.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-0.5 text-[9px] text-red-600 dark:text-red-400 hover:underline"
+          title={`Found on ${p.name}: ${p.url}`}
+        >
+          <ShieldAlert className="h-2.5 w-2.5 flex-shrink-0" />
+          <span className="truncate">{p.name}</span>
+          <ExternalLink className="h-2 w-2 flex-shrink-0" />
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
   const { status: aiStatus, errorMsg: aiError, triggerMakeover, processedCount, totalCount } = useAiMakeover();
+  const { results: checkResults, isChecking, checkPhotos, hasFlags, findReplacement, findingReplacement, replacement, replacementCheckResults, replacementHasFlags } = usePlatformCheck(unit.photoFolder, communityPhotoFolder);
 
   const { data: fileData } = useQuery<{ folder: string; files: string[] }>({
     queryKey: [`/api/photos/community-files?folder=${communityPhotoFolder}`],
@@ -283,13 +425,33 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
     });
   };
 
+  // Auto-select first 3 photos for platform check
+  const photosToCheck = unit.photos.slice(0, 3).map(p => p.filename);
+  const anyChecked = Object.keys(checkResults).length > 0;
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground">
-          {totalPhotos} photos total ({unit.photos.length} unit{hasCommunity ? ` + ${communityPhotos.length} community` : ""}) in Lodgify upload order
+          {totalPhotos} photos total ({unit.photos.length} unit{hasCommunity ? ` + ${communityFiles.length} community` : ""}) in Lodgify upload order
         </p>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => checkPhotos(photosToCheck)}
+            disabled={isChecking}
+            data-testid={`button-platform-check-${unit.id}`}
+            title="Reverse-image-searches the first 3 photos on Airbnb, VRBO, and Booking.com"
+          >
+            {isChecking ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Checking...</>
+            ) : anyChecked ? (
+              <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Re-check Photos</>
+            ) : (
+              <><Shield className="h-3.5 w-3.5 mr-1.5" />Check Photos</>
+            )}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -321,6 +483,7 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
           </Button>
         </div>
       </div>
+
       {aiStatus === "loading" && (
         <div className="text-xs text-muted-foreground bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-3 py-2 flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 animate-pulse" />
@@ -335,16 +498,18 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
           ZIP downloaded — {processedCount} AI-generated image{processedCount !== 1 ? "s" : ""} out of {totalCount} total photos.
         </div>
       )}
+
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
         {unit.photos.map((photo, idx) => {
           const willBeProcessed = aiStatus === "loading" && isInteriorPhoto(photo.filename);
+          const checkResult = checkResults[photo.filename];
           return (
             <div
               key={photo.filename}
               className="relative group"
               data-testid={`photo-preview-${unit.id}-${idx}`}
             >
-              <div className={`aspect-square rounded overflow-hidden border ${idx === 0 ? "border-primary ring-2 ring-primary/30" : "border-transparent"}`}>
+              <div className={`aspect-square rounded overflow-hidden border ${idx === 0 ? "border-primary ring-2 ring-primary/30" : checkResult?.status === "found" ? "border-red-400" : checkResult?.status === "clear" ? "border-green-400" : "border-transparent"}`}>
                 <img
                   src={`/photos/${unit.photoFolder}/${photo.filename}`}
                   alt={photo.label}
@@ -368,10 +533,75 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
                   Main
                 </Badge>
               )}
+              {checkResult && <PlatformBadge result={checkResult} />}
             </div>
           );
         })}
       </div>
+
+      {hasFlags && communityPhotoFolder && (
+        <div className="rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-3 py-2.5 space-y-2">
+          <p className="text-xs font-medium text-red-700 dark:text-red-400 flex items-center gap-1.5">
+            <ShieldAlert className="h-3.5 w-3.5" />
+            One or more photos were found on other booking platforms. Consider replacing this unit's photos.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-red-300 text-red-700 hover:bg-red-100 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+            onClick={findReplacement}
+            disabled={findingReplacement}
+            data-testid={`button-find-replacement-${unit.id}`}
+          >
+            {findingReplacement ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Searching for another unit...</>
+            ) : (
+              <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Find Another Property</>
+            )}
+          </Button>
+        </div>
+      )}
+
+      {replacement && (
+        <div className="rounded border border-border bg-muted/30 px-3 py-3 space-y-2">
+          {replacement.error ? (
+            <p className="text-xs text-muted-foreground">{replacement.error}</p>
+          ) : (
+            <>
+              <p className="text-xs font-medium flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                Now showing photos from <span className="font-semibold">{replacement.source}</span>
+              </p>
+              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-1.5">
+                {replacement.photos.map((photo, idx) => (
+                  <div key={idx} className="space-y-0.5">
+                    <div className={`aspect-square rounded overflow-hidden border ${replacementCheckResults[idx]?.status === "found" ? "border-red-400" : replacementCheckResults[idx]?.status === "clear" ? "border-green-400" : "border-border"}`}>
+                      <img
+                        src={photo.url}
+                        alt={photo.label}
+                        className="w-full h-full object-cover"
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                      />
+                    </div>
+                    <PlatformBadge result={replacementCheckResults[idx]} />
+                  </div>
+                ))}
+              </div>
+              {Object.values(replacementCheckResults).every(r => r.status !== "checking") && replacementHasFlags && (
+                <p className="text-xs text-red-600 dark:text-red-400">
+                  Some replacement photos were also found on booking platforms. Try running the search again to find a cleaner unit.
+                </p>
+              )}
+              {Object.values(replacementCheckResults).every(r => r.status !== "checking") && !replacementHasFlags && Object.keys(replacementCheckResults).length > 0 && (
+                <p className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
+                  <ShieldCheck className="h-3 w-3" /> Replacement photos appear clean — not found on other platforms.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <p className="text-[11px] text-muted-foreground">
         Photos are numbered in optimal order: living/main areas first, then bedrooms/bathrooms, then exterior/community.
         The first photo becomes the main listing image in Lodgify.

@@ -1,0 +1,25 @@
+Add a "Platform Check" feature to scan photos for duplicate listings
+Add a new tool that works like this:
+
+The user selects 2–3 photos from the current listing's photo set (or the app auto-selects the first 2 photos).
+The app performs a reverse image search on each photo using SerpAPI's Google reverse image endpoint: https://serpapi.com/search?engine=google_reverse_image&image_url={encoded_image_url}&api_key={SERPAPI_API_KEY}. Parse the results and check for any returned URLs containing airbnb.com, vrbo.com, or booking.com.
+Display a badge underneath each photo:
+
+✅ green = "Not found on any platform"
+🚫 red = "Found on [platform name]" — show the platform name and a clickable link to the matching listing URL so the user can review it.
+If a photo is found on multiple platforms, list each one separately under the badge.
+
+
+No automatic actions — flagging and linking is the only output. The user decides what to do from there.
+"Find Another Property" button: If any photo is flagged, display a "Find Another Property" button below the photo grid. When clicked it should:
+
+Identify the community the current listing photos came from (e.g. Regency at Poipu Kai, Pili Mai, etc.).
+Search for a different for-sale MLS listing at the same community using Zillow or Homes.com — specifically a unit with a different unit number than the one currently in use.
+Fetch and download all available photos from that replacement unit's listing page.
+Replace the current photo set in the app with the new unit's photos and display a notification: "Now showing photos from [community name] Unit [#]."
+Automatically re-run the platform check on the new photos and display fresh badges.
+If no suitable replacement unit is found on Zillow or Homes.com after 3 attempts, display a message: "Could not find a replacement unit automatically — please select photos manually."
+
+
+
+Add a "Check Photos" button near the photo grid that triggers this scan. Run checks asynchronously and update each photo's badge independently as results come in. Store SERPAPI_API_KEY in Replit Secrets. If photos are stored locally or as base64, use the ImgBB free API (https://api.imgbb.com/1/upload) to temporarily host each image at a public URL before running the reverse search. Store the ImgBB key as IMGBB_API_KEY in Replit Secrets.
