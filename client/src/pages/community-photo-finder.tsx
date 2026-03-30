@@ -55,6 +55,7 @@ export default function CommunityPhotoFinder() {
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set());
   const [isSaving, setIsSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ saved: number; failed: number } | null>(null);
+  const [photoSource, setPhotoSource] = useState<"listing" | "search" | null>(null);
 
   async function handleSearch() {
     if (!selectedCommunity) return;
@@ -63,6 +64,7 @@ export default function CommunityPhotoFinder() {
     setSelected(new Set());
     setFailedImages(new Set());
     setSaveResult(null);
+    setPhotoSource(null);
 
     try {
       const params = new URLSearchParams({ communityName: selectedCommunity });
@@ -74,6 +76,7 @@ export default function CommunityPhotoFinder() {
       const data = await resp.json();
       setResults(data.results || []);
       setCheckedCommunity(selectedCommunity);
+      setPhotoSource(data.source === "listing" ? "listing" : "search");
       if ((data.results || []).length === 0) {
         toast({ title: "No results found", description: "Try a different community or refine your search.", variant: "destructive" });
       }
@@ -224,6 +227,16 @@ export default function CommunityPhotoFinder() {
               <span className="text-sm font-medium" data-testid="text-result-count">
                 {visibleResults.length} photos found for <strong>{checkedCommunity}</strong>
               </span>
+              {photoSource === "listing" && (
+                <Badge variant="secondary" className="text-xs" data-testid="badge-photo-source-listing">
+                  Sourced from listing URL
+                </Badge>
+              )}
+              {photoSource === "search" && (
+                <Badge variant="outline" className="text-xs" data-testid="badge-photo-source-search">
+                  Sourced from image search
+                </Badge>
+              )}
               <div className="ml-auto flex gap-2 flex-wrap">
                 <Button variant="outline" size="sm" onClick={selectAll} data-testid="button-select-all">
                   <CheckSquare className="h-4 w-4 mr-1" />

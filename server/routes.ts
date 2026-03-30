@@ -5,7 +5,142 @@ import { insertBuyInSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
+import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
+
+// Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
+// All other communities fall back to Google Images search.
+const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string }> = {
+  "Regency at Poipu Kai": {
+    primary: "https://www.zillow.com/homedetails/1831-Poipu-Rd-APT-823-Koloa-HI-96756/80152954_zpid/",
+    fallback: "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/gy46glh43cckm/",
+  },
+};
+
+interface ScrapedPhoto {
+  url: string;
+  title: string;
+  source: string;
+  sourceLink: string;
+}
+
+async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+
+    let navigatedUrl: string | null = null;
+
+    // Try primary URL
+    try {
+      const resp = await page.goto(primaryUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+      if (resp && resp.status() < 400) navigatedUrl = primaryUrl;
+    } catch (_) {}
+
+    // Try fallback if primary failed
+    if (!navigatedUrl && fallbackUrl) {
+      try {
+        const resp = await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+        if (resp && resp.status() < 400) navigatedUrl = fallbackUrl;
+      } catch (_) {}
+    }
+
+    if (!navigatedUrl) return [];
+
+    // Wait briefly for lazy-loaded images
+    await page.waitForTimeout(2500);
+
+    const currentUrl = page.url();
+    const isZillow = currentUrl.includes("zillow.com");
+    const isHomes = currentUrl.includes("homes.com");
+    const sourceName = isZillow ? "Zillow" : isHomes ? "Homes.com" : new URL(currentUrl).hostname;
+
+    let photoUrls: string[] = [];
+
+    // --- Zillow: extract from __NEXT_DATA__ JSON blob (most reliable) ---
+    if (isZillow) {
+      photoUrls = await page.evaluate(() => {
+        const nd = (window as any).__NEXT_DATA__;
+        if (!nd) return [];
+        const urls: string[] = [];
+
+        function walk(obj: any, depth: number): void {
+          if (depth > 14 || !obj || typeof obj !== "object") return;
+          if (Array.isArray(obj)) { obj.forEach(v => walk(v, depth + 1)); return; }
+          // Zillow photo format: { mixedSources: { jpeg: [{url, width}, ...] } }
+          if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+            const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
+            if (jpegs.length > 0) {
+              const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+              if (biggest.url) urls.push(biggest.url);
+            }
+            return;
+          }
+          Object.values(obj).forEach(v => walk(v, depth + 1));
+        }
+
+        walk(nd, 0);
+        return [...new Set(urls)];
+      }).catch(() => [] as string[]);
+    }
+
+    // --- Homes.com / generic fallback: JSON-LD + img tags ---
+    if (photoUrls.length === 0) {
+      photoUrls = await page.evaluate(() => {
+        const candidates: string[] = [];
+
+        // JSON-LD structured data often has image arrays
+        document.querySelectorAll('script[type="application/ld+json"]').forEach(el => {
+          try {
+            function pickImgs(obj: any): void {
+              if (!obj || typeof obj !== "object") return;
+              const imgs = obj.image ? (Array.isArray(obj.image) ? obj.image : [obj.image]) : [];
+              imgs.forEach((img: any) => {
+                if (typeof img === "string") candidates.push(img);
+                else if (img?.url) candidates.push(img.url);
+              });
+              Object.values(obj).forEach(v => pickImgs(v));
+            }
+            pickImgs(JSON.parse(el.textContent || "{}"));
+          } catch (_) {}
+        });
+
+        // img tags — collect src / data-src
+        document.querySelectorAll("img").forEach(img => {
+          const src = img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || "";
+          if (src.startsWith("http")) candidates.push(src);
+        });
+
+        return [...new Set(candidates)];
+      }).catch(() => [] as string[]);
+    }
+
+    // Filter out icons/logos/SVGs/GIFs and format
+    const results: ScrapedPhoto[] = photoUrls
+      .filter(url => {
+        const u = url.toLowerCase();
+        return !u.endsWith(".svg") && !u.endsWith(".gif")
+          && !u.includes("logo") && !u.includes("icon") && !u.includes("sprite")
+          && !u.includes("placeholder") && url.startsWith("http");
+      })
+      .map(url => ({
+        url,
+        title: `${sourceName} listing photo`,
+        source: sourceName,
+        sourceLink: navigatedUrl!,
+      }));
+
+    return results;
+  } finally {
+    await browser.close();
+  }
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -1406,6 +1541,29 @@ export async function registerRoutes(
     }
 
     const name = communityName.trim();
+
+    // --- If this community has a hardcoded listing URL, scrape it directly ---
+    const sourceConfig = COMMUNITY_SOURCE_URLS[name];
+    if (sourceConfig) {
+      try {
+        const scraped = await scrapeListingPhotos(sourceConfig.primary, sourceConfig.fallback);
+        if (scraped.length > 0) {
+          const results = scraped.map((p, i) => ({
+            url: p.url,
+            thumbnail: p.url,
+            title: p.title,
+            source: p.source,
+            sourceLink: p.sourceLink,
+            score: 100 - i, // preserve order, high score so they sort first
+          }));
+          return res.json({ communityName: name, results, totalFound: results.length, source: "listing" });
+        }
+        // Scraped but got nothing — fall through to Google Images search
+      } catch (err: any) {
+        console.warn(`[community-photos] Scraping failed for ${name}, falling back to search:`, err.message);
+        // Fall through to search below
+      }
+    }
 
     // Known aliases / extra terms that help narrow results to the specific community
     const COMMUNITY_EXTRAS: Record<string, string> = {
