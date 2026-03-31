@@ -1,0 +1,98 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "zPHJ_L3sjIFAXTxtDyc1J"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_00.png"
+type = "image"
+title = "pili mai unit a living room"
+
+[[generated]]
+id = "K1xzc0Lf0A3bIeTgOfRjx"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_01.png"
+type = "image"
+title = "pili mai unit a kitchen"
+
+[[generated]]
+id = "s5KBMhAi1id1GhxGPDC6M"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_02.png"
+type = "image"
+title = "pili mai unit a dining"
+
+[[generated]]
+id = "F4TKQImtEMDM6psBQcsRq"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_03.png"
+type = "image"
+title = "pili mai unit a king bedroom"
+
+[[generated]]
+id = "e-JPyDkSd4Sv9ddt9qgzM"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_04.png"
+type = "image"
+title = "pili mai unit a queen bedroom"
+
+[[generated]]
+id = "TFCRQ_YPz59ldiCe60O1J"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_05.png"
+type = "image"
+title = "pili mai unit a twin bedroom"
+
+[[generated]]
+id = "eTEYDMqj5jn4jG9cVM6ff"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_06.png"
+type = "image"
+title = "pili mai unit a bathroom"
+
+[[generated]]
+id = "-jVvydwxcXMR8RkSaqe2g"
+uri = "file://client/public/photos/pili-mai-unit-a/photo_07.png"
+type = "image"
+title = "pili mai unit a lanai"
+
+[[generated]]
+id = "L4v0zms1pfWAuO_fYekm9"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_00.png"
+type = "image"
+title = "pili mai unit b living room"
+
+[[generated]]
+id = "yWvUFBEgkhOY6jsQgFhWA"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_01.png"
+type = "image"
+title = "pili mai unit b kitchen"
+
+[[generated]]
+id = "HDQn6HFXyhDyDlt0JmJ9c"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_02.png"
+type = "image"
+title = "pili mai unit b dining"
+
+[[generated]]
+id = "kB6l_isBxiJPeWByyPlFN"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_03.png"
+type = "image"
+title = "pili mai unit b king bedroom"
+
+[[generated]]
+id = "pSLHVb5abXBmVlqQAIamd"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_04.png"
+type = "image"
+title = "pili mai unit b queen bedroom"
+
+[[generated]]
+id = "egeuHNjXpOwyTsdgiqP0z"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_05.png"
+type = "image"
+title = "pili mai unit b twin bedroom"
+
+[[generated]]
+id = "pO9EmSY6wMiSDuhpN4Ry0"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_06.png"
+type = "image"
+title = "pili mai unit b bathroom"
+
+[[generated]]
+id = "IDvAtJ2RKcaXgWqAauoEw"
+uri = "file://client/public/photos/pili-mai-unit-b/photo_07.png"
+type = "image"
+title = "pili mai unit b lanai"
