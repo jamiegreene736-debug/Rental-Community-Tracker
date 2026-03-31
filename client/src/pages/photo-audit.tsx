@@ -52,7 +52,7 @@ function buildAuditData(): PropertyAudit[] {
       const unitNumMatch = folder.match(/(?:unit-)?(\d+)$/);
       const extractedUnitNum = unitNumMatch ? unitNumMatch[1] : null;
       const isGeneric = !extractedUnitNum;
-      const isStockPhoto = folder.includes("pili-mai") || folder === "";
+      const isStockPhoto = unit.photos.length === 0;
 
       return {
         id: unit.id,
