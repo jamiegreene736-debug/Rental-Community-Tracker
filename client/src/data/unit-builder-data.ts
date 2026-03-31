@@ -99,7 +99,14 @@ const COMMUNITY_LAE_NANI: CommunityPhoto[] = [
   { filename: "06-community.jpg", label: "Community Grounds", position: "end" },
 ];
 
-const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [];
+const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [
+  { filename: "photo_00.jpg", label: "Poipu Beach Community", position: "beginning" },
+  { filename: "photo_01.jpg", label: "Brenneckes Beach Area", position: "beginning" },
+  { filename: "photo_02.jpg", label: "Beachside Exterior", position: "beginning" },
+  { filename: "photo_03.jpg", label: "Community Grounds", position: "end" },
+  { filename: "photo_04.jpg", label: "Coastal View", position: "end" },
+  { filename: "photo_05.jpg", label: "Beach Access", position: "end" },
+];
 
 const COMMUNITY_KAIULANI: CommunityPhoto[] = [
   { filename: "01-community.jpg", label: "Princeville View", position: "beginning" },
@@ -515,28 +522,9 @@ const PHOTOS_KAIULANI: UnitPhoto[] = [
   { filename: "photo_27.jpg", label: "Cliffside Ocean Views", category: "Views" },
 ];
 
-const PHOTOS_PILI_MAI_UNIT_A: UnitPhoto[] = [
-  { filename: "photo_00.jpg", label: "Modern Kitchen", category: "Kitchen" },
-  { filename: "photo_01.jpg", label: "Comfortable Living Room", category: "Living Areas" },
-  { filename: "photo_02.jpg", label: "Open Floor Plan", category: "Living Areas" },
-  { filename: "photo_03.jpg", label: "Dining Area", category: "Living Areas" },
-  { filename: "photo_04.jpg", label: "Living Space", category: "Living Areas" },
-  { filename: "photo_05.jpg", label: "Bright Bedroom", category: "Bedrooms" },
-  { filename: "photo_06.jpg", label: "Master Bedroom Suite", category: "Bedrooms" },
-  { filename: "photo_07.jpg", label: "Guest Bedroom", category: "Bedrooms" },
-  { filename: "photo_08.jpg", label: "Modern Bathroom", category: "Bathrooms" },
-  { filename: "photo_09.jpg", label: "Townhome Interior", category: "Living Areas" },
-];
+const PHOTOS_PILI_MAI_UNIT_A: UnitPhoto[] = [];
 
-const PHOTOS_PILI_MAI_UNIT_B: UnitPhoto[] = [
-  { filename: "photo_00.jpg", label: "Spacious Interior", category: "Living Areas" },
-  { filename: "photo_01.jpg", label: "Living Room", category: "Living Areas" },
-  { filename: "photo_02.jpg", label: "Open Layout", category: "Living Areas" },
-  { filename: "photo_03.jpg", label: "Dining and Kitchen", category: "Kitchen" },
-  { filename: "photo_04.jpg", label: "King Bedroom", category: "Bedrooms" },
-  { filename: "photo_05.jpg", label: "Guest Bedroom", category: "Bedrooms" },
-  { filename: "photo_06.jpg", label: "Second Guest Bedroom", category: "Bedrooms" },
-];
+const PHOTOS_PILI_MAI_UNIT_B: UnitPhoto[] = [];
 
 export const unitBuilderData: PropertyUnitBuilder[] = [
   {

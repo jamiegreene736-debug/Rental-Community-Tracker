@@ -1,0 +1,41 @@
+I need you to fix three photo issues in this app:
+
+---
+
+FIX 1: Replace Pili Mai Stock Photos
+
+The two Pili Mai listings (IDs 32 and 33) are using generic stock/rendered images. Fix the following folders:
+
+- public/photos/pili-mai-unit-a/ — currently has a "Modern Kitchen" stock render
+- public/photos/pili-mai-unit-b/ — currently has a "Spacious Interior" staged render
+
+Steps:
+1. Delete all existing image files in both public/photos/pili-mai-unit-a/ and public/photos/pili-mai-unit-b/
+2. These folders need to be repopulated with real photos of actual Pili Mai at Poipu condos/townhomes (unit interiors, lanais, exteriors). I will upload the real photos — please make sure the folder structure and naming convention (photo_00.jpg, photo_01.jpg, photo_02.jpg, etc.) stays intact so the app can find them.
+3. If there is a data file (JSON or JS) that stores captions or alt text for photos in these folders, clear out the old generic labels so they can be updated to match the new real photos.
+
+---
+
+FIX 2: Add Community Photos for Poipu Brenneckes Beachside (ID 28)
+
+The folder public/photos/community-poipu-beachside/ exists but has 0 photos, so no community images show for this listing.
+
+Steps:
+1. Accept 4–6 photos that I will upload into public/photos/community-poipu-beachside/
+2. Name them sequentially: photo_00.jpg, photo_01.jpg, photo_02.jpg, etc.
+3. These photos will show the Poipu Brenneckes beach area and community exterior
+4. After adding the files, confirm the /photo-audit page no longer flags this property as missing community photos
+
+---
+
+FIX 3: Investigate the Community Mismatch for Poipu Brenneckes Oceanfront (ID 31)
+
+The /photo-audit page flags a Community Mismatch for this property. The folder is public/photos/community-poipu-oceanfront/ and it currently has 6 photos.
+
+Steps:
+1. Open each of the 6 photos in public/photos/community-poipu-oceanfront/ and tell me what they show (e.g. do they show a pool, a beachfront house, a condo complex, etc.)
+2. Find the code that determines Community Match vs Community Mismatch — likely in src/lib/photoAudit.ts, src/utils/photoAudit.ts, or a similar audit utility file. Show me the relevant logic.
+3. Based on what the photos actually show, either:
+   a. Replace the 6 photos with correct images of the Poipu Brenneckes Oceanfront property, OR
+   b. Fix the folder reference or community tag in the data layer if the folder name is mismatched
+4. Confirm the Community Mismatch flag clears on /photo-audit after the fix

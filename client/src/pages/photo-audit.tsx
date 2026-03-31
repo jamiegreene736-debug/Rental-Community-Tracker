@@ -41,7 +41,11 @@ function buildAuditData(): PropertyAudit[] {
     const communityFolderName = prop.communityPhotoFolder || "";
     const complexNameNormalized = (prop.complexName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
     const communityFolderNormalized = communityFolderName.replace("community-", "").replace(/-/g, "");
-    const communityMatch = !communityFolderName || communityFolderNormalized.includes(complexNameNormalized.slice(0, 6)) || complexNameNormalized.includes(communityFolderNormalized.slice(0, 6));
+    const complexWords = (prop.complexName || "").toLowerCase().split(/\s+/).filter(w => w.length > 3).map(w => w.replace(/[^a-z0-9]/g, ""));
+    const communityMatch = !communityFolderName ||
+      communityFolderNormalized.includes(complexNameNormalized.slice(0, 6)) ||
+      complexNameNormalized.includes(communityFolderNormalized.slice(0, 6)) ||
+      complexWords.some(word => communityFolderNormalized.includes(word));
 
     const units = prop.units.map((unit) => {
       const folder = unit.photoFolder;
