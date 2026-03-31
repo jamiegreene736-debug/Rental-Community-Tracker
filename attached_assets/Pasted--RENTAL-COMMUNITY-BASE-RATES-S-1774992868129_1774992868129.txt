@@ -1,0 +1,108 @@
+// ─────────────────────────────────────────────────────────────
+// RENTAL COMMUNITY BASE RATES
+// Source: Airbnb & VRBO live listings · May 2026 · All-in retail
+// (taxes + cleaning + platform fees already included)
+// ─────────────────────────────────────────────────────────────
+
+const BASE_RATES = [
+  // Kauai – South Shore
+  { community: "Poipu Kai",         "2BR": 430,  "3BR": 530,  "4BR": 715,  region: "hawaii" },
+  { community: "Poipu Oceanfront",   "2BR": 525,  "3BR": 660,  "4BR": 780,  region: "hawaii" },
+  { community: "Poipu Brenneckes",   "2BR": 425,  "3BR": 515,  "4BR": 720,  region: "hawaii" },
+  { community: "Pili Mai",           "2BR": 480,  "3BR": 620,  "4BR": 700,  region: "hawaii" },
+  // Kauai – East Shore
+  { community: "Kapaa Beachfront",   "2BR": 490,  "3BR": 700,  "4BR": 850,  region: "hawaii" },
+  // Kauai – North Shore
+  { community: "Princeville",        "2BR": 410,  "3BR": 620,  "4BR": 715,  region: "hawaii" },
+  // Kauai – West Shore
+  { community: "Kekaha Beachfront",  "2BR": 450,  "3BR": 675,  "4BR": 900,  region: "hawaii" },
+  // Big Island – Kona Coast
+  { community: "Keauhou",            "2BR": 260,  "3BR": null, "4BR": null, region: "hawaii" },
+  // Florida – Orlando Area
+  { community: "Southern Dunes",     "2BR": null, "3BR": 160,  "4BR": 167,  region: "florida" },
+  { community: "Windsor Hills",      "2BR": null, "3BR": 175,  "4BR": 245,  region: "florida" },
+];
+
+// Fallback: $225 × number of bedrooms
+const FALLBACK_RATE_PER_BEDROOM = 225;
+
+// ─────────────────────────────────────────────────────────────
+// SEASONALITY MULTIPLIERS
+// ─────────────────────────────────────────────────────────────
+
+const SEASON_MULTIPLIERS = {
+  hawaii:  { LOW: 0.85, MEDIUM: 1.00, HIGH: 1.50 },
+  florida: { LOW: 0.80, MEDIUM: 1.00, HIGH: 1.45 },
+};
+
+// ─────────────────────────────────────────────────────────────
+// MONTHLY SEASON MAP  (format: "YYYY-MM")
+// ─────────────────────────────────────────────────────────────
+
+const HAWAII_SEASONS = {
+  "2026-04": "HIGH",   // Spring break / end of whale season
+  "2026-05": "MEDIUM", // Shoulder
+  "2026-06": "HIGH",   // Summer begins
+  "2026-07": "HIGH",   // Peak summer
+  "2026-08": "HIGH",   // Peak summer
+  "2026-09": "LOW",    // Post-summer, pre-holiday
+  "2026-10": "LOW",    // Low demand
+  "2026-11": "MEDIUM", // Building toward holidays
+  "2026-12": "HIGH",   // Holiday / Christmas peak
+  "2027-01": "HIGH",   // New Year / whale season
+  "2027-02": "MEDIUM", // Shoulder
+  "2027-03": "HIGH",   // Spring break / whale season
+  "2027-04": "HIGH",   // Spring break carry
+  "2027-05": "MEDIUM", // Shoulder
+  "2027-06": "HIGH",   // Summer begins
+  "2027-07": "HIGH",   // Peak summer
+  "2027-08": "HIGH",   // Peak summer
+  "2027-09": "LOW",    // Post-summer
+  "2027-10": "LOW",    // Low demand
+  "2027-11": "MEDIUM", // Building toward holidays
+  "2027-12": "HIGH",   // Holiday peak
+};
+
+const FLORIDA_SEASONS = {
+  "2026-04": "MEDIUM", // Post spring break shoulder
+  "2026-05": "MEDIUM", // Shoulder
+  "2026-06": "HIGH",   // Disney summer begins
+  "2026-07": "HIGH",   // Peak Disney summer
+  "2026-08": "HIGH",   // Peak Disney summer
+  "2026-09": "LOW",    // Schools back, lowest demand
+  "2026-10": "MEDIUM", // Fall break, Halloween events
+  "2026-11": "MEDIUM", // Shoulder (Thanksgiving week = spike)
+  "2026-12": "HIGH",   // Christmas / New Year Disney rush
+  "2027-01": "LOW",    // Post-holiday, low season
+  "2027-02": "MEDIUM", // Presidents Day weekend bump
+  "2027-03": "HIGH",   // Spring Break – peak FL demand
+  "2027-04": "MEDIUM", // Post spring break
+  "2027-05": "MEDIUM", // Shoulder
+  "2027-06": "HIGH",   // Disney summer begins
+  "2027-07": "HIGH",   // Peak Disney summer
+  "2027-08": "HIGH",   // Peak Disney summer
+  "2027-09": "LOW",    // Schools back, lowest demand
+  "2027-10": "MEDIUM", // Fall break
+  "2027-11": "MEDIUM", // Shoulder
+  "2027-12": "HIGH",   // Christmas / New Year
+};
+
+// ─────────────────────────────────────────────────────────────
+// HELPER: get nightly rate for a community/bedroom/month
+// ─────────────────────────────────────────────────────────────
+
+function getNightlyRate(communityName, bedrooms, yearMonth) {
+  const entry = BASE_RATES.find(r => r.community === communityName);
+  const key = bedrooms + "BR";
+  const base = entry?.[key] ?? (FALLBACK_RATE_PER_BEDROOM * parseInt(bedrooms));
+  const seasonMap = entry?.region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
+  const season = seasonMap[yearMonth] ?? "MEDIUM";
+  const multiplier = SEASON_MULTIPLIERS[entry?.region ?? "hawaii"][season];
+  return Math.round(base * multiplier);
+}
+
+// Usage example:
+// getNightlyRate("Poipu Kai", 2, "2026-07")  → 645   ($430 × 1.50)
+// getNightlyRate("Windsor Hills", 3, "2027-03") → 254  ($175 × 1.45)
+// getNightlyRate("Keauhou", 2, "2026-09")    → 221   ($260 × 0.85)
+  

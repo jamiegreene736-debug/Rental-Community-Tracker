@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Rental Community Tracker – Rate & Seasonality Data</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f3f4f6;color:#111;padding:32px 20px;}
+    h1{font-size:22px;font-weight:700;margin-bottom:4px;}
+    .subtitle{font-size:13px;color:#666;margin-bottom:28px;}
+    section{background:#fff;border-radius:10px;box-shadow:0 1px 8px rgba(0,0,0,.07);margin-bottom:28px;overflow:hidden;}
+    .sec-header{padding:16px 24px;border-bottom:1px solid #e5e7eb;}
+    .sec-header h2{font-size:15px;font-weight:700;}
+    .sec-header p{font-size:12px;color:#777;margin-top:2px;}
+    table{width:100%;border-collapse:collapse;}
+    thead th{background:#f9fafb;padding:10px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#6b7280;text-align:left;border-bottom:1px solid #e5e7eb;}
+    thead th:not(:first-child){text-align:center;}
+    tbody td{padding:11px 16px;font-size:14px;border-bottom:1px solid #f3f4f6;}
+    tbody td:not(:first-child){text-align:center;}
+    tbody tr:last-child td{border-bottom:none;}
+    tbody tr:hover{background:#fafbff;}
+    .val{font-weight:600;}
+    .dash{color:#ccc;}
+    .region-row td{background:#f9fafb;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9ca3af;padding:7px 16px;}
+    .footnote{padding:12px 24px;font-size:12px;color:#6b7280;border-top:1px solid #f3f4f6;}
+    .footnote b{color:#374151;}
+    /* multiplier badges */
+    .low{background:#dbeafe;color:#1d4ed8;border-radius:4px;padding:2px 8px;font-weight:600;font-size:12px;}
+    .med{background:#d1fae5;color:#065f46;border-radius:4px;padding:2px 8px;font-weight:600;font-size:12px;}
+    .high{background:#fee2e2;color:#b91c1c;border-radius:4px;padding:2px 8px;font-weight:600;font-size:12px;}
+    /* month grid */
+    .month-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:4px;padding:16px 24px;}
+    .month-grid.florida{padding-top:0;}
+    .month-cell{border-radius:6px;padding:8px 4px;text-align:center;}
+    .month-cell .mn{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-bottom:3px;}
+    .month-cell .yr{font-size:9px;opacity:.7;}
+    .month-cell .sl{font-size:10px;font-weight:700;margin-top:3px;}
+    .month-cell.low-cell{background:#dbeafe;color:#1d4ed8;}
+    .month-cell.med-cell{background:#d1fae5;color:#065f46;}
+    .month-cell.high-cell{background:#fee2e2;color:#b91c1c;}
+    .grid-label{padding:12px 24px 0;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9ca3af;}
+    /* code block */
+    pre{background:#1e293b;color:#e2e8f0;padding:24px;font-size:12px;line-height:1.7;overflow-x:auto;tab-size:2;white-space:pre;}
+    .kw{color:#93c5fd;}
+    .str{color:#86efac;}
+    .num{color:#fde68a;}
+    .cmt{color:#64748b;}
+    .copy-btn{float:right;background:#334155;color:#e2e8f0;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;margin-top:-4px;}
+    .copy-btn:hover{background:#475569;}
+    .tag{display:inline-block;font-size:10px;font-weight:700;background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 6px;margin-left:6px;vertical-align:middle;}
+  </style>
+</head>
+<body>
+
+<h1>Rental Community Tracker — Rate &amp; Seasonality Data</h1>
+<p class="subtitle">Source: Live Airbnb &amp; VRBO listings · May 2026 · All prices are retail all-in (taxes + cleaning + platform fees included)</p>
+
+<!-- ═══════════════════════════════════════════
+     1. BASE RATE TABLE
+════════════════════════════════════════════ -->
+<section>
+  <div class="sec-header">
+    <h2>1. Base Rates — Nightly (All-In, Retail)</h2>
+    <p>Averaged from live Airbnb &amp; VRBO listings for May 2026 (shoulder season baseline). 4BR cells marked <span class="tag">NEW</span> are newly added from this research.</p>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Community</th><th>2BR</th><th>3BR</th><th>4BR <span class="tag">NEW</span></th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="region-row" colspan="4">Kauai – South Shore</td></tr>
+      <tr><td>Poipu Kai</td><td class="val">$430</td><td class="val">$530</td><td class="val">$715</td></tr>
+      <tr><td>Poipu Oceanfront</td><td class="val">$525</td><td class="val">$660</td><td class="val">$780</td></tr>
+      <tr><td>Poipu Brenneckes</td><td class="val">$425</td><td class="val">$515</td><td class="val">$720</td></tr>
+      <tr><td>Pili Mai</td><td class="val">$480</td><td class="val">$620</td><td class="val">$700</td></tr>
+
+      <tr><td class="region-row" colspan="4">Kauai – East Shore</td></tr>
+      <tr><td>Kapaa Beachfront</td><td class="val">$490</td><td class="val">$700</td><td class="val">$850</td></tr>
+
+      <tr><td class="region-row" colspan="4">Kauai – North Shore</td></tr>
+      <tr><td>Princeville</td><td class="val">$410</td><td class="val">$620</td><td class="val">$715</td></tr>
+
+      <tr><td class="region-row" colspan="4">Kauai – West Shore</td></tr>
+      <tr><td>Kekaha Beachfront</td><td class="val">$450</td><td class="val">$675</td><td class="val">$900</td></tr>
+
+      <tr><td class="region-row" colspan="4">Big Island – Kona Coast</td></tr>
+      <tr><td>Keauhou</td><td class="val">$260</td><td class="dash">—</td><td class="dash">—</td></tr>
+
+      <tr><td class="region-row" colspan="4">Florida – Orlando / Central FL</td></tr>
+      <tr><td>Southern Dunes</td><td class="dash">—</td><td class="val">$160</td><td class="val">$167</td></tr>
+      <tr><td>Windsor Hills</td><td class="dash">—</td><td class="val">$175</td><td class="val">$245</td></tr>
+    </tbody>
+  </table>
+  <div class="footnote">
+    If a community/bedroom combo isn't in this table, it falls back to <b>$225 × number of bedrooms</b>.<br>
+    <b>4BR confirmed via Airbnb:</b> Poipu Kai · Pili Mai (units 7B &amp; 13B) · Kekaha Beachfront · Princeville · Kapaa Beachfront · Poipu Oceanfront · Poipu Brenneckes · Southern Dunes · Windsor Hills. <b>Keauhou remains 2BR only</b> (condo inventory, consistent with existing table).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     2. SEASONALITY MULTIPLIERS
+════════════════════════════════════════════ -->
+<section>
+  <div class="sec-header">
+    <h2>2. Seasonality Multipliers — Applied to Base Rate</h2>
+    <p>Multiply base rate × the factor below to arrive at the final nightly charge for that season.</p>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Region</th><th>Low Season</th><th>Medium (Base)</th><th>High Season</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>Hawaii</b> (all islands)</td>
+        <td><span class="low">× 0.85</span></td>
+        <td><span class="med">× 1.00</span></td>
+        <td><span class="high">× 1.50</span></td>
+      </tr>
+      <tr>
+        <td><b>Orlando / Central Florida</b></td>
+        <td><span class="low">× 0.80</span></td>
+        <td><span class="med">× 1.00</span></td>
+        <td><span class="high">× 1.45</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="footnote">
+    <b>Example:</b> Poipu Kai 2BR in July (High) → $430 × 1.50 = <b>$645/night</b> &nbsp;|&nbsp;
+    Windsor Hills 3BR in September (Low) → $175 × 0.80 = <b>$140/night</b>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     3. SEASONAL CALENDAR 2026–2027
+════════════════════════════════════════════ -->
+<section>
+  <div class="sec-header">
+    <h2>3. Seasonal Calendar — April 2026 through December 2027</h2>
+    <p>Color key: <span class="low">LOW</span> &nbsp;<span class="med">MED</span> &nbsp;<span class="high">HIGH</span></p>
+  </div>
+
+  <!-- HAWAII -->
+  <div class="grid-label">🌺 Hawaii (Kauai &amp; Big Island)</div>
+  <div class="month-grid">
+    <div class="month-cell high-cell"><div class="mn">Apr</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell med-cell"><div class="mn">May</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jun</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jul</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Aug</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell low-cell"><div class="mn">Sep</div><div class="yr">2026</div><div class="sl">LOW</div></div>
+    <div class="month-cell low-cell"><div class="mn">Oct</div><div class="yr">2026</div><div class="sl">LOW</div></div>
+    <div class="month-cell med-cell"><div class="mn">Nov</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Dec</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jan</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell med-cell"><div class="mn">Feb</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Mar</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+  </div>
+  <div class="month-grid">
+    <div class="month-cell high-cell"><div class="mn">Apr</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell med-cell"><div class="mn">May</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jun</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jul</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Aug</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell low-cell"><div class="mn">Sep</div><div class="yr">2027</div><div class="sl">LOW</div></div>
+    <div class="month-cell low-cell"><div class="mn">Oct</div><div class="yr">2027</div><div class="sl">LOW</div></div>
+    <div class="month-cell med-cell"><div class="mn">Nov</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Dec</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+  </div>
+
+  <!-- FLORIDA -->
+  <div class="grid-label" style="margin-top:8px;">🎢 Orlando / Central Florida</div>
+  <div class="month-grid florida">
+    <div class="month-cell med-cell"><div class="mn">Apr</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell med-cell"><div class="mn">May</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jun</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jul</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Aug</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell low-cell"><div class="mn">Sep</div><div class="yr">2026</div><div class="sl">LOW</div></div>
+    <div class="month-cell med-cell"><div class="mn">Oct</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell med-cell"><div class="mn">Nov</div><div class="yr">2026</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Dec</div><div class="yr">2026</div><div class="sl">HIGH</div></div>
+    <div class="month-cell low-cell"><div class="mn">Jan</div><div class="yr">2027</div><div class="sl">LOW</div></div>
+    <div class="month-cell med-cell"><div class="mn">Feb</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Mar</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+  </div>
+  <div class="month-grid florida">
+    <div class="month-cell med-cell"><div class="mn">Apr</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell med-cell"><div class="mn">May</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jun</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Jul</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell high-cell"><div class="mn">Aug</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell low-cell"><div class="mn">Sep</div><div class="yr">2027</div><div class="sl">LOW</div></div>
+    <div class="month-cell med-cell"><div class="mn">Oct</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell med-cell"><div class="mn">Nov</div><div class="yr">2027</div><div class="sl">MED</div></div>
+    <div class="month-cell high-cell"><div class="mn">Dec</div><div class="yr">2027</div><div class="sl">HIGH</div></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+    <div class="month-cell" style="background:#f3f4f6;"></div>
+  </div>
+  <div class="footnote" style="margin-top:8px;">
+    <b>Hawaii High drivers:</b> Dec–Jan (holiday/whale season), Jun–Aug (summer), Mar–Apr (spring break). &nbsp;
+    <b>FL High drivers:</b> Jun–Aug (Disney summer), Dec (Christmas week), Mar (Spring Break). &nbsp;
+    <b>Note:</b> Apr 2026 shown as HIGH for Hawaii because it is already past the research date (March 31, 2026) and whale season/spring break demand carries through mid-April.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     4. REPLIT-READY JAVASCRIPT
+════════════════════════════════════════════ -->
+<section>
+  <div class="sec-header">
+    <h2>4. Copy-Paste into Replit</h2>
+    <p>Drop this directly into your app's rate configuration file.</p>
+  </div>
+  <pre>
+<span class="cmt">// ─────────────────────────────────────────────────────────────
+// RENTAL COMMUNITY BASE RATES
+// Source: Airbnb & VRBO live listings · May 2026 · All-in retail
+// (taxes + cleaning + platform fees already included)
+// ─────────────────────────────────────────────────────────────</span>
+
+<span class="kw">const</span> BASE_RATES = [
+  <span class="cmt">// Kauai – South Shore</span>
+  { community: <span class="str">"Poipu Kai"</span>,         <span class="str">"2BR"</span>: <span class="num">430</span>,  <span class="str">"3BR"</span>: <span class="num">530</span>,  <span class="str">"4BR"</span>: <span class="num">715</span>,  region: <span class="str">"hawaii"</span> },
+  { community: <span class="str">"Poipu Oceanfront"</span>,   <span class="str">"2BR"</span>: <span class="num">525</span>,  <span class="str">"3BR"</span>: <span class="num">660</span>,  <span class="str">"4BR"</span>: <span class="num">780</span>,  region: <span class="str">"hawaii"</span> },
+  { community: <span class="str">"Poipu Brenneckes"</span>,   <span class="str">"2BR"</span>: <span class="num">425</span>,  <span class="str">"3BR"</span>: <span class="num">515</span>,  <span class="str">"4BR"</span>: <span class="num">720</span>,  region: <span class="str">"hawaii"</span> },
+  { community: <span class="str">"Pili Mai"</span>,           <span class="str">"2BR"</span>: <span class="num">480</span>,  <span class="str">"3BR"</span>: <span class="num">620</span>,  <span class="str">"4BR"</span>: <span class="num">700</span>,  region: <span class="str">"hawaii"</span> },
+  <span class="cmt">// Kauai – East Shore</span>
+  { community: <span class="str">"Kapaa Beachfront"</span>,   <span class="str">"2BR"</span>: <span class="num">490</span>,  <span class="str">"3BR"</span>: <span class="num">700</span>,  <span class="str">"4BR"</span>: <span class="num">850</span>,  region: <span class="str">"hawaii"</span> },
+  <span class="cmt">// Kauai – North Shore</span>
+  { community: <span class="str">"Princeville"</span>,        <span class="str">"2BR"</span>: <span class="num">410</span>,  <span class="str">"3BR"</span>: <span class="num">620</span>,  <span class="str">"4BR"</span>: <span class="num">715</span>,  region: <span class="str">"hawaii"</span> },
+  <span class="cmt">// Kauai – West Shore</span>
+  { community: <span class="str">"Kekaha Beachfront"</span>,  <span class="str">"2BR"</span>: <span class="num">450</span>,  <span class="str">"3BR"</span>: <span class="num">675</span>,  <span class="str">"4BR"</span>: <span class="num">900</span>,  region: <span class="str">"hawaii"</span> },
+  <span class="cmt">// Big Island – Kona Coast</span>
+  { community: <span class="str">"Keauhou"</span>,            <span class="str">"2BR"</span>: <span class="num">260</span>,  <span class="str">"3BR"</span>: <span class="kw">null</span>, <span class="str">"4BR"</span>: <span class="kw">null</span>, region: <span class="str">"hawaii"</span> },
+  <span class="cmt">// Florida – Orlando Area</span>
+  { community: <span class="str">"Southern Dunes"</span>,     <span class="str">"2BR"</span>: <span class="kw">null</span>, <span class="str">"3BR"</span>: <span class="num">160</span>,  <span class="str">"4BR"</span>: <span class="num">167</span>,  region: <span class="str">"florida"</span> },
+  { community: <span class="str">"Windsor Hills"</span>,      <span class="str">"2BR"</span>: <span class="kw">null</span>, <span class="str">"3BR"</span>: <span class="num">175</span>,  <span class="str">"4BR"</span>: <span class="num">245</span>,  region: <span class="str">"florida"</span> },
+];
+
+<span class="cmt">// Fallback: $225 × number of bedrooms</span>
+<span class="kw">const</span> FALLBACK_RATE_PER_BEDROOM = <span class="num">225</span>;
+
+<span class="cmt">// ─────────────────────────────────────────────────────────────
+// SEASONALITY MULTIPLIERS
+// ─────────────────────────────────────────────────────────────</span>
+
+<span class="kw">const</span> SEASON_MULTIPLIERS = {
+  hawaii:  { LOW: <span class="num">0.85</span>, MEDIUM: <span class="num">1.00</span>, HIGH: <span class="num">1.50</span> },
+  florida: { LOW: <span class="num">0.80</span>, MEDIUM: <span class="num">1.00</span>, HIGH: <span class="num">1.45</span> },
+};
+
+<span class="cmt">// ─────────────────────────────────────────────────────────────
+// MONTHLY SEASON MAP  (format: "YYYY-MM")
+// ─────────────────────────────────────────────────────────────</span>
+
+<span class="kw">const</span> HAWAII_SEASONS = {
+  <span class="str">"2026-04"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Spring break / end of whale season</span>
+  <span class="str">"2026-05"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2026-06"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Summer begins</span>
+  <span class="str">"2026-07"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak summer</span>
+  <span class="str">"2026-08"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak summer</span>
+  <span class="str">"2026-09"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Post-summer, pre-holiday</span>
+  <span class="str">"2026-10"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Low demand</span>
+  <span class="str">"2026-11"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Building toward holidays</span>
+  <span class="str">"2026-12"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Holiday / Christmas peak</span>
+  <span class="str">"2027-01"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// New Year / whale season</span>
+  <span class="str">"2027-02"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2027-03"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Spring break / whale season</span>
+  <span class="str">"2027-04"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Spring break carry</span>
+  <span class="str">"2027-05"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2027-06"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Summer begins</span>
+  <span class="str">"2027-07"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak summer</span>
+  <span class="str">"2027-08"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak summer</span>
+  <span class="str">"2027-09"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Post-summer</span>
+  <span class="str">"2027-10"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Low demand</span>
+  <span class="str">"2027-11"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Building toward holidays</span>
+  <span class="str">"2027-12"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Holiday peak</span>
+};
+
+<span class="kw">const</span> FLORIDA_SEASONS = {
+  <span class="str">"2026-04"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Post spring break shoulder</span>
+  <span class="str">"2026-05"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2026-06"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Disney summer begins</span>
+  <span class="str">"2026-07"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak Disney summer</span>
+  <span class="str">"2026-08"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak Disney summer</span>
+  <span class="str">"2026-09"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Schools back, lowest demand</span>
+  <span class="str">"2026-10"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Fall break, Halloween events</span>
+  <span class="str">"2026-11"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder (Thanksgiving week = spike)</span>
+  <span class="str">"2026-12"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Christmas / New Year Disney rush</span>
+  <span class="str">"2027-01"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Post-holiday, low season</span>
+  <span class="str">"2027-02"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Presidents Day weekend bump</span>
+  <span class="str">"2027-03"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Spring Break – peak FL demand</span>
+  <span class="str">"2027-04"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Post spring break</span>
+  <span class="str">"2027-05"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2027-06"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Disney summer begins</span>
+  <span class="str">"2027-07"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak Disney summer</span>
+  <span class="str">"2027-08"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Peak Disney summer</span>
+  <span class="str">"2027-09"</span>: <span class="str">"LOW"</span>,    <span class="cmt">// Schools back, lowest demand</span>
+  <span class="str">"2027-10"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Fall break</span>
+  <span class="str">"2027-11"</span>: <span class="str">"MEDIUM"</span>, <span class="cmt">// Shoulder</span>
+  <span class="str">"2027-12"</span>: <span class="str">"HIGH"</span>,   <span class="cmt">// Christmas / New Year</span>
+};
+
+<span class="cmt">// ─────────────────────────────────────────────────────────────
+// HELPER: get nightly rate for a community/bedroom/month
+// ─────────────────────────────────────────────────────────────</span>
+
+<span class="kw">function</span> getNightlyRate(communityName, bedrooms, yearMonth) {
+  <span class="kw">const</span> entry = BASE_RATES.find(r => r.community === communityName);
+  <span class="kw">const</span> key = bedrooms + <span class="str">"BR"</span>;
+  <span class="kw">const</span> base = entry?.[key] ?? (FALLBACK_RATE_PER_BEDROOM * <span class="kw">parseInt</span>(bedrooms));
+  <span class="kw">const</span> seasonMap = entry?.region === <span class="str">"florida"</span> ? FLORIDA_SEASONS : HAWAII_SEASONS;
+  <span class="kw">const</span> season = seasonMap[yearMonth] ?? <span class="str">"MEDIUM"</span>;
+  <span class="kw">const</span> multiplier = SEASON_MULTIPLIERS[entry?.region ?? <span class="str">"hawaii"</span>][season];
+  <span class="kw">return</span> Math.round(base * multiplier);
+}
+
+<span class="cmt">// Usage example:
+// getNightlyRate("Poipu Kai", 2, "2026-07")  → 645   ($430 × 1.50)
+// getNightlyRate("Windsor Hills", 3, "2027-03") → 254  ($175 × 1.45)
+// getNightlyRate("Keauhou", 2, "2026-09")    → 221   ($260 × 0.85)</span>
+  </pre>
+</section>
+
+</body>
+</html>
