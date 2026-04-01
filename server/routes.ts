@@ -278,7 +278,10 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
         },
       }),
     });
-    if (!createResp.ok) return null;
+    if (!createResp.ok) {
+      console.error("[makeover-job] Replicate SDXL error:", createResp.status, await createResp.text());
+      return null;
+    }
     const prediction = await createResp.json() as { id?: string; status: string; output?: string[]; error?: string };
     if (prediction.status === "succeeded" && prediction.output?.length) {
       const imgResp = await fetch(prediction.output[0]);

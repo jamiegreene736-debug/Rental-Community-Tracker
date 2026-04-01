@@ -461,7 +461,11 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
           <DialogDescription>
             {step === "audit" && "Checking if your bedroom photos appear on any active Airbnb listing..."}
             {step === "makeover" && `AI-enhancing ${interiorCount} interior photos and upscaling all ${totalCount} photos to 2× resolution.`}
-            {step === "done" && `${processedCount} interior photos AI-enhanced and bundled. Your ZIP has been downloaded.`}
+            {step === "done" && (
+              processedCount === 0 && interiorCount > 0
+                ? `ZIP downloaded with ${totalCount} original photos — AI enhancement couldn't run (Replicate API key may be invalid or expired).`
+                : `${processedCount} of ${interiorCount} interior photos AI-enhanced. ZIP downloaded with all ${totalCount} photos.`
+            )}
           </DialogDescription>
         </DialogHeader>
 
