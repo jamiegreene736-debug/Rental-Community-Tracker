@@ -265,7 +265,7 @@ async function generateWithStabilityKw(prompt: string): Promise<Buffer | null> {
 
 async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
   const key = process.env.REPLICATE_API_TOKEN;
-  if (!key) return null;
+  if (!key) { console.error("[sdxl] No REPLICATE_API_TOKEN set"); return null; }
   try {
     const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
       method: "POST",
@@ -279,32 +279,57 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
       }),
     });
     if (!createResp.ok) {
-      console.error("[makeover-job] Replicate SDXL error:", createResp.status, await createResp.text());
+      const errText = await createResp.text();
+      console.error("[sdxl] Create failed:", createResp.status, errText);
       return null;
     }
-    const prediction = await createResp.json() as { id?: string; status: string; output?: string[]; error?: string };
-    if (prediction.status === "succeeded" && prediction.output?.length) {
-      const imgResp = await fetch(prediction.output[0]);
-      if (!imgResp.ok) return null;
+    const prediction = await createResp.json() as { id?: string; status: string; output?: string[] | string; error?: string };
+    console.log("[sdxl] Prediction response: status=", prediction.status, "id=", prediction.id, "error=", prediction.error, "output=", JSON.stringify(prediction.output)?.substring(0, 120));
+    if (prediction.error) { console.error("[sdxl] Prediction error:", prediction.error); return null; }
+    const extractUrl = (output: string[] | string | undefined): string | null => {
+      if (!output) return null;
+      if (Array.isArray(output)) return output[0] || null;
+      if (typeof output === "string") return output;
+      return null;
+    };
+    const downloadUrl = (status: string, output: string[] | string | undefined): string | null =>
+      status === "succeeded" ? extractUrl(output) : null;
+    const immediateUrl = downloadUrl(prediction.status, prediction.output);
+    if (immediateUrl) {
+      console.log("[sdxl] Immediate success, downloading from:", immediateUrl.substring(0, 80));
+      const imgResp = await fetch(immediateUrl);
+      if (!imgResp.ok) { console.error("[sdxl] Image download failed:", imgResp.status); return null; }
       return Buffer.from(await imgResp.arrayBuffer());
     }
     if (prediction.id) {
+      console.log("[sdxl] Polling prediction:", prediction.id);
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 2000));
         const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
           headers: { "Authorization": `Token ${key}` },
         });
-        const result = await pollResp.json() as { status: string; output?: string[]; error?: string };
-        if (result.status === "succeeded" && result.output?.length) {
-          const imgResp = await fetch(result.output[0]);
-          if (!imgResp.ok) return null;
+        const result = await pollResp.json() as { status: string; output?: string[] | string; error?: string };
+        if (i % 10 === 0) console.log("[sdxl] Poll", i, "status=", result.status);
+        if (result.error) { console.error("[sdxl] Poll error:", result.error); return null; }
+        const pollUrl = downloadUrl(result.status, result.output);
+        if (pollUrl) {
+          console.log("[sdxl] Poll success at attempt", i, ", downloading");
+          const imgResp = await fetch(pollUrl);
+          if (!imgResp.ok) { console.error("[sdxl] Poll image download failed:", imgResp.status); return null; }
           return Buffer.from(await imgResp.arrayBuffer());
         }
-        if (result.status === "failed") return null;
+        if (result.status === "failed" || result.status === "canceled") {
+          console.error("[sdxl] Prediction failed/canceled at poll", i);
+          return null;
+        }
       }
+      console.error("[sdxl] Timed out after 120s polling");
     }
     return null;
-  } catch { return null; }
+  } catch (err: any) {
+    console.error("[sdxl] Exception:", err?.message || err);
+    return null;
+  }
 }
 
 async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
