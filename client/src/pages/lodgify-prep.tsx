@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -40,6 +40,13 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { apiRequest } from "@/lib/queryClient";
 import {
   Table,
@@ -203,56 +210,468 @@ function isInteriorPhoto(filename: string): boolean {
   return INTERIOR_KEYWORDS.some(k => lower.includes(k));
 }
 
-function useAiMakeover() {
-  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [processedCount, setProcessedCount] = useState<number>(0);
-  const [totalCount, setTotalCount] = useState<number>(0);
+type FlowStep = "audit" | "makeover" | "done";
 
-  const triggerMakeover = async (params: {
-    folders: string[];
-    communityFolder?: string;
-    beginningPhotos?: string[];
-    endPhotos?: string[];
-    name: string;
-  }) => {
-    setStatus("loading");
-    setErrorMsg(null);
+interface AuditUnitInput {
+  id: string;
+  label: string;
+  photoFolder: string;
+  photos: Array<{ filename: string; label: string }>;
+  bedrooms: number;
+  communityName: string;
+  location: string;
+}
+interface AuditUnitResult {
+  unitId: string;
+  unitLabel: string;
+  photoFilename: string;
+  photoServePath: string;
+  status: "checking" | "passed" | "flagged" | "error";
+  airbnbUrl?: string;
+  replacement?: Array<{ url: string; thumbnail: string; label: string }> | null;
+  findingReplacement?: boolean;
+}
+interface MakeoverPhotoState {
+  index: number;
+  servePath: string;
+  zipName: string;
+  isInterior: boolean;
+  status: "pending" | "processing" | "done" | "failed";
+  hasResult: boolean;
+}
+
+interface MakeoverFlowModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  propertyName: string;
+  folders: string[];
+  communityFolder?: string;
+  beginningPhotos?: string[];
+  endPhotos?: string[];
+  unitsToAudit: AuditUnitInput[];
+}
+
+function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFolder, beginningPhotos, endPhotos, unitsToAudit }: MakeoverFlowModalProps) {
+  const [step, setStep] = useState<FlowStep>("audit");
+  const [auditResults, setAuditResults] = useState<AuditUnitResult[]>([]);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [photos, setPhotos] = useState<MakeoverPhotoState[]>([]);
+  const [processedCount, setProcessedCount] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
+  const [interiorCount, setInteriorCount] = useState(0);
+  const [makeoverError, setMakeoverError] = useState<string | null>(null);
+  const [makeoverDone, setMakeoverDone] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+
+  const findBedroomPhoto = (unitPhotos: Array<{ filename: string; label: string }>) => {
+    const byLabel = unitPhotos.find(p => p.label.toLowerCase().includes("bedroom") || p.label.toLowerCase().includes("bed"));
+    if (byLabel) return byLabel;
+    const byFilename = unitPhotos.find(p => p.filename.toLowerCase().includes("bedroom") || p.filename.toLowerCase().includes("bed"));
+    if (byFilename) return byFilename;
+    const anyInterior = unitPhotos.find(p => isInteriorPhoto(p.filename));
+    if (anyInterior) return anyInterior;
+    return unitPhotos[0] || null;
+  };
+
+  const runAudit = async () => {
+    const initial: AuditUnitResult[] = unitsToAudit
+      .filter(u => u.photos.length > 0)
+      .map(u => {
+        const photo = findBedroomPhoto(u.photos);
+        return {
+          unitId: u.id,
+          unitLabel: u.label,
+          photoFilename: photo?.filename || "",
+          photoServePath: photo ? `/photos/${u.photoFolder}/${photo.filename}` : "",
+          status: "checking" as const,
+        };
+      });
+    setAuditResults(initial);
+
+    const checked = await Promise.all(
+      initial.map(async (unit, i) => {
+        if (!unit.photoFilename) return { ...unit, status: "error" as const };
+        try {
+          const resp = await fetch("/api/photos/platform-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ folder: unitsToAudit[i].photoFolder, filename: unit.photoFilename }),
+          });
+          if (!resp.ok) return { ...unit, status: "error" as const };
+          const data = await resp.json();
+          const airbnbMatch = (data.platforms || []).find((p: any) => (p.url || "").includes("airbnb.com"));
+          return {
+            ...unit,
+            status: (airbnbMatch ? "flagged" : "passed") as "flagged" | "passed",
+            airbnbUrl: airbnbMatch?.url,
+          };
+        } catch {
+          return { ...unit, status: "error" as const };
+        }
+      })
+    );
+    setAuditResults(checked);
+    const hasFlags = checked.some(r => r.status === "flagged");
+    if (!hasFlags) setTimeout(() => startMakeover(), 1500);
+  };
+
+  const startMakeover = async () => {
+    setStep("makeover");
+    setMakeoverError(null);
+    setMakeoverDone(false);
+    setPhotos([]);
     setProcessedCount(0);
-    setTotalCount(0);
     try {
-      const response = await fetch("/api/photos/ai-makeover", {
+      const resp = await fetch("/api/photos/ai-makeover/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ folders, communityFolder, beginningPhotos, endPhotos, name: propertyName }),
       });
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(err.error || `Server error ${response.status}`);
-      }
-      const aiProcessed = parseInt(response.headers.get("X-Photos-Processed") || "0");
-      const aiTotal = parseInt(response.headers.get("X-Photos-Total") || "0");
-      setProcessedCount(aiProcessed);
-      setTotalCount(aiTotal);
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${params.name.replace(/[^a-zA-Z0-9_-]/g, "-")}-ai-makeover.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatus("done");
-      setTimeout(() => setStatus("idle"), 5000);
+      if (!resp.ok) throw new Error("Failed to start makeover");
+      const data = await resp.json();
+      setJobId(data.jobId);
+      setTotalCount(data.totalCount);
+      setInteriorCount(data.interiorCount);
+      const initialPhotos: MakeoverPhotoState[] = (data.photos || []).map((p: any) => ({
+        index: p.index, servePath: p.servePath, zipName: p.zipName, isInterior: p.isInterior,
+        status: "pending" as const, hasResult: false,
+      }));
+      setPhotos(initialPhotos);
+
+      const es = new EventSource(`/api/photos/ai-makeover/events/${data.jobId}`);
+      esRef.current = es;
+      es.onmessage = (e) => {
+        const event = JSON.parse(e.data);
+        if (event.type === "photo_start") {
+          setPhotos(prev => prev.map(p => p.index === event.index ? { ...p, status: "processing" } : p));
+        } else if (event.type === "photo_done") {
+          setProcessedCount(event.processedCount ?? 0);
+          setPhotos(prev => prev.map(p => p.index === event.index ? { ...p, status: event.status, hasResult: event.hasResult } : p));
+        } else if (event.type === "complete") {
+          setProcessedCount(event.processedCount);
+          setMakeoverDone(true);
+          es.close();
+          triggerDownload(data.jobId, propertyName);
+          setTimeout(() => setStep("done"), 800);
+        } else if (event.type === "error") {
+          setMakeoverError(event.message);
+          es.close();
+        }
+      };
+      es.onerror = () => es.close();
     } catch (err: any) {
-      setErrorMsg(err.message || "AI makeover failed");
-      setStatus("error");
-      setTimeout(() => setStatus("idle"), 5000);
+      setMakeoverError(err.message || "Failed to start");
     }
   };
 
-  return { status, errorMsg, triggerMakeover, processedCount, totalCount };
+  const findReplacement = async (unitIdx: number) => {
+    const unit = unitsToAudit[unitIdx];
+    setAuditResults(prev => prev.map((r, i) => i === unitIdx ? { ...r, findingReplacement: true } : r));
+    try {
+      const resp = await fetch(`/api/photos/find-replacement?communityName=${encodeURIComponent(unit.communityName)}&location=${encodeURIComponent(unit.location)}&bedrooms=${unit.bedrooms}`);
+      const data = await resp.json();
+      setAuditResults(prev => prev.map((r, i) => i === unitIdx ? { ...r, findingReplacement: false, replacement: data.images || [] } : r));
+    } catch {
+      setAuditResults(prev => prev.map((r, i) => i === unitIdx ? { ...r, findingReplacement: false, replacement: [] } : r));
+    }
+  };
+
+  const reAuditReplacement = async (unitIdx: number, imageUrl: string) => {
+    try {
+      const resp = await fetch("/api/photos/platform-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrl }),
+      });
+      if (!resp.ok) throw new Error("Check failed");
+      const data = await resp.json();
+      const airbnbMatch = (data.platforms || []).find((p: any) => (p.url || "").includes("airbnb.com"));
+      if (!airbnbMatch) {
+        setAuditResults(prev => prev.map((r, i) => i === unitIdx
+          ? { ...r, photoServePath: imageUrl, status: "passed", replacement: null }
+          : r));
+        const anyFlagged = auditResults.some((r, i) => i !== unitIdx && r.status === "flagged");
+        if (!anyFlagged) setTimeout(() => startMakeover(), 1200);
+      } else {
+        alert("This replacement photo was also found on Airbnb. Try another or continue anyway.");
+      }
+    } catch {
+      alert("Could not check replacement photo.");
+    }
+  };
+
+  const triggerDownload = (jId: string, name: string) => {
+    const a = document.createElement("a");
+    a.href = `/api/photos/ai-makeover/download/${jId}`;
+    a.download = `${name.replace(/[^a-zA-Z0-9_-]/g, "-")}-ai-makeover.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      setStep("audit");
+      setAuditResults([]);
+      setJobId(null);
+      setPhotos([]);
+      setProcessedCount(0);
+      setTotalCount(0);
+      setInteriorCount(0);
+      setMakeoverError(null);
+      setMakeoverDone(false);
+      runAudit();
+    } else {
+      esRef.current?.close();
+    }
+  }, [isOpen]);
+
+  const auditDone = auditResults.length > 0 && auditResults.every(r => r.status !== "checking");
+  const hasFlags = auditResults.some(r => r.status === "flagged");
+  const doneCount = photos.filter(p => p.status === "done" || p.status === "failed").length;
+  const processingIdx = photos.findIndex(p => p.status === "processing");
+  const interiorPhotos = photos.filter(p => p.isInterior);
+
+  const STEPS: FlowStep[] = ["audit", "makeover", "done"];
+  const stepLabels = { audit: "Photo Audit", makeover: "AI Makeover", done: "Complete" };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-2xl max-h-[88vh] overflow-y-auto">
+        <DialogHeader>
+          <div className="flex items-center gap-1.5 mb-1">
+            {STEPS.map((s, i) => (
+              <div key={s} className="flex items-center gap-1">
+                {i > 0 && <ChevronRight className="h-3 w-3 text-muted-foreground" />}
+                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full transition-colors ${
+                  step === s
+                    ? "bg-primary text-primary-foreground"
+                    : STEPS.indexOf(step) > i
+                    ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"
+                    : "bg-muted text-muted-foreground"
+                }`} data-testid={`step-indicator-${s}`}>
+                  {i + 1}. {stepLabels[s]}
+                </span>
+              </div>
+            ))}
+          </div>
+          <DialogTitle>
+            {step === "audit" ? "Step 1: Photo Audit" : step === "makeover" ? "Step 2: AI Makeover" : "All Done!"}
+          </DialogTitle>
+          <DialogDescription>
+            {step === "audit" && "Checking if your bedroom photos appear on any active Airbnb listing..."}
+            {step === "makeover" && `Enhancing ${interiorCount} interior photos with professional AI. Community and exterior photos pass through unchanged.`}
+            {step === "done" && `${processedCount} interior photos AI-enhanced and bundled. Your ZIP has been downloaded.`}
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* ── STEP 1: AUDIT ── */}
+        {step === "audit" && (
+          <div className="space-y-3 mt-2">
+            {auditResults.length === 0 && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                <Loader2 className="h-4 w-4 animate-spin" /> Preparing audit...
+              </div>
+            )}
+            {auditResults.map((result, idx) => (
+              <div key={result.unitId} className="border rounded-lg p-3 space-y-2">
+                <div className="flex items-start gap-3">
+                  {result.photoServePath && (
+                    <img src={result.photoServePath} alt={result.unitLabel}
+                      className="w-16 h-16 object-cover rounded border flex-shrink-0"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold">{result.unitLabel}</p>
+                    <p className="text-xs text-muted-foreground mb-1 truncate">
+                      {result.photoFilename || "No photo available"}
+                    </p>
+                    {result.status === "checking" && (
+                      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Searching reverse image index...
+                      </span>
+                    )}
+                    {result.status === "passed" && (
+                      <span className="flex items-center gap-1 text-xs font-medium text-green-700 dark:text-green-400">
+                        <ShieldCheck className="h-3.5 w-3.5" /> Audit Passed ✓ — not found on Airbnb
+                      </span>
+                    )}
+                    {result.status === "flagged" && (
+                      <div className="space-y-2">
+                        <span className="flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400">
+                          <ShieldAlert className="h-3.5 w-3.5" /> Flagged — photo found on an Airbnb listing
+                        </span>
+                        {result.airbnbUrl && (
+                          <a href={result.airbnbUrl} target="_blank" rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-xs text-blue-600 hover:underline">
+                            <ExternalLink className="h-3 w-3" /> View matching Airbnb listing
+                          </a>
+                        )}
+                        {!result.replacement && (
+                          <Button size="sm" variant="outline" className="h-7 text-xs"
+                            disabled={result.findingReplacement}
+                            onClick={() => findReplacement(idx)}
+                            data-testid={`button-find-new-unit-${result.unitId}`}>
+                            {result.findingReplacement
+                              ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Searching...</>
+                              : <><RefreshCw className="h-3 w-3 mr-1" />Find New Unit</>}
+                          </Button>
+                        )}
+                        {result.replacement && result.replacement.length > 0 && (
+                          <div className="space-y-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">Select a replacement bedroom photo:</p>
+                            <div className="grid grid-cols-4 gap-1.5 max-h-32 overflow-y-auto">
+                              {result.replacement.map((img, imgIdx) => (
+                                <button key={imgIdx} onClick={() => reAuditReplacement(idx, img.url)}
+                                  className="aspect-square rounded overflow-hidden border hover:border-primary transition-colors"
+                                  data-testid={`button-replacement-photo-${imgIdx}`}>
+                                  <img src={img.thumbnail} alt={img.label}
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => { (e.target as HTMLImageElement).style.opacity = "0.3"; }} />
+                                </button>
+                              ))}
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">Click a photo to re-audit it and use it instead.</p>
+                          </div>
+                        )}
+                        {result.replacement !== undefined && result.replacement?.length === 0 && (
+                          <p className="text-xs text-muted-foreground">No replacement photos found. Try continuing anyway.</p>
+                        )}
+                      </div>
+                    )}
+                    {result.status === "error" && (
+                      <span className="text-xs text-muted-foreground">Could not check — skipping this unit</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {auditDone && hasFlags && (
+              <div className="flex gap-2 pt-1 border-t">
+                <Button size="sm" onClick={() => startMakeover()} data-testid="button-continue-anyway">
+                  <Wand2 className="h-3.5 w-3.5 mr-1.5" />Continue Anyway
+                </Button>
+                <Button size="sm" variant="outline" onClick={onClose} data-testid="button-cancel-makeover">
+                  Cancel
+                </Button>
+              </div>
+            )}
+            {auditDone && !hasFlags && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" /> All units passed — starting AI makeover...
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* ── STEP 2: MAKEOVER ── */}
+        {step === "makeover" && (
+          <div className="space-y-4 mt-2">
+            {makeoverError ? (
+              <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">
+                <strong>Error:</strong> {makeoverError}
+              </div>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>
+                      {processingIdx >= 0
+                        ? `Processing interior photo ${doneCount + 1} of ${interiorCount}…`
+                        : makeoverDone
+                        ? `Complete — ${processedCount} interior photos enhanced`
+                        : interiorCount > 0 ? "Starting AI enhancement…" : "Building ZIP…"}
+                    </span>
+                    <span>{Math.min(doneCount, interiorCount)}/{interiorCount}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className="h-full bg-purple-500 transition-all duration-500"
+                      style={{ width: `${interiorCount > 0 ? (Math.min(doneCount, interiorCount) / interiorCount) * 100 : 0}%` }} />
+                  </div>
+                </div>
+
+                {interiorPhotos.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground">Interior Photos — Before / After</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-72 overflow-y-auto pr-1">
+                      {interiorPhotos.map(p => (
+                        <div key={p.index} className="space-y-1" data-testid={`photo-makeover-${p.index}`}>
+                          <div className="flex gap-1">
+                            <div className="w-1/2">
+                              <div className="aspect-square bg-muted rounded overflow-hidden">
+                                {p.servePath && <img src={p.servePath} alt="Before" className="w-full h-full object-cover" />}
+                              </div>
+                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">Before</p>
+                            </div>
+                            <div className="w-1/2">
+                              <div className="aspect-square bg-muted rounded overflow-hidden relative">
+                                {p.status === "processing" && (
+                                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-purple-900/50">
+                                    <Loader2 className="h-4 w-4 text-purple-200 animate-spin" />
+                                    <span className="text-[9px] text-purple-200 mt-0.5">AI</span>
+                                  </div>
+                                )}
+                                {p.hasResult && jobId && (
+                                  <img src={`/api/photos/ai-makeover/result/${jobId}/photo/${p.index}`}
+                                    alt="After" className="w-full h-full object-cover" />
+                                )}
+                              </div>
+                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">After</p>
+                            </div>
+                          </div>
+                          <div className="text-center">
+                            {p.status === "pending" && <span className="text-[10px] text-muted-foreground">Pending</span>}
+                            {p.status === "processing" && (
+                              <span className="text-[10px] text-purple-500 flex items-center justify-center gap-0.5">
+                                <Loader2 className="h-2.5 w-2.5 animate-spin" /> Processing…
+                              </span>
+                            )}
+                            {p.status === "done" && (
+                              <span className="text-[10px] text-green-600 flex items-center justify-center gap-0.5">
+                                <Check className="h-2.5 w-2.5" /> Done ✓
+                              </span>
+                            )}
+                            {p.status === "failed" && <span className="text-[10px] text-muted-foreground">Original kept</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!jobId && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Starting AI makeover job…
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── STEP 3: DONE ── */}
+        {step === "done" && (
+          <div className="space-y-3 mt-2">
+            <div className="flex items-center gap-3 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
+              <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/50 flex items-center justify-center flex-shrink-0">
+                <Check className="h-5 w-5 text-green-600 dark:text-green-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-green-800 dark:text-green-200">ZIP Downloaded!</p>
+                <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                  {processedCount} interior photo{processedCount !== 1 ? "s" : ""} AI-enhanced. {totalCount} total photos bundled in the ZIP.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" variant="outline" onClick={onClose} data-testid="button-close-makeover-modal">
+              Close
+            </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 type PlatformMatch = { name: string; url: string };
@@ -392,7 +811,7 @@ function PlatformBadge({ result }: { result?: PhotoCheckResult }) {
 }
 
 function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
-  const { status: aiStatus, errorMsg: aiError, triggerMakeover, processedCount, totalCount } = useAiMakeover();
+  const [showMakeoverModal, setShowMakeoverModal] = useState(false);
   const { results: checkResults, isChecking, checkPhotos, hasFlags, findReplacement, findingReplacement, replacement, replacementCheckResults, replacementHasFlags } = usePlatformCheck(unit.photoFolder, communityPhotoFolder);
 
   const { data: fileData } = useQuery<{ folder: string; files: string[] }>({
@@ -415,21 +834,31 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
     ? `/api/photos/zip-multi?folders=${unit.photoFolder}&name=${encodeURIComponent(unit.id)}&communityFolder=${communityPhotoFolder}&beginningPhotos=${encodeURIComponent(communityFiles.join(","))}&endPhotos=`
     : `/api/photos/zip/${unit.photoFolder}`;
 
-  const handleAiMakeover = () => {
-    triggerMakeover({
-      folders: [unit.photoFolder],
-      communityFolder: communityPhotoFolder,
-      beginningPhotos: communityFiles,
-      endPhotos: [],
-      name: unit.id,
-    });
-  };
-
-  // Auto-select first 3 photos for platform check
   const photosToCheck = unit.photos.slice(0, 3).map(p => p.filename);
   const anyChecked = Object.keys(checkResults).length > 0;
 
+  const unitForAudit: AuditUnitInput = {
+    id: unit.id,
+    label: unit.id,
+    photoFolder: unit.photoFolder,
+    photos: unit.photos,
+    bedrooms: unit.bedrooms,
+    communityName: unit.id.split("-")[0] || unit.id,
+    location: "",
+  };
+
   return (
+    <>
+      <MakeoverFlowModal
+        isOpen={showMakeoverModal}
+        onClose={() => setShowMakeoverModal(false)}
+        propertyName={unit.id}
+        folders={[unit.photoFolder]}
+        communityFolder={communityPhotoFolder}
+        beginningPhotos={communityFiles}
+        endPhotos={[]}
+        unitsToAudit={[unitForAudit]}
+      />
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground">
@@ -455,20 +884,11 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
           <Button
             variant="outline"
             size="sm"
-            onClick={handleAiMakeover}
-            disabled={aiStatus === "loading"}
+            onClick={() => setShowMakeoverModal(true)}
             data-testid={`button-ai-makeover-${unit.id}`}
-            title="Reimagines interior rooms in a modern luxury style using AI. Exterior and pool photos are kept as-is."
+            title="Audits bedroom photo for Airbnb conflicts, then enhances all interior photos with professional AI."
           >
-            {aiStatus === "loading" ? (
-              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Processing...</>
-            ) : aiStatus === "done" ? (
-              <><Check className="h-3.5 w-3.5 mr-1.5 text-green-500" />Downloaded!</>
-            ) : aiStatus === "error" ? (
-              <><AlertCircle className="h-3.5 w-3.5 mr-1.5 text-red-500" />{aiError || "Error"}</>
-            ) : (
-              <><Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover + ZIP</>
-            )}
+            <Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover + ZIP
           </Button>
           <Button
             variant="default"
@@ -484,24 +904,9 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
         </div>
       </div>
 
-      {aiStatus === "loading" && (
-        <div className="text-xs text-muted-foreground bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-3 py-2 flex items-center gap-2">
-          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 animate-pulse" />
-          <span>
-            <strong className="text-purple-700 dark:text-purple-300">AI generation in progress</strong> — Claude is describing each interior photo, then generating a new luxury-style version. Exterior, pool, and community photos pass through unchanged. This takes 2–5 minutes.
-          </span>
-        </div>
-      )}
-      {aiStatus === "done" && processedCount > 0 && (
-        <div className="text-xs text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded px-3 py-2 flex items-center gap-2">
-          <Check className="h-3.5 w-3.5 flex-shrink-0" />
-          ZIP downloaded — {processedCount} AI-generated image{processedCount !== 1 ? "s" : ""} out of {totalCount} total photos.
-        </div>
-      )}
-
       <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
         {unit.photos.map((photo, idx) => {
-          const willBeProcessed = aiStatus === "loading" && isInteriorPhoto(photo.filename);
+          const willBeProcessed = false;
           const checkResult = checkResults[photo.filename];
           return (
             <div
@@ -607,11 +1012,12 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
         The first photo becomes the main listing image in Lodgify.
       </p>
     </div>
+    </>
   );
 }
 
 function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder }) {
-  const { status: aiStatus, errorMsg: aiError, triggerMakeover, processedCount, totalCount } = useAiMakeover();
+  const [showMakeoverModal, setShowMakeoverModal] = useState(false);
 
   const { data: fileData, isLoading: filesLoading } = useQuery<{ folder: string; files: string[] }>({
     queryKey: [`/api/photos/community-files?folder=${property.communityPhotoFolder}`],
@@ -627,19 +1033,30 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
     ? `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}&communityFolder=${property.communityPhotoFolder}&beginningPhotos=${encodeURIComponent(communityFiles.join(","))}&endPhotos=`
     : `/api/photos/zip-multi?folders=${unitFolders.join(",")}&name=${encodeURIComponent(property.propertyName)}`;
 
-  const handleAiMakeover = () => {
-    triggerMakeover({
-      folders: unitFolders,
-      communityFolder: property.communityPhotoFolder,
-      beginningPhotos: communityFiles,
-      endPhotos: [],
-      name: property.propertyName,
-    });
-  };
+  const unitsToAudit: AuditUnitInput[] = property.units.map(u => ({
+    id: u.id,
+    label: `${property.complexName} #${u.unitNumber}`,
+    photoFolder: u.photoFolder,
+    photos: u.photos,
+    bedrooms: u.bedrooms,
+    communityName: property.complexName,
+    location: property.address || "",
+  }));
 
   if (!property.communityPhotoFolder) return null;
 
   return (
+    <>
+      <MakeoverFlowModal
+        isOpen={showMakeoverModal}
+        onClose={() => setShowMakeoverModal(false)}
+        propertyName={property.propertyName}
+        folders={unitFolders}
+        communityFolder={property.communityPhotoFolder}
+        beginningPhotos={communityFiles}
+        endPhotos={[]}
+        unitsToAudit={unitsToAudit}
+      />
     <Card className="p-4 md:p-6">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <div>
@@ -655,20 +1072,11 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
           <Button
             variant="outline"
             size="sm"
-            onClick={handleAiMakeover}
-            disabled={aiStatus === "loading"}
+            onClick={() => setShowMakeoverModal(true)}
             data-testid="button-ai-makeover-all"
-            title="Reimagines interior rooms across all units in a modern luxury style. Community and exterior photos are kept as-is."
+            title="Audits bedroom photos for Airbnb conflicts, then enhances all interior photos with professional AI. Community and exterior photos are kept as-is."
           >
-            {aiStatus === "loading" ? (
-              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Processing all units...</>
-            ) : aiStatus === "done" ? (
-              <><Check className="h-3.5 w-3.5 mr-1.5 text-green-500" />Downloaded!</>
-            ) : aiStatus === "error" ? (
-              <><AlertCircle className="h-3.5 w-3.5 mr-1.5 text-red-500" />{aiError || "Error"}</>
-            ) : (
-              <><Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover All + ZIP</>
-            )}
+            <Wand2 className="h-3.5 w-3.5 mr-1.5" />AI Makeover All + ZIP
           </Button>
           <Button
             variant="default"
@@ -683,21 +1091,6 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
           </Button>
         </div>
       </div>
-      {aiStatus === "loading" && (
-        <div className="text-xs text-muted-foreground bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-3 py-2 mb-4 flex items-center gap-2">
-          <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 animate-pulse" />
-          <span>
-            <strong className="text-purple-700 dark:text-purple-300">AI generation in progress</strong> — Claude is describing each interior room photo across all units, then generating a new luxury-style version of each. Community and exterior photos pass through unchanged. This may take 5–10 minutes.
-          </span>
-        </div>
-      )}
-      {aiStatus === "done" && processedCount > 0 && (
-        <div className="text-xs text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded px-3 py-2 mb-4 flex items-center gap-2">
-          <Check className="h-3.5 w-3.5 flex-shrink-0" />
-          ZIP downloaded — {processedCount} AI-generated image{processedCount !== 1 ? "s" : ""} out of {totalCount} total photos across all units.
-        </div>
-      )}
-
       {filesLoading && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground py-4">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -746,6 +1139,7 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
         Download includes: community photos first, then all unit photos. Files are numbered sequentially for correct Lodgify upload order.
       </p>
     </Card>
+    </>
   );
 }
 
@@ -1071,7 +1465,7 @@ function PushRatesToLodgify({ pricing }: { pricing: PropertyPricing }) {
       year: rate.year,
       sellRate: totalSell,
       season: rate.season,
-      minStay: rate.season === "high" ? 7 : 5,
+      minStay: rate.season === "HIGH" ? 7 : 5,
     };
   }) || [];
 

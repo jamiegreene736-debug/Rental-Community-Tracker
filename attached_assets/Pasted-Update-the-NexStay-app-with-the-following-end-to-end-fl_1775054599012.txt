@@ -1,0 +1,56 @@
+Update the NexStay app with the following end-to-end flow triggered by the "AI Makeover All + Zip" button. The full sequence is: Step 1: Photo Audit → Step 2: AI Makeover → Step 3: ZIP Download.
+Also remove the standalone Photo Audit tab from the homepage navigation — it is now fully embedded inside this button flow.
+
+STEP 1 — Photo Audit
+When the "AI Makeover All + Zip" button is clicked, before anything else, run a Photo Audit automatically.
+
+From each unit, select one representative photo to audit — specifically the first available bedroom photo. If no bedroom photo is tagged, fall back to the first available interior photo. For a bundled 2-unit listing, this means a maximum of 2 photos checked total.
+Run a reverse image search on that one photo per unit to check whether it appears on any active Airbnb listing. Use SerpAPI's reverse image search endpoint (already configured in this project) and scan the results for any URLs containing airbnb.com. If SerpAPI does not support reverse image search, use the Google Custom Search API with image search enabled or Bing Visual Search API — whichever is easiest to configure.
+Display a results panel showing the audit outcome for each unit:
+
+🟢 Audit Passed ✓ — bedroom photo not found on Airbnb. Auto-advance to Step 2.
+🔴 Flagged — bedroom photo found on an Airbnb listing. Show a warning with the matching listing link if available, and display two buttons:
+
+Continue Anyway — skips to Step 2 despite the flag
+Find New Unit — triggers the replacement flow below
+
+
+
+
+Find New Unit flow (only activates if the user clicks that button):
+
+Use the community name, location, and bedroom count already stored in NexStay to scrape Zillow for a comparable replacement condo unit in the same area.
+Extract and pull the listing photos from the Zillow result.
+Replace the flagged unit's photos in NexStay with the newly scraped Zillow photos.
+Automatically re-run the Photo Audit on the new unit's bedroom photo.
+If it passes, proceed to Step 2 automatically.
+If it fails again, show the same two-button panel so the user can try again or continue anyway.
+
+
+
+
+STEP 2 — AI Makeover
+Once the audit passes or the user confirms to continue:
+
+Identify all interior photos for the unit(s) — bedrooms, living room, kitchen, bathrooms. Non-interior photos (exterior, pool, amenities) are passed through unchanged.
+Send each interior photo through the AI image enhancement API already configured in this project (Replicate, Stability AI, or equivalent). Apply a professional real estate enhancement — improved lighting, sharpened detail, warmer tones, and a clean staged interior look.
+Show a live progress UI that updates in real time as each photo is processed. Do not wait until all photos are done before showing progress. The UI should include:
+
+A progress bar showing "Processing photo X of Y…"
+A real-time thumbnail preview for each photo that updates as it completes, showing the before and after side by side
+A per-photo status label: Pending → Processing… → Done ✓
+
+
+
+
+STEP 3 — ZIP Download
+Once all interior photos have been AI-processed:
+
+Bundle all photos into a single ZIP file — AI-enhanced interior photos plus unchanged non-interior photos.
+Automatically trigger the ZIP download for the user.
+
+
+CLEANUP
+
+Remove the Photo Audit tab from the homepage navigation entirely. That functionality now lives exclusively inside the AI Makeover All + Zip button flow.
+The homepage should be cleaner with that tab gone.

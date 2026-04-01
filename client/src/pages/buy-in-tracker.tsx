@@ -333,18 +333,23 @@ type AirbnbProperty = {
   source?: "airbnb" | "vrbo" | "suite-paradise";
 };
 
+type SearchBucket = {
+  count: number;
+  totalResults: number;
+  properties: AirbnbProperty[];
+  error?: string;
+  searchUrl?: string;
+  vrboSearchUrl?: string;
+  note?: string;
+};
+
 type AirbnbSearchResults = {
   community: string;
   searchLocation: string;
   checkIn: string;
   checkOut: string;
   unitsNeeded: { bedrooms: number; count: number }[];
-  searches: Record<string, {
-    count: number;
-    totalResults: number;
-    properties: AirbnbProperty[];
-    error?: string;
-  }>;
+  searches: Record<string, SearchBucket>;
 };
 
 type OtherPlatformResults = {
@@ -352,18 +357,8 @@ type OtherPlatformResults = {
   checkIn: string;
   checkOut: string;
   unitsNeeded: { bedrooms: number; count: number }[];
-  vrbo: Record<string, {
-    count: number;
-    totalResults: number;
-    properties: AirbnbProperty[];
-    error?: string;
-  }>;
-  suiteParadise: Record<string, {
-    count: number;
-    totalResults: number;
-    properties: AirbnbProperty[];
-    error?: string;
-  }>;
+  vrbo: Record<string, SearchBucket>;
+  suiteParadise: Record<string, SearchBucket>;
 };
 
 const PLATFORM_LABELS: Record<string, { name: string; color: string; bookLabel: string }> = {

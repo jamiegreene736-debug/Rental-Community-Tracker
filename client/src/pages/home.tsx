@@ -600,11 +600,6 @@ export default function Home() {
                 Community Photos
               </Button>
             </Link>
-            <Link href="/photo-audit">
-              <Button variant="outline" data-testid="button-photo-audit">
-                Photo Audit
-              </Button>
-            </Link>
             <Link href="/availability-scanner">
               <Button variant="outline" data-testid="button-availability-scanner">
                 <CalendarSearch className="h-4 w-4 mr-2" />

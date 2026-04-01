@@ -156,6 +156,207 @@ async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Pr
   }
 }
 
+// ========== AI MAKEOVER JOB SYSTEM ==========
+interface MakeoverJobPhoto {
+  index: number;
+  zipName: string;
+  localPath: string;
+  servePath: string;
+  shouldProcess: boolean;
+  status: "pending" | "processing" | "done" | "failed";
+  resultBuffer?: Buffer;
+}
+interface MakeoverJob {
+  name: string;
+  status: "running" | "done" | "error";
+  photos: MakeoverJobPhoto[];
+  processedCount: number;
+  totalCount: number;
+  interiorCount: number;
+  zipBuffer?: Buffer;
+  error?: string;
+  listeners: Set<any>;
+  createdAt: number;
+}
+const makeoverJobs = new Map<string, MakeoverJob>();
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [id, job] of makeoverJobs) {
+    if (job.createdAt < cutoff) makeoverJobs.delete(id);
+  }
+}, 30 * 60 * 1000);
+
+function emitJobEvent(jobId: string, data: object) {
+  const job = makeoverJobs.get(jobId);
+  if (!job) return;
+  const line = `data: ${JSON.stringify(data)}\n\n`;
+  for (const res of job.listeners) { try { res.write(line); } catch (_) {} }
+}
+
+const INTERIOR_KW = ["living","bedroom","kitchen","dining","bathroom","lounge","family","master","bed","bath","office","room","interior","sofa","couch","great-room","great_room","greatroom","overview","detail","area","space","hallway","foyer","entry","loft"];
+const EXTERIOR_KW = ["pool","community","exterior","outside","beach","ocean","view","patio","balcony","garden","yard","front","aerial","court","tennis","hot-tub","hottub"];
+
+function isInteriorPhotoKw(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  if (EXTERIOR_KW.some(k => lower.includes(k))) return false;
+  return INTERIOR_KW.some(k => lower.includes(k));
+}
+
+function getFilenamePromptKw(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.includes("bedroom") || lower.includes("master") || lower.includes("bed"))
+    return "luxurious master bedroom, king bed with crisp white linens, coastal decor, bright natural light through large windows, modern furniture";
+  if (lower.includes("kitchen"))
+    return "modern vacation rental kitchen, white shaker cabinets, stainless steel appliances, quartz countertops, bright and clean, coastal style";
+  if (lower.includes("bathroom") || lower.includes("bath"))
+    return "luxury vacation rental bathroom, marble tiles, rainfall shower, modern fixtures, bright spa-like lighting";
+  if (lower.includes("living") || lower.includes("lounge") || lower.includes("great"))
+    return "elegant vacation rental living room, comfortable linen sofas, coastal modern decor, large windows with natural light, bright and airy";
+  if (lower.includes("dining"))
+    return "bright vacation rental dining room, wooden farmhouse table, upholstered chairs, pendant lighting, natural light";
+  if (lower.includes("loft"))
+    return "airy vacation rental loft space, comfortable seating, natural light from skylights, modern coastal decor";
+  return "luxury vacation rental interior, modern coastal style, bright natural light, high-end furniture, professional real estate photography";
+}
+
+async function describeWithClaudeKw(imageBuffer: Buffer, mimeType: string): Promise<string | null> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return null;
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-3-5-sonnet-20241022", max_tokens: 250,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: mimeType, data: imageBuffer.toString("base64") } },
+          { type: "text", text: "Describe this vacation rental interior for an AI image generation prompt. Focus on: room type, furniture style, color palette, lighting, and overall aesthetic. Be specific, under 180 words, no preamble." },
+        ]}],
+      }),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json() as any;
+    return (data.content?.[0]?.text as string) || null;
+  } catch { return null; }
+}
+
+async function generateWithStabilityKw(prompt: string): Promise<Buffer | null> {
+  const key = process.env.STABILITY_API_KEY;
+  if (!key) return null;
+  try {
+    const resp = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image", {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        text_prompts: [
+          { text: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K`, weight: 1 },
+          { text: "low quality, blurry, dark, cluttered, people, text, watermark, bad anatomy", weight: -1 },
+        ],
+        cfg_scale: 7, height: 1024, width: 1024, samples: 1, steps: 30,
+      }),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json() as any;
+    const b64 = data.artifacts?.[0]?.base64 as string | undefined;
+    return b64 ? Buffer.from(b64, "base64") : null;
+  } catch { return null; }
+}
+
+async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
+  const key = process.env.REPLICATE_API_KEY;
+  if (!key) return null;
+  try {
+    const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
+      body: JSON.stringify({
+        input: {
+          prompt: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K high resolution`,
+          negative_prompt: "low quality, blurry, dark, cluttered, people, text, watermark, deformed",
+          width: 1024, height: 1024, num_inference_steps: 25, guidance_scale: 7.5, scheduler: "K_EULER",
+        },
+      }),
+    });
+    if (!createResp.ok) return null;
+    const prediction = await createResp.json() as { id?: string; status: string; output?: string[]; error?: string };
+    if (prediction.status === "succeeded" && prediction.output?.length) {
+      const imgResp = await fetch(prediction.output[0]);
+      if (!imgResp.ok) return null;
+      return Buffer.from(await imgResp.arrayBuffer());
+    }
+    if (prediction.id) {
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+          headers: { "Authorization": `Bearer ${key}` },
+        });
+        const result = await pollResp.json() as { status: string; output?: string[]; error?: string };
+        if (result.status === "succeeded" && result.output?.length) {
+          const imgResp = await fetch(result.output[0]);
+          if (!imgResp.ok) return null;
+          return Buffer.from(await imgResp.arrayBuffer());
+        }
+        if (result.status === "failed") return null;
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+async function processPhotoWithAIKw(imageBuffer: Buffer, mimeType: string, filename: string): Promise<Buffer | null> {
+  const claudeDesc = await describeWithClaudeKw(imageBuffer, mimeType);
+  const prompt = claudeDesc || getFilenamePromptKw(filename);
+  console.log(`[makeover-job] ${filename} → prompt: ${prompt.substring(0, 80)}...`);
+  const stability = await generateWithStabilityKw(prompt);
+  if (stability) return stability;
+  return generateWithReplicateKw(prompt);
+}
+
+async function runMakeoverJob(jobId: string): Promise<void> {
+  const job = makeoverJobs.get(jobId);
+  if (!job) return;
+  try {
+    const zip = new JSZip();
+    for (const photo of job.photos) {
+      if (!fs.existsSync(photo.localPath)) {
+        photo.status = "failed";
+        emitJobEvent(jobId, { type: "photo_done", index: photo.index, status: "failed", hasResult: false, processedCount: job.processedCount });
+        continue;
+      }
+      const rawData = fs.readFileSync(photo.localPath);
+      const ext = path.extname(photo.localPath).toLowerCase();
+      const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
+      if (photo.shouldProcess) {
+        photo.status = "processing";
+        emitJobEvent(jobId, { type: "photo_start", index: photo.index, total: job.totalCount, zipName: photo.zipName, servePath: photo.servePath });
+        const result = await processPhotoWithAIKw(rawData, mimeType, photo.zipName);
+        if (result) {
+          photo.resultBuffer = result;
+          photo.status = "done";
+          job.processedCount++;
+          zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), result);
+        } else {
+          photo.status = "failed";
+          zip.file(photo.zipName, rawData);
+        }
+      } else {
+        photo.status = "done";
+        zip.file(photo.zipName, rawData);
+      }
+      emitJobEvent(jobId, { type: "photo_done", index: photo.index, status: photo.status, hasResult: !!photo.resultBuffer, processedCount: job.processedCount });
+    }
+    job.zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+    job.status = "done";
+    emitJobEvent(jobId, { type: "complete", processedCount: job.processedCount, totalCount: job.totalCount, interiorCount: job.interiorCount });
+  } catch (err: any) {
+    job.status = "error";
+    job.error = err.message;
+    emitJobEvent(jobId, { type: "error", message: err.message });
+  }
+  for (const res of job.listeners) { try { res.end(); } catch (_) {} }
+  job.listeners.clear();
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -568,6 +769,132 @@ export async function registerRoutes(
       "X-Photos-Failed": String(failed),
     });
     res.send(zipBuffer);
+  });
+
+  // ========== JOB-BASED AI MAKEOVER (SSE progress) ==========
+  app.post("/api/photos/ai-makeover/start", async (req, res) => {
+    const { folders, communityFolder, beginningPhotos, endPhotos, name } = req.body as {
+      folders: string[];
+      communityFolder?: string;
+      beginningPhotos?: string[];
+      endPhotos?: string[];
+      name?: string;
+    };
+    if (!folders || folders.length === 0) return res.status(400).json({ error: "No folders provided" });
+
+    const photosBase = path.join(process.cwd(), "client", "public", "photos");
+    const allPhotos: MakeoverJobPhoto[] = [];
+    let globalIndex = 0;
+
+    if (communityFolder && beginningPhotos && beginningPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of beginningPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        const paddedIndex = String(globalIndex + 1).padStart(3, "0");
+        allPhotos.push({ index: globalIndex++, zipName: `${paddedIndex}-community-${baseName}${ext}`, localPath: path.join(communityDir, safePhoto), servePath: `/photos/${communityFolder}/${safePhoto}`, shouldProcess: false, status: "pending" });
+      }
+    }
+    for (const folder of folders) {
+      const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, "");
+      const photosDir = path.join(photosBase, safeFolder);
+      if (!fs.existsSync(photosDir)) continue;
+      const files = fs.readdirSync(photosDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f)).sort();
+      for (const file of files) {
+        const ext = path.extname(file);
+        const baseName = path.basename(file, ext).replace(/^\d+-/, "");
+        const paddedIndex = String(globalIndex + 1).padStart(3, "0");
+        allPhotos.push({ index: globalIndex++, zipName: `${paddedIndex}-${safeFolder}-${baseName}${ext}`, localPath: path.join(photosDir, file), servePath: `/photos/${safeFolder}/${file}`, shouldProcess: isInteriorPhotoKw(file), status: "pending" });
+      }
+    }
+    if (communityFolder && endPhotos && endPhotos.length > 0) {
+      const communityDir = path.join(photosBase, communityFolder);
+      for (const photo of endPhotos) {
+        const safePhoto = photo.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const ext = path.extname(safePhoto);
+        const baseName = path.basename(safePhoto, ext).replace(/^\d+-/, "");
+        const paddedIndex = String(globalIndex + 1).padStart(3, "0");
+        allPhotos.push({ index: globalIndex++, zipName: `${paddedIndex}-community-${baseName}${ext}`, localPath: path.join(photosBase, communityFolder, safePhoto), servePath: `/photos/${communityFolder}/${safePhoto}`, shouldProcess: false, status: "pending" });
+      }
+    }
+
+    const interiorCount = allPhotos.filter(p => p.shouldProcess).length;
+    const jobId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const job: MakeoverJob = { name: name || "ai-makeover", status: "running", photos: allPhotos, processedCount: 0, totalCount: allPhotos.length, interiorCount, listeners: new Set(), createdAt: Date.now() };
+    makeoverJobs.set(jobId, job);
+    runMakeoverJob(jobId).catch(err => {
+      const j = makeoverJobs.get(jobId);
+      if (j) { j.status = "error"; j.error = err.message; }
+    });
+    res.json({ jobId, totalCount: allPhotos.length, interiorCount, photos: allPhotos.map(p => ({ index: p.index, zipName: p.zipName, servePath: p.servePath, isInterior: p.shouldProcess })) });
+  });
+
+  app.get("/api/photos/ai-makeover/events/:jobId", (req, res) => {
+    const { jobId } = req.params;
+    const job = makeoverJobs.get(jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    for (const photo of job.photos) {
+      if (photo.status !== "pending") {
+        res.write(`data: ${JSON.stringify({ type: "photo_done", index: photo.index, status: photo.status, hasResult: !!photo.resultBuffer, processedCount: job.processedCount })}\n\n`);
+      }
+    }
+    if (job.status === "done") {
+      res.write(`data: ${JSON.stringify({ type: "complete", processedCount: job.processedCount, totalCount: job.totalCount, interiorCount: job.interiorCount })}\n\n`);
+      res.end(); return;
+    }
+    if (job.status === "error") {
+      res.write(`data: ${JSON.stringify({ type: "error", message: job.error })}\n\n`);
+      res.end(); return;
+    }
+    job.listeners.add(res);
+    const keepAlive = setInterval(() => { try { res.write(":keep-alive\n\n"); } catch (_) {} }, 15000);
+    req.on("close", () => { clearInterval(keepAlive); job.listeners.delete(res); });
+  });
+
+  app.get("/api/photos/ai-makeover/result/:jobId/photo/:index", (req, res) => {
+    const { jobId, index } = req.params;
+    const job = makeoverJobs.get(jobId);
+    if (!job) return res.status(404).end();
+    const photo = job.photos[parseInt(index, 10)];
+    if (!photo || !photo.resultBuffer) return res.status(404).end();
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.send(photo.resultBuffer);
+  });
+
+  app.get("/api/photos/ai-makeover/download/:jobId", (req, res) => {
+    const { jobId } = req.params;
+    const job = makeoverJobs.get(jobId);
+    if (!job || !job.zipBuffer) return res.status(job ? 202 : 404).json({ error: job ? "Still processing" : "Not found" });
+    const safeName = job.name.replace(/[^a-zA-Z0-9_-]/g, "");
+    res.set({ "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${safeName}-ai-makeover.zip"`, "Content-Length": String(job.zipBuffer.length) });
+    res.send(job.zipBuffer);
+  });
+
+  app.get("/api/photos/find-replacement", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SearchAPI not configured" });
+    const { communityName, location, bedrooms } = req.query as Record<string, string>;
+    if (!communityName || !location) return res.status(400).json({ error: "communityName and location required" });
+    try {
+      const bedroomsLabel = bedrooms ? `${bedrooms} bedroom ` : "";
+      const query = `${bedroomsLabel}${communityName} ${location} vacation rental condo interior`;
+      const params = new URLSearchParams({ engine: "google_images", q: query, api_key: apiKey, num: "20", safe: "active" });
+      const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+      if (!response.ok) return res.status(500).json({ error: "Image search failed" });
+      const data = await response.json() as any;
+      const images = (data.images_results || [])
+        .filter((img: any) => { const src = (img.original || img.thumbnail || "").toLowerCase(); return !src.includes("airbnb") && !src.includes("vrbo") && !src.includes("booking.com") && src; })
+        .slice(0, 12)
+        .map((img: any) => ({ url: img.original || img.thumbnail, thumbnail: img.thumbnail || img.original, label: img.title || "Replacement photo", source: img.source || "" }));
+      res.json({ images });
+    } catch (err: any) { res.status(500).json({ error: "Find replacement failed", message: err.message }); }
   });
 
   app.get("/api/lodgify/properties", async (_req, res) => {
