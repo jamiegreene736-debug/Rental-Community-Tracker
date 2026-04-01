@@ -2447,7 +2447,7 @@ export async function registerRoutes(
 
     // Run Google Lens reverse image search via SearchAPI
     const searchResp = await fetch(
-      `https://www.searchapi.io/api/v1/search?engine=google_lens&image_url=${encodeURIComponent(publicUrl)}&api_key=${searchApiKey}`,
+      `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(publicUrl)}&api_key=${searchApiKey}`,
     );
 
     if (!searchResp.ok) {
@@ -2582,7 +2582,7 @@ export async function registerRoutes(
 
     try {
       const resp = await fetch(
-        `https://www.searchapi.io/api/v1/search?engine=google_lens&image_url=${encodeURIComponent(imageUrl)}&api_key=${searchApiKey}`,
+        `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${searchApiKey}`,
       );
       if (!resp.ok) {
         const errText = await resp.text();
