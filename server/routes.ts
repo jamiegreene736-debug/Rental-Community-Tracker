@@ -264,8 +264,8 @@ async function generateWithStabilityKw(prompt: string): Promise<Buffer | null> {
 }
 
 async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
-  const key = process.env.REPLICATE_API_TOKEN;
-  if (!key) { console.error("[sdxl] No REPLICATE_API_TOKEN set"); return null; }
+  const key = process.env.REPLICATE_API_KEY;
+  if (!key) { console.error("[sdxl] No REPLICATE_API_KEY set"); return null; }
   try {
     const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
       method: "POST",
@@ -333,7 +333,7 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
 }
 
 async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
-  const key = process.env.REPLICATE_API_TOKEN;
+  const key = process.env.REPLICATE_API_KEY;
   if (!key) return null;
   try {
     const b64 = imageBuffer.toString("base64");
@@ -556,12 +556,12 @@ export async function registerRoutes(
   // AI photo makeover: uses Claude vision to describe each interior photo, then generates
   // a new luxury-style version via Stability AI or Replicate SDXL. Returns a ZIP.
   app.post("/api/photos/ai-makeover", async (req, res) => {
-    const replicateKey = process.env.REPLICATE_API_TOKEN;
+    const replicateKey = process.env.REPLICATE_API_KEY;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const stabilityKey = process.env.STABILITY_API_KEY;
 
     if (!replicateKey && !stabilityKey) {
-      return res.status(500).json({ error: "No AI image generation API key configured (need REPLICATE_API_TOKEN or STABILITY_API_KEY)" });
+      return res.status(500).json({ error: "No AI image generation API key configured (need REPLICATE_API_KEY or STABILITY_API_KEY)" });
     }
 
     const { folders, communityFolder, beginningPhotos, endPhotos, name } = req.body as {
@@ -2445,9 +2445,9 @@ export async function registerRoutes(
       return res.status(400).json({ error: "Provide either folder+filename (local photo) or imageUrl (external photo)" });
     }
 
-    // Run Google Reverse Image Search via SearchAPI
+    // Run Google Lens reverse image search via SearchAPI
     const searchResp = await fetch(
-      `https://www.searchapi.io/api/v1/search?engine=google_reverse_image&image_url=${encodeURIComponent(publicUrl)}&api_key=${searchApiKey}`,
+      `https://www.searchapi.io/api/v1/search?engine=google_lens&image_url=${encodeURIComponent(publicUrl)}&api_key=${searchApiKey}`,
     );
 
     if (!searchResp.ok) {
@@ -2468,6 +2468,7 @@ export async function registerRoutes(
     const found: { name: string; url: string }[] = [];
 
     const allResults = [
+      ...(searchData.visual_matches || []),
       ...(searchData.organic_results || []),
       ...(searchData.image_results || []),
       ...(searchData.inline_images || []),
@@ -2581,7 +2582,7 @@ export async function registerRoutes(
 
     try {
       const resp = await fetch(
-        `https://www.searchapi.io/api/v1/search?engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}&api_key=${searchApiKey}`,
+        `https://www.searchapi.io/api/v1/search?engine=google_lens&image_url=${encodeURIComponent(imageUrl)}&api_key=${searchApiKey}`,
       );
       if (!resp.ok) {
         const errText = await resp.text();
@@ -2590,6 +2591,7 @@ export async function registerRoutes(
       const data = await resp.json() as any;
       const matches: Array<{ platform: string; url: string }> = [];
       const allLinks = [
+        ...(data.visual_matches || []),
         ...(data.organic_results || []),
         ...(data.image_results || []),
       ] as Array<{ link: string; title?: string; source?: string }>;
