@@ -460,7 +460,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
           </DialogTitle>
           <DialogDescription>
             {step === "audit" && "Checking if your bedroom photos appear on any active Airbnb listing..."}
-            {step === "makeover" && `Enhancing ${interiorCount} interior photos with professional AI. Community and exterior photos pass through unchanged.`}
+            {step === "makeover" && `AI-enhancing ${interiorCount} interior photos and upscaling all ${totalCount} photos to 2× resolution.`}
             {step === "done" && `${processedCount} interior photos AI-enhanced and bundled. Your ZIP has been downloaded.`}
           </DialogDescription>
         </DialogHeader>

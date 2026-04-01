@@ -393,8 +393,10 @@ async function runMakeoverJob(jobId: string): Promise<void> {
           zip.file(photo.zipName, rawData);
         }
       } else {
+        // Upscale community/exterior photos too — same 2x Real-ESRGAN pass
+        const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
         photo.status = "done";
-        zip.file(photo.zipName, rawData);
+        zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), upscaled || rawData);
       }
       emitJobEvent(jobId, { type: "photo_done", index: photo.index, status: photo.status, hasResult: !!photo.resultBuffer, processedCount: job.processedCount });
     }
