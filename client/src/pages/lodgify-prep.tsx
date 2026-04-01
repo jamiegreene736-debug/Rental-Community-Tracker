@@ -657,17 +657,31 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
         {/* ── STEP 3: DONE ── */}
         {step === "done" && (
           <div className="space-y-3 mt-2">
-            <div className="flex items-center gap-3 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
-              <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/50 flex items-center justify-center flex-shrink-0">
-                <Check className="h-5 w-5 text-green-600 dark:text-green-400" />
+            {processedCount === 0 && interiorCount > 0 ? (
+              <div className="flex items-start gap-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
+                <div className="h-10 w-10 rounded-full bg-amber-100 dark:bg-amber-900/50 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <span className="text-amber-600 dark:text-amber-400 font-bold text-sm">!</span>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">ZIP Downloaded — AI Enhancement Failed</p>
+                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                    {totalCount} original photos bundled (renamed in correct order). AI enhancement couldn't run — the Replicate API key appears to be invalid or expired. Update the <strong>REPLICATE_API_KEY</strong> secret and redeploy to enable AI generation.
+                  </p>
+                </div>
               </div>
-              <div>
-                <p className="text-sm font-semibold text-green-800 dark:text-green-200">ZIP Downloaded!</p>
-                <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
-                  {processedCount} interior photo{processedCount !== 1 ? "s" : ""} AI-enhanced. {totalCount} total photos bundled in the ZIP.
-                </p>
+            ) : (
+              <div className="flex items-center gap-3 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
+                <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/50 flex items-center justify-center flex-shrink-0">
+                  <Check className="h-5 w-5 text-green-600 dark:text-green-400" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-green-800 dark:text-green-200">ZIP Downloaded!</p>
+                  <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                    {processedCount} of {interiorCount} interior photo{interiorCount !== 1 ? "s" : ""} AI-enhanced. {totalCount} total photos bundled in the ZIP.
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
             <Button size="sm" variant="outline" onClick={onClose} data-testid="button-close-makeover-modal">
               Close
             </Button>
