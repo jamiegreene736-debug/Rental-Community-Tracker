@@ -264,12 +264,12 @@ async function generateWithStabilityKw(prompt: string): Promise<Buffer | null> {
 }
 
 async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
-  const key = process.env.REPLICATE_API_KEY;
+  const key = process.env.REPLICATE_API_TOKEN;
   if (!key) return null;
   try {
     const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
+      headers: { "Authorization": `Token ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
       body: JSON.stringify({
         input: {
           prompt: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K high resolution`,
@@ -292,7 +292,7 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 2000));
         const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-          headers: { "Authorization": `Bearer ${key}` },
+          headers: { "Authorization": `Token ${key}` },
         });
         const result = await pollResp.json() as { status: string; output?: string[]; error?: string };
         if (result.status === "succeeded" && result.output?.length) {
@@ -308,14 +308,14 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
 }
 
 async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
-  const key = process.env.REPLICATE_API_KEY;
+  const key = process.env.REPLICATE_API_TOKEN;
   if (!key) return null;
   try {
     const b64 = imageBuffer.toString("base64");
     const dataUri = `data:${mimeType};base64,${b64}`;
     const createResp = await fetch("https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
+      headers: { "Authorization": `Token ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
       body: JSON.stringify({ input: { image: dataUri, scale: 2, face_enhance: false } }),
     });
     if (!createResp.ok) {
@@ -337,7 +337,7 @@ async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Pr
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 3000));
         const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-          headers: { "Authorization": `Bearer ${key}` },
+          headers: { "Authorization": `Token ${key}` },
         });
         const result = await pollResp.json() as { status: string; output?: string; error?: string };
         if (result.status === "succeeded" && result.output) {
@@ -531,12 +531,12 @@ export async function registerRoutes(
   // AI photo makeover: uses Claude vision to describe each interior photo, then generates
   // a new luxury-style version via Stability AI or Replicate SDXL. Returns a ZIP.
   app.post("/api/photos/ai-makeover", async (req, res) => {
-    const replicateKey = process.env.REPLICATE_API_KEY;
+    const replicateKey = process.env.REPLICATE_API_TOKEN;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const stabilityKey = process.env.STABILITY_API_KEY;
 
     if (!replicateKey && !stabilityKey) {
-      return res.status(500).json({ error: "No AI image generation API key configured (need REPLICATE_API_KEY or STABILITY_API_KEY)" });
+      return res.status(500).json({ error: "No AI image generation API key configured (need REPLICATE_API_TOKEN or STABILITY_API_KEY)" });
     }
 
     const { folders, communityFolder, beginningPhotos, endPhotos, name } = req.body as {

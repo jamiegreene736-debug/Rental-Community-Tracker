@@ -665,7 +665,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
                 <div>
                   <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">ZIP Downloaded — AI Enhancement Failed</p>
                   <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
-                    {totalCount} original photos bundled (renamed in correct order). AI enhancement couldn't run — the Replicate API key appears to be invalid or expired. Update the <strong>REPLICATE_API_KEY</strong> secret and redeploy to enable AI generation.
+                    {totalCount} original photos bundled (renamed in correct order). AI enhancement couldn't run — the Replicate API key may be invalid or expired. Update the <strong>REPLICATE_API_TOKEN</strong> secret and redeploy to enable AI generation.
                   </p>
                 </div>
               </div>
