@@ -200,14 +200,14 @@ function AmenitiesChecklist({ propertyId }: { propertyId: number }) {
   );
 }
 
-// Same keyword logic as server — determines which photos get AI generation
-const INTERIOR_KEYWORDS = ["living", "bedroom", "kitchen", "dining", "bathroom", "lounge", "family", "master", "bed", "bath", "office", "room", "interior", "sofa", "couch", "great-room", "great_room", "greatroom", "overview", "detail", "area", "space", "hallway", "foyer", "entry", "loft"];
-const EXTERIOR_KEYWORDS = ["pool", "community", "exterior", "outside", "beach", "ocean", "view", "patio", "balcony", "garden", "yard", "front", "aerial", "court", "tennis", "hot-tub", "hottub"];
+// Matches server logic — any unit photo without exterior keywords is treated as interior.
+// Generic names like photo_00.jpg default to interior because community/exterior photos
+// are already kept in their own community folder (never in unit folders).
+const EXTERIOR_KEYWORDS = ["pool", "community", "exterior", "outside", "beach", "ocean", "view", "patio", "balcony", "garden", "yard", "front", "aerial", "court", "tennis", "hot-tub", "hottub", "resort", "grounds", "walkway", "entrance", "driveway"];
 
 function isInteriorPhoto(filename: string): boolean {
   const lower = filename.toLowerCase();
-  if (EXTERIOR_KEYWORDS.some(k => lower.includes(k))) return false;
-  return INTERIOR_KEYWORDS.some(k => lower.includes(k));
+  return !EXTERIOR_KEYWORDS.some(k => lower.includes(k));
 }
 
 type FlowStep = "audit" | "makeover" | "done";

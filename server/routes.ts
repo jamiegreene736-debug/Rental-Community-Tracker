@@ -193,13 +193,14 @@ function emitJobEvent(jobId: string, data: object) {
   for (const res of job.listeners) { try { res.write(line); } catch (_) {} }
 }
 
-const INTERIOR_KW = ["living","bedroom","kitchen","dining","bathroom","lounge","family","master","bed","bath","office","room","interior","sofa","couch","great-room","great_room","greatroom","overview","detail","area","space","hallway","foyer","entry","loft"];
-const EXTERIOR_KW = ["pool","community","exterior","outside","beach","ocean","view","patio","balcony","garden","yard","front","aerial","court","tennis","hot-tub","hottub"];
+const EXTERIOR_KW = ["pool","community","exterior","outside","beach","ocean","view","patio","balcony","garden","yard","front","aerial","court","tennis","hot-tub","hottub","resort","grounds","walkway","entrance","driveway"];
 
+// Any unit photo that isn't obviously exterior is treated as interior (makeover candidate).
+// Generic filenames like photo_00.jpg default to interior since community/exterior photos
+// are always served from the communityFolder (shouldProcess=false) not unit folders.
 function isInteriorPhotoKw(filename: string): boolean {
   const lower = filename.toLowerCase();
-  if (EXTERIOR_KW.some(k => lower.includes(k))) return false;
-  return INTERIOR_KW.some(k => lower.includes(k));
+  return !EXTERIOR_KW.some(k => lower.includes(k));
 }
 
 function getFilenamePromptKw(filename: string): string {
@@ -303,13 +304,65 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
   } catch { return null; }
 }
 
+async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
+  const key = process.env.REPLICATE_API_KEY;
+  if (!key) return null;
+  try {
+    const b64 = imageBuffer.toString("base64");
+    const dataUri = `data:${mimeType};base64,${b64}`;
+    const createResp = await fetch("https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
+      body: JSON.stringify({ input: { image: dataUri, scale: 2, face_enhance: false } }),
+    });
+    if (!createResp.ok) {
+      console.error("[upscale] Replicate Real-ESRGAN error:", createResp.status, await createResp.text());
+      return null;
+    }
+    const prediction = await createResp.json() as { id?: string; status: string; output?: string; error?: string };
+    const resolveOutput = async (p: typeof prediction): Promise<Buffer | null> => {
+      if (p.status === "succeeded" && p.output) {
+        const imgResp = await fetch(p.output);
+        if (!imgResp.ok) return null;
+        return Buffer.from(await imgResp.arrayBuffer());
+      }
+      return null;
+    };
+    const quick = await resolveOutput(prediction);
+    if (quick) return quick;
+    if (prediction.id) {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const pollResp = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+          headers: { "Authorization": `Bearer ${key}` },
+        });
+        const result = await pollResp.json() as { status: string; output?: string; error?: string };
+        if (result.status === "succeeded" && result.output) {
+          const imgResp = await fetch(result.output);
+          if (!imgResp.ok) return null;
+          return Buffer.from(await imgResp.arrayBuffer());
+        }
+        if (result.status === "failed") { console.error("[upscale] Real-ESRGAN failed:", result.error); return null; }
+      }
+    }
+    return null;
+  } catch (err) { console.error("[upscale] exception:", err); return null; }
+}
+
 async function processPhotoWithAIKw(imageBuffer: Buffer, mimeType: string, filename: string): Promise<Buffer | null> {
   const claudeDesc = await describeWithClaudeKw(imageBuffer, mimeType);
   const prompt = claudeDesc || getFilenamePromptKw(filename);
   console.log(`[makeover-job] ${filename} → prompt: ${prompt.substring(0, 80)}...`);
-  const stability = await generateWithStabilityKw(prompt);
-  if (stability) return stability;
-  return generateWithReplicateKw(prompt);
+  const generated = await (async () => {
+    const stability = await generateWithStabilityKw(prompt);
+    if (stability) return stability;
+    return generateWithReplicateKw(prompt);
+  })();
+  if (!generated) return null;
+  // Upscale the generated image 2x for higher resolution output
+  console.log(`[makeover-job] ${filename} → upscaling 2x...`);
+  const upscaled = await upscaleWithReplicateKw(generated, "image/jpeg");
+  return upscaled || generated;
 }
 
 async function runMakeoverJob(jobId: string): Promise<void> {
