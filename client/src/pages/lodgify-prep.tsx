@@ -264,6 +264,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
   const [interiorCount, setInteriorCount] = useState(0);
   const [makeoverError, setMakeoverError] = useState<string | null>(null);
   const [makeoverDone, setMakeoverDone] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
   const findBedroomPhoto = (unitPhotos: Array<{ filename: string; label: string }>) => {
@@ -370,7 +371,10 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
           es.close();
         }
       };
-      es.onerror = () => es.close();
+      es.onerror = () => {
+        es.close();
+        setConnectionLost(true);
+      };
     } catch (err: any) {
       setMakeoverError(err.message || "Failed to start");
     }
@@ -448,6 +452,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
       setInteriorCount(0);
       setMakeoverError(null);
       setMakeoverDone(false);
+      setConnectionLost(false);
       runAudit();
     } else {
       esRef.current?.close();
@@ -458,10 +463,10 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
   const hasFlags = auditResults.some(r => r.status === "flagged");
   const doneCount = photos.filter(p => p.status === "done" || p.status === "failed").length;
   const processingIdx = photos.findIndex(p => p.status === "processing");
-  const interiorPhotos = photos.filter(p => p.isInterior);
+  const allPhotosForDisplay = photos.filter(p => p.isInterior);
 
   const STEPS: FlowStep[] = ["audit", "makeover", "done"];
-  const stepLabels = { audit: "Photo Audit", makeover: "AI Makeover", done: "Complete" };
+  const stepLabels = { audit: "Photo Audit", makeover: "Upscale", done: "Complete" };
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -484,15 +489,15 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
             ))}
           </div>
           <DialogTitle>
-            {step === "audit" ? "Step 1: Photo Audit" : step === "makeover" ? "Step 2: AI Makeover" : "All Done!"}
+            {step === "audit" ? "Step 1: Photo Audit" : step === "makeover" ? "Step 2: 2× Upscaling" : "All Done!"}
           </DialogTitle>
           <DialogDescription>
             {step === "audit" && "Checking if your bedroom photos appear on any active Airbnb listing..."}
-            {step === "makeover" && `AI-enhancing ${interiorCount} interior photos and upscaling all ${totalCount} photos to 2× resolution.`}
+            {step === "makeover" && `Upscaling all ${totalCount} photos to 2× resolution using Real-ESRGAN. Your real photos are enhanced, not replaced.`}
             {step === "done" && (
-              processedCount === 0 && interiorCount > 0
-                ? `ZIP downloaded with ${totalCount} original photos — AI enhancement couldn't run (Replicate API key may be invalid or expired).`
-                : `${processedCount} of ${interiorCount} interior photos AI-enhanced. ZIP downloaded with all ${totalCount} photos.`
+              processedCount === 0
+                ? `ZIP downloaded with ${totalCount} original photos — upscaling couldn't run (Replicate API key may be invalid).`
+                : `${processedCount} of ${totalCount} photos upscaled 2×. ZIP downloaded with all ${totalCount} photos.`
             )}
           </DialogDescription>
         </DialogHeader>
@@ -636,54 +641,69 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
                 <div className="space-y-1.5">
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>
-                      {processingIdx >= 0
-                        ? `Processing interior photo ${doneCount + 1} of ${interiorCount}…`
+                      {connectionLost
+                        ? `Connection lost after photo ${doneCount} — ZIP may still be ready`
+                        : processingIdx >= 0
+                        ? `Upscaling photo ${doneCount + 1} of ${totalCount}…`
                         : makeoverDone
-                        ? `Complete — ${processedCount} interior photos enhanced`
-                        : interiorCount > 0 ? "Starting AI enhancement…" : "Building ZIP…"}
+                        ? `Complete — ${processedCount} photos upscaled 2×`
+                        : totalCount > 0 ? "Starting upscaling job…" : "Building ZIP…"}
                     </span>
-                    <span>{Math.min(doneCount, interiorCount)}/{interiorCount}</span>
+                    <span>{doneCount}/{totalCount}</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full overflow-hidden">
                     <div className="h-full bg-purple-500 transition-all duration-500"
-                      style={{ width: `${interiorCount > 0 ? (Math.min(doneCount, interiorCount) / interiorCount) * 100 : 0}%` }} />
+                      style={{ width: `${totalCount > 0 ? (doneCount / totalCount) * 100 : 0}%` }} />
                   </div>
                 </div>
 
-                {interiorPhotos.length > 0 && (
+                {connectionLost && jobId && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 p-3 space-y-2">
+                    <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                      Live connection dropped — the job may still be running on the server.
+                    </p>
+                    <Button size="sm" variant="outline" className="h-7 text-xs"
+                      onClick={() => triggerDownload(jobId, propertyName)}
+                      data-testid="button-manual-download">
+                      <Download className="h-3 w-3 mr-1.5" />Download ZIP (what's ready so far)
+                    </Button>
+                  </div>
+                )}
+
+                {allPhotosForDisplay.length > 0 && (
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">Interior Photos — Before / After</p>
+                    <p className="text-xs font-medium text-muted-foreground">Interior Photos — Before / After (2× Upscaled)</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-72 overflow-y-auto pr-1">
-                      {interiorPhotos.map(p => (
+                      {allPhotosForDisplay.map(p => (
                         <div key={p.index} className="space-y-1" data-testid={`photo-makeover-${p.index}`}>
                           <div className="flex gap-1">
                             <div className="w-1/2">
                               <div className="aspect-square bg-muted rounded overflow-hidden">
                                 {p.servePath && <img src={p.servePath} alt="Before" className="w-full h-full object-cover" />}
                               </div>
-                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">Before</p>
+                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">Original</p>
                             </div>
                             <div className="w-1/2">
                               <div className="aspect-square bg-muted rounded overflow-hidden relative">
                                 {p.status === "processing" && (
                                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-purple-900/50">
                                     <Loader2 className="h-4 w-4 text-purple-200 animate-spin" />
-                                    <span className="text-[9px] text-purple-200 mt-0.5">AI</span>
+                                    <span className="text-[9px] text-purple-200 mt-0.5">↑2×</span>
                                   </div>
                                 )}
                                 {p.hasResult && jobId && (
                                   <img src={`/api/photos/ai-makeover/result/${jobId}/photo/${p.index}`}
-                                    alt="After" className="w-full h-full object-cover" />
+                                    alt="Upscaled" className="w-full h-full object-cover" />
                                 )}
                               </div>
-                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">After</p>
+                              <p className="text-[9px] text-muted-foreground text-center mt-0.5">Upscaled</p>
                             </div>
                           </div>
                           <div className="text-center">
                             {p.status === "pending" && <span className="text-[10px] text-muted-foreground">Pending</span>}
                             {p.status === "processing" && (
                               <span className="text-[10px] text-purple-500 flex items-center justify-center gap-0.5">
-                                <Loader2 className="h-2.5 w-2.5 animate-spin" /> Processing…
+                                <Loader2 className="h-2.5 w-2.5 animate-spin" /> Upscaling…
                               </span>
                             )}
                             {p.status === "done" && (
@@ -701,7 +721,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
 
                 {!jobId && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Starting AI makeover job…
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Starting upscaling job…
                   </div>
                 )}
               </>
@@ -712,15 +732,15 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
         {/* ── STEP 3: DONE ── */}
         {step === "done" && (
           <div className="space-y-3 mt-2">
-            {processedCount === 0 && interiorCount > 0 ? (
+            {processedCount === 0 ? (
               <div className="flex items-start gap-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
                 <div className="h-10 w-10 rounded-full bg-amber-100 dark:bg-amber-900/50 flex items-center justify-center flex-shrink-0 mt-0.5">
                   <span className="text-amber-600 dark:text-amber-400 font-bold text-sm">!</span>
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">ZIP Downloaded — AI Enhancement Failed</p>
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">ZIP Downloaded — Upscaling Failed</p>
                   <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
-                    {totalCount} original photos bundled (renamed in correct order). AI enhancement couldn't run — the Replicate API key may be invalid or expired. Update the <strong>REPLICATE_API_KEY</strong> secret and redeploy to enable AI generation.
+                    {totalCount} original photos bundled (renamed in correct order). Upscaling couldn't run — the Replicate API key may be invalid or expired. Update the <strong>REPLICATE_API_KEY</strong> secret and redeploy to enable upscaling.
                   </p>
                 </div>
               </div>
@@ -732,7 +752,7 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
                 <div>
                   <p className="text-sm font-semibold text-green-800 dark:text-green-200">ZIP Downloaded!</p>
                   <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
-                    {processedCount} of {interiorCount} interior photo{interiorCount !== 1 ? "s" : ""} AI-enhanced. {totalCount} total photos bundled in the ZIP.
+                    {processedCount} of {totalCount} photo{totalCount !== 1 ? "s" : ""} upscaled 2× with Real-ESRGAN. All {totalCount} photos bundled in the ZIP.
                   </p>
                 </div>
               </div>

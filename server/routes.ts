@@ -432,25 +432,19 @@ async function runMakeoverJob(jobId: string): Promise<void> {
       const rawData = fs.readFileSync(photo.localPath);
       const ext = path.extname(photo.localPath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
-      if (photo.shouldProcess) {
-        photo.status = "processing";
-        emitJobEvent(jobId, { type: "photo_start", index: photo.index, total: job.totalCount, zipName: photo.zipName, servePath: photo.servePath });
-        const result = await processPhotoWithAIKw(rawData, mimeType, photo.zipName);
-        if (result) {
-          photo.resultBuffer = result;
-          photo.status = "done";
-          job.processedCount++;
-          zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), result);
-        } else {
-          photo.status = "failed";
-          zip.file(photo.zipName, rawData);
-        }
-      } else {
-        // Upscale community/exterior photos too — same 2x Real-ESRGAN pass
-        const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
-        photo.status = "done";
-        zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), upscaled || rawData);
-      }
+
+      // Upscale every photo (interior and exterior) with Real-ESRGAN 2x.
+      // This enhances the real photos without replacing their content.
+      photo.status = "processing";
+      emitJobEvent(jobId, { type: "photo_start", index: photo.index, total: job.totalCount, zipName: photo.zipName, servePath: photo.servePath });
+      console.log(`[makeover-job] ${photo.zipName} → upscaling 2x (Real-ESRGAN)...`);
+      const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
+      const finalBuffer = upscaled || rawData;
+      photo.resultBuffer = upscaled || undefined;
+      photo.status = "done";
+      if (upscaled) job.processedCount++;
+      zip.file(photo.zipName.replace(/\.(jpg|jpeg|png)$/i, ".jpg"), finalBuffer);
+
       emitJobEvent(jobId, { type: "photo_done", index: photo.index, status: photo.status, hasResult: !!photo.resultBuffer, processedCount: job.processedCount });
     }
     job.zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
