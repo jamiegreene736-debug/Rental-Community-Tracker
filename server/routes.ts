@@ -283,29 +283,31 @@ async function replicatePostWithRetry(url: string, key: string, body: object, la
 
 async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
   const key = process.env.REPLICATE_API_KEY;
-  if (!key) { console.error("[sdxl] No REPLICATE_API_KEY set"); return null; }
+  if (!key) { console.error("[flux] No REPLICATE_API_KEY set"); return null; }
   try {
     const createResp = await replicatePostWithRetry(
-      "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions",
+      "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
       key,
       {
         input: {
-          prompt: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K high resolution`,
-          negative_prompt: "low quality, blurry, dark, cluttered, people, text, watermark, deformed",
-          width: 1024, height: 1024, num_inference_steps: 25, guidance_scale: 7.5, scheduler: "K_EULER",
+          prompt: `${prompt}, luxury vacation rental interior, professional real estate photography, bright natural light, 4K high resolution`,
+          num_outputs: 1,
+          aspect_ratio: "1:1",
+          output_quality: 90,
+          num_inference_steps: 4,
         },
       },
-      "sdxl"
+      "flux"
     );
     if (!createResp.ok) {
       let errText = "";
       try { errText = await createResp.text(); } catch (_) {}
-      console.error("[sdxl] Create failed:", createResp.status, errText);
+      console.error("[flux] Create failed:", createResp.status, errText);
       return null;
     }
     const prediction = await createResp.json() as { id?: string; status: string; output?: string[] | string; error?: string };
-    console.log("[sdxl] Prediction response: status=", prediction.status, "id=", prediction.id, "error=", prediction.error, "output=", JSON.stringify(prediction.output)?.substring(0, 120));
-    if (prediction.error) { console.error("[sdxl] Prediction error:", prediction.error); return null; }
+    console.log("[flux] Prediction response: status=", prediction.status, "id=", prediction.id, "error=", prediction.error, "output=", JSON.stringify(prediction.output)?.substring(0, 120));
+    if (prediction.error) { console.error("[flux] Prediction error:", prediction.error); return null; }
     const extractUrl = (output: string[] | string | undefined): string | null => {
       if (!output) return null;
       if (Array.isArray(output)) return output[0] || null;
