@@ -263,23 +263,43 @@ async function generateWithStabilityKw(prompt: string): Promise<Buffer | null> {
   } catch { return null; }
 }
 
+// Retry a Replicate POST up to maxRetries times on 429 rate-limit responses.
+async function replicatePostWithRetry(url: string, key: string, body: object, label: string, maxRetries = 4): Promise<Response> {
+  const headers = { "Authorization": `Token ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" };
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+    if (resp.status !== 429) return resp;
+    if (attempt === maxRetries) {
+      console.error(`[${label}] Still rate-limited after ${maxRetries} retries — giving up`);
+      return resp;
+    }
+    let retryAfter = 15;
+    try { const j = await resp.json() as any; retryAfter = Math.min((j?.retry_after || 15) + 3, 90); } catch (_) {}
+    console.log(`[${label}] 429 rate-limit (attempt ${attempt + 1}/${maxRetries + 1}) — waiting ${retryAfter}s...`);
+    await new Promise(r => setTimeout(r, retryAfter * 1000));
+  }
+  return fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
 async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
   const key = process.env.REPLICATE_API_KEY;
   if (!key) { console.error("[sdxl] No REPLICATE_API_KEY set"); return null; }
   try {
-    const createResp = await fetch("https://api.replicate.com/v1/models/stability-ai/sdxl/predictions", {
-      method: "POST",
-      headers: { "Authorization": `Token ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
-      body: JSON.stringify({
+    const createResp = await replicatePostWithRetry(
+      "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions",
+      key,
+      {
         input: {
           prompt: `${prompt}, luxury vacation rental, professional real estate photography, bright natural light, 4K high resolution`,
           negative_prompt: "low quality, blurry, dark, cluttered, people, text, watermark, deformed",
           width: 1024, height: 1024, num_inference_steps: 25, guidance_scale: 7.5, scheduler: "K_EULER",
         },
-      }),
-    });
+      },
+      "sdxl"
+    );
     if (!createResp.ok) {
-      const errText = await createResp.text();
+      let errText = "";
+      try { errText = await createResp.text(); } catch (_) {}
       console.error("[sdxl] Create failed:", createResp.status, errText);
       return null;
     }
@@ -338,13 +358,16 @@ async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Pr
   try {
     const b64 = imageBuffer.toString("base64");
     const dataUri = `data:${mimeType};base64,${b64}`;
-    const createResp = await fetch("https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions", {
-      method: "POST",
-      headers: { "Authorization": `Token ${key}`, "Content-Type": "application/json", "Prefer": "wait=60" },
-      body: JSON.stringify({ input: { image: dataUri, scale: 2, face_enhance: false } }),
-    });
+    const createResp = await replicatePostWithRetry(
+      "https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions",
+      key,
+      { input: { image: dataUri, scale: 2, face_enhance: false } },
+      "upscale"
+    );
     if (!createResp.ok) {
-      console.error("[upscale] Replicate Real-ESRGAN error:", createResp.status, await createResp.text());
+      let errText = "";
+      try { errText = await createResp.text(); } catch (_) {}
+      console.error("[upscale] Replicate Real-ESRGAN error:", createResp.status, errText);
       return null;
     }
     const prediction = await createResp.json() as { id?: string; status: string; output?: string; error?: string };
