@@ -228,6 +228,9 @@ interface AuditUnitResult {
   photoServePath: string;
   status: "checking" | "passed" | "flagged" | "error";
   airbnbUrl?: string;
+  matchTitle?: string;
+  matchLocation?: string;
+  matchConfidence?: "high" | "medium" | "low";
   replacement?: Array<{ url: string; thumbnail: string; label: string }> | null;
   findingReplacement?: boolean;
 }
@@ -292,10 +295,16 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
       initial.map(async (unit, i) => {
         if (!unit.photoFilename) return { ...unit, status: "error" as const };
         try {
+          const auditUnit = unitsToAudit[i];
           const resp = await fetch("/api/photos/platform-check", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ folder: unitsToAudit[i].photoFolder, filename: unit.photoFilename }),
+            body: JSON.stringify({
+              folder: auditUnit.photoFolder,
+              filename: unit.photoFilename,
+              communityName: auditUnit.communityName,
+              location: auditUnit.location,
+            }),
           });
           if (!resp.ok) return { ...unit, status: "error" as const };
           const data = await resp.json();
@@ -304,6 +313,9 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
             ...unit,
             status: (airbnbMatch ? "flagged" : "passed") as "flagged" | "passed",
             airbnbUrl: airbnbMatch?.url,
+            matchTitle: airbnbMatch?.title || "",
+            matchLocation: airbnbMatch?.matchLocation || "",
+            matchConfidence: airbnbMatch?.confidence,
           };
         } catch {
           return { ...unit, status: "error" as const };
@@ -377,11 +389,16 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
   };
 
   const reAuditReplacement = async (unitIdx: number, imageUrl: string) => {
+    const auditUnit = unitsToAudit[unitIdx];
     try {
       const resp = await fetch("/api/photos/platform-check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrl }),
+        body: JSON.stringify({
+          imageUrl,
+          communityName: auditUnit.communityName,
+          location: auditUnit.location,
+        }),
       });
       if (!resp.ok) throw new Error("Check failed");
       const data = await resp.json();
@@ -398,6 +415,17 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
     } catch {
       alert("Could not check replacement photo.");
     }
+  };
+
+  const dismissFlag = (unitIdx: number) => {
+    setAuditResults(prev => {
+      const updated = prev.map((r, i) =>
+        i === unitIdx ? { ...r, status: "passed" as const, airbnbUrl: undefined, matchTitle: undefined, matchLocation: undefined, replacement: null } : r
+      );
+      const stillFlagged = updated.some(r => r.status === "flagged");
+      if (!stillFlagged) setTimeout(() => startMakeover(), 800);
+      return updated;
+    });
   };
 
   const triggerDownload = (jId: string, name: string) => {
@@ -503,8 +531,28 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
                     {result.status === "flagged" && (
                       <div className="space-y-2">
                         <span className="flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400">
-                          <ShieldAlert className="h-3.5 w-3.5" /> Flagged — photo found on an Airbnb listing
+                          <ShieldAlert className="h-3.5 w-3.5" />
+                          Flagged — photo found on an Airbnb listing
+                          {result.matchConfidence && (
+                            <span className={`ml-1 px-1 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+                              result.matchConfidence === "high" ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                              : result.matchConfidence === "medium" ? "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300"
+                              : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300"
+                            }`}>
+                              {result.matchConfidence} confidence
+                            </span>
+                          )}
                         </span>
+                        {(result.matchTitle || result.matchLocation) && (
+                          <div className="rounded bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 px-2 py-1.5 space-y-0.5">
+                            {result.matchTitle && (
+                              <p className="text-xs font-medium text-red-900 dark:text-red-200 leading-snug">{result.matchTitle}</p>
+                            )}
+                            {result.matchLocation && (
+                              <p className="text-[11px] text-red-700 dark:text-red-400 capitalize">{result.matchLocation}</p>
+                            )}
+                          </div>
+                        )}
                         {result.airbnbUrl && (
                           <a href={result.airbnbUrl} target="_blank" rel="noopener noreferrer"
                             className="flex items-center gap-1 text-xs text-blue-600 hover:underline">
@@ -512,14 +560,21 @@ function MakeoverFlowModal({ isOpen, onClose, propertyName, folders, communityFo
                           </a>
                         )}
                         {!result.replacement && (
-                          <Button size="sm" variant="outline" className="h-7 text-xs"
-                            disabled={result.findingReplacement}
-                            onClick={() => findReplacement(idx)}
-                            data-testid={`button-find-new-unit-${result.unitId}`}>
-                            {result.findingReplacement
-                              ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Searching...</>
-                              : <><RefreshCw className="h-3 w-3 mr-1" />Find New Unit</>}
-                          </Button>
+                          <div className="flex gap-2 flex-wrap">
+                            <Button size="sm" variant="outline" className="h-7 text-xs"
+                              disabled={result.findingReplacement}
+                              onClick={() => findReplacement(idx)}
+                              data-testid={`button-find-new-unit-${result.unitId}`}>
+                              {result.findingReplacement
+                                ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Searching...</>
+                                : <><RefreshCw className="h-3 w-3 mr-1" />Find New Unit</>}
+                            </Button>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground hover:text-green-700 dark:hover:text-green-400"
+                              onClick={() => dismissFlag(idx)}
+                              data-testid={`button-not-a-match-${result.unitId}`}>
+                              <ShieldCheck className="h-3 w-3 mr-1" />Not a Match
+                            </Button>
+                          </div>
                         )}
                         {result.replacement && result.replacement.length > 0 && (
                           <div className="space-y-1.5">

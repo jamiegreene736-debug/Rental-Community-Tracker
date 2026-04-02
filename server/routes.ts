@@ -2400,11 +2400,32 @@ export async function registerRoutes(
 
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    const { folder, filename, imageUrl } = req.body as {
+    const { folder, filename, imageUrl, communityName, location } = req.body as {
       folder?: string;
       filename?: string;
       imageUrl?: string;
+      communityName?: string;
+      location?: string;
     };
+
+    // Island detection helpers for location-based filtering
+    const ISLAND_KEYWORDS: Record<string, string[]> = {
+      kauai: ["kauai", "lihue", "kapaa", "koloa", "poipu", "princeville", "hanalei", "waimea", "eleele", "kalaheo", "96766", "96746", "96756", "96765", "96741"],
+      oahu: ["oahu", "honolulu", "waikiki", "kailua", "kaneohe", "aiea", "pearl city", "96815", "96816", "96734", "96701"],
+      maui: ["maui", "kihei", "lahaina", "wailea", "paia", "makena", "kapalua", "kahului", "96753", "96761", "96732"],
+      "big island": ["big island", "kona", "kailua-kona", "hilo", "waikoloa", "kohala", "waimea", "96740", "96720", "96743"],
+      molokai: ["molokai", "kaunakakai"],
+      lanai: ["lanai city"],
+    };
+    const detectIsland = (text: string): string | null => {
+      const lower = text.toLowerCase();
+      for (const [island, keywords] of Object.entries(ISLAND_KEYWORDS)) {
+        if (keywords.some(k => lower.includes(k))) return island;
+      }
+      return null;
+    };
+    const ourIsland = detectIsland(location || "");
+    const communityWords = (communityName || "").toLowerCase().split(/\s+/).filter(w => w.length > 3);
 
     let publicUrl: string | null = null;
 
@@ -2465,7 +2486,7 @@ export async function registerRoutes(
       "booking.com": "Booking.com",
     };
 
-    const found: { name: string; url: string }[] = [];
+    const found: { name: string; url: string; title: string; matchLocation: string; confidence: "high" | "medium" | "low" }[] = [];
 
     const allResults = [
       ...(searchData.visual_matches || []),
@@ -2477,14 +2498,42 @@ export async function registerRoutes(
 
     for (const result of allResults) {
       const url: string = result.link || result.source_url || result.url || result.source?.link || "";
+      const title: string = result.title || result.snippet || "";
+      const titleLower = title.toLowerCase();
+      const position: number = result.position ?? 999;
+
+      // ── 1. Island mismatch filter: discard if matched listing is on a different island ──
+      if (ourIsland) {
+        const matchIsland = detectIsland(title + " " + url);
+        if (matchIsland && matchIsland !== ourIsland) {
+          console.log(`[platform-check] Discarding cross-island match: "${title}" (${matchIsland} vs our ${ourIsland})`);
+          continue;
+        }
+      }
+
+      // ── 2. Community name cross-reference ──
+      const hasCommunityMatch = communityWords.length > 0 && communityWords.some(w => titleLower.includes(w));
+
+      // ── 3. Similarity threshold via position ──
+      // With community name match: accept top 10 results (high confidence from branding)
+      // Without community name match: only accept position 1-2 (near-identical visuals required)
+      const positionLimit = hasCommunityMatch ? 10 : 2;
+      if (position > positionLimit) {
+        console.log(`[platform-check] Skipping low-confidence match pos=${position} (limit=${positionLimit}): "${title}"`);
+        continue;
+      }
+
+      const confidence: "high" | "medium" | "low" = hasCommunityMatch ? "high" : position === 1 ? "medium" : "low";
+      const matchLocation = detectIsland(title + " " + url) || "";
+
       for (const [domain, platformName] of Object.entries(PLATFORMS)) {
         if (url.includes(domain) && !found.some(f => f.name === platformName && f.url === url)) {
-          found.push({ name: platformName, url });
+          found.push({ name: platformName, url, title, matchLocation, confidence });
         }
       }
     }
 
-    console.log(`[platform-check] ${filename || imageUrl}: ${found.length > 0 ? found.map(f => f.name).join(", ") : "clear"}`);
+    console.log(`[platform-check] ${filename || imageUrl}: ourIsland=${ourIsland} community="${communityName}" → ${found.length > 0 ? found.map(f => `${f.name}(${f.confidence})`).join(", ") : "clear"}`);
     res.json({ filename: filename || null, platforms: found, checkedUrl: publicUrl });
   });
 
