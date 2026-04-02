@@ -70,6 +70,10 @@ const HAWAII_SEASONS: Record<string, SeasonType> = {
   "2027-10": "LOW",
   "2027-11": "MEDIUM",
   "2027-12": "HIGH",
+  "2028-01": "HIGH",
+  "2028-02": "MEDIUM",
+  "2028-03": "HIGH",
+  "2028-04": "HIGH",
 };
 
 const FLORIDA_SEASONS: Record<string, SeasonType> = {
@@ -94,6 +98,10 @@ const FLORIDA_SEASONS: Record<string, SeasonType> = {
   "2027-10": "MEDIUM",
   "2027-11": "MEDIUM",
   "2027-12": "HIGH",
+  "2028-01": "LOW",
+  "2028-02": "MEDIUM",
+  "2028-03": "HIGH",
+  "2028-04": "MEDIUM",
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -155,12 +163,12 @@ function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
   return map[yearMonth] ?? "MEDIUM";
 }
 
-// Generates 21 months of rates: April 2026 → December 2027
+// Generates 25 months of rates: April 2026 → April 2028
 const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: number }[] = (() => {
   const months: { yearMonth: string; monthIndex: number; year: number }[] = [];
   let year = 2026;
   let monthIndex = 3; // April = index 3
-  for (let i = 0; i < 21; i++) {
+  for (let i = 0; i < 25; i++) {
     const mm = String(monthIndex + 1).padStart(2, "0");
     months.push({ yearMonth: `${year}-${mm}`, monthIndex, year });
     monthIndex++;
