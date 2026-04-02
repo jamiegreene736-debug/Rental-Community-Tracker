@@ -1,0 +1,58 @@
+# Replit Agent Prompt: Add Lodgify Property ID Field + Status Indicator to NexStay
+
+## WHAT I NEED
+
+Add a "Lodgify Property ID" field to every unit record in the app. This field serves as the source of truth for whether a unit has been built out in Lodgify or not.
+
+## REQUIREMENTS
+
+### 1. New Field: Lodgify Property ID
+
+- Add a new field called `lodgify_property_id` to the unit data model / schema.
+- This field stores a numeric string (Lodgify Property IDs are numbers, e.g., "784523").
+- The field is optional — most units won't have one yet.
+- The field should be editable from the unit's detail/edit view. A simple text input labeled **"Lodgify Property ID"** is fine.
+- When a user enters an ID and saves, it persists to the database.
+
+### 2. Visual Status Indicator on Every Unit
+
+Wherever units are displayed (unit cards, unit lists, unit detail pages, community views — anywhere a unit appears), show a visual status badge:
+
+**If `lodgify_property_id` is empty / null / not set:**
+- Show a badge/pill that says **"Not in Lodgify"**
+- Color: Red or muted gray background with dark text
+- This makes it immediately obvious which units still need to be built out
+
+**If `lodgify_property_id` has a value:**
+- Show a badge/pill that says **"In Lodgify"** followed by the ID in smaller or lighter text (e.g., "In Lodgify · #784523")
+- Color: Green background with white text
+- This confirms the unit is live and shows the ID for quick reference
+
+### 3. Where the Indicator Should Appear
+
+- **Unit cards / list view:** Small badge in the corner or below the unit name
+- **Unit detail page:** Prominent badge near the top, next to or below the unit title
+- **Community view** (if units are listed under a community): Badge on each unit row/card so you can scan an entire community and see which units are done vs pending
+
+### 4. Filtering / Sorting (Nice to Have)
+
+If it's straightforward to implement, add the ability to:
+- Filter units by Lodgify status: "All" / "In Lodgify" / "Not in Lodgify"
+- This lets me quickly see how many units are left to build out
+
+### 5. Summary Count (Nice to Have)
+
+On the main dashboard or at the top of the properties/units page, show a simple count:
+- **"18 / 22 units in Lodgify"** (or whatever the actual numbers are)
+- This gives me an at-a-glance progress tracker for the buildout
+
+## WHAT NOT TO DO
+
+- Do NOT call the Lodgify API to verify the ID. This is a manual entry field only — no API integration needed for this feature.
+- Do NOT change any existing fields, layouts, or functionality. This is purely additive.
+- Do NOT remove or rearrange any existing unit data. Just add the new field and badges alongside what's already there.
+- Do NOT make the Lodgify Property ID field required. It must remain optional.
+
+## SUMMARY
+
+The end result: I can look at any unit or scan any community and instantly see a green "In Lodgify · #784523" badge or a red/gray "Not in Lodgify" badge. When I (or Cowork) finish building a unit in Lodgify, I enter the Property ID into NexStay and the status flips from red to green. Simple, visual, reliable.

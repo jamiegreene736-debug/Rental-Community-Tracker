@@ -47,7 +47,8 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import {
   Table,
   TableBody,
@@ -1294,74 +1295,127 @@ function UnitPrepCard({ unit, complexName, propertyId, communityPhotos, communit
   );
 }
 
-function LodgifySyncStatus({ property }: { property: PropertyUnitBuilder }) {
-  const { data, isLoading, error } = useQuery<{ count: number | null; items: any[] }>({
-    queryKey: ["/api/lodgify/properties"],
+function LodgifySyncStatus({ propertyId }: { propertyId: number }) {
+  const { data: mapData = [], isLoading } = useQuery<{ propertyId: number; lodgifyPropertyId: string }[]>({
+    queryKey: ["/api/lodgify/property-map"],
   });
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [inputVal, setInputVal] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const entry = mapData.find(e => e.propertyId === propertyId);
+  const lodgifyId = entry?.lodgifyPropertyId ?? null;
+
+  const handleSave = async () => {
+    const trimmed = inputVal.trim();
+    if (!trimmed) return;
+    setSaving(true);
+    try {
+      await apiRequest("PUT", `/api/lodgify/property-map/${propertyId}`, { lodgifyPropertyId: trimmed });
+      queryClient.invalidateQueries({ queryKey: ["/api/lodgify/property-map"] });
+      toast({ title: "Lodgify ID saved", description: `Property ID #${trimmed} recorded.` });
+      setEditing(false);
+      setInputVal("");
+    } catch (err: any) {
+      toast({ title: "Failed to save", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClear = async () => {
+    if (!confirm("Remove the Lodgify Property ID from this property?")) return;
+    setSaving(true);
+    try {
+      await apiRequest("DELETE", `/api/lodgify/property-map/${propertyId}`);
+      queryClient.invalidateQueries({ queryKey: ["/api/lodgify/property-map"] });
+      toast({ title: "Lodgify ID removed" });
+    } catch (err: any) {
+      toast({ title: "Failed to remove", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (isLoading) {
     return (
       <Card className="p-4">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          Checking Lodgify sync status...
+          Loading Lodgify status…
         </div>
       </Card>
     );
   }
-
-  if (error) {
-    return (
-      <Card className="p-4">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <XCircle className="h-4 w-4" />
-          Could not connect to Lodgify
-        </div>
-      </Card>
-    );
-  }
-
-  const lodgifyProps = data?.items || [];
-  const matchingProp = lodgifyProps.find((p: any) => {
-    const name = (p.name || "").toLowerCase();
-    const complexLower = property.complexName.toLowerCase();
-    const propNameLower = property.propertyName.toLowerCase();
-    return name.includes(complexLower) || complexLower.includes(name) ||
-           name.includes(propNameLower) || propNameLower.includes(name);
-  });
 
   return (
     <Card className="p-4">
       <div className="flex items-start gap-3">
-        {matchingProp ? (
-          <>
-            <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium">Found in Lodgify</p>
-              <p className="text-sm text-muted-foreground mt-0.5">
-                Matched: "{matchingProp.name}" (ID: {matchingProp.id})
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">
-                You can update this property's details in Lodgify using the copied data below.
-              </p>
-            </div>
-          </>
+        {lodgifyId ? (
+          <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5" />
         ) : (
-          <>
-            <XCircle className="h-5 w-5 text-orange-500 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium">Not yet in Lodgify</p>
-              <p className="text-sm text-muted-foreground mt-0.5">
-                This property needs to be created in Lodgify. Use the data below to set it up.
-              </p>
-              {lodgifyProps.length > 0 && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  Your Lodgify account has {lodgifyProps.length} existing properties.
-                </p>
+          <XCircle className="h-5 w-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            {lodgifyId ? (
+              <>
+                <span className="text-sm font-medium text-green-700 dark:text-green-400">In Lodgify</span>
+                <span className="text-xs text-muted-foreground font-mono bg-muted px-1.5 py-0.5 rounded">#{lodgifyId}</span>
+              </>
+            ) : (
+              <span className="text-sm font-medium">Not in Lodgify</span>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {lodgifyId
+              ? "This property has been built out in Lodgify. Use the ID above to push rates or manage the listing."
+              : "Enter the Lodgify Property ID once this listing is created in Lodgify."}
+          </p>
+
+          {editing ? (
+            <div className="flex items-center gap-2 mt-3">
+              <Input
+                placeholder="e.g. 784523"
+                value={inputVal}
+                onChange={e => setInputVal(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") handleSave(); if (e.key === "Escape") { setEditing(false); setInputVal(""); } }}
+                className="h-8 text-sm w-48"
+                autoFocus
+                data-testid="input-lodgify-property-id-map"
+              />
+              <Button size="sm" className="h-8" onClick={handleSave} disabled={saving || !inputVal.trim()} data-testid="button-save-lodgify-id">
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+              </Button>
+              <Button size="sm" variant="ghost" className="h-8" onClick={() => { setEditing(false); setInputVal(""); }}>Cancel</Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 mt-3">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => { setEditing(true); setInputVal(lodgifyId ?? ""); }}
+                data-testid="button-edit-lodgify-id"
+              >
+                {lodgifyId ? "Change ID" : "Enter Lodgify ID"}
+              </Button>
+              {lodgifyId && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 text-xs text-muted-foreground"
+                  onClick={handleClear}
+                  disabled={saving}
+                  data-testid="button-clear-lodgify-id"
+                >
+                  Remove
+                </Button>
               )}
             </div>
-          </>
-        )}
+          )}
+        </div>
       </div>
     </Card>
   );
@@ -1741,7 +1795,7 @@ export default function LodgifyPrep() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
           <div className="lg:col-span-2">
-            <LodgifySyncStatus property={property} />
+            <LodgifySyncStatus propertyId={propertyId} />
           </div>
           <div className="space-y-4">
             <CopyField label="Property Address" value={property.address} />

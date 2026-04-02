@@ -5,7 +5,8 @@ import {
   type ScannerRun, type InsertScannerRun,
   type AvailabilityScan, type InsertAvailabilityScan,
   type CommunityDraft, type InsertCommunityDraft,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts,
+  type LodgifyPropertyMap,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -47,6 +48,10 @@ export interface IStorage {
   getCommunityDraft(id: number): Promise<CommunityDraft | undefined>;
   updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
   deleteCommunityDraft(id: number): Promise<boolean>;
+
+  getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
+  upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
+  deleteLodgifyPropertyId(propertyId: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -242,6 +247,27 @@ export class DatabaseStorage implements IStorage {
 
   async deleteCommunityDraft(id: number): Promise<boolean> {
     const result = await db.delete(communityDrafts).where(eq(communityDrafts.id, id)).returning();
+    return result.length > 0;
+  }
+
+  async getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]> {
+    return db.select().from(lodgifyPropertyMap).orderBy(lodgifyPropertyMap.propertyId);
+  }
+
+  async upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap> {
+    const [result] = await db
+      .insert(lodgifyPropertyMap)
+      .values({ propertyId, lodgifyPropertyId })
+      .onConflictDoUpdate({
+        target: lodgifyPropertyMap.propertyId,
+        set: { lodgifyPropertyId, updatedAt: new Date() },
+      })
+      .returning();
+    return result;
+  }
+
+  async deleteLodgifyPropertyId(propertyId: number): Promise<boolean> {
+    const result = await db.delete(lodgifyPropertyMap).where(eq(lodgifyPropertyMap.propertyId, propertyId)).returning();
     return result.length > 0;
   }
 }

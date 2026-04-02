@@ -1021,6 +1021,42 @@ export async function registerRoutes(
     }
   });
 
+  // ── Manual Lodgify Property ID map (stored in DB, no API call) ──
+  app.get("/api/lodgify/property-map", async (_req, res) => {
+    try {
+      const map = await storage.getLodgifyPropertyMap();
+      res.json(map);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch property map" });
+    }
+  });
+
+  app.put("/api/lodgify/property-map/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId);
+    const { lodgifyPropertyId } = req.body;
+    if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+    if (!lodgifyPropertyId || typeof lodgifyPropertyId !== "string" || !lodgifyPropertyId.trim()) {
+      return res.status(400).json({ error: "Missing or invalid lodgifyPropertyId" });
+    }
+    try {
+      const result = await storage.upsertLodgifyPropertyId(propertyId, lodgifyPropertyId.trim());
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save" });
+    }
+  });
+
+  app.delete("/api/lodgify/property-map/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+    try {
+      await storage.deleteLodgifyPropertyId(propertyId);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete" });
+    }
+  });
+
   app.get("/api/lodgify/property/:propertyId/rooms", async (req, res) => {
     const apiKey = process.env.LODGIFY_API_KEY;
     if (!apiKey) {

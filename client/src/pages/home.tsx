@@ -45,8 +45,10 @@ import {
   Plus,
   Star,
   Trash2,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
-import { getMultiUnitPropertyIds, getAllMultiUnitProperties } from "@/data/unit-builder-data";
+import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
 
@@ -413,6 +415,7 @@ export default function Home() {
   const [communityFilter, setCommunityFilter] = useState("all");
   const [islandFilter, setIslandFilter] = useState("all");
   const [multiUnitFilter, setMultiUnitFilter] = useState("all");
+  const [lodgifyFilter, setLodgifyFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("community");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -425,6 +428,18 @@ export default function Home() {
     const set = new Set(properties.map((p) => p.island));
     return Array.from(set).sort();
   }, []);
+
+  const { data: propertyMapData = [] } = useQuery<{ propertyId: number; lodgifyPropertyId: string }[]>({
+    queryKey: ["/api/lodgify/property-map"],
+  });
+
+  const propertyMapById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const entry of propertyMapData) {
+      map.set(entry.propertyId, entry.lodgifyPropertyId);
+    }
+    return map;
+  }, [propertyMapData]);
 
   const filtered = useMemo(() => {
     let result = properties;
@@ -448,6 +463,11 @@ export default function Home() {
       const isMulti = multiUnitFilter === "yes";
       result = result.filter((p) => p.multiUnit === isMulti);
     }
+    if (lodgifyFilter === "in_lodgify") {
+      result = result.filter((p) => propertyMapById.has(p.id));
+    } else if (lodgifyFilter === "not_lodgify") {
+      result = result.filter((p) => p.multiUnit && !propertyMapById.has(p.id));
+    }
     result = [...result].sort((a, b) => {
       let aVal: string | number | null = a[sortField];
       let bVal: string | number | null = b[sortField];
@@ -461,7 +481,7 @@ export default function Home() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir]);
+  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, lodgifyFilter, propertyMapById, sortField, sortDir]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -482,7 +502,7 @@ export default function Home() {
   };
 
   const multiUnitCount = properties.filter((p) => p.multiUnit).length;
-  const poipuKaiCount = properties.filter((p) => p.community === "Poipu Kai").length;
+  const inLodgifyCount = properties.filter((p) => p.multiUnit && propertyMapById.has(p.id)).length;
   const avgBedrooms = Math.round((properties.reduce((s, p) => s + p.bedrooms, 0) / properties.length) * 10) / 10;
   const pricedProperties = properties.filter((p) => p.lowPrice !== null);
   const avgLow = pricedProperties.length
@@ -490,12 +510,6 @@ export default function Home() {
     : 0;
 
   const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
-
-  const multiUnitProps = useMemo(() => getAllMultiUnitProperties(), []);
-
-  const { data: lodgifyData, isLoading: lodgifyLoading } = useQuery<{ count: number | null; items: any[] }>({
-    queryKey: ["/api/lodgify/properties"],
-  });
 
   const { data: communityDraftsData } = useQuery<CommunityDraft[]>({
     queryKey: ["/api/community/drafts"],
@@ -511,63 +525,6 @@ export default function Home() {
       queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
     },
   });
-
-  const lodgifyStatusMap = useMemo(() => {
-    const map = new Map<number, { found: boolean; lodgifyName?: string; lodgifyId?: number }>();
-    if (!lodgifyData?.items) return map;
-    const lodgifyProps = lodgifyData.items as any[];
-    const usedLodgifyIds = new Set<number>();
-
-    const candidates: { propertyId: number; lodgifyProp: any; score: number }[] = [];
-
-    for (const mp of multiUnitProps) {
-      const dashProp = properties.find(p => p.id === mp.propertyId);
-      if (!dashProp) continue;
-
-      for (const lp of lodgifyProps) {
-        const name = (lp.name || "").toLowerCase();
-        const complexLower = mp.complexName.toLowerCase();
-        const propNameLower = mp.propertyName.toLowerCase();
-        const nameMatchesComplex = name.includes(complexLower) || complexLower.includes(name);
-        const nameMatchesProp = name.includes(propNameLower) || propNameLower.includes(name);
-        if (!nameMatchesComplex && !nameMatchesProp) continue;
-
-        let score = 0;
-        const brMatch = name.match(/(\d+)\s*br/i) || name.match(/(\d+)\s*bedroom/i);
-        const sleepsMatch = name.match(/sleeps\s*(\d+)/i);
-
-        if (brMatch) {
-          if (parseInt(brMatch[1]) === dashProp.bedrooms) score += 10;
-          else continue;
-        }
-        if (sleepsMatch) {
-          if (parseInt(sleepsMatch[1]) === dashProp.guests) score += 10;
-          else continue;
-        }
-        if (nameMatchesProp) score += 5;
-        if (nameMatchesComplex) score += 2;
-
-        candidates.push({ propertyId: mp.propertyId, lodgifyProp: lp, score });
-      }
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-
-    for (const c of candidates) {
-      if (usedLodgifyIds.has(c.lodgifyProp.id)) continue;
-      if (map.has(c.propertyId) && map.get(c.propertyId)!.found) continue;
-      usedLodgifyIds.add(c.lodgifyProp.id);
-      map.set(c.propertyId, { found: true, lodgifyName: c.lodgifyProp.name, lodgifyId: c.lodgifyProp.id });
-    }
-
-    for (const mp of multiUnitProps) {
-      if (!map.has(mp.propertyId)) {
-        map.set(mp.propertyId, { found: false });
-      }
-    }
-
-    return map;
-  }, [lodgifyData, multiUnitProps]);
 
   const communityVariant = (community: string): "default" | "secondary" | "outline" => {
     const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Pili Mai"];
@@ -630,12 +587,14 @@ export default function Home() {
             </div>
             <p className="text-2xl font-bold" data-testid="text-multi-unit-count">{multiUnitCount}</p>
           </Card>
-          <Card className="p-4">
+          <Card className="p-4 cursor-pointer" onClick={() => setLodgifyFilter(lodgifyFilter === "all" ? "in_lodgify" : "all")}>
             <div className="flex items-center gap-2 mb-1">
-              <MapPin className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Poipu Kai Properties</span>
+              <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">In Lodgify</span>
             </div>
-            <p className="text-2xl font-bold" data-testid="text-poipu-kai-count">{poipuKaiCount}</p>
+            <p className="text-2xl font-bold" data-testid="text-in-lodgify-count">
+              {inLodgifyCount} <span className="text-base font-normal text-muted-foreground">/ {multiUnitCount}</span>
+            </p>
           </Card>
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
@@ -692,6 +651,16 @@ export default function Home() {
                 <SelectItem value="all">All Types</SelectItem>
                 <SelectItem value="yes">Multi-Unit</SelectItem>
                 <SelectItem value="no">Single Unit</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={lodgifyFilter} onValueChange={setLodgifyFilter}>
+              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status">
+                <SelectValue placeholder="Lodgify Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Lodgify Status</SelectItem>
+                <SelectItem value="in_lodgify">In Lodgify</SelectItem>
+                <SelectItem value="not_lodgify">Not in Lodgify</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -857,21 +826,19 @@ export default function Home() {
                   </TableCell>
                   <TableCell className="text-center">
                     {property.multiUnit ? (
-                      lodgifyLoading ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground mx-auto" data-testid={`status-lodgify-loading-${property.id}`} />
+                      propertyMapById.has(property.id) ? (
+                        <div className="flex flex-col items-center gap-0.5" data-testid={`status-lodgify-${property.id}`}>
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-full px-2 py-0.5 whitespace-nowrap">
+                            <CheckCircle2 className="h-3 w-3" />
+                            In Lodgify
+                          </span>
+                          <span className="text-[9px] text-muted-foreground">#{propertyMapById.get(property.id)}</span>
+                        </div>
                       ) : (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <div className="flex justify-center" data-testid={`status-lodgify-${property.id}`}>
-                              <div className={`h-3 w-3 rounded-full ${lodgifyStatusMap.get(property.id)?.found ? "bg-green-500" : "bg-red-500"}`} />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            {lodgifyStatusMap.get(property.id)?.found
-                              ? `In Lodgify: "${lodgifyStatusMap.get(property.id)?.lodgifyName}"`
-                              : "Not yet built out in Lodgify"}
-                          </TooltipContent>
-                        </Tooltip>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted rounded-full px-2 py-0.5 whitespace-nowrap" data-testid={`status-lodgify-${property.id}`}>
+                          <XCircle className="h-3 w-3" />
+                          Not in Lodgify
+                        </span>
                       )
                     ) : (
                       <span className="text-xs text-muted-foreground">-</span>
