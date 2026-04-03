@@ -1,0 +1,86 @@
+Refactor the Property Builder tool in NexStay so it works reliably with browser automation tools like Claude's Cowork desktop agent. The current layout causes navigation failures. Apply all of the following changes:
+
+---
+
+## 1. ADD UNIQUE, STABLE IDs AND ARIA LABELS TO ALL INTERACTIVE ELEMENTS
+
+Every button, input field, dropdown, modal trigger, and form control must have:
+- A unique `id` attribute (e.g., id="property-builder-search-input", id="btn-add-unit", id="step-1-next")
+- A descriptive `aria-label` attribute matching its function
+- No dynamically generated or random IDs (e.g., no "input-48f3a2")
+
+---
+
+## 2. REPLACE MULTI-COLUMN / CARD GRID LAYOUTS WITH A LINEAR STEP-BY-STEP WIZARD
+
+Instead of showing all fields at once in a complex grid:
+- Break the property builder into clearly numbered sequential steps (Step 1, Step 2, Step 3...)
+- Show only ONE step at a time
+- Each step must have a visible heading (e.g., <h2>Step 1: Select Community</h2>)
+- Include a clearly labeled "Next" button (id="btn-next-step") and "Back" button (id="btn-prev-step") at the bottom of each step
+- Display a simple step indicator at the top (e.g., "Step 2 of 5")
+
+---
+
+## 3. MAKE ALL SEARCH/SELECT FIELDS PLAIN HTML INPUTS OR NATIVE SELECTS
+
+- Replace any custom autocomplete widgets, typeahead libraries, or floating suggestion overlays with standard <input> or <select> elements
+- If a search-with-suggestions field is necessary, ensure the suggestions render as a visible <ul> list with each item in a <li> tag that has a unique id and is clickable
+- Search inputs must be reachable via Tab key and must not require hover to activate
+
+---
+
+## 4. MODALS AND DROPDOWNS MUST BE FULLY DOM-RENDERED WHEN OPEN
+
+- When a modal or dropdown opens, its content must be present in the DOM immediately (no CSS visibility:hidden tricks where the element exists but is not readable)
+- Each modal must have: id="modal-[name]", a visible close button with id="btn-close-modal-[name]", and a clear heading
+- Dropdowns must not rely on :hover CSS — they must open on click
+
+---
+
+## 5. AVOID INFINITE SCROLL — USE PAGINATED LISTS WITH NUMBERED PAGES
+
+- Any list of units, communities, or properties must use standard pagination (Previous / Next / page numbers)
+- Each paginated list container must have id="list-[content-type]" (e.g., id="list-units")
+- Each list item must have id="item-[unique-identifier]"
+
+---
+
+## 6. ALL FORM SUBMISSION AND SAVE ACTIONS MUST USE VISIBLE BUTTONS (NOT KEYBOARD-ONLY OR ICON-ONLY)
+
+- Every save, submit, or confirm action must have a clearly labeled text button (not just an icon)
+- Buttons must not be disabled by default without a visible explanation of why
+- After a save action completes, display a visible success/error status message with id="status-message"
+
+---
+
+## 7. PAGE NAVIGATION MUST USE STANDARD URL ROUTES
+
+- Each major section of the property builder must have its own URL path (e.g., /property-builder/step-1, /property-builder/step-2)
+- Avoid single-page state changes that don't update the URL — automation tools rely on URL state to know where they are
+
+---
+
+## 8. ADD A PLAIN-TEXT SUMMARY PANEL AT EACH STEP
+
+- At each wizard step, include a read-only <div id="summary-panel"> that shows in plain text what has been selected/entered so far
+- This allows automation tools to verify current state without having to parse form field values
+
+---
+
+## 9. FIX THE MAIN DASHBOARD TABLE — ELIMINATE HORIZONTAL SCROLLING, OPTIMIZED FOR 13" SCREEN
+
+The main dashboard is a wide horizontal table that requires sideways scrolling to reach per-property action buttons (such as each row's individual "Build" button). This is the primary cause of Cowork navigation failures on small screens like a 13" MacBook Pro. Fix as follows:
+
+- The dashboard table must fit within a 1280px-wide viewport with NO horizontal scrolling required
+- Reduce or eliminate fixed-width columns — allow columns to flex and compress to fit the screen
+- Move each property row's action buttons (e.g., "Build", "Edit", "View") to the FIRST or SECOND column of the row (left side), NOT the last column — this ensures they are always visible without any scrolling
+- Each per-row Build button must have a unique id in the format id="btn-build-[property-id]" and an aria-label like "Build property [property name]"
+- If the table still cannot fit without horizontal scroll, convert each row into a compact stacked card layout where the property name appears at the top and action buttons appear directly below it — fully visible on load
+- The leftmost column must be sticky (position: sticky; left: 0) so property names remain visible if any horizontal scroll remains
+- Do not hide action buttons behind a "..." overflow menu or icon-only controls — buttons must display their text label at all times
+- Test that every per-property Build button is clickable on a 1280x800 viewport without any scrolling
+
+---
+
+Apply these changes without removing any existing functionality. Test that each step of the property builder is reachable, readable, and operable via keyboard Tab + Enter navigation alone.

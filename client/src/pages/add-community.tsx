@@ -277,7 +277,7 @@ export default function AddCommunity() {
         </div>
 
         {/* Step indicator */}
-        <div className="flex items-center gap-2 mb-8 overflow-x-auto pb-1">
+        <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1" id="step-indicator" aria-label={`Step ${step} of ${STEPS.length}`}>
           {STEPS.map((label, i) => {
             const stepNum = i + 1;
             const isActive = step === stepNum;
@@ -288,7 +288,7 @@ export default function AddCommunity() {
                   isActive ? "bg-primary text-primary-foreground" :
                   isDone ? "bg-primary/20 text-primary" :
                   "bg-muted text-muted-foreground"
-                }`}>
+                }`} id={`step-indicator-${stepNum}`}>
                   {isDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className="w-4 h-4 text-center leading-4">{stepNum}</span>}
                   {label}
                 </div>
@@ -297,52 +297,60 @@ export default function AddCommunity() {
             );
           })}
         </div>
+        <p className="text-sm text-muted-foreground mb-6" id="step-progress-label">Step {step} of {STEPS.length}: {STEPS[step - 1]}</p>
 
         {/* ── STEP 1: Location ─────────────────────────────── */}
         {step === 1 && (
-          <Card className="p-6">
+          <Card className="p-6" id="step-1-content">
             <div className="flex items-center gap-2 mb-4">
               <MapPin className="h-5 w-5 text-primary" />
-              <h2 className="text-lg font-semibold">Step 1 — Select Location</h2>
+              <h2 className="text-lg font-semibold" id="step-1-heading">Step 1: Select Location</h2>
             </div>
             <p className="text-muted-foreground text-sm mb-6">
               Choose a US state and city to research vacation rental communities suitable for bundled multi-unit listings.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
               <div>
-                <label className="text-sm font-medium mb-1.5 block">State</label>
+                <label htmlFor="select-state" className="text-sm font-medium mb-1.5 block">State</label>
                 <Select value={selectedState} onValueChange={setSelectedState}>
-                  <SelectTrigger data-testid="select-state">
+                  <SelectTrigger data-testid="select-state" id="select-state" aria-label="Select US state">
                     <SelectValue placeholder="Select a state…" />
                   </SelectTrigger>
                   <SelectContent>
                     {US_STATES.map(s => (
-                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                      <SelectItem key={s} value={s} id={`option-state-${s.replace(/\s/g, "-")}`}>{s}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
               <div>
-                <label className="text-sm font-medium mb-1.5 block">City</label>
+                <label htmlFor="input-city" className="text-sm font-medium mb-1.5 block">City</label>
                 <Input
+                  id="input-city"
                   placeholder="e.g. Kissimmee, Myrtle Beach…"
                   value={cityInput}
                   onChange={e => setCityInput(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && handleResearch()}
                   data-testid="input-city"
+                  aria-label="Enter city name"
                 />
               </div>
+            </div>
+            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
             <Button
               onClick={handleResearch}
               disabled={researchLoading || !selectedState || !cityInput.trim()}
               data-testid="button-research"
+              id="btn-next-step"
+              aria-label="Research communities in the selected location"
             >
               {researchLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
               {researchLoading ? "Researching…" : "Research Communities"}
             </Button>
             {researchLoading && (
-              <p className="text-sm text-muted-foreground mt-3">
+              <p className="text-sm text-muted-foreground mt-3" id="status-message">
                 Searching for communities and scoring with AI — this takes 20–40 seconds…
               </p>
             )}
@@ -351,15 +359,18 @@ export default function AddCommunity() {
 
         {/* ── STEP 2: Research results ──────────────────────── */}
         {step === 2 && (
-          <div>
+          <div id="step-2-content">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Search className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-semibold">Step 2 — Community Research</h2>
+                <h2 className="text-lg font-semibold" id="step-2-heading">Step 2: Community Research</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(1)} data-testid="button-back-step1">
+              <Button variant="outline" size="sm" onClick={() => setStep(1)} data-testid="button-back-step1" id="btn-prev-step" aria-label="Go back to Step 1: Select Location">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Change Location
               </Button>
+            </div>
+            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <strong>Location:</strong> {cityInput}, {selectedState} — <strong>{communities.length}</strong> communities found. Select one to continue.
             </div>
             <p className="text-muted-foreground text-sm mb-4">
               Found {communities.length} qualifying communities in <strong>{cityInput}, {selectedState}</strong>. Click a card to select it.
@@ -413,15 +424,20 @@ export default function AddCommunity() {
 
         {/* ── STEP 3: Unit pair selection ───────────────────── */}
         {step === 3 && (
-          <div>
+          <div id="step-3-content">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <BedDouble className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-semibold">Step 3 — Select Unit Pair</h2>
+                <h2 className="text-lg font-semibold" id="step-3-heading">Step 3: Select Unit Pair</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2">
+              <Button variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2" id="btn-prev-step" aria-label="Go back to Step 2: Community Research">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
+            </div>
+            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <strong>Community:</strong> {selectedCommunity?.name || "None selected"} in {selectedCommunity ? `${selectedCommunity.city}, ${selectedCommunity.state}` : "—"}.{" "}
+              <strong>Unit 1:</strong> {selectedUnit1?.title || "Not selected"}.{" "}
+              <strong>Unit 2:</strong> {selectedUnit2?.title || "Not selected"}.
             </div>
 
             {selectedCommunity && (
@@ -553,6 +569,8 @@ export default function AddCommunity() {
                   onClick={handleConfirmUnits}
                   disabled={!selectedUnit1 || !selectedUnit2}
                   data-testid="button-confirm-units"
+                  id="btn-next-step"
+                  aria-label="Confirm selected unit pair and proceed to photos"
                 >
                   Confirm Unit Pair & Fetch Photos <ArrowRight className="h-4 w-4 ml-2" />
                 </Button>
@@ -563,15 +581,21 @@ export default function AddCommunity() {
 
         {/* ── STEP 4: Photos + platform check ──────────────── */}
         {step === 4 && (
-          <div>
+          <div id="step-4-content">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Camera className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-semibold">Step 4 — Photos & Platform Check</h2>
+                <h2 className="text-lg font-semibold" id="step-4-heading">Step 4: Photos & Platform Check</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(3)} data-testid="button-back-step3">
+              <Button variant="outline" size="sm" onClick={() => setStep(3)} data-testid="button-back-step3" id="btn-prev-step" aria-label="Go back to Step 3: Select Unit Pair">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
+            </div>
+            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <strong>Community:</strong> {selectedCommunity?.name} — <strong>Unit 1:</strong> {selectedUnit1?.title} — <strong>Unit 2:</strong> {selectedUnit2?.title}.{" "}
+              {unit1Photos.length + unit2Photos.length > 0 ? `${unit1Photos.length + unit2Photos.length} photos loaded.` : photosLoading ? "Loading photos…" : "No photos loaded."}
+              {Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean).length > 0 &&
+                ` ${Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean).length} flagged photos.`}
             </div>
 
             {photosLoading && (
@@ -649,7 +673,7 @@ export default function AddCommunity() {
                   </div>
                 )}
 
-                <Button onClick={handleGenerateListing} data-testid="button-generate-listing">
+                <Button onClick={handleGenerateListing} data-testid="button-generate-listing" id="btn-next-step" aria-label="Generate listing draft and proceed to Step 5">
                   <FileText className="h-4 w-4 mr-2" />
                   Generate Listing Draft <ArrowRight className="h-4 w-4 ml-2" />
                 </Button>
@@ -660,19 +684,25 @@ export default function AddCommunity() {
 
         {/* ── STEP 5: Listing draft ─────────────────────────── */}
         {step === 5 && (
-          <div>
+          <div id="step-5-content">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <FileText className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-semibold">Step 5 — Listing Draft</h2>
+                <h2 className="text-lg font-semibold" id="step-5-heading">Step 5: Listing Draft</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(4)} data-testid="button-back-step4">
+              <Button variant="outline" size="sm" onClick={() => setStep(4)} data-testid="button-back-step4" id="btn-prev-step" aria-label="Go back to Step 4: Photos and Platform Check">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
             </div>
 
+            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <strong>Community:</strong> {selectedCommunity?.name} — <strong>Units:</strong> {selectedUnit1?.title} + {selectedUnit2?.title}.{" "}
+              <strong>Combined:</strong> {combinedBedrooms}BR. <strong>Suggested rate:</strong> ${suggestedRate > 0 ? suggestedRate.toLocaleString() : "—"}/night.{" "}
+              <strong>Title:</strong> {editedTitle || (listing?.title ?? "Not generated yet")}.
+            </div>
+
             {listingLoading && (
-              <div className="flex items-center gap-3 py-12 justify-center text-muted-foreground">
+              <div className="flex items-center gap-3 py-12 justify-center text-muted-foreground" id="status-message">
                 <Loader2 className="h-5 w-5 animate-spin" />
                 Generating VRBO-ready listing with AI…
               </div>
@@ -683,11 +713,11 @@ export default function AddCommunity() {
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
                   <Card className="p-4">
                     <p className="text-xs text-muted-foreground mb-1">Combined Bedrooms</p>
-                    <p className="text-2xl font-bold" data-testid="text-combined-bedrooms">{combinedBedrooms}BR</p>
+                    <p className="text-2xl font-bold" data-testid="text-combined-bedrooms" id="text-combined-bedrooms">{combinedBedrooms}BR</p>
                   </Card>
                   <Card className="p-4">
                     <p className="text-xs text-muted-foreground mb-1">Suggested Nightly Rate</p>
-                    <p className="text-2xl font-bold text-green-600" data-testid="text-suggested-rate">${suggestedRate > 0 ? suggestedRate.toLocaleString() : listing.suggestedRate?.toLocaleString() ?? "—"}</p>
+                    <p className="text-2xl font-bold text-green-600" data-testid="text-suggested-rate" id="text-suggested-rate">${suggestedRate > 0 ? suggestedRate.toLocaleString() : listing.suggestedRate?.toLocaleString() ?? "—"}</p>
                   </Card>
                   <Card className="p-4">
                     <p className="text-xs text-muted-foreground mb-1">Markup</p>
@@ -697,37 +727,42 @@ export default function AddCommunity() {
 
                 <div className="space-y-4 mb-6">
                   <div>
-                    <label className="text-sm font-medium mb-1.5 block">
+                    <label htmlFor="input-listing-title" className="text-sm font-medium mb-1.5 block">
                       Headline <span className="text-muted-foreground font-normal">({editedTitle.length}/80 chars)</span>
                     </label>
                     <Input
+                      id="input-listing-title"
                       value={editedTitle}
                       onChange={e => setEditedTitle(e.target.value.slice(0, 80))}
                       className="font-medium"
                       data-testid="input-listing-title"
+                      aria-label="Listing headline"
                     />
                   </div>
                   <div>
-                    <label className="text-sm font-medium mb-1.5 block">Description</label>
+                    <label htmlFor="textarea-listing-description" className="text-sm font-medium mb-1.5 block">Description</label>
                     <Textarea
+                      id="textarea-listing-description"
                       value={editedDescription}
                       onChange={e => setEditedDescription(e.target.value)}
                       rows={16}
                       className="font-mono text-xs leading-relaxed resize-y"
                       data-testid="textarea-listing-description"
+                      aria-label="Listing description"
                     />
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <Button onClick={handleSave} disabled={saving} data-testid="button-save-community">
+                  <Button onClick={handleSave} disabled={saving} data-testid="button-save-community" id="btn-next-step" aria-label="Save community to dashboard">
                     {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
                     {saving ? "Saving…" : "Save to Dashboard"}
                   </Button>
-                  <Button variant="outline" onClick={handleGenerateListing} disabled={listingLoading} data-testid="button-regenerate">
+                  <Button variant="outline" onClick={handleGenerateListing} disabled={listingLoading} data-testid="button-regenerate" id="button-regenerate-listing" aria-label="Regenerate listing with AI">
                     Regenerate with AI
                   </Button>
                 </div>
+                {saving && <p id="status-message" className="text-sm text-muted-foreground mt-2">Saving community to dashboard…</p>}
               </>
             )}
           </div>

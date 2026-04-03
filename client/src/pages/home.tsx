@@ -611,6 +611,8 @@ export default function Home() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 data-testid="input-search"
+                id="input-search-properties"
+                aria-label="Search properties by name, community, or location"
                 placeholder="Search properties..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
@@ -618,7 +620,7 @@ export default function Home() {
               />
             </div>
             <Select value={communityFilter} onValueChange={setCommunityFilter}>
-              <SelectTrigger className="w-[200px]" data-testid="select-community">
+              <SelectTrigger className="w-[200px]" data-testid="select-community" id="select-community-filter" aria-label="Filter by community">
                 <SelectValue placeholder="All Communities" />
               </SelectTrigger>
               <SelectContent>
@@ -631,7 +633,7 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={islandFilter} onValueChange={setIslandFilter}>
-              <SelectTrigger className="w-[160px]" data-testid="select-island">
+              <SelectTrigger className="w-[160px]" data-testid="select-island" id="select-island-filter" aria-label="Filter by island">
                 <SelectValue placeholder="All Islands" />
               </SelectTrigger>
               <SelectContent>
@@ -644,7 +646,7 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={multiUnitFilter} onValueChange={setMultiUnitFilter}>
-              <SelectTrigger className="w-[160px]" data-testid="select-multi-unit">
+              <SelectTrigger className="w-[160px]" data-testid="select-multi-unit" id="select-type-filter" aria-label="Filter by property type">
                 <SelectValue placeholder="All Types" />
               </SelectTrigger>
               <SelectContent>
@@ -654,7 +656,7 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={lodgifyFilter} onValueChange={setLodgifyFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status">
+              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status" id="select-lodgify-filter" aria-label="Filter by Lodgify status">
                 <SelectValue placeholder="Lodgify Status" />
               </SelectTrigger>
               <SelectContent>
@@ -666,9 +668,9 @@ export default function Home() {
           </div>
         </Card>
 
-        <Card>
+        <Card id="property-table-card">
           <div className="p-3 border-b flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm text-muted-foreground" data-testid="text-showing-count">
+            <p className="text-sm text-muted-foreground" data-testid="text-showing-count" id="text-showing-count">
               Showing {filtered.length} of {properties.length} properties
             </p>
             <div className="flex items-center gap-2">
@@ -678,99 +680,134 @@ export default function Home() {
               </Badge>
             </div>
           </div>
-          <Table>
+          <div className="overflow-x-auto">
+          <Table id="list-properties" style={{ minWidth: 0 }}>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[140px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[30px] text-center">#</TableHead>
-                <TableHead>
+                <TableHead className="min-w-[180px]">
                   <Button
                     variant="ghost"
                     className="font-medium"
                     onClick={() => handleSort("name")}
                     data-testid="button-sort-name"
+                    id="button-sort-name"
+                    aria-label="Sort by property name"
                   >
                     Property Name
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead>
+                <TableHead className="min-w-[130px]">
                   <Button
                     variant="ghost"
                     className="font-medium"
                     onClick={() => handleSort("community")}
                     data-testid="button-sort-community"
+                    id="button-sort-community"
+                    aria-label="Sort by community"
                   >
                     Community
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead>
+                <TableHead className="min-w-[80px]">
                   <Button
                     variant="ghost"
                     className="font-medium"
                     onClick={() => handleSort("island")}
                     data-testid="button-sort-island"
+                    id="button-sort-island"
+                    aria-label="Sort by island"
                   >
                     Island
                     <SortIcon field="island" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center">
+                <TableHead className="text-center w-[50px]">
                   <Button
                     variant="ghost"
-                    className="font-medium"
+                    className="font-medium px-1"
                     onClick={() => handleSort("bedrooms")}
                     data-testid="button-sort-bedrooms"
+                    id="button-sort-bedrooms"
+                    aria-label="Sort by bedrooms"
                   >
                     BR
                     <SortIcon field="bedrooms" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center">
+                <TableHead className="text-center w-[70px]">
                   <Button
                     variant="ghost"
-                    className="font-medium"
+                    className="font-medium px-1"
                     onClick={() => handleSort("guests")}
                     data-testid="button-sort-guests"
+                    id="button-sort-guests"
+                    aria-label="Sort by guests"
                   >
                     Guests
                     <SortIcon field="guests" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-right">
-                  <Button
-                    variant="ghost"
-                    className="font-medium"
-                    onClick={() => handleSort("lowPrice")}
-                    data-testid="button-sort-low-price"
-                  >
-                    Low $/Night
-                    <SortIcon field="lowPrice" />
-                  </Button>
-                </TableHead>
-                <TableHead className="text-right">
-                  <Button
-                    variant="ghost"
-                    className="font-medium"
-                    onClick={() => handleSort("highPrice")}
-                    data-testid="button-sort-high-price"
-                  >
-                    High $/Night
-                    <SortIcon field="highPrice" />
-                  </Button>
-                </TableHead>
-                <TableHead className="text-center">Type</TableHead>
-                <TableHead className="text-center w-[60px]">Lodgify</TableHead>
-                <TableHead className="w-[40px]"></TableHead>
+                <TableHead className="text-center min-w-[120px]">Lodgify</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filtered.map((property, idx) => (
-                <TableRow key={property.id} data-testid={`row-property-${property.id}`}>
+                <TableRow key={property.id} data-testid={`row-property-${property.id}`} id={`item-property-${property.id}`}>
+                  <TableCell className="sticky left-0 bg-background z-10">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {unitBuilderIds.has(property.id) && (
+                        <>
+                          <Link href={`/unit-builder/${property.id}`}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs px-2 gap-1"
+                              data-testid={`button-unit-builder-${property.id}`}
+                              id={`btn-build-${property.id}`}
+                              aria-label={`Build property ${property.name}`}
+                            >
+                              <Hammer className="h-3 w-3" />
+                              Build
+                            </Button>
+                          </Link>
+                          <Link href={`/lodgify-prep/${property.id}`}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs px-2 gap-1"
+                              data-testid={`button-lodgify-prep-${property.id}`}
+                              id={`btn-prep-${property.id}`}
+                              aria-label={`Lodgify prep for ${property.name}`}
+                            >
+                              <ClipboardList className="h-3 w-3" />
+                              Prep
+                            </Button>
+                          </Link>
+                        </>
+                      )}
+                      <a
+                        href={property.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid={`link-property-${property.id}`}
+                        id={`link-view-${property.id}`}
+                        aria-label={`View ${property.name} listing`}
+                      >
+                        <Button size="sm" variant="ghost" className="h-7 text-xs px-2 gap-1">
+                          <ExternalLink className="h-3 w-3" />
+                          View
+                        </Button>
+                      </a>
+                    </div>
+                  </TableCell>
                   <TableCell className="text-center text-muted-foreground text-xs">{idx + 1}</TableCell>
                   <TableCell>
-                    <div className="max-w-[280px]">
-                      <span className="font-medium text-sm leading-tight" data-testid={`text-name-${property.id}`}>
+                    <div>
+                      <span className="font-medium text-sm leading-tight" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`}>
                         {property.name}
                       </span>
                       <p className="text-xs text-muted-foreground mt-0.5">{property.unitDetails}</p>
@@ -789,45 +826,19 @@ export default function Home() {
                     <span className="text-sm text-muted-foreground">{property.island}</span>
                   </TableCell>
                   <TableCell className="text-center">
-                    <div className="flex items-center justify-center gap-1">
-                      <BedDouble className="h-3.5 w-3.5 text-muted-foreground" />
-                      <span className="font-medium" data-testid={`text-bedrooms-${property.id}`}>
-                        {property.bedrooms}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-center">
-                    <div className="flex items-center justify-center gap-1">
-                      <Users className="h-3.5 w-3.5 text-muted-foreground" />
-                      <span className="font-medium" data-testid={`text-guests-${property.id}`}>
-                        {property.guests}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <span className="font-medium" data-testid={`text-low-price-${property.id}`}>
-                      {property.lowPrice ? `$${property.lowPrice.toLocaleString()}` : "N/A"}
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <span className="font-medium" data-testid={`text-high-price-${property.id}`}>
-                      {property.highPrice ? `$${property.highPrice.toLocaleString()}` : "N/A"}
+                    <span className="font-medium" data-testid={`text-bedrooms-${property.id}`}>
+                      {property.bedrooms}
                     </span>
                   </TableCell>
                   <TableCell className="text-center">
-                    {property.multiUnit ? (
-                      <Badge variant="outline" className="text-xs">
-                        <Layers className="h-3 w-3 mr-1" />
-                        Multi
-                      </Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">Single</span>
-                    )}
+                    <span className="font-medium" data-testid={`text-guests-${property.id}`}>
+                      {property.guests}
+                    </span>
                   </TableCell>
                   <TableCell className="text-center">
                     {property.multiUnit ? (
                       propertyMapById.has(property.id) ? (
-                        <div className="flex flex-col items-center gap-0.5" data-testid={`status-lodgify-${property.id}`}>
+                        <div className="flex flex-col items-center gap-0.5" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
                           <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-full px-2 py-0.5 whitespace-nowrap">
                             <CheckCircle2 className="h-3 w-3" />
                             In Lodgify
@@ -835,7 +846,7 @@ export default function Home() {
                           <span className="text-[9px] text-muted-foreground">#{propertyMapById.get(property.id)}</span>
                         </div>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted rounded-full px-2 py-0.5 whitespace-nowrap" data-testid={`status-lodgify-${property.id}`}>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted rounded-full px-2 py-0.5 whitespace-nowrap" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
                           <XCircle className="h-3 w-3" />
                           Not in Lodgify
                         </span>
@@ -844,45 +855,18 @@ export default function Home() {
                       <span className="text-xs text-muted-foreground">-</span>
                     )}
                   </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-1">
-                      {unitBuilderIds.has(property.id) && (
-                        <>
-                          <Link href={`/unit-builder/${property.id}`}>
-                            <Button size="icon" variant="ghost" data-testid={`button-unit-builder-${property.id}`}>
-                              <Hammer className="h-4 w-4" />
-                            </Button>
-                          </Link>
-                          <Link href={`/lodgify-prep/${property.id}`}>
-                            <Button size="icon" variant="ghost" data-testid={`button-lodgify-prep-${property.id}`}>
-                              <ClipboardList className="h-4 w-4" />
-                            </Button>
-                          </Link>
-                        </>
-                      )}
-                      <a
-                        href={property.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        data-testid={`link-property-${property.id}`}
-                      >
-                        <Button size="icon" variant="ghost">
-                          <ExternalLink className="h-4 w-4" />
-                        </Button>
-                      </a>
-                    </div>
-                  </TableCell>
                 </TableRow>
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
+          </div>
         </Card>
 
         {/* Community Drafts Section */}
