@@ -1,0 +1,109 @@
+Update the Pre-Flight Check screen in the NexStay Property Builder. Do not change anything else. Make only the following two changes:
+
+---
+
+## CHANGE 1 — SHOW BOTH UNITS AS SEPARATE ROWS PER PLATFORM
+
+The platform check table currently shows one row per platform (Airbnb, VRBO, Booking.com). Change it so that each platform has TWO rows — one for each unit in the bundled listing.
+
+Pull both unit records from the existing property data. Each unit already has a unit number and street address stored in NexStay.
+
+### New table structure:
+
+| Platform     | Unit              | Address                  | Status         | Link       |
+|--------------|-------------------|--------------------------|----------------|------------|
+| Airbnb       | Unit A (e.g. #3B) | 123 Poipu Rd, Unit 3B    | [status badge] | [View →]   |
+| Airbnb       | Unit B (e.g. #4C) | 123 Poipu Rd, Unit 4C    | [status badge] | [View →]   |
+| VRBO         | Unit A (e.g. #3B) | 123 Poipu Rd, Unit 3B    | [status badge] | [View →]   |
+| VRBO         | Unit B (e.g. #4C) | 123 Poipu Rd, Unit 4C    | [status badge] | [View →]   |
+| Booking.com  | Unit A (e.g. #3B) | 123 Poipu Rd, Unit 3B    | [status badge] | [View →]   |
+| Booking.com  | Unit B (e.g. #4C) | 123 Poipu Rd, Unit 4C    | [status badge] | [View →]   |
+
+Group rows visually by platform with a light divider or shaded header row between each platform group so it's easy to scan.
+
+Each row must have a unique id in the format:
+id="check-[platform]-[unit-id]"
+e.g. id="check-airbnb-unit-a", id="check-vrbo-unit-b"
+
+Update the backend route /api/platform-check?propertyId=[id] to return results
+per unit, per platform:
+
+{
+  "units": [
+    {
+      "unitId": "unit-a",
+      "unitNumber": "3B",
+      "address": "123 Poipu Rd, Unit 3B",
+      "platforms": {
+        "airbnb":  { "listed": true/false/null, "url": "...", "titleMatch": true/false },
+        "vrbo":    { "listed": true/false/null, "url": "...", "titleMatch": true/false },
+        "booking": { "listed": true/false/null, "url": "...", "titleMatch": true/false }
+      }
+    },
+    {
+      "unitId": "unit-b",
+      "unitNumber": "4C",
+      "address": "123 Poipu Rd, Unit 4C",
+      "platforms": {
+        "airbnb":  { "listed": true/false/null, "url": "...", "titleMatch": true/false },
+        "vrbo":    { "listed": true/false/null, "url": "...", "titleMatch": true/false },
+        "booking": { "listed": true/false/null, "url": "...", "titleMatch": true/false }
+      }
+    }
+  ]
+}
+
+---
+
+## CHANGE 2 — FIX FALSE POSITIVES BY VERIFYING UNIT NUMBER AGAINST LISTING TITLE
+
+The current site: search is returning false positives because it finds any listing on
+the platform that mentions the community name, even if it's a different unit.
+
+Add a verification step that fetches the actual listing page and checks whether the
+unit number appears in the listing title or header. Only mark a unit as "Listed" if
+the unit number is confirmed in the listing content.
+
+### Updated detection logic (server-side, per unit per platform):
+
+Step 1 — Run the existing Google site: search using property name and city:
+- Airbnb:      `site:airbnb.com "[community_name]" "[city]" "[unit_number]"`
+- VRBO:        `site:vrbo.com "[community_name]" "[city]" "[unit_number]"`
+- Booking.com: `site:booking.com "[community_name]" "[city]" "[unit_number]"`
+
+Include the unit number directly in the search query — this alone will reduce
+false positives significantly.
+
+Step 2 — For any result URL returned, fetch that listing page (server-side) and
+extract the page <title> tag and the first <h1> or <h2> heading.
+
+Step 3 — Check whether the unit number (e.g. "3B" or "Unit 3B") appears in either
+the page title or the first heading. This is case-insensitive.
+
+- If unit number IS found in title/heading → confirmed match → "titleMatch": true
+  → show green "✓ Yes — Listed" badge
+- If unit number is NOT found in title/heading → likely false positive →
+  "titleMatch": false → show yellow "⚠ Possible Match — Title Unconfirmed" badge
+  (class="status-unconfirmed") with the URL still shown so the user can manually check
+- If no results found at all → "✗ No — Not Listed" red badge as before
+- If fetch fails → "⚠ Could not verify" yellow badge as before
+
+### Badge summary after this change:
+- Green  "✓ Yes — Listed"                    → search found it AND unit number confirmed in title
+- Yellow "⚠ Possible Match — Check Manually" → search found a result but unit number not in title
+- Red    "✗ No — Not Listed"                 → no results found
+- Yellow "⚠ Could not verify"                → fetch or search failed
+
+For the yellow "Possible Match" rows, still show the "View →" link so the user
+can click through and manually verify.
+
+---
+
+## NO OTHER CHANGES
+
+Do not modify:
+- The skip banner or Cowork bypass button
+- The photo audit section
+- The "Continue to Builder" or "Use a Different Unit" buttons
+- Any existing wizard steps
+- Any other part of the NexStay app

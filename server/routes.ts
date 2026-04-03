@@ -2620,40 +2620,78 @@ export async function registerRoutes(
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const name = (req.query.name as string || "").trim();
-    const address = (req.query.address as string || "").trim();
+    const city = (req.query.city as string || "").trim();
+    const unitsParam = (req.query.units as string || "[]");
     if (!name) return res.status(400).json({ error: "name is required" });
 
-    // Extract city from address like "4460 Nehe Rd, Lihue, HI 96766"
-    const cityMatch = address.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
-    const city = cityMatch ? cityMatch[1].trim() : address;
+    let units: { unitId: string; unitNumber: string; address: string }[] = [];
+    try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
+    if (units.length === 0) return res.status(400).json({ error: "units array is required" });
 
-    const platforms: { key: string; label: string; pattern: string; query: string }[] = [
-      { key: "airbnb",  label: "Airbnb",      pattern: "airbnb.com/rooms/",        query: `site:airbnb.com "${name}" "${city}"` },
-      { key: "vrbo",    label: "VRBO",         pattern: "vrbo.com/",                query: `site:vrbo.com "${name}" "${city}"` },
-      { key: "booking", label: "Booking.com",  pattern: "booking.com/",             query: `site:booking.com "${name}" "${city}"` },
+    const PLATFORM_CONFIGS = [
+      { key: "airbnb",  pattern: "airbnb.com/rooms/" },
+      { key: "vrbo",    pattern: "vrbo.com/" },
+      { key: "booking", pattern: "booking.com/" },
     ];
 
-    const check = async (p: typeof platforms[0]): Promise<{ listed: boolean | null; url: string | null }> => {
+    // Fetch listing page and check if unit number appears in <title>, <h1>, or <h2>
+    const verifyTitle = async (url: string, unitNumber: string): Promise<boolean> => {
       try {
-        const params = new URLSearchParams({ engine: "google", q: p.query, api_key: apiKey, num: "10" });
-        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
-          headers: { "User-Agent": "NexStay/1.0" },
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        const resp = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; NexStay/1.0; +https://nexstay.com)" },
+          signal: ctrl.signal,
         });
-        if (!resp.ok) return { listed: null, url: null };
-        const data = await resp.json() as any;
-        const results = data.organic_results || [];
-        for (const r of results) {
-          const link: string = r.link || r.url || "";
-          if (link.includes(p.pattern)) return { listed: true, url: link };
-        }
-        return { listed: false, url: null };
+        clearTimeout(timer);
+        if (!resp.ok) return false;
+        const html = await resp.text();
+        const titleM = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        const h1M    = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+        const h2M    = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+        const combined = [titleM?.[1], h1M?.[1], h2M?.[1]].join(" ").toLowerCase().replace(/<[^>]+>/g, " ");
+        return combined.includes(unitNumber.toLowerCase());
       } catch {
-        return { listed: null, url: null };
+        return false;
       }
     };
 
-    const [airbnb, vrbo, booking] = await Promise.all(platforms.map(p => check(p)));
-    res.json({ airbnb, vrbo, booking });
+    const checkUnitPlatform = async (
+      unit: { unitId: string; unitNumber: string },
+      cfg: typeof PLATFORM_CONFIGS[0],
+    ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
+      const q = `site:${cfg.key === "booking" ? "booking.com" : cfg.key + ".com"} "${name}" "${city}" "${unit.unitNumber}"`;
+      try {
+        const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "10" });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+          headers: { "User-Agent": "NexStay/1.0" },
+        });
+        if (!resp.ok) return { listed: null, url: null, titleMatch: false };
+        const data = await resp.json() as any;
+        const results: any[] = data.organic_results || [];
+        for (const r of results) {
+          const link: string = r.link || r.url || "";
+          if (link.includes(cfg.pattern)) {
+            const confirmed = await verifyTitle(link, unit.unitNumber);
+            return { listed: true, url: link, titleMatch: confirmed };
+          }
+        }
+        return { listed: false, url: null, titleMatch: false };
+      } catch {
+        return { listed: null, url: null, titleMatch: false };
+      }
+    };
+
+    const resultUnits = await Promise.all(
+      units.map(async (unit) => {
+        const [airbnb, vrbo, booking] = await Promise.all(
+          PLATFORM_CONFIGS.map(cfg => checkUnitPlatform(unit, cfg)),
+        );
+        return { unitId: unit.unitId, unitNumber: unit.unitNumber, address: unit.address, platforms: { airbnb, vrbo, booking } };
+      }),
+    );
+
+    res.json({ units: resultUnits });
   });
 
   // Photo audit: runs reverse image search on each unit photo to detect platform listings
