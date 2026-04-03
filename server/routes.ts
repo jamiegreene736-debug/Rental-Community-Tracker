@@ -2075,6 +2075,26 @@ export async function registerRoutes(
     }
   });
 
+  // Serve community photo listing as { url, filename }[] — used by Builder Step 3
+  app.get("/api/photos/community/:folder", async (req, res) => {
+    const folder = req.params.folder.replace(/[^a-zA-Z0-9_-]/g, "");
+    if (!folder) return res.status(400).json({ error: "Missing folder" });
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    try {
+      const files = await fs.promises.readdir(folderPath).catch(() => []);
+      const imageFiles = (files as string[])
+        .filter((f: string) => /\.(jpg|jpeg|png|webp)$/i.test(f))
+        .sort();
+      const result = imageFiles.map((f: string) => ({
+        url: `/photos/${folder}/${f}`,
+        filename: f,
+      }));
+      res.json(result);
+    } catch {
+      res.json([]);
+    }
+  });
+
   // List actual files in a community photo folder (dynamic — doesn't rely on hardcoded data)
   app.get("/api/photos/community-files", async (req, res) => {
     const folder = (req.query.folder as string || "").replace(/[^a-zA-Z0-9_-]/g, "");

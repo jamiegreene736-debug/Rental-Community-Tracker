@@ -371,10 +371,22 @@ function Step3({
     setMakeoverError(null);
 
     try {
+      const beginningPhotos = property.communityPhotos
+        .filter(p => p.position === "beginning")
+        .map(p => p.filename);
+      const endPhotos = property.communityPhotos
+        .filter(p => p.position === "end")
+        .map(p => p.filename);
       const resp = await fetch("/api/photos/ai-makeover/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ propertyId: property.propertyId }),
+        body: JSON.stringify({
+          folders: property.units.map(u => u.photoFolder),
+          communityFolder: property.communityPhotoFolder,
+          beginningPhotos,
+          endPhotos,
+          name: property.propertyName,
+        }),
       });
       if (!resp.ok) throw new Error("Failed to start makeover");
       const data = await resp.json();
@@ -427,7 +439,7 @@ function Step3({
   return (
     <div id="step-3-content">
       <h2 className="text-xl font-bold mb-2" id="step-3-heading">What does your rental look like?</h2>
-      <p className="text-muted-foreground text-sm mb-4">Review community and unit photos. Use AI Makeover to upscale all photos 2× before uploading to Lodgify.</p>
+      <p className="text-muted-foreground text-sm mb-4">Review community and unit photos. Use Upscale All + ZIP to run Real-ESRGAN 2× upscaling on all interior photos, then download them as a ZIP ready to upload to Lodgify.</p>
 
       {/* Action buttons — visible immediately, no scroll required */}
       <div className="flex flex-wrap gap-3 mb-6 p-4 bg-muted/30 rounded-lg border">
@@ -438,7 +450,7 @@ function Step3({
           disabled={makingOver}
         >
           {makingOver ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
-          AI Makeover All + ZIP
+          Upscale All + ZIP
         </Button>
         <Button
           id="btn-download-zip"
