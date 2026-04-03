@@ -13,6 +13,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { UnitReplacementFlow } from "@/components/unit-replacement-flow";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -110,6 +111,7 @@ export default function BuilderPreflight() {
   const [platformChecking, setPlatformChecking] = useState(false);
   const [platformData, setPlatformData] = useState<PlatformCheckData>(null);
   const [platformDone, setPlatformDone] = useState(false);
+  const [showReplacementFlow, setShowReplacementFlow] = useState(false);
 
   if (!property) {
     return (
@@ -339,15 +341,28 @@ export default function BuilderPreflight() {
           </Button>
           <Button
             id="btn-use-different-unit"
-            aria-label="Go to prep page to find a replacement unit"
+            aria-label="Find a replacement unit"
             size="lg"
             variant="outline"
-            onClick={() => setLocation(`/lodgify-prep/${id}`)}
+            onClick={() => setShowReplacementFlow(true)}
             className="sm:w-auto"
           >
             Use a Different Unit
           </Button>
         </div>
+
+        {showReplacementFlow && property.communityPhotoFolder && (
+          <div className="mt-6">
+            <UnitReplacementFlow
+              unit={{ id: property.units[0].id, unitNumber: property.units[0].unitNumber, bedrooms: property.units[0].bedrooms }}
+              allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms }))}
+              communityFolder={property.communityPhotoFolder}
+              propertyId={id}
+              onClose={() => setShowReplacementFlow(false)}
+              onPushToBuilder={() => setLocation(step1Url)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
