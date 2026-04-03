@@ -1,13 +1,4 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
-import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Loader2,
   RefreshCw,
@@ -16,15 +7,22 @@ import {
   ShieldCheck,
   Home,
   ExternalLink,
-  ArrowRight,
   Search as SearchIcon,
-  Sparkles,
+  Repeat2,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
 export type UnitStub = { id: string; unitNumber: string; bedrooms: number };
 
-type ReplacementUnit = {
+export type ReplacementUnitData = {
   url: string;
   address: string;
   unitLabel: string;
@@ -39,20 +37,19 @@ export function UnitReplacementFlow({
   communityFolder,
   propertyId,
   onClose,
-  onPushToBuilder,
+  onUnitReplaced,
 }: {
   unit: UnitStub;
   allUnits: UnitStub[];
   communityFolder: string;
   propertyId: number;
   onClose?: () => void;
-  onPushToBuilder?: () => void;
+  onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData) => void;
 }) {
   const [selectedUnitId, setSelectedUnitId] = useState(unit.id);
-  const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "saving" | "swapped" | "error">("idle");
-  const [result, setResult] = useState<{ unit: ReplacementUnit } | { error: string } | null>(null);
+  const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
+  const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
-  const [, navigate] = useLocation();
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
 
@@ -70,24 +67,22 @@ export function UnitReplacementFlow({
       const data = await resp.json();
       if (data.error) {
         setStage("error");
-        setResult({ error: data.error });
+        setResult(null);
+        setSwapError(data.error);
       } else {
         setStage("found");
-        setResult(data);
+        setResult(data.unit);
       }
     } catch {
       setStage("error");
-      setResult({ error: "Failed to connect. Please try again." });
+      setSwapError("Failed to connect. Please try again.");
     }
   }
 
-  async function handlePushToBuilder() {
-    if (!result || !("unit" in result)) return;
-    const newUnit = result.unit;
-
-    setStage("saving");
+  async function handleReplaceUnit() {
+    if (!result) return;
+    setStage("replacing");
     setSwapError(null);
-
     try {
       const resp = await apiRequest("POST", "/api/unit-swaps", {
         propertyId,
@@ -95,34 +90,36 @@ export function UnitReplacementFlow({
         oldUnitId: selectedUnit.id,
         oldUnitNumber: selectedUnit.unitNumber,
         oldBedrooms: selectedUnit.bedrooms,
-        newAddress: newUnit.address,
-        newUnitLabel: newUnit.unitLabel,
-        newBedrooms: newUnit.bedrooms,
-        newSourceUrl: newUnit.url,
-        thumbnailUrl: newUnit.photos[0]?.url || null,
+        newAddress: result.address,
+        newUnitLabel: result.unitLabel,
+        newBedrooms: result.bedrooms,
+        newSourceUrl: result.url,
+        thumbnailUrl: result.photos[0]?.url || null,
       });
       if (!resp.ok) {
         const err = await resp.json();
-        throw new Error(err.error || "Failed to save unit swap");
+        throw new Error(err.error || "Failed to record unit swap");
       }
-      setStage("swapped");
+      // Notify parent to apply the replacement and re-run the platform check
+      onUnitReplaced?.(selectedUnit.id, result);
+      onClose?.();
     } catch (err: any) {
       setSwapError(err?.message || "Failed to record swap. Please try again.");
       setStage("found");
     }
   }
 
-  function navigateToBuilder() {
-    if (onPushToBuilder) {
-      onPushToBuilder();
-    } else {
-      navigate(`/builder/${propertyId}/preflight?from=${encodeURIComponent(`/lodgify-prep/${propertyId}`)}`);
-    }
-  }
-
   const steps = ["Search Zillow", "Check Airbnb", "Confirm Clean"];
-  const stepDone = stage === "checking" ? [true, false, false] : (stage === "found" || stage === "saving" || stage === "swapped") ? [true, true, true] : [false, false, false];
-  const stepActive = stage === "searching" ? [true, false, false] : stage === "checking" ? [false, true, false] : [false, false, false];
+  const stepDone = stage === "checking"
+    ? [true, false, false]
+    : (stage === "found" || stage === "replacing")
+      ? [true, true, true]
+      : [false, false, false];
+  const stepActive = stage === "searching"
+    ? [true, false, false]
+    : stage === "checking"
+      ? [false, true, false]
+      : [false, false, false];
 
   return (
     <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-3 space-y-3">
@@ -137,36 +134,6 @@ export function UnitReplacementFlow({
           </Button>
         )}
       </div>
-
-      {/* Swap success screen */}
-      {stage === "swapped" && result && "unit" in result && (
-        <div className="space-y-3">
-          <div className="rounded border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/30 px-3 py-3 space-y-1.5">
-            <p className="text-xs font-semibold text-green-700 dark:text-green-400 flex items-center gap-1.5">
-              <Sparkles className="h-3.5 w-3.5" />
-              Unit swap recorded successfully
-            </p>
-            <p className="text-[11px] text-green-700 dark:text-green-500 leading-snug">
-              <span className="font-medium">Old:</span> Unit #{selectedUnit.unitNumber} ({selectedUnit.bedrooms} BR)
-            </p>
-            <p className="text-[11px] text-green-700 dark:text-green-500 leading-snug">
-              <span className="font-medium">New:</span> {result.unit.unitLabel} — {result.unit.address}
-            </p>
-            {result.unit.bedrooms && (
-              <p className="text-[11px] text-green-700 dark:text-green-500">{result.unit.bedrooms} BR replacement</p>
-            )}
-          </div>
-          <Button
-            size="sm"
-            className="w-full"
-            onClick={navigateToBuilder}
-            data-testid="button-go-to-builder"
-          >
-            Go to Builder
-            <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
-          </Button>
-        </div>
-      )}
 
       {/* Unit selector + search */}
       {(stage === "idle" || stage === "searching" || stage === "checking") && (
@@ -199,7 +166,7 @@ export function UnitReplacementFlow({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
-                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb for photo conflicts…"}
+                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb for conflicts…"}
                 </span>
               </div>
               <div className="flex gap-1.5">
@@ -228,19 +195,21 @@ export function UnitReplacementFlow({
         </>
       )}
 
-      {stage === "error" && result && "error" in result && (
+      {/* Error state */}
+      {stage === "error" && (
         <div className="space-y-2">
           <p className="text-xs text-red-600 dark:text-red-400 flex items-start gap-1.5">
             <XCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
-            {result.error}
+            {swapError || "Search failed. Please try again."}
           </p>
-          <Button size="sm" variant="outline" onClick={() => setStage("idle")} data-testid="button-retry-unit-search">
+          <Button size="sm" variant="outline" onClick={() => { setStage("idle"); setSwapError(null); }} data-testid="button-retry-unit-search">
             Try Again
           </Button>
         </div>
       )}
 
-      {(stage === "found" || stage === "saving") && result && "unit" in result && (
+      {/* Found unit — confirm replacement */}
+      {(stage === "found" || stage === "replacing") && result && (
         <div className="space-y-2.5">
           <p className="text-xs font-medium text-green-700 dark:text-green-400 flex items-center gap-1.5">
             <ShieldCheck className="h-3.5 w-3.5" />
@@ -250,19 +219,19 @@ export function UnitReplacementFlow({
             <div className="flex items-start gap-2">
               <Home className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
               <div>
-                <p className="text-xs font-semibold leading-snug">{result.unit.unitLabel}</p>
-                <p className="text-[11px] text-muted-foreground leading-snug">{result.unit.address}</p>
-                <p className="text-[11px] text-muted-foreground">Source: {result.unit.source}</p>
-                {result.unit.bedrooms && (
+                <p className="text-xs font-semibold leading-snug">{result.unitLabel}</p>
+                <p className="text-[11px] text-muted-foreground leading-snug">{result.address}</p>
+                <p className="text-[11px] text-muted-foreground">Source: {result.source}</p>
+                {result.bedrooms && (
                   <p className="text-[11px] text-muted-foreground">
-                    {result.unit.bedrooms} Bedroom{result.unit.bedrooms > 1 ? "s" : ""}
+                    {result.bedrooms} Bedroom{result.bedrooms > 1 ? "s" : ""}
                   </p>
                 )}
               </div>
             </div>
-            {result.unit.photos.length > 0 && (
+            {result.photos.length > 0 && (
               <div className="grid grid-cols-6 gap-1">
-                {result.unit.photos.map((photo, i) => (
+                {result.photos.map((photo, i) => (
                   <div key={i} className="aspect-square rounded overflow-hidden border border-border">
                     <img
                       src={photo.url}
@@ -275,15 +244,22 @@ export function UnitReplacementFlow({
               </div>
             )}
             <a
-              href={result.unit.url}
+              href={result.url}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[11px] text-primary hover:underline flex items-center gap-1"
               data-testid="link-replacement-unit-source"
             >
-              View on {result.unit.source}
+              View on {result.source}
               <ExternalLink className="h-2.5 w-2.5" />
             </a>
+          </div>
+
+          {/* What will change */}
+          <div className="rounded bg-muted/50 border border-border px-2.5 py-2 text-[11px] text-muted-foreground space-y-0.5">
+            <p className="font-medium text-foreground text-xs mb-1">What this replaces:</p>
+            <p><span className="line-through text-muted-foreground">Unit #{selectedUnit.unitNumber} ({selectedUnit.bedrooms} BR)</span> → <span className="font-medium text-foreground">{result.unitLabel} ({result.bedrooms ?? selectedUnit.bedrooms} BR)</span></p>
+            <p className="text-[10px]">Address, unit number, bedroom count, and photo source will all update. Platform check will re-run automatically.</p>
           </div>
 
           {swapError && (
@@ -293,21 +269,21 @@ export function UnitReplacementFlow({
           <div className="flex gap-2">
             <Button
               size="sm"
-              onClick={handlePushToBuilder}
+              onClick={handleReplaceUnit}
               className="flex-1"
-              disabled={stage === "saving"}
+              disabled={stage === "replacing"}
               data-testid="button-push-to-builder"
             >
-              {stage === "saving" ? (
-                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Recording swap…</>
+              {stage === "replacing" ? (
+                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Replacing…</>
               ) : (
-                <>Push to Builder<ArrowRight className="h-3.5 w-3.5 ml-1.5" /></>
+                <><Repeat2 className="h-3.5 w-3.5 mr-1.5" />Yes, Replace Unit</>
               )}
             </Button>
             <Button
               size="sm"
               variant="outline"
-              disabled={stage === "saving"}
+              disabled={stage === "replacing"}
               onClick={() => { setStage("idle"); setResult(null); setSwapError(null); }}
               data-testid="button-try-another-unit"
             >

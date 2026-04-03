@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
   Loader2,
   ArrowRight,
@@ -13,7 +14,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
-import { UnitReplacementFlow } from "@/components/unit-replacement-flow";
+import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,15 @@ type UnitCheckResult = {
 };
 
 type PlatformCheckData = { units: UnitCheckResult[] } | null;
+
+// A swapped unit's effective display data
+type UnitOverride = {
+  unitNumber: string;
+  address: string;
+  bedrooms: number;
+  unitLabel: string;
+  sourceUrl: string;
+};
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 
@@ -113,6 +123,9 @@ export default function BuilderPreflight() {
   const [platformDone, setPlatformDone] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
 
+  // Maps old unit ID → replacement unit data
+  const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
+
   if (!property) {
     return (
       <div className="max-w-2xl mx-auto p-8 text-center">
@@ -126,20 +139,42 @@ export default function BuilderPreflight() {
 
   const step1Url = `/builder/${id}/step-1`;
 
+  // Build the effective unit list — replace any overridden units with their new data
+  const effectiveUnits = property.units.map(u => {
+    const override = unitOverrides[u.id];
+    if (override) {
+      return {
+        ...u,
+        unitNumber: override.unitNumber,
+        bedrooms: override.bedrooms,
+        // address is on the property, but we surface it in the override for the platform check
+        _overrideAddress: override.address,
+        _isReplaced: true,
+        _replacedLabel: override.unitLabel,
+        _replacedSourceUrl: override.sourceUrl,
+        _originalUnitNumber: u.unitNumber,
+      };
+    }
+    return { ...u, _overrideAddress: undefined, _isReplaced: false, _replacedLabel: undefined, _replacedSourceUrl: undefined, _originalUnitNumber: u.unitNumber };
+  });
+
   // Extract city from address like "4460 Nehe Rd, Lihue, HI 96766"
   const cityMatch = property.address.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
   const city = cityMatch ? cityMatch[1].trim() : property.address;
 
-  const runPlatformCheck = async () => {
+  const runPlatformCheck = async (unitsToCheck = effectiveUnits) => {
     setPlatformChecking(true);
     setPlatformData(null);
     try {
-      const units = property.units.map(u => ({
-        unitId: u.id,
-        unitNumber: u.unitNumber,
-        address: `${property.address}, Unit ${u.unitNumber}`,
-        photoFolder: u.photoFolder,
-      }));
+      const units = unitsToCheck.map(u => {
+        const address = (u as any)._overrideAddress || `${property.address}, Unit ${u.unitNumber}`;
+        return {
+          unitId: u.id,
+          unitNumber: u.unitNumber,
+          address,
+          photoFolder: u.photoFolder,
+        };
+      });
       const params = new URLSearchParams({
         name: property.propertyName,
         city,
@@ -149,12 +184,11 @@ export default function BuilderPreflight() {
       if (!resp.ok) throw new Error("Check failed");
       setPlatformData(await resp.json());
     } catch {
-      // On error, fill all results as "error"
       setPlatformData({
-        units: property.units.map(u => ({
+        units: unitsToCheck.map(u => ({
           unitId: u.id,
           unitNumber: u.unitNumber,
-          address: `${property.address}, Unit ${u.unitNumber}`,
+          address: (u as any)._overrideAddress || `${property.address}, Unit ${u.unitNumber}`,
           platforms: {
             airbnb:  { status: "error", url: null, detection: "Could not verify" },
             vrbo:    { status: "error", url: null, detection: "Could not verify" },
@@ -173,6 +207,39 @@ export default function BuilderPreflight() {
     setPlatformData(null);
     runPlatformCheck();
   };
+
+  // Called when user confirms "Yes, Replace Unit" in the replacement flow
+  function handleUnitReplaced(oldUnitId: string, newUnit: ReplacementUnitData) {
+    const newOverride: UnitOverride = {
+      unitNumber: newUnit.unitLabel.replace(/^Unit\s*#?/i, ""),
+      address: newUnit.address,
+      bedrooms: newUnit.bedrooms ?? property.units.find(u => u.id === oldUnitId)?.bedrooms ?? 1,
+      unitLabel: newUnit.unitLabel,
+      sourceUrl: newUnit.url,
+    };
+    const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
+    setUnitOverrides(updatedOverrides);
+    setShowReplacementFlow(false);
+
+    // Immediately re-run the platform check with the updated units
+    const updatedUnits = property.units.map(u => {
+      const override = updatedOverrides[u.id];
+      if (override) {
+        return {
+          ...u,
+          unitNumber: override.unitNumber,
+          bedrooms: override.bedrooms,
+          _overrideAddress: override.address,
+          _isReplaced: true,
+          _replacedLabel: override.unitLabel,
+          _replacedSourceUrl: override.sourceUrl,
+          _originalUnitNumber: u.unitNumber,
+        };
+      }
+      return { ...u, _overrideAddress: undefined, _isReplaced: false, _replacedLabel: undefined, _replacedSourceUrl: undefined, _originalUnitNumber: u.unitNumber };
+    });
+    runPlatformCheck(updatedUnits);
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -219,18 +286,23 @@ export default function BuilderPreflight() {
           </p>
         </div>
 
-        {/* ── Platform Check (combined text + photo signals) ── */}
+        {/* ── Platform Check ── */}
         <Card className="p-6 mb-6">
           <h2 className="text-base font-semibold mb-1">Platform Check</h2>
           <p className="text-sm text-muted-foreground mb-4">
-            Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search. Both signals are combined into a single authoritative result.
+            Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search.
+            {Object.keys(unitOverrides).length > 0 && (
+              <span className="ml-1 text-amber-600 dark:text-amber-400 font-medium">
+                Showing updated units after replacement.
+              </span>
+            )}
           </p>
 
           {!platformDone && !platformChecking && (
             <Button
               id="btn-run-platform-check"
               aria-label="Run platform check using text search and reverse image search"
-              onClick={runPlatformCheck}
+              onClick={() => runPlatformCheck()}
             >
               Run Platform Check
             </Button>
@@ -267,10 +339,12 @@ export default function BuilderPreflight() {
                       </td>
                     </tr>
 
-                    {/* One row per unit */}
-                    {property.units.map(unit => {
+                    {/* One row per effective unit */}
+                    {effectiveUnits.map(unit => {
                       const unitResult = platformData?.units.find(u => u.unitId === unit.id);
                       const r = unitResult?.platforms[key];
+                      const isReplaced = (unit as any)._isReplaced;
+                      const displayAddress = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
                       return (
                         <tr
                           key={`${key}-${unit.id}`}
@@ -278,9 +352,16 @@ export default function BuilderPreflight() {
                           className="border-b border-border/40 last:border-0"
                         >
                           <td className="py-2.5 text-xs text-muted-foreground pl-2">—</td>
-                          <td className="py-2.5 text-sm font-medium">Unit {unit.unitNumber}</td>
+                          <td className="py-2.5 text-sm font-medium">
+                            <span>Unit {unit.unitNumber}</span>
+                            {isReplaced && (
+                              <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
+                                replaced
+                              </Badge>
+                            )}
+                          </td>
                           <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
-                            {property.address}, Unit {unit.unitNumber}
+                            {displayAddress}
                           </td>
                           <td className="py-2.5">
                             <StatusBadge result={r} checking={platformChecking} />
@@ -344,7 +425,7 @@ export default function BuilderPreflight() {
             aria-label="Find a replacement unit"
             size="lg"
             variant="outline"
-            onClick={() => setShowReplacementFlow(true)}
+            onClick={() => setShowReplacementFlow(v => !v)}
             className="sm:w-auto"
           >
             Use a Different Unit
@@ -359,7 +440,7 @@ export default function BuilderPreflight() {
               communityFolder={property.communityPhotoFolder}
               propertyId={id}
               onClose={() => setShowReplacementFlow(false)}
-              onPushToBuilder={() => setLocation(step1Url)}
+              onUnitReplaced={handleUnitReplaced}
             />
           </div>
         )}
