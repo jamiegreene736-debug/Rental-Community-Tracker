@@ -1098,7 +1098,7 @@ function UnitReplacementFlow({
           <div className="flex gap-2">
             <Button
               size="sm"
-              onClick={() => navigate(`/builder/${propertyId}/preflight`)}
+              onClick={() => navigate(`/builder/${propertyId}/preflight?from=${encodeURIComponent(`/lodgify-prep/${propertyId}`)}`)}
               className="flex-1"
               data-testid="button-push-to-builder"
             >
