@@ -1612,7 +1612,7 @@ function PushRatesToLodgify({ pricing }: { pricing: PropertyPricing }) {
       year: rate.year,
       sellRate: totalSell,
       season: rate.season,
-      minStay: rate.season === "HIGH" ? 7 : 5,
+      minStay: 5,
     };
   }) || [];
 
@@ -1723,7 +1723,7 @@ function PushRatesToLodgify({ pricing }: { pricing: PropertyPricing }) {
 
       <div className="mt-3 text-xs text-muted-foreground">
         <p>Combined nightly sell rate being pushed: ${combinedRates[0]?.sellRate || 0} - ${combinedRates[combinedRates.length - 1]?.sellRate || 0}/night (varies by season)</p>
-        <p className="mt-1">Minimum stay: 7 nights (high season), 5 nights (mid/low season)</p>
+        <p className="mt-1">Minimum stay: 5 nights (all seasons)</p>
       </div>
     </Card>
   );

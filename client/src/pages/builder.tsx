@@ -819,7 +819,7 @@ function Step9({
         year: rate.year,
         sellRate: pricing.units.reduce((sum, u) => sum + u.monthlyRates[idx].sellRate, 0),
         season: rate.season,
-        minStay: rate.season === "HIGH" ? 7 : 5,
+        minStay: 5,
       })) ?? [])
     : [];
 
@@ -890,11 +890,7 @@ function Step9({
               <p className="font-semibold">{combinedRates.length} months</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">High-season min stay</p>
-              <p className="font-semibold">7 nights</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Mid/low-season min stay</p>
+              <p className="text-xs text-muted-foreground">Min stay (all seasons)</p>
               <p className="font-semibold">5 nights</p>
             </div>
           </div>
