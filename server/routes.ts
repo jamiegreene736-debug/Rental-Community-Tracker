@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertBuyInSchema, insertCommunityDraftSchema } from "@shared/schema";
+import { insertBuyInSchema, insertCommunityDraftSchema, insertUnitSwapSchema } from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
@@ -2162,28 +2162,26 @@ export async function registerRoutes(
       }
     }
 
-    // Known aliases / extra terms that help narrow results to the specific community
-    const COMMUNITY_EXTRAS: Record<string, string> = {
-      "Regency at Poipu Kai": "Poipu Kai resort Kauai",
-      "Kekaha Beachfront Estate": "Kekaha Kauai beachfront",
-      "Keauhou Estates": "Keauhou Kona Hawaii",
-      "Mauna Kai Princeville": "Princeville Kauai resort",
-      "Kaha Lani Resort": "Kapaa Kauai resort",
-      "Lae Nani Resort": "Kapaa Kauai oceanfront",
-      "Poipu Brenneckes Beachside": "Poipu Beach Kauai",
-      "Kaiulani of Princeville": "Princeville Kauai",
-      "Poipu Brenneckes Oceanfront": "Poipu Beach Kauai oceanfront",
-      "Pili Mai": "Pili Mai Poipu Kauai",
-    };
-
-    const extras = COMMUNITY_EXTRAS[name] || "resort Kauai";
-
-    // Three focused queries: pool/grounds, aerial/exterior, amenities
+    // Five targeted on-property queries — each focuses on a specific amenity/area type
     const queries = [
-      `"${name}" pool grounds resort`,
-      `"${name}" exterior buildings aerial ${extras}`,
-      `"${name}" amenities community common area`,
+      `"${name}" pool`,
+      `"${name}" building exterior`,
+      `"${name}" amenities`,
+      `"${name}" clubhouse`,
+      `"${name}" resort grounds`,
     ];
+
+    // Also include property management site searches for known high-quality sources
+    const COMMUNITY_PM_QUERIES: Record<string, string[]> = {
+      "Regency at Poipu Kai": [`site:suiteparadise.com "Poipu Kai"`, `site:kauaibeachrentals.com "Poipu Kai"`],
+      "Kaha Lani Resort": [`site:suiteparadise.com "Kaha Lani"`, `site:parrish.com "Kaha Lani"`],
+      "Lae Nani Resort": [`site:suiteparadise.com "Lae Nani"`, `site:castleresorts.com "Lae Nani"`],
+      "Kaiulani of Princeville": [`site:parrish.com "Kaiulani"`, `site:princeville.com "Kaiulani"`],
+      "Mauna Kai Princeville": [`site:parrish.com "Mauna Kai"`, `site:princeville.com "Mauna Kai"`],
+      "Pili Mai": [`site:koloa-landing.com "Pili Mai"`, `site:suiteparadise.com "Pili Mai"`],
+      "Keauhou Estates": [`site:outrigger.com "Keauhou"`, `site:holua.com "Keauhou"`],
+    };
+    const pmQueries = COMMUNITY_PM_QUERIES[name] || [];
 
     // Keywords that indicate an individual unit interior — reject these
     const interiorKeywords = [
@@ -2250,8 +2248,9 @@ export async function registerRoutes(
     }
 
     try {
-      // Run all three queries in parallel
-      const searchPromises = queries.map(async (q) => {
+      // Run all queries in parallel: 5 targeted on-property queries + PM site queries
+      const allQueries = [...queries, ...pmQueries];
+      const searchPromises = allQueries.map(async (q) => {
         const params = new URLSearchParams({
           engine: "google_images",
           q,
@@ -2367,32 +2366,33 @@ export async function registerRoutes(
       "Pili Mai": "community-pili-mai",
     };
 
-    const COMMUNITY_EXTRAS: Record<string, string> = {
-      "Regency at Poipu Kai": "Poipu Kai resort Kauai",
-      "Kekaha Beachfront Estate": "Kekaha Kauai beachfront",
-      "Keauhou Estates": "Keauhou Kona Hawaii",
-      "Mauna Kai Princeville": "Princeville Kauai resort",
-      "Kaha Lani Resort": "Kapaa Kauai resort",
-      "Lae Nani Resort": "Kapaa Kauai oceanfront",
-      "Poipu Brenneckes Beachside": "Poipu Beach Kauai",
-      "Kaiulani of Princeville": "Princeville Kauai",
-      "Poipu Brenneckes Oceanfront": "Poipu Beach Kauai oceanfront",
-      "Pili Mai": "Pili Mai Poipu Kauai",
-    };
-
     const interiorKeywords = ["bedroom", "kitchen", "bathroom", "bath", "living room", "dining room", "interior", "couch", "sofa", "bed ", "master", "loft", "hallway", "floor plan", "floorplan", "map", "square feet"];
     const lowTrustSources = ["airbnb.com", "vrbo.com", "booking.com", "homeaway.com"];
-    const highTrustSources = ["tripadvisor.com", "suiteparadise.com", "outrigger.com", "castleresorts.com", "parrish.com", "google.com", "jeanandabbott.com"];
+    const highTrustSources = ["tripadvisor.com", "suiteparadise.com", "outrigger.com", "castleresorts.com", "parrish.com", "google.com", "jeanandabbott.com", "kauaibeachrentals.com"];
+
+    const COMMUNITY_PM_QUERIES_BATCH: Record<string, string[]> = {
+      "Regency at Poipu Kai": [`site:suiteparadise.com "Poipu Kai"`, `site:kauaibeachrentals.com "Poipu Kai"`],
+      "Kaha Lani Resort": [`site:suiteparadise.com "Kaha Lani"`, `site:parrish.com "Kaha Lani"`],
+      "Lae Nani Resort": [`site:suiteparadise.com "Lae Nani"`, `site:castleresorts.com "Lae Nani"`],
+      "Kaiulani of Princeville": [`site:parrish.com "Kaiulani"`, `site:princeville.com "Kaiulani"`],
+      "Mauna Kai Princeville": [`site:parrish.com "Mauna Kai"`, `site:princeville.com "Mauna Kai"`],
+      "Pili Mai": [`site:koloa-landing.com "Pili Mai"`, `site:suiteparadise.com "Pili Mai"`],
+      "Keauhou Estates": [`site:outrigger.com "Keauhou"`, `site:holua.com "Keauhou"`],
+    };
 
     const results: Record<string, { saved: number; failed: number }> = {};
 
     for (const [communityName, folderName] of Object.entries(COMMUNITIES_MAP)) {
+      console.log(`[populate-all] ▶ Starting: ${communityName} → ${folderName}`);
       try {
-        const extras = COMMUNITY_EXTRAS[communityName] || "resort Kauai";
+        // Five targeted on-property queries + PM site queries
         const queries = [
-          `"${communityName}" pool grounds resort`,
-          `"${communityName}" exterior buildings aerial ${extras}`,
-          `"${communityName}" amenities community common area`,
+          `"${communityName}" pool`,
+          `"${communityName}" building exterior`,
+          `"${communityName}" amenities`,
+          `"${communityName}" clubhouse`,
+          `"${communityName}" resort grounds`,
+          ...(COMMUNITY_PM_QUERIES_BATCH[communityName] || []),
         ];
         const nameWords = communityName.toLowerCase().split(/\s+/).filter(w => w.length > 3);
 
@@ -2404,8 +2404,9 @@ export async function registerRoutes(
             const data = await resp.json() as any;
             allImages.push(...(data.images || []));
           }
-          await new Promise(r => setTimeout(r, 500)); // rate limit between queries
+          await new Promise(r => setTimeout(r, 400)); // rate limit between queries
         }
+        console.log(`[populate-all] ${communityName}: fetched ${allImages.length} raw images across ${queries.length} queries`);
 
         // Deduplicate and score
         const seen = new Set<string>();
@@ -2431,20 +2432,26 @@ export async function registerRoutes(
           validated.push({ url, score });
         }
         validated.sort((a, b) => b.score - a.score);
-        const top6 = validated.slice(0, 6).map(v => v.url);
+        const topUrls = validated.slice(0, 8).map(v => v.url);
+        console.log(`[populate-all] ${communityName}: ${validated.length} valid candidates, saving top ${topUrls.length}`);
 
-        // Save to folder
+        // Purge existing community photos then save new ones
         const folderPath = path.join(process.cwd(), "client/public/photos", folderName);
         await fs.promises.mkdir(folderPath, { recursive: true });
         const existing = await fs.promises.readdir(folderPath).catch(() => []);
+        let purged = 0;
         for (const f of existing) {
-          if (/\.(jpg|jpeg|png|webp)$/i.test(f)) await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+          if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
+            await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+            purged++;
+          }
         }
+        console.log(`[populate-all] ${communityName}: purged ${purged} old photos`);
 
         let saved = 0; let failed = 0;
-        for (let i = 0; i < top6.length; i++) {
+        for (let i = 0; i < topUrls.length; i++) {
           try {
-            const imgResp = await fetch(top6[i], {
+            const imgResp = await fetch(topUrls[i], {
               headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
               signal: AbortSignal.timeout(12000),
             });
@@ -2458,11 +2465,14 @@ export async function registerRoutes(
           } catch { failed++; }
         }
         results[communityName] = { saved, failed };
+        console.log(`[populate-all] ✓ ${communityName}: saved=${saved}, failed=${failed}`);
       } catch (err: any) {
+        console.log(`[populate-all] ✗ ${communityName}: ERROR — ${err?.message}`);
         results[communityName] = { saved: 0, failed: -1 };
       }
       await new Promise(r => setTimeout(r, 1000)); // rate limit between communities
     }
+    console.log(`[populate-all] ✅ Complete! Results:`, JSON.stringify(results));
 
     res.json({ status: "complete", results });
   });
@@ -3123,6 +3133,32 @@ export async function registerRoutes(
     return res.json({
       error: "No eligible replacement units found. Please try again later or adjust your search criteria.",
     });
+  });
+
+  // ============================================================
+  // Unit Swaps: Record a confirmed replacement unit for the builder
+  // ============================================================
+  app.post("/api/unit-swaps", async (req, res) => {
+    const parsed = insertUnitSwapSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
+    }
+    const swap = await storage.createUnitSwap(parsed.data);
+    return res.json({ swap });
+  });
+
+  app.get("/api/unit-swaps/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+    const swaps = await storage.getUnitSwaps(propertyId);
+    return res.json({ swaps });
+  });
+
+  app.delete("/api/unit-swaps/:id", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+    const ok = await storage.deleteUnitSwap(id);
+    return res.json({ ok });
   });
 
   // ============================================================

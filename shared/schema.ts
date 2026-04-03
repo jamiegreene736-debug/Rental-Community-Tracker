@@ -145,6 +145,29 @@ export const insertCommunityDraftSchema = createInsertSchema(communityDrafts).om
 export type InsertCommunityDraft = z.infer<typeof insertCommunityDraftSchema>;
 export type CommunityDraft = typeof communityDrafts.$inferSelect;
 
+export const unitSwaps = pgTable("unit_swaps", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  communityFolder: text("community_folder").notNull(),
+  oldUnitId: text("old_unit_id").notNull(),
+  oldUnitNumber: text("old_unit_number").notNull(),
+  oldBedrooms: integer("old_bedrooms"),
+  newAddress: text("new_address").notNull(),
+  newUnitLabel: text("new_unit_label").notNull(),
+  newBedrooms: integer("new_bedrooms"),
+  newSourceUrl: text("new_source_url").notNull(),
+  thumbnailUrl: text("thumbnail_url"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertUnitSwapSchema = createInsertSchema(unitSwaps).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertUnitSwap = z.infer<typeof insertUnitSwapSchema>;
+export type UnitSwap = typeof unitSwaps.$inferSelect;
+
 export const lodgifyPropertyMap = pgTable("lodgify_property_map", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().unique(),

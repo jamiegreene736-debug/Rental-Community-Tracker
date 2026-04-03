@@ -6,7 +6,8 @@ import {
   type AvailabilityScan, type InsertAvailabilityScan,
   type CommunityDraft, type InsertCommunityDraft,
   type LodgifyPropertyMap,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap,
+  type UnitSwap, type InsertUnitSwap,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -52,6 +53,11 @@ export interface IStorage {
   getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
   upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
   deleteLodgifyPropertyId(propertyId: number): Promise<boolean>;
+
+  createUnitSwap(swap: InsertUnitSwap): Promise<UnitSwap>;
+  getUnitSwaps(propertyId: number): Promise<UnitSwap[]>;
+  getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
+  deleteUnitSwap(id: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -268,6 +274,30 @@ export class DatabaseStorage implements IStorage {
 
   async deleteLodgifyPropertyId(propertyId: number): Promise<boolean> {
     const result = await db.delete(lodgifyPropertyMap).where(eq(lodgifyPropertyMap.propertyId, propertyId)).returning();
+    return result.length > 0;
+  }
+
+  async createUnitSwap(swap: InsertUnitSwap): Promise<UnitSwap> {
+    const [result] = await db.insert(unitSwaps).values(swap).returning();
+    return result;
+  }
+
+  async getUnitSwaps(propertyId: number): Promise<UnitSwap[]> {
+    return db.select().from(unitSwaps).where(eq(unitSwaps.propertyId, propertyId)).orderBy(desc(unitSwaps.createdAt));
+  }
+
+  async getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined> {
+    const [result] = await db
+      .select()
+      .from(unitSwaps)
+      .where(and(eq(unitSwaps.propertyId, propertyId), eq(unitSwaps.oldUnitId, unitId)))
+      .orderBy(desc(unitSwaps.createdAt))
+      .limit(1);
+    return result;
+  }
+
+  async deleteUnitSwap(id: number): Promise<boolean> {
+    const result = await db.delete(unitSwaps).where(eq(unitSwaps.id, id)).returning();
     return result.length > 0;
   }
 }

@@ -1,0 +1,49 @@
+Feature Update: Push to Builder Unit Swap + Community Photo Methodology Fix
+There are two separate issues to address. Please handle both.
+
+Issue 1 – "Push to Builder" Must Fully Replace the Old Unit
+Currently when a user clicks "Push to Builder" after the replacement flow, it is not fully swapping out the old unit. Fix this so the following happens completely and cleanly:
+
+Remove all photos associated with the old unit from the listing/builder entry.
+Insert the new unit's photos in their place (sourced from the Zillow candidate confirmed in the replacement flow).
+Update all references from the old unit to the new unit throughout the system — this includes but is not limited to:
+
+Unit address
+Unit number
+Bedroom/bathroom count if different
+Any metadata, tags, or identifiers tied to the old unit
+
+
+After the swap, the old unit should have zero remaining references anywhere in the community record — no lingering address, photos, or unit IDs.
+Confirm the swap with a success message showing the new unit's address so the user can visually verify it took effect.
+
+
+Issue 2 – Community Photo Methodology Must Include On-Property Photos
+The current community photo sourcing is returning photos of the surrounding area (scenery, beaches, nearby landmarks) rather than the actual property. This needs to be fixed.
+Required fix:
+Update the photo search methodology so that for each community, the search specifically targets on-property amenity and building photos, including:
+
+The building exterior
+Pool area
+Lobby or common areas
+Clubhouse, gym, tennis courts, or any other on-site amenities
+Aerial or ground-level shots of the property itself
+
+How to improve the search queries:
+Instead of broad queries like "Princeville Kauai", use more targeted queries such as:
+
+"[Community Name] pool"
+"[Community Name] building exterior"
+"[Community Name] amenities"
+"[Community Name] clubhouse"
+"[Community Name] resort grounds"
+
+Layer these queries and deduplicate results. Prioritize photos that are clearly on-property over landscape or scenery shots. If the community has a known property management website, HOA page, or resort site, try to pull photos directly from there first as those will be the most accurate.
+Fresh Purge:
+Once the new methodology is in place, perform a full purge and re-fetch of community photos for all 22 communities. Delete all existing community-level photos and re-source from scratch using the updated query logic. Do not retain any previously cached community photos.
+
+Notes:
+
+These two issues are independent — fix and test each one separately before combining.
+The unit swap in Issue 1 should not affect community-level photos, and the community photo purge in Issue 2 should not affect unit-level photos. Keep these two photo buckets cleanly separated.
+Log each community as it completes the purge/re-fetch so progress is visible in the console.

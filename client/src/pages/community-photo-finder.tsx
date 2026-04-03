@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Search, Copy, ExternalLink, ImageOff, CheckSquare, Square, FolderDown, Loader2 } from "lucide-react";
+import { ArrowLeft, Search, Copy, ExternalLink, ImageOff, CheckSquare, Square, FolderDown, Loader2, RefreshCw } from "lucide-react";
 
 const COMMUNITIES = [
   "Regency at Poipu Kai",
@@ -56,6 +56,8 @@ export default function CommunityPhotoFinder() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ saved: number; failed: number } | null>(null);
   const [photoSource, setPhotoSource] = useState<"listing" | "search" | null>(null);
+  const [isPopulating, setIsPopulating] = useState(false);
+  const [populateResults, setPopulateResults] = useState<Record<string, { saved: number; failed: number }> | null>(null);
 
   async function handleSearch() {
     if (!selectedCommunity) return;
@@ -151,6 +153,26 @@ export default function CommunityPhotoFinder() {
     setFailedImages(prev => new Set(prev).add(url));
   }
 
+  async function handlePopulateAll() {
+    if (!confirm("This will PURGE all existing community photos and re-fetch fresh ones for all 10 communities using the updated on-property search methodology. This makes ~70 API calls and takes several minutes. Continue?")) return;
+    setIsPopulating(true);
+    setPopulateResults(null);
+    try {
+      const resp = await fetch("/api/community-photos/populate-all", { method: "POST" });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Populate failed");
+      setPopulateResults(data.results || {});
+      toast({
+        title: "Community photos refreshed",
+        description: `All ${Object.keys(data.results || {}).length} communities have been re-fetched with the new on-property photo methodology.`,
+      });
+    } catch (err: any) {
+      toast({ title: "Populate failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsPopulating(false);
+    }
+  }
+
   const visibleResults = results.filter(r => !failedImages.has(r.url));
 
   return (
@@ -214,8 +236,55 @@ export default function CommunityPhotoFinder() {
           </div>
           {isSearching && (
             <p className="text-sm text-muted-foreground mt-3" data-testid="text-search-status">
-              Running 3 targeted searches for {selectedCommunity} — pool/grounds, aerial/exterior, amenities...
+              Running 5+ targeted searches for {selectedCommunity} — pool, building exterior, amenities, clubhouse, resort grounds…
             </p>
+          )}
+        </Card>
+
+        {/* Batch Re-Fetch Section */}
+        <Card className="p-4 mb-6 border-dashed">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+            <div>
+              <p className="text-sm font-medium">Re-Fetch All Communities</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Purge and re-download photos for all 10 communities using the updated on-property photo methodology (pool, exterior, amenities, clubhouse, grounds).
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handlePopulateAll}
+              disabled={isPopulating}
+              data-testid="button-populate-all"
+              className="shrink-0"
+            >
+              {isPopulating ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Re-fetching…</>
+              ) : (
+                <><RefreshCw className="h-4 w-4 mr-2" />Re-Fetch All Communities</>
+              )}
+            </Button>
+          </div>
+          {isPopulating && (
+            <p className="text-xs text-muted-foreground mt-2">
+              This takes 5–10 minutes. Check the server console for real-time progress logs.
+            </p>
+          )}
+          {populateResults && (
+            <div className="mt-3 border-t pt-3">
+              <p className="text-xs font-medium mb-1.5">Results:</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                {Object.entries(populateResults).map(([name, r]) => (
+                  <div key={name} className="text-[11px] flex items-center gap-1.5">
+                    <span className={r.saved > 0 ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+                      {r.saved > 0 ? "✓" : "✗"}
+                    </span>
+                    <span className="truncate">{name}</span>
+                    <span className="text-muted-foreground shrink-0">({r.saved} saved)</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </Card>
 
