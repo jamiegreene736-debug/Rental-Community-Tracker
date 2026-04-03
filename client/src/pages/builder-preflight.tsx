@@ -339,10 +339,10 @@ export default function BuilderPreflight() {
           </Button>
           <Button
             id="btn-use-different-unit"
-            aria-label="Return to previous page to select a different unit"
+            aria-label="Go to prep page to find a replacement unit"
             size="lg"
             variant="outline"
-            onClick={() => window.history.back()}
+            onClick={() => setLocation(`/lodgify-prep/${id}`)}
             className="sm:w-auto"
           >
             Use a Different Unit
