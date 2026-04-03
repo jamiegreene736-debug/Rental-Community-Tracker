@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Link, useParams } from "wouter";
+import { Link, useParams, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +38,9 @@ import {
   Shield,
   RefreshCw,
   ExternalLink,
+  ArrowRight,
+  Home,
+  Search as SearchIcon,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
@@ -47,6 +50,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -904,9 +914,216 @@ function PlatformBadge({ result }: { result?: PhotoCheckResult }) {
   );
 }
 
-function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
+type UnitStub = { id: string; unitNumber: string; bedrooms: number };
+
+function UnitReplacementFlow({
+  unit,
+  allUnits,
+  communityFolder,
+  propertyId,
+  onClose,
+}: {
+  unit: UnitStub;
+  allUnits: UnitStub[];
+  communityFolder: string;
+  propertyId: number;
+  onClose: () => void;
+}) {
+  const [selectedUnitId, setSelectedUnitId] = useState(unit.id);
+  const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "error">("idle");
+  const [result, setResult] = useState<null | { unit: { url: string; address: string; unitLabel: string; bedrooms: number | null; source: string; photos: { url: string; label: string }[] } } | { error: string }>(null);
+  const [, navigate] = useLocation();
+
+  async function search() {
+    const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
+    setResult(null);
+    setStage("searching");
+    setTimeout(() => setStage("checking"), 2000);
+    try {
+      const resp = await apiRequest("POST", "/api/replacement/find-unit", {
+        communityFolder,
+        requiredBedrooms: selectedUnit.bedrooms,
+        skipUrls: [],
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setStage("error");
+        setResult({ error: data.error });
+      } else {
+        setStage("found");
+        setResult(data);
+      }
+    } catch {
+      setStage("error");
+      setResult({ error: "Failed to connect. Please try again." });
+    }
+  }
+
+  const steps = ["Search Zillow", "Check Airbnb", "Confirm Clean"];
+  const stepDone = stage === "checking" ? [true, false, false] : stage === "found" ? [true, true, true] : [false, false, false];
+  const stepActive = stage === "searching" ? [true, false, false] : stage === "checking" ? [false, true, false] : [false, false, false];
+
+  return (
+    <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+          <RefreshCw className="h-3.5 w-3.5" />
+          Find a New Unit
+        </p>
+        <Button variant="ghost" size="icon" className="h-5 w-5" onClick={onClose} data-testid="button-close-replacement-flow">
+          <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
+        </Button>
+      </div>
+
+      {(stage === "idle" || stage === "searching" || stage === "checking") && (
+        <>
+          <div className="space-y-1.5">
+            <p className="text-xs text-muted-foreground">Which unit would you like to replace?</p>
+            <Select
+              value={selectedUnitId}
+              onValueChange={setSelectedUnitId}
+              disabled={stage !== "idle"}
+            >
+              <SelectTrigger className="h-8 text-xs" data-testid="select-replacement-unit">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {allUnits.map(u => (
+                  <SelectItem key={u.id} value={u.id} className="text-xs">
+                    Unit #{u.unitNumber} — {u.bedrooms} BR
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {stage === "idle" && (
+            <Button size="sm" className="w-full" onClick={search} data-testid="button-start-unit-search">
+              <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+              Find Replacement Unit
+            </Button>
+          )}
+
+          {(stage === "searching" || stage === "checking") && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                <span>
+                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb for photo conflicts…"}
+                </span>
+              </div>
+              <div className="flex gap-1.5">
+                {steps.map((label, i) => (
+                  <div
+                    key={label}
+                    className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border ${
+                      stepDone[i]
+                        ? "border-green-400 text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30"
+                        : stepActive[i]
+                          ? "border-primary text-primary"
+                          : "border-border text-muted-foreground"
+                    }`}
+                  >
+                    {stepDone[i]
+                      ? <CheckCircle2 className="h-2.5 w-2.5" />
+                      : stepActive[i]
+                        ? <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                        : <div className="h-2.5 w-2.5 rounded-full border border-current opacity-40" />}
+                    {label}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {stage === "error" && result && "error" in result && (
+        <div className="space-y-2">
+          <p className="text-xs text-red-600 dark:text-red-400 flex items-start gap-1.5">
+            <XCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+            {result.error}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setStage("idle")} data-testid="button-retry-unit-search">
+            Try Again
+          </Button>
+        </div>
+      )}
+
+      {stage === "found" && result && "unit" in result && (
+        <div className="space-y-2.5">
+          <p className="text-xs font-medium text-green-700 dark:text-green-400 flex items-center gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Clean replacement found — not on Airbnb
+          </p>
+          <div className="rounded border border-border bg-background px-3 py-2.5 space-y-2">
+            <div className="flex items-start gap-2">
+              <Home className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-xs font-semibold leading-snug">{result.unit.unitLabel}</p>
+                <p className="text-[11px] text-muted-foreground leading-snug">{result.unit.address}</p>
+                <p className="text-[11px] text-muted-foreground">Source: {result.unit.source}</p>
+                {result.unit.bedrooms && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {result.unit.bedrooms} Bedroom{result.unit.bedrooms > 1 ? "s" : ""}
+                  </p>
+                )}
+              </div>
+            </div>
+            {result.unit.photos.length > 0 && (
+              <div className="grid grid-cols-6 gap-1">
+                {result.unit.photos.map((photo, i) => (
+                  <div key={i} className="aspect-square rounded overflow-hidden border border-border">
+                    <img
+                      src={photo.url}
+                      alt={photo.label}
+                      className="w-full h-full object-cover"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <a
+              href={result.unit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-primary hover:underline flex items-center gap-1"
+              data-testid="link-replacement-unit-source"
+            >
+              View on {result.unit.source}
+              <ExternalLink className="h-2.5 w-2.5" />
+            </a>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              onClick={() => navigate(`/builder/${propertyId}/preflight`)}
+              className="flex-1"
+              data-testid="button-push-to-builder"
+            >
+              Push to Builder
+              <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => { setStage("idle"); setResult(null); }}
+              data-testid="button-try-another-unit"
+            >
+              Try Another
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PhotoOrderPreview({ unit, communityPhotoFolder, propertyId, allUnits }: { unit: Unit; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string; propertyId: number; allUnits: UnitStub[] }) {
   const [showMakeoverModal, setShowMakeoverModal] = useState(false);
-  const { results: checkResults, isChecking, checkPhotos, hasFlags, findReplacement, findingReplacement, replacement, replacementCheckResults, replacementHasFlags } = usePlatformCheck(unit.photoFolder, communityPhotoFolder);
+  const [showReplacementFlow, setShowReplacementFlow] = useState(false);
+  const { results: checkResults, isChecking, checkPhotos, hasFlags } = usePlatformCheck(unit.photoFolder, communityPhotoFolder);
 
   const { data: fileData } = useQuery<{ folder: string; files: string[] }>({
     queryKey: [`/api/photos/community-files?folder=${communityPhotoFolder}`],
@@ -1038,67 +1255,33 @@ function PhotoOrderPreview({ unit, communityPhotoFolder }: { unit: Unit; communi
         })}
       </div>
 
-      {hasFlags && communityPhotoFolder && (
+      {hasFlags && !showReplacementFlow && (
         <div className="rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-3 py-2.5 space-y-2">
           <p className="text-xs font-medium text-red-700 dark:text-red-400 flex items-center gap-1.5">
             <ShieldAlert className="h-3.5 w-3.5" />
-            One or more photos were found on other booking platforms. Consider replacing this unit's photos.
+            One or more photos were found on other booking platforms. Consider replacing this unit.
           </p>
           <Button
             size="sm"
             variant="outline"
             className="border-red-300 text-red-700 hover:bg-red-100 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
-            onClick={findReplacement}
-            disabled={findingReplacement}
+            onClick={() => setShowReplacementFlow(true)}
             data-testid={`button-find-replacement-${unit.id}`}
           >
-            {findingReplacement ? (
-              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Searching for another unit...</>
-            ) : (
-              <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Find Another Property</>
-            )}
+            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+            Get a New Unit
           </Button>
         </div>
       )}
 
-      {replacement && (
-        <div className="rounded border border-border bg-muted/30 px-3 py-3 space-y-2">
-          {replacement.error ? (
-            <p className="text-xs text-muted-foreground">{replacement.error}</p>
-          ) : (
-            <>
-              <p className="text-xs font-medium flex items-center gap-1.5">
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
-                Now showing photos from <span className="font-semibold">{replacement.source}</span>
-              </p>
-              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-1.5">
-                {replacement.photos.map((photo, idx) => (
-                  <div key={idx} className="space-y-0.5">
-                    <div className={`aspect-square rounded overflow-hidden border ${replacementCheckResults[idx]?.status === "found" ? "border-red-400" : replacementCheckResults[idx]?.status === "clear" ? "border-green-400" : "border-border"}`}>
-                      <img
-                        src={photo.url}
-                        alt={photo.label}
-                        className="w-full h-full object-cover"
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-                      />
-                    </div>
-                    <PlatformBadge result={replacementCheckResults[idx]} />
-                  </div>
-                ))}
-              </div>
-              {Object.values(replacementCheckResults).every(r => r.status !== "checking") && replacementHasFlags && (
-                <p className="text-xs text-red-600 dark:text-red-400">
-                  Some replacement photos were also found on booking platforms. Try running the search again to find a cleaner unit.
-                </p>
-              )}
-              {Object.values(replacementCheckResults).every(r => r.status !== "checking") && !replacementHasFlags && Object.keys(replacementCheckResults).length > 0 && (
-                <p className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
-                  <ShieldCheck className="h-3 w-3" /> Replacement photos appear clean — not found on other platforms.
-                </p>
-              )}
-            </>
-          )}
-        </div>
+      {showReplacementFlow && communityPhotoFolder && (
+        <UnitReplacementFlow
+          unit={{ id: unit.id, unitNumber: unit.unitNumber, bedrooms: unit.bedrooms }}
+          allUnits={allUnits}
+          communityFolder={communityPhotoFolder}
+          propertyId={propertyId}
+          onClose={() => setShowReplacementFlow(false)}
+        />
       )}
 
       <p className="text-[11px] text-muted-foreground">
@@ -1237,7 +1420,7 @@ function CommunityPhotosSection({ property }: { property: PropertyUnitBuilder })
   );
 }
 
-function UnitPrepCard({ unit, complexName, propertyId, communityPhotos, communityPhotoFolder }: { unit: Unit; complexName: string; propertyId: number; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string }) {
+function UnitPrepCard({ unit, complexName, propertyId, communityPhotos, communityPhotoFolder, allUnits }: { unit: Unit; complexName: string; propertyId: number; communityPhotos?: CommunityPhoto[]; communityPhotoFolder?: string; allUnits: UnitStub[] }) {
   return (
     <Card className="overflow-visible">
       <div className="p-4 md:p-6">
@@ -1287,7 +1470,7 @@ function UnitPrepCard({ unit, complexName, propertyId, communityPhotos, communit
           </TabsContent>
 
           <TabsContent value="photos" className="mt-4">
-            <PhotoOrderPreview unit={unit} communityPhotos={communityPhotos} communityPhotoFolder={communityPhotoFolder} />
+            <PhotoOrderPreview unit={unit} communityPhotos={communityPhotos} communityPhotoFolder={communityPhotoFolder} propertyId={propertyId} allUnits={allUnits} />
           </TabsContent>
         </Tabs>
       </div>
@@ -1841,6 +2024,7 @@ export default function LodgifyPrep() {
               propertyId={propertyId}
               communityPhotos={property.communityPhotos}
               communityPhotoFolder={property.communityPhotoFolder}
+              allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms }))}
             />
           ))}
         </div>

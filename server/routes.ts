@@ -2920,6 +2920,126 @@ export async function registerRoutes(
   });
 
   // ============================================================
+  // Find a replacement unit: Zillow search → Airbnb check → return clean unit
+  // ============================================================
+  app.post("/api/replacement/find-unit", async (req, res) => {
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { communityFolder, requiredBedrooms, skipUrls = [] } = req.body as {
+      communityFolder: string;
+      requiredBedrooms?: number;
+      skipUrls?: string[];
+    };
+
+    const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
+    if (!communityName) return res.status(400).json({ error: "Unknown community folder" });
+
+    // Step 1 — Search Zillow/Homes.com for listing URLs
+    let candidateUrls: string[] = [];
+    for (const siteQuery of [`site:zillow.com "${communityName}"`, `site:homes.com "${communityName}"`]) {
+      try {
+        const searchResp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=8&api_key=${searchApiKey}`,
+        );
+        if (!searchResp.ok) continue;
+        const searchData = await searchResp.json() as any;
+        const urls: string[] = (searchData.organic_results || [])
+          .map((r: any) => r.link as string)
+          .filter((u: string) =>
+            (u.includes("zillow.com/homedetails") || u.includes("homes.com/property")) &&
+            !skipUrls.includes(u),
+          );
+        candidateUrls = [...candidateUrls, ...urls];
+        if (candidateUrls.length >= 8) break;
+      } catch {}
+    }
+    candidateUrls = [...new Set(candidateUrls)].slice(0, 5);
+
+    // Step 2 — For each candidate, scrape photos then check against Airbnb
+    for (const url of candidateUrls) {
+      try {
+        const photos = await scrapeListingPhotos(url);
+        if (photos.length < 2) continue;
+
+        // Extract human-readable address from URL slug
+        const addressMatch = url.match(/homedetails\/([^/]+)\//);
+        const address = addressMatch
+          ? decodeURIComponent(addressMatch[1]).replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase())
+          : communityName;
+
+        const unitMatch = url.match(/apt-([a-z0-9]+)/i) ||
+          url.match(/unit-([a-z0-9]+)/i) ||
+          url.match(/-([a-z0-9]+)[-/]?.*zpid/i);
+        const unitLabel = unitMatch ? `Unit #${unitMatch[1].toUpperCase()}` : "New unit";
+
+        const source = url.includes("zillow.com") ? "Zillow" : "Homes.com";
+
+        // Step 2a — Airbnb check via reverse image search (if ImgBB key available)
+        let foundOnAirbnb = false;
+        if (imgbbKey) {
+          for (const photo of photos.slice(0, 2)) {
+            try {
+              const imgResp = await fetch(photo.url);
+              if (!imgResp.ok) continue;
+              const buffer = await imgResp.arrayBuffer();
+              const base64 = Buffer.from(buffer).toString("base64");
+
+              const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: `image=${encodeURIComponent(base64)}`,
+              });
+              if (!imgbbResp.ok) continue;
+              const imgbbData = await imgbbResp.json() as any;
+              const publicUrl = imgbbData?.data?.url;
+              if (!publicUrl) continue;
+
+              const lensParams = new URLSearchParams({ engine: "google_lens", url: publicUrl, api_key: searchApiKey });
+              const lensResp = await fetch(`https://www.searchapi.io/api/v1/search?${lensParams.toString()}`);
+              if (!lensResp.ok) continue;
+              const lensData = await lensResp.json() as any;
+              const allLinks = [
+                ...(lensData.visual_matches || []),
+                ...(lensData.organic_results || []),
+                ...(lensData.pages_with_matching_images || []),
+              ].map((r: any) => (r.link || r.url || r.source_url || "").toLowerCase());
+
+              if (allLinks.some((l: string) => l.includes("airbnb.com"))) {
+                foundOnAirbnb = true;
+                break;
+              }
+              await new Promise(r => setTimeout(r, 1000));
+            } catch {}
+          }
+        }
+
+        if (!foundOnAirbnb) {
+          return res.json({
+            unit: {
+              url,
+              address,
+              unitLabel,
+              bedrooms: requiredBedrooms ?? null,
+              source,
+              photos: photos.slice(0, 6).map(p => ({ url: p.url, label: p.title || "Photo" })),
+            },
+          });
+        }
+        console.log(`[replacement/find-unit] ${url} found on Airbnb — skipping`);
+      } catch (err: any) {
+        console.warn(`[replacement/find-unit] Failed for ${url}:`, err.message);
+      }
+    }
+
+    return res.json({
+      error: "No eligible replacement units found. Please try again later or adjust your search criteria.",
+    });
+  });
+
+  // ============================================================
   // Step 4: Fetch unit photos from a Zillow/Homes.com URL
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {

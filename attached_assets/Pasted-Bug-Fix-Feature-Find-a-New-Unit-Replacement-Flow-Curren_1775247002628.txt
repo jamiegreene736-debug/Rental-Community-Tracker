@@ -1,0 +1,29 @@
+Bug Fix + Feature: "Find a New Unit" Replacement Flow
+Currently, when a user clicks "Get a New Unit" after the Photo Audit step, the app redirects back to the dashboard instead of continuing the replacement workflow. Fix this and implement the full replacement flow as described below.
+
+Expected Behavior:
+
+After the Photo Audit step, if the user clicks "Get a New Unit", do NOT redirect to the dashboard.
+Instead, display a replacement selection screen with:
+
+A heading like: "Which unit would you like to replace?"
+A dropdown menu populated with the current active units in the community (by unit name/number)
+A "Find Replacement" button
+
+
+When the user selects a unit and clicks "Find Replacement", trigger the following pipeline in sequence:
+
+Step 1 – Zillow Search: Search Zillow for an available replacement unit matching the community's criteria (location, bed/bath count, etc.). Pull the top result.
+Step 2 – Airbnb Check: Confirm the candidate unit is NOT already listed on Airbnb (use the existing platform detection / reverse image search logic already built into the app). If it IS listed on Airbnb, automatically fetch the next Zillow candidate and repeat the check.
+Step 3 – Confirmation Screen: Once a clean unit is found (not on Airbnb), display a confirmation card showing the candidate unit's details (address, beds/baths, photos if available) and a "Push to Builder" button.
+
+
+When the user clicks "Push to Builder", add the new unit to the community builder flow exactly as any other newly added unit would be processed.
+
+
+Notes:
+
+Reuse existing Zillow search logic and Airbnb detection logic — do not rebuild from scratch.
+If no valid replacement unit is found after a reasonable number of attempts (e.g., 5 tries), show an error message: "No eligible replacement units found. Please try again later or adjust your search criteria."
+The dropdown should not include the unit already flagged during the Photo Audit (pre-select or pre-filter it out as the default choice).
+Maintain the existing app styling and navigation patterns throughout this new flow.
