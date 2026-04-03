@@ -13,12 +13,14 @@ import AvailabilityScanner from "@/pages/availability-scanner";
 import CommunityPhotoFinder from "@/pages/community-photo-finder";
 import AddCommunity from "@/pages/add-community";
 import Builder from "@/pages/builder";
+import BuilderPreflight from "@/pages/builder-preflight";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/add-community" component={AddCommunity} />
+      <Route path="/builder/:propertyId/preflight" component={BuilderPreflight} />
       <Route path="/builder/:propertyId/:step" component={Builder} />
       <Route path="/unit-builder/:id" component={UnitBuilder} />
       <Route path="/lodgify-prep/:id" component={LodgifyPrep} />

@@ -2612,6 +2612,126 @@ export async function registerRoutes(
     res.json({ filename: filename || null, platforms: found, checkedUrl: publicUrl });
   });
 
+  // ========== PRE-FLIGHT CHECK ==========
+
+  // Platform check: searches Google for the property on Airbnb, VRBO, and Booking.com
+  app.get("/api/preflight/platform-check", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const name = (req.query.name as string || "").trim();
+    const address = (req.query.address as string || "").trim();
+    if (!name) return res.status(400).json({ error: "name is required" });
+
+    // Extract city from address like "4460 Nehe Rd, Lihue, HI 96766"
+    const cityMatch = address.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
+    const city = cityMatch ? cityMatch[1].trim() : address;
+
+    const platforms: { key: string; label: string; pattern: string; query: string }[] = [
+      { key: "airbnb",  label: "Airbnb",      pattern: "airbnb.com/rooms/",        query: `site:airbnb.com "${name}" "${city}"` },
+      { key: "vrbo",    label: "VRBO",         pattern: "vrbo.com/",                query: `site:vrbo.com "${name}" "${city}"` },
+      { key: "booking", label: "Booking.com",  pattern: "booking.com/",             query: `site:booking.com "${name}" "${city}"` },
+    ];
+
+    const check = async (p: typeof platforms[0]): Promise<{ listed: boolean | null; url: string | null }> => {
+      try {
+        const params = new URLSearchParams({ engine: "google", q: p.query, api_key: apiKey, num: "10" });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+          headers: { "User-Agent": "NexStay/1.0" },
+        });
+        if (!resp.ok) return { listed: null, url: null };
+        const data = await resp.json() as any;
+        const results = data.organic_results || [];
+        for (const r of results) {
+          const link: string = r.link || r.url || "";
+          if (link.includes(p.pattern)) return { listed: true, url: link };
+        }
+        return { listed: false, url: null };
+      } catch {
+        return { listed: null, url: null };
+      }
+    };
+
+    const [airbnb, vrbo, booking] = await Promise.all(platforms.map(p => check(p)));
+    res.json({ airbnb, vrbo, booking });
+  });
+
+  // Photo audit: runs reverse image search on each unit photo to detect platform listings
+  app.get("/api/preflight/photo-audit", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    if (!imgbbKey) return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
+
+    const foldersParam = (req.query.folders as string || "");
+    const folders = foldersParam.split(",").map(f => f.replace(/[^a-zA-Z0-9_-]/g, "")).filter(Boolean);
+    if (folders.length === 0) return res.status(400).json({ error: "folders is required" });
+
+    const photosBase = path.join(process.cwd(), "client", "public", "photos");
+    const PLATFORMS = ["airbnb.com", "vrbo.com", "booking.com"];
+
+    const results: { folder: string; filename: string; url: string; found: boolean | null; platforms: string[]; error?: string }[] = [];
+
+    for (const folder of folders) {
+      const folderPath = path.join(photosBase, folder);
+      if (!fs.existsSync(folderPath)) continue;
+      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
+
+      for (const file of files) {
+        const localPath = path.join(folderPath, file);
+        try {
+          const base64Data = fs.readFileSync(localPath).toString("base64");
+          const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `image=${encodeURIComponent(base64Data)}`,
+          });
+          if (!imgbbResp.ok) {
+            results.push({ folder, filename: file, url: `/photos/${folder}/${file}`, found: null, platforms: [], error: "Upload failed" });
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+          const imgbbData = await imgbbResp.json() as any;
+          const publicUrl = imgbbData?.data?.url;
+          if (!publicUrl) {
+            results.push({ folder, filename: file, url: `/photos/${folder}/${file}`, found: null, platforms: [], error: "No URL from imgbb" });
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+
+          const searchParams = new URLSearchParams({ engine: "google_lens", url: publicUrl, api_key: apiKey });
+          const searchResp = await fetch(`https://www.searchapi.io/api/v1/search?${searchParams.toString()}`, {
+            headers: { "User-Agent": "NexStay/1.0" },
+          });
+          if (!searchResp.ok) {
+            results.push({ folder, filename: file, url: `/photos/${folder}/${file}`, found: null, platforms: [], error: "Search failed" });
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+          const searchData = await searchResp.json() as any;
+          const allResults = [
+            ...(searchData.visual_matches || []),
+            ...(searchData.organic_results || []),
+            ...(searchData.pages_with_matching_images || []),
+          ];
+          const foundPlatforms: string[] = [];
+          for (const r of allResults) {
+            const link: string = r.link || r.url || r.source_url || "";
+            for (const p of PLATFORMS) {
+              if (link.includes(p) && !foundPlatforms.includes(p)) foundPlatforms.push(p);
+            }
+          }
+          results.push({ folder, filename: file, url: `/photos/${folder}/${file}`, found: foundPlatforms.length > 0, platforms: foundPlatforms });
+        } catch (err: any) {
+          results.push({ folder, filename: file, url: `/photos/${folder}/${file}`, found: null, platforms: [], error: err.message });
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+
+    res.json({ results });
+  });
+
   // ========== FIND REPLACEMENT LISTING ==========
   // Searches for a different MLS unit at the same community and returns its photos.
   app.post("/api/photos/find-replacement", async (req, res) => {

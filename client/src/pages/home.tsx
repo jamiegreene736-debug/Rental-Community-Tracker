@@ -750,7 +750,7 @@ export default function Home() {
                   <TableCell className="sticky left-0 bg-background z-10">
                     <div className="flex items-center gap-1 flex-wrap">
                       {unitBuilderIds.has(property.id) && (
-                        <Link href={`/builder/${property.id}/step-1`}>
+                        <Link href={`/builder/${property.id}/preflight`}>
                           <Button
                             size="sm"
                             variant="outline"

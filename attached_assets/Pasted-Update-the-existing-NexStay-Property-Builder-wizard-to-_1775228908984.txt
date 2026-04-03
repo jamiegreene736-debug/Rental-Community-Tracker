@@ -1,0 +1,134 @@
+Update the existing NexStay Property Builder wizard to add a Pre-Flight Check screen that runs BEFORE the existing wizard steps begin. Do not rebuild or change the existing wizard — only add this new screen as the entry point.
+
+---
+
+## WHAT TO BUILD
+
+When a user clicks "Build" on the dashboard, instead of going straight to the wizard, first show a new Pre-Flight Check screen. After completing or skipping this screen, the user proceeds to Step 1 of the existing wizard as normal.
+
+URL for this screen: /builder/[property-id]/preflight
+The existing wizard steps remain unchanged at their current URLs.
+
+---
+
+## PRE-FLIGHT CHECK SCREEN LAYOUT
+
+### Top of screen — Skip banner (CRITICAL FOR COWORK)
+
+The very first element at the top of the page, before anything else, must be:
+
+A full-width banner (id="cowork-skip-banner") containing:
+- Text: "Automated agent? Skip this step."
+- One large button: "Skip → Go to Step 1" (id="btn-skip-preflight")
+- This button must be the FIRST focusable element on the page (tabindex="1")
+- Clicking it goes directly to the existing wizard Step 1
+- Style this banner so it is visually distinct (e.g. dark background, white text)
+
+This ensures Cowork can Tab once + Enter to bypass the entire screen instantly.
+
+---
+
+### Main content — Platform Check
+
+Heading: "Pre-Flight Check — Is this unit already listed?"
+
+Display the property name and address being checked (pulled from existing property data).
+
+Show a "Run Platform Check" button (id="btn-run-platform-check").
+
+When clicked, run three parallel checks (one per platform) and display results in a clean status table (id="platform-check-table") with three rows:
+
+| Platform     | Status         | Link              |
+|--------------|----------------|-------------------|
+| Airbnb       | [status badge] | [View listing]    |
+| VRBO         | [status badge] | [View listing]    |
+| Booking.com  | [status badge] | [View listing]    |
+
+Status badges:
+- While checking: grey pill labeled "Checking..." (class="status-checking")
+- Found on platform: green pill labeled "✓ Yes — Listed" (class="status-listed")
+- Not found: red pill labeled "✗ No — Not Listed" (class="status-not-listed")
+- Check failed/error: yellow pill labeled "⚠ Could not verify" (class="status-error")
+
+If a listing is found, show a clickable "View →" link next to the badge that opens the listing in a new tab (id="link-[platform]", e.g. id="link-airbnb").
+
+---
+
+## PLATFORM DETECTION LOGIC
+
+Use the following approach for each platform. The property name and address are already available in NexStay's property data — use both to construct search queries.
+
+### Method: Google Search via SerpAPI or direct fetch
+
+For each platform, construct a targeted Google search query:
+- Airbnb:      `site:airbnb.com "[property_name]" "[city]"`
+- VRBO:        `site:vrbo.com "[property_name]" "[city]"`
+- Booking.com: `site:booking.com "[property_name]" "[city]"`
+
+Make a server-side fetch to:
+`https://www.google.com/search?q=[encoded_query]`
+
+Parse the HTML response:
+- If any result URLs contain "airbnb.com/rooms/" → Listed on Airbnb. Extract and store the listing URL.
+- If any result URLs contain "vrbo.com/" with a listing ID pattern → Listed on VRBO. Extract URL.
+- If any result URLs contain "booking.com/hotel/" or "booking.com/apartments/" → Listed on Booking.com. Extract URL.
+- If no matching URLs found in results → Not Listed.
+- If the fetch fails or returns an error → status is "Could not verify"
+
+Run all three checks concurrently (Promise.all or equivalent) so they complete at the same time rather than sequentially.
+
+Important: Do this fetch server-side (not from the browser) to avoid CORS issues. Create a backend route: GET /api/platform-check?propertyId=[id] that returns JSON:
+
+{
+  "airbnb": { "listed": true/false/null, "url": "https://..." or null },
+  "vrbo": { "listed": true/false/null, "url": "https://..." or null },
+  "booking": { "listed": true/false/null, "url": "https://..." or null }
+}
+
+null means the check could not be completed (show warning badge).
+
+---
+
+### Photo Audit Sub-Section (below platform table)
+
+Heading: "Photo Audit — Do any unit photos appear on these platforms?"
+
+Show a "Run Photo Audit" button (id="btn-run-photo-audit"). This runs independently from the platform check.
+
+For each unit photo in the property, run a Google Reverse Image Search:
+- Construct URL: `https://www.google.com/searchbyimage?image_url=[encoded_photo_url]`
+- Make a server-side fetch and check if results mention airbnb.com, vrbo.com, or booking.com in the returned HTML
+- Route: GET /api/photo-audit?propertyId=[id]
+
+Display results as a thumbnail grid (id="photo-audit-grid"):
+- Each photo shown as a small thumbnail
+- Below each thumbnail, show a badge:
+  - Green "✓ Found online" (class="photo-found") if detected on any platform
+  - Grey "✗ Not detected" (class="photo-not-found") if clean
+  - Yellow "⚠ Check failed" (class="photo-error") if the check errored
+
+---
+
+## BOTTOM ACTION BUTTONS
+
+After results are shown (or even before running checks), always display two action buttons at the bottom:
+
+1. Primary: "Continue to Builder →" (id="btn-continue-to-wizard")
+   - Goes to Step 1 of the existing wizard
+   - Always enabled regardless of check results — never block progression
+
+2. Secondary: "Use a Different Unit" (id="btn-use-different-unit")
+   - Returns the user to the dashboard property list
+   - The dashboard should highlight or filter to show alternative units in the same community
+   - Style as an outlined/secondary button so it reads as the less preferred action
+
+---
+
+## TECHNICAL REQUIREMENTS
+
+- The skip banner and "Skip → Go to Step 1" button (id="btn-skip-preflight") must be the first tabbable element on the page with tabindex="1" — this is critical for Cowork automation
+- All status results must render as plain visible DOM text/elements — not inside canvas, SVG, or iframes
+- The screen must work even if both checks are skipped entirely (don't require checks to proceed)
+- Add a "Re-run Checks" button (id="btn-rerun-checks") that appears after results load
+- Do not modify any existing wizard steps, URLs, or logic — this screen only adds a new entry point
+- All fetches that hit Google must be rate-limited and include a user-agent header to avoid being blocked — add a 1 second delay between photo audit requests to avoid hammering Google
