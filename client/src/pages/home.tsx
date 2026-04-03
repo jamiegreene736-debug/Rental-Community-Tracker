@@ -6,11 +6,6 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
   Table,
   TableBody,
   TableCell,
@@ -33,17 +28,12 @@ import {
   ExternalLink,
   Building2,
   BedDouble,
-  Users,
   DollarSign,
   Layers,
-  MapPin,
   Hammer,
-  ClipboardList,
-  Loader2,
   CalendarSearch,
   Images,
   Plus,
-  Star,
   Trash2,
   CheckCircle2,
   XCircle,
@@ -760,34 +750,19 @@ export default function Home() {
                   <TableCell className="sticky left-0 bg-background z-10">
                     <div className="flex items-center gap-1 flex-wrap">
                       {unitBuilderIds.has(property.id) && (
-                        <>
-                          <Link href={`/unit-builder/${property.id}`}>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 text-xs px-2 gap-1"
-                              data-testid={`button-unit-builder-${property.id}`}
-                              id={`btn-build-${property.id}`}
-                              aria-label={`Build property ${property.name}`}
-                            >
-                              <Hammer className="h-3 w-3" />
-                              Build
-                            </Button>
-                          </Link>
-                          <Link href={`/lodgify-prep/${property.id}`}>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 text-xs px-2 gap-1"
-                              data-testid={`button-lodgify-prep-${property.id}`}
-                              id={`btn-prep-${property.id}`}
-                              aria-label={`Lodgify prep for ${property.name}`}
-                            >
-                              <ClipboardList className="h-3 w-3" />
-                              Prep
-                            </Button>
-                          </Link>
-                        </>
+                        <Link href={`/builder/${property.id}/step-1`}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs px-2 gap-1"
+                            data-testid={`button-unit-builder-${property.id}`}
+                            id={`btn-build-${property.id}`}
+                            aria-label={`Build property ${property.name}`}
+                          >
+                            <Hammer className="h-3 w-3" />
+                            Build
+                          </Button>
+                        </Link>
                       )}
                       <a
                         href={property.url}

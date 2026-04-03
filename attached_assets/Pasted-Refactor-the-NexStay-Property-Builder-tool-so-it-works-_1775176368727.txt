@@ -1,0 +1,165 @@
+Refactor the NexStay Property Builder tool so it works reliably with browser automation tools like Claude's Cowork desktop agent. The builder wizard must mirror Lodgify's exact 8-step "Create rental" wizard order, followed by a 9th step unique to NexStay. Apply all changes below:
+
+---
+
+## 1. DASHBOARD — CONSOLIDATE "BUILD" AND "PREP" INTO ONE BUTTON
+
+Each property row currently shows three buttons: Build, Prep, and View. Build and Prep go to the same page. Fix this:
+- Remove the "Prep" button from every property row entirely
+- Keep only "Build" (id="btn-build-[property-id]") and "View" per row
+- Each "Build" button navigates to /builder/[property-id]/step-1
+
+---
+
+## 2. DASHBOARD TABLE — KEEP ACTIONS COLUMN ON THE LEFT (ALREADY CORRECT)
+
+The Actions column is already on the left — preserve this. Confirm no horizontal scrolling is required to see the Build or View buttons on a 1280px viewport.
+
+---
+
+## 3. REPLACE THE BUILDER PAGE WITH A 9-STEP WIZARD MATCHING LODGIFY'S EXACT ORDER
+
+The builder must be a step-by-step wizard that exactly mirrors how Lodgify's "Create rental" wizard works. One question or task per step, with a visible "Step X of 9" indicator at the top. Each step has its own URL at /builder/[property-id]/step-[n].
+
+---
+
+### Step 1 of 9 — Rental Name
+- Heading: "What is the name of your rental?"
+- Field: Listing title / public name (id="input-rental-name", character counter, max 60 chars)
+- Field: Internal name (id="input-internal-name", optional)
+- Navigation: "Next →" button (id="btn-next-step")
+
+---
+
+### Step 2 of 9 — Location
+- Heading: "Where is your rental located?"
+- Field: Country dropdown (id="select-country", native <select>)
+- Field: Full street address (id="input-street-address")
+- Field: City (id="input-city")
+- Field: Zip code (id="input-zip")
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 3 of 9 — Photos
+- Heading: "What does your rental look like?"
+- Show Community & Resort Photos section at the TOP — no scrolling required
+- "AI Makeover All + ZIP" button (id="btn-ai-makeover")
+- "Download All Photos (ZIP)" button (id="btn-download-zip")
+- Community photo thumbnails grid displayed immediately
+- Unit photo tabs displayed below community photos
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 4 of 9 — Basics
+- Heading: "Share some basics about your place"
+- Field: Guests (id="input-guests", +/- stepper buttons with ids "btn-guests-minus" and "btn-guests-plus")
+- Field: Bedrooms (id="input-bedrooms", +/- steppers)
+- Field: Bathrooms (id="input-bathrooms", +/- steppers)
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 5 of 9 — Amenities
+- Heading: "Tell guests what your place has to offer"
+- Display amenities as a plain checkbox list (no custom widgets)
+- Each checkbox must have id="amenity-[name]" (e.g., id="amenity-wifi", id="amenity-pool")
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 6 of 9 — Price
+- Heading: "What is the price per night?"
+- Field: Nightly Price (id="input-nightly-price") — ALWAYS pre-fill this field with $125 as the default value. Do not leave it blank.
+- Field: Currency (id="select-currency", native <select>, default to USD)
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 7 of 9 — Description
+- Heading: "How would you describe your place?"
+- Field: Large textarea (id="input-description") with placeholder text
+- Include a "Use AI" or "Generate description" button (id="btn-generate-description") if AI generation is available
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 8 of 9 — Reservation Type
+- Heading: "How would you like to accept reservations?"
+- Two radio options displayed as large tappable cards:
+  - "Instant booking" (id="radio-instant-booking") — mark as selected/default
+  - "Booking request" (id="radio-booking-request")
+- Navigation: "← Back" and "Next →" buttons
+
+---
+
+### Step 9 of 9 — Push Rates to Lodgify (NexStay-specific)
+- Heading: "Push your rates to Lodgify"
+- Instruction text: "Your rental has been created in Lodgify. Find your new Lodgify Property ID in your Lodgify dashboard under Rentals, then enter it below to push your rates."
+- Field: Lodgify Property ID (id="input-lodgify-property-id", placeholder "e.g. 766525")
+- Display read-only summary of rates being pushed (combined nightly sell rate and minimum stay)
+- Button: "Push Rates to Lodgify" (id="btn-push-rates") — large, prominent
+- After successful push, show confirmation message with id="status-message"
+- Navigation: "← Back" button and a "Done — Back to Dashboard" button (id="btn-done")
+
+---
+
+## 4. WIZARD NAVIGATION REQUIREMENTS
+
+- Step indicator at the top of every step: "Step X of 9 — [Step Name]" using id="step-indicator"
+- "Back to Dashboard" link visible at the top of every step (id="link-back-to-dashboard")
+- Every Next button: id="btn-next-step"
+- Every Back button: id="btn-prev-step"
+- Current step heading must be an <h2> tag
+- Each step at its own URL: /builder/[property-id]/step-1 through /builder/[property-id]/step-9
+
+---
+
+## 5. ADD UNIQUE, STABLE IDs AND ARIA LABELS TO ALL INTERACTIVE ELEMENTS
+
+Every button, input, dropdown, and form control must have:
+- A unique, descriptive id (no random or generated IDs)
+- A descriptive aria-label matching its function
+
+---
+
+## 6. MAKE ALL INPUTS PLAIN HTML — NO CUSTOM WIDGETS
+
+- Use standard <input> and <select> elements throughout
+- If typeahead/autocomplete is needed, render suggestions as a plain <ul> with <li> items, each with a unique id
+- All inputs reachable via Tab key without hover
+
+---
+
+## 7. MODALS AND DROPDOWNS MUST BE FULLY DOM-RENDERED WHEN OPEN
+
+- No CSS visibility:hidden tricks — modal content must be in the DOM when open
+- Each modal: id="modal-[name]", close button id="btn-close-modal-[name]"
+- Dropdowns open on click, not hover
+
+---
+
+## 8. NO INFINITE SCROLL — USE PAGINATION
+
+- All lists use Previous / Next / page number pagination
+- List containers: id="list-[content-type]"
+- List items: id="item-[unique-identifier]"
+
+---
+
+## 9. ALL ACTIONS USE VISIBLE LABELED BUTTONS
+
+- No icon-only buttons — all buttons show text labels
+- No buttons hidden in "..." overflow menus
+- Save/submit actions show confirmation with id="status-message"
+
+---
+
+## 10. PLAIN-TEXT SUMMARY PANEL ON EVERY STEP
+
+Include a read-only <div id="summary-panel"> on each step showing in plain text everything entered so far. This lets automation tools verify current state without parsing form fields.
+
+---
+
+Apply all changes without removing any existing functionality. Test that every step is reachable and operable via keyboard Tab + Enter navigation alone on a 1280x800 viewport with no horizontal scrolling required.
