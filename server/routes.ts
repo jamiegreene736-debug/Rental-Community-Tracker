@@ -3037,21 +3037,19 @@ export async function registerRoutes(
 
           // Extract unit number from URL slug — patterns: "Nehe-Rd-122-", "APT-122-", "Unit-122-"
           const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
-          // Last numeric segment before the ZPID part
           const parts = slug.split("-");
-          // Find the unit number: usually 2-3 digits right after the street name parts
-          // E.g. "4460-Nehe-Rd-122-Lihue-HI-96766" → "122"
-          let unitNumber = "";
-          for (let i = parts.length - 1; i >= 0; i--) {
-            if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 9999 && parseInt(parts[i]) > 99) {
-              unitNumber = parts[i];
-              break;
-            }
-          }
+          // First try explicit apt/unit prefix (most reliable)
+          const aptMatch = slug.match(/(?:apt|unit)-([a-z0-9]+)/i);
+          let unitNumber = aptMatch ? aptMatch[1].toUpperCase() : "";
           if (!unitNumber) {
-            // Try apt/unit prefix pattern
-            const aptMatch = slug.match(/apt-([a-z0-9]+)/i) || slug.match(/unit-([a-z0-9]+)/i);
-            if (aptMatch) unitNumber = aptMatch[1].toUpperCase();
+            // Scan parts backwards, skip index 0 (house number like "4460") and skip zip codes (5+ digits)
+            // Unit numbers are 2-4 digits and appear after the street name segments
+            for (let i = parts.length - 1; i >= 1; i--) {
+              if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
+                unitNumber = parts[i];
+                break;
+              }
+            }
           }
 
           const addrDisplay = decodeURIComponent(slug)
@@ -3077,27 +3075,25 @@ export async function registerRoutes(
       try {
         const { zillowUrl, address, unitNumber, thumbnail } = candidate;
 
-        // Build Airbnb-specific text searches
-        const airbnbQueries = unitNumber
-          ? [
-              `site:airbnb.com "${communityAddress}" "${unitNumber}"`,
-              `site:airbnb.com "${communityName}" "${unitNumber}"`,
-            ]
-          : [`site:airbnb.com "${communityAddress}"`];
-
+        // Check Airbnb using the STREET ADDRESS + unit number only.
+        // The community-name query (e.g. "Kaha Lani Resort" + "228") causes false positives
+        // because "228" can match review counts, square footage, etc. on any listing page.
+        // The address query is specific enough: if the unit is on Airbnb it will mention the address.
         let foundOnAirbnb = false;
-        for (const q of airbnbQueries) {
+        if (unitNumber) {
+          const q = `site:airbnb.com "${communityAddress}" "${unitNumber}"`;
           console.error(`[find-unit] Airbnb text check: ${q}`);
           try {
             const resp = await fetch(
               `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
             );
-            if (!resp.ok) continue;
-            const data = await resp.json() as any;
-            const hits: any[] = data.organic_results || [];
-            const airbnbHits = hits.filter((h: any) => (h.link || "").includes("airbnb.com"));
-            console.error(`[find-unit] Airbnb hits for "${q}": ${airbnbHits.length}`);
-            if (airbnbHits.length > 0) { foundOnAirbnb = true; break; }
+            if (resp.ok) {
+              const data = await resp.json() as any;
+              const hits: any[] = data.organic_results || [];
+              const airbnbHits = hits.filter((h: any) => (h.link || "").includes("airbnb.com"));
+              console.error(`[find-unit] Airbnb hits for "${q}": ${airbnbHits.length}`);
+              if (airbnbHits.length > 0) foundOnAirbnb = true;
+            }
           } catch {}
         }
 
