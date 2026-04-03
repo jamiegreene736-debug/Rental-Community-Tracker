@@ -31,6 +31,20 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-pili-mai": "Pili Mai",
 };
 
+// Street address fragment for each community — used to find individual Zillow unit listings via Google Images
+const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
+  "community-regency-poipu-kai": "2253 Poipu Rd",
+  "community-kekaha-estate": "8351 Kekaha Rd",
+  "community-keauhou-estates": "78-261 Manukai St",
+  "community-mauna-kai": "3900 Wyllie Rd",
+  "community-kaha-lani": "4460 Nehe Rd",
+  "community-lae-nani": "410 Papaloa Rd",
+  "community-poipu-beachside": "2251 Poipu Rd",
+  "community-kaiulani": "3970 Wyllie Rd",
+  "community-poipu-oceanfront": "2249 Poipu Rd",
+  "community-pili-mai": "2651 Puuholo Rd",
+};
+
 interface ScrapedPhoto {
   url: string;
   title: string;
@@ -2933,8 +2947,10 @@ export async function registerRoutes(
           "Referer": "https://www.google.com/",
         },
       });
+      console.error(`[scrapeZillow] ${url} → HTTP ${resp.status} ${resp.statusText}`);
       if (!resp.ok) return [];
       const html = await resp.text();
+      console.error(`[scrapeZillow] HTML length: ${html.length}, has __NEXT_DATA__: ${html.includes('id="__NEXT_DATA__"')}, has mixedSources: ${html.includes("mixedSources")}`);
 
       // Extract __NEXT_DATA__ JSON embedded by Next.js SSR
       const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
@@ -2984,52 +3000,122 @@ export async function registerRoutes(
     const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
     if (!communityName) return res.status(400).json({ error: "Unknown community folder" });
 
-    // Step 1 — Search Zillow/Homes.com for listing URLs
-    let candidateUrls: string[] = [];
-    for (const siteQuery of [`site:zillow.com "${communityName}"`, `site:homes.com "${communityName}"`]) {
-      try {
-        const searchResp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=8&api_key=${searchApiKey}`,
-        );
-        if (!searchResp.ok) continue;
-        const searchData = await searchResp.json() as any;
-        const urls: string[] = (searchData.organic_results || [])
-          .map((r: any) => r.link as string)
-          .filter((u: string) =>
-            (u.includes("zillow.com/homedetails") || u.includes("homes.com/property")) &&
-            !skipUrls.includes(u),
-          );
-        candidateUrls = [...candidateUrls, ...urls];
-        if (candidateUrls.length >= 8) break;
-      } catch {}
+    const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
+    console.error(`[find-unit] Starting search: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
+
+    // Step 1 — Search Google Images for Zillow CDN photos of units at this address
+    // This avoids scraping Zillow directly (which blocks bots) — photos are publicly indexed on Google
+    interface CandidateGroup {
+      sourceLink: string;   // Zillow listing URL
+      address: string;
+      unitLabel: string;
+      photos: string[];     // zillowstatic.com photo URLs
     }
-    candidateUrls = [...new Set(candidateUrls)].slice(0, 5);
+    const candidateMap = new Map<string, CandidateGroup>();
 
-    // Step 2 — For each candidate, scrape photos then check against Airbnb
-    for (const url of candidateUrls) {
+    const imageQueries = [
+      `site:photos.zillowstatic.com "${communityAddress}"`,
+      `"${communityAddress}" zillow condo unit interior`,
+    ];
+
+    for (const q of imageQueries) {
       try {
-        const photos = await scrapeZillowPhotosFetch(url);
-        if (photos.length < 1) continue;
+        console.error(`[find-unit] Google Images query: ${q}`);
+        const imgResp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google_images&q=${encodeURIComponent(q)}&num=20&api_key=${searchApiKey}`,
+        );
+        if (!imgResp.ok) {
+          console.error(`[find-unit] SearchAPI images HTTP ${imgResp.status}`);
+          continue;
+        }
+        const imgData = await imgResp.json() as any;
+        const results: any[] = imgData.images_results || imgData.organic_results || [];
+        console.error(`[find-unit] Got ${results.length} image results`);
 
-        // Extract human-readable address from URL slug
-        const addressMatch = url.match(/homedetails\/([^/]+)\//);
-        const address = addressMatch
-          ? decodeURIComponent(addressMatch[1]).replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase())
-          : communityName;
+        for (const r of results) {
+          const photoUrl: string = r.original || r.thumbnail || r.image || "";
+          const sourceLink: string = r.source_url || r.link || r.source || "";
+          if (!photoUrl) continue;
 
-        const unitMatch = url.match(/apt-([a-z0-9]+)/i) ||
-          url.match(/unit-([a-z0-9]+)/i) ||
-          url.match(/-([a-z0-9]+)[-/]?.*zpid/i);
-        const unitLabel = unitMatch ? `Unit #${unitMatch[1].toUpperCase()}` : "New unit";
+          // Skip photos from listings we already know about
+          if (skipUrls.some(s => sourceLink.includes(s) || s.includes(sourceLink))) continue;
 
-        const source = url.includes("zillow.com") ? "Zillow" : "Homes.com";
+          // Key by Zillow listing URL (from source_url) or by zpid extracted from photo URL
+          let groupKey = sourceLink.includes("zillow.com/homedetails") ? sourceLink : "";
+          if (!groupKey) {
+            const zpidMatch = photoUrl.match(/\/(\d{7,10})_/);
+            groupKey = zpidMatch ? `zpid:${zpidMatch[1]}` : photoUrl.split("?")[0];
+          }
+
+          if (!candidateMap.has(groupKey)) {
+            // Parse address from Zillow URL or use community name
+            let addr = communityName;
+            let unitLbl = "New unit";
+            if (sourceLink.includes("/homedetails/")) {
+              const slug = sourceLink.match(/homedetails\/([^/]+)\//)?.[1] || "";
+              addr = decodeURIComponent(slug).replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+              const aptMatch = slug.match(/apt-([a-z0-9]+)/i) || slug.match(/unit-([a-z0-9]+)/i);
+              if (aptMatch) unitLbl = `Unit #${aptMatch[1].toUpperCase()}`;
+            }
+            candidateMap.set(groupKey, { sourceLink, address: addr, unitLabel: unitLbl, photos: [] });
+          }
+          const group = candidateMap.get(groupKey)!;
+          if (group.photos.length < 6 && !group.photos.includes(photoUrl)) {
+            group.photos.push(photoUrl);
+          }
+        }
+      } catch (e: any) {
+        console.error(`[find-unit] Image search error: ${e?.message}`);
+      }
+      if (candidateMap.size >= 5) break;
+    }
+
+    // If Google Images didn't find grouped Zillow photos, fall back to Zillow URL search + plain fetch
+    if (candidateMap.size === 0) {
+      console.error(`[find-unit] No Google Images results — falling back to Zillow URL search`);
+      for (const siteQuery of [`site:zillow.com "${communityAddress}"`, `site:zillow.com "${communityName}"`]) {
+        try {
+          const searchResp = await fetch(
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=8&api_key=${searchApiKey}`,
+          );
+          if (!searchResp.ok) continue;
+          const searchData = await searchResp.json() as any;
+          const urls: string[] = (searchData.organic_results || [])
+            .map((r: any) => r.link as string)
+            .filter((u: string) => u.includes("zillow.com/homedetails") && !skipUrls.includes(u));
+          console.error(`[find-unit] Fallback Zillow URLs: ${JSON.stringify(urls)}`);
+          for (const u of urls.slice(0, 5)) {
+            const photos = await scrapeZillowPhotosFetch(u);
+            console.error(`[find-unit] Fetched ${photos.length} photos from ${u}`);
+            if (photos.length > 0) {
+              const slug = u.match(/homedetails\/([^/]+)\//)?.[1] || "";
+              const addr = decodeURIComponent(slug).replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+              const aptMatch = slug.match(/apt-([a-z0-9]+)/i) || slug.match(/unit-([a-z0-9]+)/i);
+              const unitLbl = aptMatch ? `Unit #${aptMatch[1].toUpperCase()}` : "New unit";
+              candidateMap.set(u, { sourceLink: u, address: addr, unitLabel: unitLbl, photos: photos.map(p => p.url) });
+            }
+          }
+          if (candidateMap.size >= 3) break;
+        } catch {}
+      }
+    }
+
+    const candidates = [...candidateMap.values()].filter(c => c.photos.length >= 1);
+    console.error(`[find-unit] ${candidates.length} candidates with photos`);
+
+    // Step 2 — For each candidate group, check photos against Airbnb via reverse image search
+    for (const candidate of candidates) {
+      try {
+        const { sourceLink: url, address, unitLabel: unitLabel_, photos: candidatePhotos } = candidate;
+        const unitLabel = unitLabel_;
+        const source = url.includes("zillow.com") ? "Zillow" : url.includes("homes.com") ? "Homes.com" : "Zillow";
 
         // Step 2a — Airbnb check via reverse image search (if ImgBB key available)
         let foundOnAirbnb = false;
         if (imgbbKey) {
-          for (const photo of photos.slice(0, 2)) {
+          for (const photoUrl of candidatePhotos.slice(0, 2)) {
             try {
-              const imgResp = await fetch(photo.url);
+              const imgResp = await fetch(photoUrl);
               if (!imgResp.ok) continue;
               const buffer = await imgResp.arrayBuffer();
               const base64 = Buffer.from(buffer).toString("base64");
@@ -3044,6 +3130,7 @@ export async function registerRoutes(
               const publicUrl = imgbbData?.data?.url;
               if (!publicUrl) continue;
 
+              console.error(`[find-unit] Checking photo against Airbnb via Lens: ${publicUrl}`);
               const lensParams = new URLSearchParams({ engine: "google_lens", url: publicUrl, api_key: searchApiKey });
               const lensResp = await fetch(`https://www.searchapi.io/api/v1/search?${lensParams.toString()}`);
               if (!lensResp.ok) continue;
@@ -3053,13 +3140,16 @@ export async function registerRoutes(
                 ...(lensData.organic_results || []),
                 ...(lensData.pages_with_matching_images || []),
               ].map((r: any) => (r.link || r.url || r.source_url || "").toLowerCase());
+              console.error(`[find-unit] Lens links: ${JSON.stringify(allLinks.slice(0, 5))}`);
 
               if (allLinks.some((l: string) => l.includes("airbnb.com"))) {
                 foundOnAirbnb = true;
                 break;
               }
               await new Promise(r => setTimeout(r, 1000));
-            } catch {}
+            } catch (e: any) {
+              console.error(`[find-unit] Lens check error: ${e?.message}`);
+            }
           }
         }
 
@@ -3071,7 +3161,7 @@ export async function registerRoutes(
               unitLabel,
               bedrooms: requiredBedrooms ?? null,
               source,
-              photos: photos.slice(0, 6).map(p => ({ url: p.url, label: p.title || "Photo" })),
+              photos: candidatePhotos.slice(0, 6).map(u => ({ url: u, label: "Photo" })),
             },
           });
         }
