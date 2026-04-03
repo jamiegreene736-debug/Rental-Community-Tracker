@@ -107,9 +107,6 @@ export default function BuilderPreflight() {
   const id = parseInt(propertyId || "0", 10);
   const property = getUnitBuilderByPropertyId(id);
 
-  const searchParams = new URLSearchParams(window.location.search);
-  const returnUrl = searchParams.get("from") || "/";
-
   const [platformChecking, setPlatformChecking] = useState(false);
   const [platformData, setPlatformData] = useState<PlatformCheckData>(null);
   const [platformDone, setPlatformDone] = useState(false);
@@ -199,12 +196,12 @@ export default function BuilderPreflight() {
         {/* Back link */}
         <button
           id="link-back-to-dashboard"
-          aria-label="Back to dashboard"
-          onClick={() => setLocation(returnUrl)}
+          aria-label="Back to previous page"
+          onClick={() => window.history.back()}
           className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
-          {returnUrl === "/" ? "Back to Dashboard" : "Back to Prep"}
+          Back
         </button>
 
         {/* Property info */}
@@ -345,7 +342,7 @@ export default function BuilderPreflight() {
             aria-label="Return to previous page to select a different unit"
             size="lg"
             variant="outline"
-            onClick={() => setLocation(returnUrl)}
+            onClick={() => window.history.back()}
             className="sm:w-auto"
           >
             Use a Different Unit
