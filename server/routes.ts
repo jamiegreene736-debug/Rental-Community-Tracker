@@ -2920,6 +2920,53 @@ export async function registerRoutes(
   });
 
   // ============================================================
+  // Fetch Zillow listing photos without Playwright (plain HTTP + parse __NEXT_DATA__)
+  // ============================================================
+  async function scrapeZillowPhotosFetch(url: string): Promise<{ url: string; title: string }[]> {
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
+          "Referer": "https://www.google.com/",
+        },
+      });
+      if (!resp.ok) return [];
+      const html = await resp.text();
+
+      // Extract __NEXT_DATA__ JSON embedded by Next.js SSR
+      const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+      if (!match) return [];
+
+      let nd: any;
+      try { nd = JSON.parse(match[1]); } catch { return []; }
+
+      const urls: string[] = [];
+      function walk(obj: any, depth: number): void {
+        if (depth > 16 || !obj || typeof obj !== "object") return;
+        if (Array.isArray(obj)) { obj.forEach(v => walk(v, depth + 1)); return; }
+        if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+          const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
+          if (jpegs.length > 0) {
+            const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+            if (biggest.url) urls.push(biggest.url);
+          }
+          return;
+        }
+        Object.values(obj).forEach(v => walk(v, depth + 1));
+      }
+      walk(nd, 0);
+
+      const unique = [...new Set(urls)];
+      return unique.map(u => ({ url: u, title: "Zillow photo" }));
+    } catch {
+      return [];
+    }
+  }
+
+  // ============================================================
   // Find a replacement unit: Zillow search → Airbnb check → return clean unit
   // ============================================================
   app.post("/api/replacement/find-unit", async (req, res) => {
@@ -2961,8 +3008,8 @@ export async function registerRoutes(
     // Step 2 — For each candidate, scrape photos then check against Airbnb
     for (const url of candidateUrls) {
       try {
-        const photos = await scrapeListingPhotos(url);
-        if (photos.length < 2) continue;
+        const photos = await scrapeZillowPhotosFetch(url);
+        if (photos.length < 1) continue;
 
         // Extract human-readable address from URL slug
         const addressMatch = url.match(/homedetails\/([^/]+)\//);
