@@ -1,0 +1,109 @@
+Update the Pre-Flight Check screen in the NexStay Property Builder.
+Make only the following change — do not touch anything else.
+
+---
+
+## MERGE THE PHOTO AUDIT INTO THE PLATFORM CHECK TABLE
+
+Currently the Platform Check (text search) and Photo Audit (reverse image search)
+run separately and can contradict each other. A unit's photos were confirmed on
+Airbnb, VRBO, and Booking.com via reverse image search, while the platform text
+search incorrectly returned "Not Listed" for the same platforms.
+
+Remove the separate Photo Audit section entirely. Instead, incorporate reverse
+image search as a second verification method within the existing Platform Check,
+so that both signals are combined into a single authoritative result per unit
+per platform.
+
+---
+
+## NEW COMBINED DETECTION LOGIC
+
+For each unit, for each platform, run BOTH checks and combine the results:
+
+### Signal 1 — Text Search (existing)
+Search Google using:
+site:[platform] "[community_name]" "[city]" "[unit_number]"
+
+Then fetch any result URLs and check if the unit number appears in the
+page title or first heading.
+
+### Signal 2 — Reverse Image Search (new, merged in)
+For each photo belonging to that unit, run a reverse image search:
+GET /api/photo-audit (already built) — reuse the existing logic
+
+For each photo result, check whether the result page URLs or source
+domains include airbnb.com, vrbo.com, or booking.com.
+
+Track per platform: did ANY of this unit's photos come back matched
+on that platform? If yes → photo signal is positive for that platform.
+
+### Combining the two signals into one result per unit per platform:
+
+Use this priority order — whichever signal is strongest wins:
+
+1. If text search confirms unit number in listing title → 
+   "✓ Yes — Listed (title confirmed)"
+   Badge: green (class="status-confirmed")
+
+2. If text search found a result BUT title unconfirmed, AND photo
+   search also found photos on that platform →
+   "✓ Yes — Listed (photos confirmed)"
+   Badge: green (class="status-photo-confirmed")
+
+3. If text search found nothing BUT photo search found photos on
+   that platform →
+   "⚠ Likely Listed — Found via photos only"
+   Badge: orange (class="status-photo-only")
+   Show "View →" link if available from photo results
+
+4. If text search found a result BUT title unconfirmed, AND photo
+   search found nothing →
+   "⚠ Possible Match — Check Manually"
+   Badge: yellow (class="status-unconfirmed")
+   Show "View →" link
+
+5. If both checks found nothing →
+   "✗ No — Not Listed"
+   Badge: red (class="status-not-listed")
+
+6. If both checks failed with errors →
+   "⚠ Could not verify"
+   Badge: yellow (class="status-error")
+
+---
+
+## UPDATE THE TABLE TO SHOW WHICH SIGNALS FIRED
+
+Add a small "How detected" note in grey text beneath each badge so
+the user understands why the result was reached. Examples:
+
+- "Title match + photos found"
+- "Photos found on 3 of 6 images"
+- "Text search only — no photo match"
+- "No signals found"
+
+This replaces the need for a separate Photo Audit section entirely.
+
+---
+
+## REMOVE THE SEPARATE PHOTO AUDIT SECTION
+
+Delete the standalone Photo Audit thumbnail grid and its
+"Run Photo Audit" button (id="btn-run-photo-audit") from the screen.
+Its logic is now folded into the combined check above.
+
+The single "Run Platform Check" button (id="btn-run-platform-check")
+now triggers both the text search and photo reverse image search
+concurrently for all units and all platforms.
+
+---
+
+## NO OTHER CHANGES
+
+Do not modify:
+- The skip banner or Cowork bypass button
+- The two unit rows per platform in the table
+- The "Continue to Builder" or "Use a Different Unit" buttons
+- Any existing wizard steps
+- Any other part of the NexStay app

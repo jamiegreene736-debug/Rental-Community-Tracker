@@ -1208,12 +1208,15 @@ function BuyInsTab() {
               <TableCell>{formatDate(buyIn.checkOut)}</TableCell>
               <TableCell className="text-right font-medium">{formatCurrency(buyIn.costPaid)}</TableCell>
               <TableCell>
-                {buyIn.airbnbConfirmation ? (
+                {buyIn.airbnbConfirmation || buyIn.airbnbListingUrl ? (
                   <div className="flex items-center gap-1">
-                    <span className="text-sm">{buyIn.airbnbConfirmation}</span>
+                    {buyIn.airbnbConfirmation && (
+                      <span className="text-sm">{buyIn.airbnbConfirmation}</span>
+                    )}
                     {buyIn.airbnbListingUrl && (
-                      <a href={buyIn.airbnbListingUrl} target="_blank" rel="noopener noreferrer">
-                        <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                      <a href={buyIn.airbnbListingUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline text-xs">
+                        {!buyIn.airbnbConfirmation && "View listing "}
+                        <ExternalLink className="h-3 w-3" />
                       </a>
                     )}
                   </div>

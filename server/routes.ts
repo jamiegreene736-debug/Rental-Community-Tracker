@@ -2617,6 +2617,7 @@ export async function registerRoutes(
   // Platform check: searches Google for the property on Airbnb, VRBO, and Booking.com
   app.get("/api/preflight/platform-check", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
+    const imgbbKey = process.env.IMGBB_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const name = (req.query.name as string || "").trim();
@@ -2624,7 +2625,7 @@ export async function registerRoutes(
     const unitsParam = (req.query.units as string || "[]");
     if (!name) return res.status(400).json({ error: "name is required" });
 
-    let units: { unitId: string; unitNumber: string; address: string }[] = [];
+    let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string }[] = [];
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
 
@@ -2633,34 +2634,36 @@ export async function registerRoutes(
       { key: "vrbo",    pattern: "vrbo.com/" },
       { key: "booking", pattern: "booking.com/" },
     ];
+    const photosBase = path.join(process.cwd(), "client", "public", "photos");
 
-    // Fetch listing page and check if unit number appears in <title>, <h1>, or <h2>
+    // ── Helper: fetch listing page, check unit number in title/h1/h2 ──────────
     const verifyTitle = async (url: string, unitNumber: string): Promise<boolean> => {
       try {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 8000);
         const resp = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; NexStay/1.0; +https://nexstay.com)" },
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; NexStay/1.0)" },
           signal: ctrl.signal,
         });
         clearTimeout(timer);
         if (!resp.ok) return false;
         const html = await resp.text();
-        const titleM = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-        const h1M    = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-        const h2M    = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
-        const combined = [titleM?.[1], h1M?.[1], h2M?.[1]].join(" ").toLowerCase().replace(/<[^>]+>/g, " ");
+        const combined = [
+          html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
+          html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "",
+          html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i)?.[1] || "",
+        ].join(" ").toLowerCase().replace(/<[^>]+>/g, " ");
         return combined.includes(unitNumber.toLowerCase());
-      } catch {
-        return false;
-      }
+      } catch { return false; }
     };
 
-    const checkUnitPlatform = async (
-      unit: { unitId: string; unitNumber: string },
+    // ── Helper: text search per platform for a unit ────────────────────────────
+    const textSearch = async (
+      unit: { unitNumber: string },
       cfg: typeof PLATFORM_CONFIGS[0],
     ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
-      const q = `site:${cfg.key === "booking" ? "booking.com" : cfg.key + ".com"} "${name}" "${city}" "${unit.unitNumber}"`;
+      const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
+      const q = `site:${domain} "${name}" "${city}" "${unit.unitNumber}"`;
       try {
         const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "10" });
         const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
@@ -2668,26 +2671,102 @@ export async function registerRoutes(
         });
         if (!resp.ok) return { listed: null, url: null, titleMatch: false };
         const data = await resp.json() as any;
-        const results: any[] = data.organic_results || [];
-        for (const r of results) {
+        for (const r of (data.organic_results || []) as any[]) {
           const link: string = r.link || r.url || "";
           if (link.includes(cfg.pattern)) {
-            const confirmed = await verifyTitle(link, unit.unitNumber);
-            return { listed: true, url: link, titleMatch: confirmed };
+            const titleMatch = await verifyTitle(link, unit.unitNumber);
+            return { listed: true, url: link, titleMatch };
           }
         }
         return { listed: false, url: null, titleMatch: false };
-      } catch {
-        return { listed: null, url: null, titleMatch: false };
-      }
+      } catch { return { listed: null, url: null, titleMatch: false }; }
     };
 
+    // ── Helper: photo reverse image search for a unit (caps at 3 photos) ──────
+    type PhotoSignals = Record<string, boolean>; // platform key → found
+    const photoSearch = async (photoFolder: string): Promise<{ signals: PhotoSignals; matchCount: number; totalChecked: number }> => {
+      const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
+      if (!imgbbKey) return { signals, matchCount: 0, totalChecked: 0 };
+      const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
+      if (!fs.existsSync(folderPath)) return { signals, matchCount: 0, totalChecked: 0 };
+      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 3);
+      let matchCount = 0;
+      for (const file of files) {
+        try {
+          const base64 = fs.readFileSync(path.join(folderPath, file)).toString("base64");
+          const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `image=${encodeURIComponent(base64)}`,
+          });
+          if (!imgbbResp.ok) { await new Promise(r => setTimeout(r, 1000)); continue; }
+          const imgbbData = await imgbbResp.json() as any;
+          const publicUrl = imgbbData?.data?.url;
+          if (!publicUrl) { await new Promise(r => setTimeout(r, 1000)); continue; }
+          const searchParams = new URLSearchParams({ engine: "google_lens", url: publicUrl, api_key: apiKey });
+          const searchResp = await fetch(`https://www.searchapi.io/api/v1/search?${searchParams.toString()}`, {
+            headers: { "User-Agent": "NexStay/1.0" },
+          });
+          if (searchResp.ok) {
+            const searchData = await searchResp.json() as any;
+            const allLinks = [
+              ...(searchData.visual_matches || []),
+              ...(searchData.organic_results || []),
+              ...(searchData.pages_with_matching_images || []),
+            ].map((r: any) => (r.link || r.url || r.source_url || "").toLowerCase());
+            for (const cfg of PLATFORM_CONFIGS) {
+              if (allLinks.some((l: string) => l.includes(cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`))) {
+                signals[cfg.key] = true;
+                matchCount++;
+              }
+            }
+          }
+        } catch { /* best effort */ }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      return { signals, matchCount, totalChecked: files.length };
+    };
+
+    // ── Combine text + photo signals into a single status per platform ─────────
+    type CombinedResult = { status: string; url: string | null; detection: string };
+    const combine = (
+      text: { listed: boolean | null; url: string | null; titleMatch: boolean },
+      photoFound: boolean,
+      photoMatchCount: number,
+      totalPhotos: number,
+    ): CombinedResult => {
+      if (text.listed && text.titleMatch)
+        return { status: "confirmed", url: text.url, detection: "Title match confirmed" };
+      if (text.listed && !text.titleMatch && photoFound)
+        return { status: "photo-confirmed", url: text.url, detection: "Text found + photos matched" };
+      if (!text.listed && photoFound)
+        return { status: "photo-only", url: null, detection: `Photos found on ${photoMatchCount} of ${totalPhotos} images` };
+      if (text.listed && !text.titleMatch && !photoFound)
+        return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
+      if (text.listed === null)
+        return { status: "error", url: null, detection: "Could not verify" };
+      return { status: "not-listed", url: null, detection: "No signals found" };
+    };
+
+    // ── Process each unit: run text searches + photo search concurrently ───────
     const resultUnits = await Promise.all(
       units.map(async (unit) => {
-        const [airbnb, vrbo, booking] = await Promise.all(
-          PLATFORM_CONFIGS.map(cfg => checkUnitPlatform(unit, cfg)),
-        );
-        return { unitId: unit.unitId, unitNumber: unit.unitNumber, address: unit.address, platforms: { airbnb, vrbo, booking } };
+        const [textResults, photoResult] = await Promise.all([
+          Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
+          unit.photoFolder ? photoSearch(unit.photoFolder) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchCount: 0, totalChecked: 0 }),
+        ]);
+        const [airbnbText, vrboText, bookingText] = textResults;
+        const { signals, matchCount, totalChecked } = photoResult;
+        return {
+          unitId: unit.unitId,
+          unitNumber: unit.unitNumber,
+          address: unit.address,
+          platforms: {
+            airbnb:  combine(airbnbText,  signals.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
+            vrbo:    combine(vrboText,    signals.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
+            booking: combine(bookingText, signals.booking, signals.booking ? matchCount : 0, totalChecked),
+          },
+        };
       }),
     );
 

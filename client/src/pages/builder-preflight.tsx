@@ -17,9 +17,9 @@ import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type UnitPlatformResult = {
-  listed: boolean | null;
+  status: "confirmed" | "photo-confirmed" | "photo-only" | "unconfirmed" | "not-listed" | "error";
   url: string | null;
-  titleMatch: boolean;
+  detection: string;
 };
 
 type UnitCheckResult = {
@@ -35,57 +35,71 @@ type UnitCheckResult = {
 
 type PlatformCheckData = { units: UnitCheckResult[] } | null;
 
-type PhotoResult = {
-  folder: string;
-  filename: string;
-  url: string;
-  found: boolean | null;
-  platforms: string[];
-  error?: string;
-};
-type PhotoAudit = { results: PhotoResult[] } | null;
+// ── Status badge ──────────────────────────────────────────────────────────────
 
-// ── Status badges ─────────────────────────────────────────────────────────────
-
-function StatusBadge({ result, checking }: { result: UnitPlatformResult | undefined; checking: boolean }) {
-  if (checking || result === undefined)
+function StatusBadge({
+  result,
+  checking,
+}: {
+  result: UnitPlatformResult | undefined;
+  checking: boolean;
+}) {
+  if (checking || !result) {
     return (
       <span className="status-checking inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-muted text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" /> Checking…
       </span>
     );
-  if (result.listed === null)
-    return (
-      <span className="status-error inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
-        <AlertTriangle className="h-3 w-3" /> Could not verify
-      </span>
-    );
-  if (!result.listed)
-    return (
-      <span className="status-not-listed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">
-        <XCircle className="h-3 w-3" /> ✗ No — Not Listed
-      </span>
-    );
-  if (result.titleMatch)
-    return (
-      <span className="status-listed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
-        <CheckCircle2 className="h-3 w-3" /> ✓ Yes — Listed
-      </span>
-    );
-  return (
-    <span className="status-unconfirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
-      <AlertTriangle className="h-3 w-3" /> ⚠ Possible Match — Check Manually
-    </span>
-  );
+  }
+  switch (result.status) {
+    case "confirmed":
+      return (
+        <span className="status-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
+          <CheckCircle2 className="h-3 w-3" /> ✓ Yes — Listed (title confirmed)
+        </span>
+      );
+    case "photo-confirmed":
+      return (
+        <span className="status-photo-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
+          <CheckCircle2 className="h-3 w-3" /> ✓ Yes — Listed (photos confirmed)
+        </span>
+      );
+    case "photo-only":
+      return (
+        <span className="status-photo-only inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300">
+          <AlertTriangle className="h-3 w-3" /> ⚠ Likely Listed — Found via photos only
+        </span>
+      );
+    case "unconfirmed":
+      return (
+        <span className="status-unconfirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
+          <AlertTriangle className="h-3 w-3" /> ⚠ Possible Match — Check Manually
+        </span>
+      );
+    case "not-listed":
+      return (
+        <span className="status-not-listed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">
+          <XCircle className="h-3 w-3" /> ✗ No — Not Listed
+        </span>
+      );
+    default:
+      return (
+        <span className="status-error inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
+          <AlertTriangle className="h-3 w-3" /> Could not verify
+        </span>
+      );
+  }
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const PLATFORM_LIST: { key: keyof UnitCheckResult["platforms"]; label: string }[] = [
   { key: "airbnb",  label: "Airbnb" },
   { key: "vrbo",    label: "VRBO" },
   { key: "booking", label: "Booking.com" },
 ];
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function BuilderPreflight() {
   const { propertyId } = useParams<{ propertyId: string }>();
@@ -96,10 +110,6 @@ export default function BuilderPreflight() {
   const [platformChecking, setPlatformChecking] = useState(false);
   const [platformData, setPlatformData] = useState<PlatformCheckData>(null);
   const [platformDone, setPlatformDone] = useState(false);
-
-  const [auditRunning, setAuditRunning] = useState(false);
-  const [auditResult, setAuditResult] = useState<PhotoAudit>(null);
-  const [auditDone, setAuditDone] = useState(false);
 
   if (!property) {
     return (
@@ -122,10 +132,11 @@ export default function BuilderPreflight() {
     setPlatformChecking(true);
     setPlatformData(null);
     try {
-      const units = property.units.map((u, i) => ({
+      const units = property.units.map(u => ({
         unitId: u.id,
         unitNumber: u.unitNumber,
         address: `${property.address}, Unit ${u.unitNumber}`,
+        photoFolder: u.photoFolder,
       }));
       const params = new URLSearchParams({
         name: property.propertyName,
@@ -134,53 +145,31 @@ export default function BuilderPreflight() {
       });
       const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`);
       if (!resp.ok) throw new Error("Check failed");
-      const data = await resp.json();
-      setPlatformData(data);
+      setPlatformData(await resp.json());
     } catch {
-      // Show all null on error
-      const fallback: PlatformCheckData = {
-        units: property.units.map((u, i) => ({
+      // On error, fill all results as "error"
+      setPlatformData({
+        units: property.units.map(u => ({
           unitId: u.id,
           unitNumber: u.unitNumber,
           address: `${property.address}, Unit ${u.unitNumber}`,
           platforms: {
-            airbnb:  { listed: null, url: null, titleMatch: false },
-            vrbo:    { listed: null, url: null, titleMatch: false },
-            booking: { listed: null, url: null, titleMatch: false },
+            airbnb:  { status: "error", url: null, detection: "Could not verify" },
+            vrbo:    { status: "error", url: null, detection: "Could not verify" },
+            booking: { status: "error", url: null, detection: "Could not verify" },
           },
         })),
-      };
-      setPlatformData(fallback);
+      });
     } finally {
       setPlatformChecking(false);
       setPlatformDone(true);
     }
   };
 
-  const runPhotoAudit = async () => {
-    setAuditRunning(true);
-    setAuditResult(null);
-    try {
-      const folders = property.units.map(u => u.photoFolder).join(",");
-      const resp = await fetch(`/api/preflight/photo-audit?folders=${encodeURIComponent(folders)}`);
-      if (!resp.ok) throw new Error("Audit failed");
-      const data = await resp.json();
-      setAuditResult(data);
-    } catch {
-      setAuditResult({ results: [] });
-    } finally {
-      setAuditRunning(false);
-      setAuditDone(true);
-    }
-  };
-
   const rerunChecks = () => {
     setPlatformDone(false);
     setPlatformData(null);
-    setAuditDone(false);
-    setAuditResult(null);
     runPlatformCheck();
-    runPhotoAudit();
   };
 
   return (
@@ -228,15 +217,19 @@ export default function BuilderPreflight() {
           </p>
         </div>
 
-        {/* ── Platform Check ── */}
+        {/* ── Platform Check (combined text + photo signals) ── */}
         <Card className="p-6 mb-6">
           <h2 className="text-base font-semibold mb-1">Platform Check</h2>
           <p className="text-sm text-muted-foreground mb-4">
-            Search Airbnb, VRBO, and Booking.com to see if either unit in this bundled listing is already listed.
+            Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search. Both signals are combined into a single authoritative result.
           </p>
 
           {!platformDone && !platformChecking && (
-            <Button id="btn-run-platform-check" aria-label="Run platform check" onClick={runPlatformCheck}>
+            <Button
+              id="btn-run-platform-check"
+              aria-label="Run platform check using text search and reverse image search"
+              onClick={runPlatformCheck}
+            >
               Run Platform Check
             </Button>
           )}
@@ -244,7 +237,7 @@ export default function BuilderPreflight() {
           {platformChecking && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Searching Airbnb, VRBO, and Booking.com for each unit…
+              Searching all platforms with text search + photo matching…
             </div>
           )}
 
@@ -254,141 +247,78 @@ export default function BuilderPreflight() {
                 <tr className="text-left text-xs text-muted-foreground border-b border-border">
                   <th className="pb-2 font-medium w-28">Platform</th>
                   <th className="pb-2 font-medium w-24">Unit</th>
-                  <th className="pb-2 font-medium hidden sm:table-cell">Address</th>
+                  <th className="pb-2 font-medium hidden sm:table-cell w-52">Address</th>
                   <th className="pb-2 font-medium">Status</th>
                   <th className="pb-2 font-medium w-16">Link</th>
                 </tr>
               </thead>
               <tbody>
-                {PLATFORM_LIST.map(({ key, label }, pIdx) => {
-                  const isFirstPlatform = pIdx === 0;
-                  return (
-                    <>
-                      {/* Platform group header row */}
-                      <tr key={`header-${key}`} className={`${isFirstPlatform ? "" : "border-t-2 border-border"}`}>
-                        <td
-                          colSpan={5}
-                          className="pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 px-2 rounded"
+                {PLATFORM_LIST.map(({ key, label }, pIdx) => (
+                  <>
+                    {/* Platform group header */}
+                    <tr key={`header-${key}`} className={pIdx > 0 ? "border-t-2 border-border" : ""}>
+                      <td
+                        colSpan={5}
+                        className="pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 px-2 rounded"
+                      >
+                        {label}
+                      </td>
+                    </tr>
+
+                    {/* One row per unit */}
+                    {property.units.map(unit => {
+                      const unitResult = platformData?.units.find(u => u.unitId === unit.id);
+                      const r = unitResult?.platforms[key];
+                      return (
+                        <tr
+                          key={`${key}-${unit.id}`}
+                          id={`check-${key}-${unit.id}`}
+                          className="border-b border-border/40 last:border-0"
                         >
-                          {label}
-                        </td>
-                      </tr>
-                      {/* One row per unit under this platform */}
-                      {property.units.map((unit, uIdx) => {
-                        const unitResult = platformData?.units.find(u => u.unitId === unit.id);
-                        const r = unitResult?.platforms[key];
-                        const rowId = `check-${key}-${unit.id}`;
-                        const unitAddress = `${property.address}, Unit ${unit.unitNumber}`;
-                        return (
-                          <tr
-                            key={`${key}-${unit.id}`}
-                            id={rowId}
-                            className="border-b border-border/40 last:border-0"
-                          >
-                            <td className="py-2.5 text-xs text-muted-foreground pl-2">—</td>
-                            <td className="py-2.5 text-sm font-medium">
-                              Unit {unit.unitNumber}
-                            </td>
-                            <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
-                              {unitAddress}
-                            </td>
-                            <td className="py-2.5">
-                              <StatusBadge result={r} checking={platformChecking} />
-                            </td>
-                            <td className="py-2.5">
-                              {r?.listed && r.url && (
-                                <a
-                                  id={`link-${key}-${unit.id}`}
-                                  href={r.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                                >
-                                  View <ExternalLink className="h-3 w-3" />
-                                </a>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </>
-                  );
-                })}
+                          <td className="py-2.5 text-xs text-muted-foreground pl-2">—</td>
+                          <td className="py-2.5 text-sm font-medium">Unit {unit.unitNumber}</td>
+                          <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
+                            {property.address}, Unit {unit.unitNumber}
+                          </td>
+                          <td className="py-2.5">
+                            <StatusBadge result={r} checking={platformChecking} />
+                            {r && (
+                              <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
+                            )}
+                          </td>
+                          <td className="py-2.5">
+                            {r?.url && (
+                              <a
+                                id={`link-${key}-${unit.id}`}
+                                href={r.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                              >
+                                View <ExternalLink className="h-3 w-3" />
+                              </a>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </>
+                ))}
               </tbody>
             </table>
           )}
         </Card>
 
-        {/* ── Photo Audit ── */}
-        <Card className="p-6 mb-6">
-          <h2 className="text-base font-semibold mb-1">Photo Audit</h2>
-          <p className="text-sm text-muted-foreground mb-4">
-            Do any unit photos appear on these platforms? Each photo is checked via reverse image search.
-          </p>
-
-          {!auditDone && !auditRunning && (
-            <Button
-              id="btn-run-photo-audit"
-              aria-label="Run photo audit reverse image search"
-              variant="outline"
-              onClick={runPhotoAudit}
-            >
-              Run Photo Audit
-            </Button>
-          )}
-
-          {auditRunning && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Checking photos (this takes a moment — 1 second per photo)…
-            </div>
-          )}
-
-          {auditDone && auditResult && (
-            <div id="photo-audit-grid" className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-3 mt-4">
-              {auditResult.results.length === 0 ? (
-                <p className="col-span-full text-sm text-muted-foreground">No photos found to check.</p>
-              ) : (
-                auditResult.results.map((photo, i) => (
-                  <div key={i} id={`audit-photo-${i}`} className="flex flex-col items-center gap-1.5">
-                    <div className="w-full aspect-square rounded overflow-hidden border bg-muted">
-                      <img src={photo.url} alt={photo.filename} className="w-full h-full object-cover" loading="lazy" />
-                    </div>
-                    {photo.found === null ? (
-                      <span className="photo-error text-xs rounded-full px-2 py-0.5 bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300 w-full text-center">
-                        ⚠ Check failed
-                      </span>
-                    ) : photo.found ? (
-                      <span className="photo-found text-xs rounded-full px-2 py-0.5 bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 w-full text-center">
-                        ✓ Found online
-                      </span>
-                    ) : (
-                      <span className="photo-not-found text-xs rounded-full px-2 py-0.5 bg-muted text-muted-foreground w-full text-center">
-                        ✗ Not detected
-                      </span>
-                    )}
-                    {photo.platforms.length > 0 && (
-                      <p className="text-xs text-muted-foreground text-center leading-tight">
-                        {photo.platforms.join(", ")}
-                      </p>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </Card>
-
-        {/* Re-run button — shows after either check completes */}
-        {(platformDone || auditDone) && (
+        {/* Re-run button */}
+        {platformDone && (
           <div className="mb-6">
             <Button
               id="btn-rerun-checks"
-              aria-label="Re-run platform check and photo audit"
+              aria-label="Re-run platform check"
               variant="ghost"
               size="sm"
               onClick={rerunChecks}
-              disabled={platformChecking || auditRunning}
+              disabled={platformChecking}
             >
               <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
               Re-run Checks
