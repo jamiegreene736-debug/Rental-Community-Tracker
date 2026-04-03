@@ -2711,6 +2711,8 @@ export async function registerRoutes(
     const photoSearch = async (photoFolder: string): Promise<{ signals: PhotoSignals; matchCount: number; totalChecked: number }> => {
       const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
       if (!imgbbKey) return { signals, matchCount: 0, totalChecked: 0 };
+      // Empty photoFolder means no local photos available (e.g. a replacement unit) — skip photo check
+      if (!photoFolder || photoFolder.trim() === "") return { signals, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
       if (!fs.existsSync(folderPath)) return { signals, matchCount: 0, totalChecked: 0 };
       const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 3);
@@ -2764,7 +2766,7 @@ export async function registerRoutes(
       if (text.listed && !text.titleMatch && photoFound)
         return { status: "photo-confirmed", url: text.url, detection: "Text found + photos matched" };
       if (!text.listed && photoFound)
-        return { status: "photo-only", url: null, detection: `Photos found on ${photoMatchCount} of ${totalPhotos} images` };
+        return { status: "photo-only", url: null, detection: `Photos matched (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked) — no text confirmation` };
       if (text.listed && !text.titleMatch && !photoFound)
         return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
       if (text.listed === null)

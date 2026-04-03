@@ -172,7 +172,9 @@ export default function BuilderPreflight() {
           unitId: u.id,
           unitNumber: u.unitNumber,
           address,
-          photoFolder: u.photoFolder,
+          // Replaced units have no local photo folder — skip photo check so the
+          // old unit's photos don't produce false "Likely Listed" signals
+          photoFolder: (u as any)._isReplaced ? "" : u.photoFolder,
         };
       });
       const params = new URLSearchParams({
