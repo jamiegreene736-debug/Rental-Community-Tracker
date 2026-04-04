@@ -44,7 +44,7 @@ export function UnitReplacementFlow({
   communityFolder: string;
   propertyId: number;
   onClose?: () => void;
-  onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData) => void;
+  onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData, swapId: number) => void;
 }) {
   const [selectedUnitId, setSelectedUnitId] = useState(unit.id);
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
@@ -100,8 +100,10 @@ export function UnitReplacementFlow({
         const err = await resp.json();
         throw new Error(err.error || "Failed to record unit swap");
       }
+      const data = await resp.json();
+      const swapId: number = data?.swap?.id ?? 0;
       // Notify parent to apply the replacement and re-run the platform check
-      onUnitReplaced?.(selectedUnit.id, result);
+      onUnitReplaced?.(selectedUnit.id, result, swapId);
       onClose?.();
     } catch (err: any) {
       setSwapError(err?.message || "Failed to record swap. Please try again.");

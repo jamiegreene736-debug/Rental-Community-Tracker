@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -44,6 +44,7 @@ type UnitOverride = {
   bedrooms: number;
   unitLabel: string;
   sourceUrl: string;
+  swapId?: number; // DB record ID — used to delete the swap
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -125,6 +126,29 @@ export default function BuilderPreflight() {
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
+
+  // Load any previously saved unit swaps from the DB on mount
+  useEffect(() => {
+    if (!id) return;
+    fetch(`/api/unit-swaps/${id}`)
+      .then(r => r.ok ? r.json() : null)
+      .then((data: { swaps: any[] } | null) => {
+        if (!data?.swaps?.length) return;
+        const restored: Record<string, UnitOverride> = {};
+        for (const swap of data.swaps) {
+          restored[swap.oldUnitId] = {
+            unitNumber: swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim(),
+            address: swap.newAddress,
+            bedrooms: swap.newBedrooms ?? 1,
+            unitLabel: swap.newUnitLabel,
+            sourceUrl: swap.newSourceUrl,
+            swapId: swap.id,
+          };
+        }
+        setUnitOverrides(restored);
+      })
+      .catch(() => {/* best effort */});
+  }, [id]);
 
   if (!property) {
     return (
@@ -210,14 +234,28 @@ export default function BuilderPreflight() {
     runPlatformCheck();
   };
 
+  // Undo a saved unit swap — deletes from DB and removes from state
+  const handleUndoSwap = async (oldUnitId: string) => {
+    const override = unitOverrides[oldUnitId];
+    if (override?.swapId) {
+      await fetch(`/api/unit-swaps/${override.swapId}`, { method: "DELETE" }).catch(() => {});
+    }
+    const remaining = { ...unitOverrides };
+    delete remaining[oldUnitId];
+    setUnitOverrides(remaining);
+    setPlatformDone(false);
+    setPlatformData(null);
+  };
+
   // Called when user confirms "Yes, Replace Unit" in the replacement flow
-  function handleUnitReplaced(oldUnitId: string, newUnit: ReplacementUnitData) {
+  function handleUnitReplaced(oldUnitId: string, newUnit: ReplacementUnitData, swapId?: number) {
     const newOverride: UnitOverride = {
       unitNumber: newUnit.unitLabel.replace(/^Unit\s*#?/i, ""),
       address: newUnit.address,
       bedrooms: newUnit.bedrooms ?? property.units.find(u => u.id === oldUnitId)?.bedrooms ?? 1,
       unitLabel: newUnit.unitLabel,
       sourceUrl: newUnit.url,
+      swapId,
     };
     const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
     setUnitOverrides(updatedOverrides);
@@ -293,12 +331,35 @@ export default function BuilderPreflight() {
           <h2 className="text-base font-semibold mb-1">Platform Check</h2>
           <p className="text-sm text-muted-foreground mb-4">
             Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search.
-            {Object.keys(unitOverrides).length > 0 && (
-              <span className="ml-1 text-amber-600 dark:text-amber-400 font-medium">
-                Showing updated units after replacement.
-              </span>
-            )}
           </p>
+
+          {Object.keys(unitOverrides).length > 0 && (
+            <div className="mb-4 space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Active Replacements</p>
+              {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
+                const origUnit = property.units.find(u => u.id === oldUnitId);
+                return (
+                  <div key={oldUnitId} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2">
+                    <div className="text-sm">
+                      <span className="text-muted-foreground">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
+                      <span className="mx-2 text-muted-foreground">→</span>
+                      <span className="font-medium">{override.unitLabel}</span>
+                      <span className="ml-2 text-xs text-muted-foreground">{override.address}</span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => handleUndoSwap(oldUnitId)}
+                      data-testid={`button-undo-swap-${oldUnitId}`}
+                    >
+                      Undo
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {!platformDone && !platformChecking && (
             <Button
