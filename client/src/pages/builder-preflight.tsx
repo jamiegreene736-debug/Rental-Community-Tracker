@@ -334,34 +334,52 @@ export default function BuilderPreflight() {
           </p>
 
           {Object.keys(unitOverrides).length > 0 && (
-            <div className="mb-4 space-y-2">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Active Replacements</p>
-              {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
-                const origUnit = property.units.find(u => u.id === oldUnitId);
-                return (
-                  <div key={oldUnitId} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2">
-                    <div className="text-sm">
-                      <span className="text-muted-foreground">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
-                      <span className="mx-2 text-muted-foreground">→</span>
-                      <span className="font-medium">{override.unitLabel}</span>
-                      <span className="ml-2 text-xs text-muted-foreground">{override.address}</span>
+            <div className="mb-5 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  Saved unit replacement{Object.keys(unitOverrides).length > 1 ? "s" : ""} active
+                </p>
+              </div>
+              <div className="space-y-2">
+                {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
+                  const origUnit = property.units.find(u => u.id === oldUnitId);
+                  return (
+                    <div key={oldUnitId} className="flex items-center justify-between gap-2 rounded border border-amber-200 dark:border-amber-700 bg-white/60 dark:bg-background/40 px-3 py-2">
+                      <div className="text-sm flex items-center gap-1.5 flex-wrap min-w-0">
+                        <span className="text-muted-foreground line-through text-xs">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
+                        <span className="text-muted-foreground">→</span>
+                        <span className="font-medium">{override.unitLabel}</span>
+                        <span className="text-xs text-muted-foreground truncate">{override.address}</span>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10 flex-shrink-0"
+                        onClick={() => handleUndoSwap(oldUnitId)}
+                        data-testid={`button-undo-swap-${oldUnitId}`}
+                      >
+                        Undo
+                      </Button>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                      onClick={() => handleUndoSwap(oldUnitId)}
-                      data-testid={`button-undo-swap-${oldUnitId}`}
-                    >
-                      Undo
-                    </Button>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+              {!platformDone && !platformChecking && (
+                <Button
+                  size="sm"
+                  onClick={() => runPlatformCheck()}
+                  className="w-full"
+                  data-testid="button-reverify-with-swap"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                  Run Platform Check with Replacement Unit
+                </Button>
+              )}
             </div>
           )}
 
-          {!platformDone && !platformChecking && (
+          {!platformDone && !platformChecking && Object.keys(unitOverrides).length === 0 && (
             <Button
               id="btn-run-platform-check"
               aria-label="Run platform check using text search and reverse image search"
