@@ -36,6 +36,7 @@ export function UnitReplacementFlow({
   allUnits,
   communityFolder,
   propertyId,
+  skipUrls = [],
   onClose,
   onUnitReplaced,
 }: {
@@ -43,6 +44,7 @@ export function UnitReplacementFlow({
   allUnits: UnitStub[];
   communityFolder: string;
   propertyId: number;
+  skipUrls?: string[];
   onClose?: () => void;
   onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData, swapId: number) => void;
 }) {
@@ -62,7 +64,7 @@ export function UnitReplacementFlow({
       const resp = await apiRequest("POST", "/api/replacement/find-unit", {
         communityFolder,
         requiredBedrooms: selectedUnit.bedrooms,
-        skipUrls: [],
+        skipUrls,
       });
       const data = await resp.json();
       if (data.error) {

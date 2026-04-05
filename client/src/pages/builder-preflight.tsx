@@ -520,6 +520,7 @@ export default function BuilderPreflight() {
               allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms }))}
               communityFolder={property.communityPhotoFolder}
               propertyId={id}
+              skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
               onClose={() => setShowReplacementFlow(false)}
               onUnitReplaced={handleUnitReplaced}
             />
