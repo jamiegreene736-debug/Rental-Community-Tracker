@@ -3163,6 +3163,13 @@ export async function registerRoutes(
     return res.json({ ok });
   });
 
+  app.patch("/api/unit-swaps/commit/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+    await storage.commitUnitSwaps(propertyId);
+    return res.json({ ok: true });
+  });
+
   // ============================================================
   // Step 4: Fetch unit photos from a Zillow/Homes.com URL
   // ============================================================

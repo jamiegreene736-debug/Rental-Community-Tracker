@@ -58,6 +58,7 @@ export interface IStorage {
   getUnitSwaps(propertyId: number): Promise<UnitSwap[]>;
   getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
   deleteUnitSwap(id: number): Promise<boolean>;
+  commitUnitSwaps(propertyId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -299,6 +300,10 @@ export class DatabaseStorage implements IStorage {
   async deleteUnitSwap(id: number): Promise<boolean> {
     const result = await db.delete(unitSwaps).where(eq(unitSwaps.id, id)).returning();
     return result.length > 0;
+  }
+
+  async commitUnitSwaps(propertyId: number): Promise<void> {
+    await db.update(unitSwaps).set({ committed: true }).where(eq(unitSwaps.propertyId, propertyId));
   }
 }
 

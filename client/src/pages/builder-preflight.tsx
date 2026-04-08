@@ -123,6 +123,8 @@ export default function BuilderPreflight() {
   const [platformData, setPlatformData] = useState<PlatformCheckData>(null);
   const [platformDone, setPlatformDone] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
+  const [swapsCommitted, setSwapsCommitted] = useState(false);
+  const [committing, setCommitting] = useState(false);
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
@@ -135,6 +137,7 @@ export default function BuilderPreflight() {
       .then((data: { swaps: any[] } | null) => {
         if (!data?.swaps?.length) return;
         const restored: Record<string, UnitOverride> = {};
+        let allCommitted = true;
         for (const swap of data.swaps) {
           restored[swap.oldUnitId] = {
             unitNumber: swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim(),
@@ -144,11 +147,24 @@ export default function BuilderPreflight() {
             sourceUrl: swap.newSourceUrl,
             swapId: swap.id,
           };
+          if (!swap.committed) allCommitted = false;
         }
         setUnitOverrides(restored);
+        setSwapsCommitted(allCommitted);
       })
       .catch(() => {/* best effort */});
   }, [id]);
+
+  const commitAndContinue = async () => {
+    setCommitting(true);
+    try {
+      await fetch(`/api/unit-swaps/commit/${id}`, { method: "PATCH" });
+      setSwapsCommitted(true);
+    } catch { /* best effort */ } finally {
+      setCommitting(false);
+    }
+    setLocation(`/builder/${id}/step-1`);
+  };
 
   if (!property) {
     return (
@@ -249,6 +265,7 @@ export default function BuilderPreflight() {
 
   // Called when user confirms "Yes, Replace Unit" in the replacement flow
   function handleUnitReplaced(oldUnitId: string, newUnit: ReplacementUnitData, swapId?: number) {
+    if (!property) return;
     const newOverride: UnitOverride = {
       unitNumber: newUnit.unitLabel.replace(/^Unit\s*#?/i, ""),
       address: newUnit.address,
@@ -333,7 +350,33 @@ export default function BuilderPreflight() {
             Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search.
           </p>
 
-          {Object.keys(unitOverrides).length > 0 && (
+          {Object.keys(unitOverrides).length > 0 && swapsCommitted && (
+            <div className="mb-5 rounded-md border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/40 p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0" />
+                <p className="text-sm font-semibold text-green-800 dark:text-green-300">
+                  Unit replacement{Object.keys(unitOverrides).length > 1 ? "s" : ""} committed
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
+                  const origUnit = property.units.find(u => u.id === oldUnitId);
+                  return (
+                    <div key={oldUnitId} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
+                      <div className="text-sm flex items-center gap-1.5 flex-wrap min-w-0">
+                        <span className="text-muted-foreground line-through text-xs">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
+                        <span className="text-muted-foreground">→</span>
+                        <span className="font-medium">{override.unitLabel}</span>
+                        <span className="text-xs text-muted-foreground truncate">{override.address}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {Object.keys(unitOverrides).length > 0 && !swapsCommitted && (
             <div className="mb-5 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 p-4 space-y-3">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
@@ -435,7 +478,7 @@ export default function BuilderPreflight() {
                           <td className="py-2.5 text-xs text-muted-foreground pl-2">—</td>
                           <td className="py-2.5 text-sm font-medium">
                             <span>Unit {unit.unitNumber}</span>
-                            {isReplaced && (
+                            {isReplaced && !swapsCommitted && (
                               <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
                                 replaced
                               </Badge>
@@ -492,15 +535,32 @@ export default function BuilderPreflight() {
 
         {/* Bottom action buttons */}
         <div className="flex flex-col sm:flex-row gap-3" id="preflight-actions">
-          <Button
-            id="btn-continue-to-wizard"
-            aria-label="Continue to the property builder wizard"
-            size="lg"
-            onClick={() => setLocation(step1Url)}
-            className="sm:w-auto"
-          >
-            Continue to Builder <ArrowRight className="h-4 w-4 ml-2" />
-          </Button>
+          {Object.keys(unitOverrides).length > 0 && !swapsCommitted ? (
+            <Button
+              id="btn-commit-and-continue"
+              aria-label="Commit replacement units and continue to builder"
+              size="lg"
+              onClick={commitAndContinue}
+              disabled={committing}
+              className="sm:w-auto"
+            >
+              {committing ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving…</>
+              ) : (
+                <>Commit Replacements &amp; Continue <ArrowRight className="h-4 w-4 ml-2" /></>
+              )}
+            </Button>
+          ) : (
+            <Button
+              id="btn-continue-to-wizard"
+              aria-label="Continue to the property builder wizard"
+              size="lg"
+              onClick={() => setLocation(step1Url)}
+              className="sm:w-auto"
+            >
+              Continue to Builder <ArrowRight className="h-4 w-4 ml-2" />
+            </Button>
+          )}
           <Button
             id="btn-use-different-unit"
             aria-label="Find a replacement unit"

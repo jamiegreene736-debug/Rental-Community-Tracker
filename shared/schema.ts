@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, numeric, timestamp, serial, date } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, numeric, timestamp, serial, date, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -157,6 +157,7 @@ export const unitSwaps = pgTable("unit_swaps", {
   newBedrooms: integer("new_bedrooms"),
   newSourceUrl: text("new_source_url").notNull(),
   thumbnailUrl: text("thumbnail_url"),
+  committed: boolean("committed").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

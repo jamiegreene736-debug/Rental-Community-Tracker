@@ -970,6 +970,29 @@ export default function Builder() {
   const property = getUnitBuilderByPropertyId(propertyId);
   const pricing = getPropertyPricing(propertyId);
 
+  // Fetch committed unit swaps and apply them to the property data
+  const { data: swapData } = useQuery<{ swaps: any[] }>({
+    queryKey: ["/api/unit-swaps", propertyId],
+    queryFn: () => fetch(`/api/unit-swaps/${propertyId}`).then(r => r.json()),
+    enabled: !!propertyId,
+  });
+
+  const effectiveProperty: typeof property = property ? (() => {
+    const committedSwaps = (swapData?.swaps ?? []).filter((s: any) => s.committed);
+    if (!committedSwaps.length) return property;
+    return {
+      ...property,
+      units: property.units.map(u => {
+        const swap = committedSwaps.find((s: any) => s.oldUnitId === u.id);
+        if (!swap) return u;
+        return {
+          ...u,
+          unitNumber: swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim(),
+        };
+      }),
+    };
+  })() : property;
+
   const [wizardState, setWizardState] = useState<BuilderState>(() => loadState(propertyId, property));
 
   const updateState = useCallback((partial: Partial<BuilderState>) => {
@@ -1006,11 +1029,11 @@ export default function Builder() {
     switch (stepNum) {
       case 1: return <Step1 state={wizardState} onChange={updateState} />;
       case 2: return <Step2 state={wizardState} onChange={updateState} />;
-      case 3: return <Step3 property={property} state={wizardState} />;
+      case 3: return <Step3 property={effectiveProperty!} state={wizardState} />;
       case 4: return <Step4 state={wizardState} onChange={updateState} />;
       case 5: return <Step5 state={wizardState} onChange={updateState} />;
       case 6: return <Step6 state={wizardState} onChange={updateState} />;
-      case 7: return <Step7 state={wizardState} onChange={updateState} property={property} />;
+      case 7: return <Step7 state={wizardState} onChange={updateState} property={effectiveProperty!} />;
       case 8: return <Step8 state={wizardState} onChange={updateState} />;
       case 9: return <Step9 state={wizardState} onChange={updateState} propertyId={propertyId} pricing={pricing} />;
       default: return null;
