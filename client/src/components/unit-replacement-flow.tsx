@@ -59,7 +59,7 @@ export function UnitReplacementFlow({
     setResult(null);
     setSwapError(null);
     setStage("searching");
-    setTimeout(() => setStage("checking"), 2000);
+    setTimeout(() => setStage(s => s === "searching" ? "checking" : s), 2000);
     try {
       const resp = await apiRequest("POST", "/api/replacement/find-unit", {
         communityFolder,
