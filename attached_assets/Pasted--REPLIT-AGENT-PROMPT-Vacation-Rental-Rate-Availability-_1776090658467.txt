@@ -1,0 +1,227 @@
+# REPLIT AGENT PROMPT — Vacation Rental Rate & Availability Engine
+# ─────────────────────────────────────────────────────────────────
+# COPY THIS ENTIRE PROMPT INTO REPLIT AGENT WHEN CREATING A NEW REPL
+# ─────────────────────────────────────────────────────────────────
+
+You are setting up a production-grade **Vacation Rental Rate & Availability Engine** in Python. This system has already been fully architected and coded. Your job is ONLY to:
+
+1. Set up the exact file structure I provide
+2. Install the exact dependencies
+3. Configure the Replit environment
+4. Create the .replit run configuration
+5. Do NOT rewrite, refactor, or improve any code — use it exactly as given
+
+---
+
+## STEP 1 — CREATE THE FOLLOWING EXACT FILE STRUCTURE
+
+```
+vacation_rental_system/
+├── main.py
+├── config.py
+├── orchestrator.py
+├── database.py
+├── scheduler.py
+├── requirements.txt
+├── .env.example
+├── scrapers/
+│   ├── __init__.py
+│   ├── base_scraper.py
+│   ├── airbnb_scraper.py
+│   ├── vrbo_scraper.py
+│   └── web_scraper.py
+├── pricing/
+│   ├── __init__.py
+│   └── calculator.py
+├── availability/
+│   ├── __init__.py
+│   └── checker.py
+└── guesty/
+    ├── __init__.py
+    └── client.py
+```
+
+Copy all provided code files exactly into this structure with zero modifications.
+
+---
+
+## STEP 2 — INSTALL DEPENDENCIES
+
+Run:
+```bash
+pip install requests==2.31.0 beautifulsoup4==4.12.3 lxml==5.1.0 APScheduler==3.10.4 "SQLAlchemy==2.0.27" python-dotenv==1.0.1 googlesearch-python==1.2.3 ujson==5.9.0 html5lib==1.1 colorlog==6.8.2
+```
+
+Do NOT install playwright unless the user explicitly requests it (it requires chromium download).
+
+---
+
+## STEP 3 — CREATE THE .replit FILE
+
+Create a `.replit` file at the project root with:
+
+```toml
+run = "cd vacation_rental_system && python main.py"
+entrypoint = "vacation_rental_system/main.py"
+hidden = [".config", "__pycache__", "*.pyc", "*.db-shm", "*.db-wal"]
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+run = ["sh", "-c", "cd vacation_rental_system && python main.py"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+```
+
+---
+
+## STEP 4 — CREATE THE replit.nix FILE
+
+```nix
+{ pkgs }: {
+  deps = [
+    pkgs.python311
+    pkgs.python311Packages.pip
+    pkgs.sqlite
+  ];
+}
+```
+
+---
+
+## STEP 5 — SET REPLIT SECRETS (Secrets tab, NOT .env file)
+
+Tell the user to add these secrets in the Replit Secrets panel (the lock icon in the sidebar):
+
+| Secret Key | Value | Required? |
+|---|---|---|
+| `GUESTY_CLIENT_ID` | From Guesty API dashboard | **REQUIRED** |
+| `GUESTY_CLIENT_SECRET` | From Guesty API dashboard | **REQUIRED** |
+| `GUESTY_LISTING_ID_POIPU_6BR` | Guesty listing ID for the 6BR Poipu unit | **REQUIRED** |
+| `SERP_API_KEY` | SerpAPI key (https://serpapi.com) | Recommended |
+| `SCRAPER_API_KEY` | ScraperAPI key (https://scraperapi.com) | Recommended |
+
+---
+
+## STEP 6 — VERIFY THE SETUP
+
+Run each of these commands to verify:
+
+```bash
+# Test that all imports work
+cd vacation_rental_system && python -c "from main import *; print('✓ Imports OK')"
+
+# Test database initialization
+cd vacation_rental_system && python -c "
+from database import DatabaseManager
+db = DatabaseManager('test.db')
+print('✓ Database OK')
+import os; os.remove('test.db')
+"
+
+# Test Guesty connection (only if secrets are set)
+cd vacation_rental_system && python main.py --test-guesty
+
+# Print initial status
+cd vacation_rental_system && python main.py --status
+```
+
+---
+
+## STEP 7 — RUN MODES
+
+The system supports multiple run modes via CLI flags:
+
+```bash
+# Start the full scheduler (default — runs continuously, recommended for production)
+python main.py
+
+# Run one complete pipeline cycle and exit (good for testing)
+python main.py --once
+
+# Individual component testing
+python main.py --rates-only       # Only scrape rates
+python main.py --availability     # Only check availability
+python main.py --sync             # Only sync to Guesty
+python main.py --status           # Print system stats
+python main.py --test-guesty      # Verify Guesty API connection
+```
+
+---
+
+## ARCHITECTURE OVERVIEW (for understanding — do not change)
+
+```
+INPUTS                          PROCESSING                    OUTPUTS
+──────                          ──────────                    ───────
+Airbnb API  ──┐                 ┌─ Median rate calc           ┌─ Guesty calendar
+VRBO API    ──┼─→ Rate DB ──────┤                             │  (blackout dates)
+Google      ──┤                 ├─ Platform markup calc ──────┤
+PM websites ──┘                 │  • Airbnb:  ÷(1-0.03)×1.20 ├─ Guesty pricing
+                                │  • VRBO:    ÷(1-0.08)×1.20 │  (per-window rates)
+14-day windows ──→ Avail DB ───→┘  • Booking: ÷(1-0.15)×1.20 └─ Logs / DB audit
+(24 months)                                                       trail
+```
+
+### Key Business Rules (DO NOT CHANGE)
+
+**Pricing Formula:**
+```
+net_required   = buy_in_nightly × 1.20          # 20% markup target
+airbnb_listed  = net_required / 0.97            # Cover Airbnb's 3% host fee
+vrbo_listed    = net_required / 0.92            # Cover VRBO's 8% host fee
+booking_listed = net_required / 0.85            # Cover Booking.com's 15% commission
+```
+
+**6BR = Two 3BR Logic:**
+- The 6BR Poipu listing requires buying TWO 3BR condos in Poipu Kai simultaneously
+- We scrape availability for 3BR condos from Airbnb + VRBO
+- For each 14-day window, if fewer than 3 available 3BR condos exist → BLACKOUT
+- The threshold is 3 (not 2) to create a buffer against fake/stale availability
+
+**Availability Buffer Logic:**
+```
+available_count = raw_search_results × 0.70     # 30% discount for fake availability
+if min(available_count_unit_0, available_count_unit_1) < 2:  → HARD BLACKOUT
+if min < 3 (configurable MIN_AVAILABLE_PER_SOURCE):           → SOFT BLACKOUT
+if min >= 3:                                                  → OPEN
+```
+
+---
+
+## WHAT THIS SYSTEM DOES (summary)
+
+Every **6 hours**: Scrapes nightly rates from:
+- Airbnb (unofficial v3 API + v2 fallback)
+- VRBO (REST API + GraphQL fallback)
+- Google Search (SERP API → extracts prices from snippets and pages)
+- Property Management Companies in Poipu/Kauai (direct site scraping)
+
+Every **4 hours**: For all 14-day windows across the next 24 months:
+- Checks how many 3BR condos in Poipu Kai are available on Airbnb + VRBO
+- Applies 70% fake-availability discount
+- Determines OPEN or BLACKOUT per window
+
+Every **1 hour**: Pushes to Guesty:
+- Calendar blocks for unavailable windows
+- Nightly prices (Airbnb-optimized with correct host fee markup)
+
+Every **24 hours**: Full deep scan of all of the above
+
+All results are stored in a SQLite database (`vacation_rental.db`) for audit, trend analysis, and failure recovery.
+
+---
+
+## IMPORTANT NOTES FOR THE USER
+
+1. **Guesty listing IDs**: Find these in Guesty → Listings → click a listing → the ID is in the URL
+2. **SerpAPI**: Free tier is 100 searches/month. Paid plans start at $50/mo. Highly recommended.
+3. **ScraperAPI**: Free tier includes 1,000 credits. Use if Airbnb/VRBO blocks direct requests.
+4. **Airbnb scraping**: Airbnb actively blocks scrapers. Without ScraperAPI, you may see reduced results. The system handles this gracefully with fallbacks.
+5. **Rate limits**: The system includes built-in delays (2–5 sec between requests) to avoid bans.
+6. **Adding more units**: Edit `COMPOSITE_UNITS` in `config.py` to add more Guesty listings.
+7. **Adjusting markup**: Change `DESIRED_MARKUP_PCT` in `config.py` (default: 0.20 = 20%).
+8. **Adjusting blackout threshold**: Change `min_available_per_source` in each `CompositeUnit` in `config.py`.

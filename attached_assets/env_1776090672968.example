@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GUESTY — Required for calendar blackouts and pricing sync
+# Get from: https://app.guesty.com/integrations/api
+# ─────────────────────────────────────────────────────────────────────────────
+GUESTY_CLIENT_ID=your_guesty_client_id
+GUESTY_CLIENT_SECRET=your_guesty_client_secret
+
+# Guesty Listing IDs (from your Guesty dashboard → Listings → [listing] → URL)
+GUESTY_LISTING_ID_POIPU_6BR=your_6br_listing_id_here
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCRAPING APIs — Optional but strongly recommended for reliability
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ScraperAPI — proxy rotation for Airbnb/VRBO scraping
+# Get free tier at: https://www.scraperapi.com/
+SCRAPER_API_KEY=
+
+# SerpAPI — Google search results
+# Get at: https://serpapi.com/ (free 100 searches/month)
+SERP_API_KEY=
+
+# Oxylabs — premium proxy (optional, use if ScraperAPI is insufficient)
+OXYLABS_USER=
+OXYLABS_PASS=
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+DATABASE_PATH=vacation_rental.db
+LOG_LEVEL=INFO
+LOG_FILE=vacation_rental.log
