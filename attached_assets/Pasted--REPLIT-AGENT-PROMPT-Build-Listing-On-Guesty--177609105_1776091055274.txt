@@ -1,0 +1,244 @@
+# REPLIT AGENT PROMPT — Build Listing On Guesty
+# ============================================================
+# IMPORTANT: Do NOT write new code for this feature.
+# All code has already been written and is provided below as
+# exact file contents. Your job is ONLY to:
+#   1. Create the files exactly as specified
+#   2. Wire them into the existing project
+#   3. Remove all Lodgify-related code
+#   4. Configure environment variables
+# ============================================================
+
+---
+
+## YOUR TASK
+
+Replace the existing Lodgify property-building workflow with a new
+Guesty API-powered system. All the code is written — you just need
+to add these two files to the project and integrate them.
+
+---
+
+## STEP 1 — Create these exact files (do not modify the code)
+
+### File 1: `src/services/guestyService.js`
+
+Copy the EXACT contents from the file artifact named
+`guestyService.js` provided with this prompt.
+
+This file contains:
+- OAuth 2.0 authentication with token caching
+- All Guesty Open API calls (create listing, update descriptions,
+  upload photos, update financials, get channel status, etc.)
+- A `buildFullListing(propertyData, onProgress)` pipeline method
+- An `updateFullListing(listingId, propertyData, onProgress)` method
+- A `checkConnection()` method for verifying credentials
+
+Do NOT rewrite this file. Copy it exactly.
+
+### File 2: `src/components/GuestyListingBuilder/index.jsx`
+
+Copy the EXACT contents from the file artifact named
+`GuestyListingBuilder.jsx` provided with this prompt.
+
+This file contains the full React dashboard UI including:
+- Guesty connection status pill (green when connected)
+- Channel status grid with 3 columns: Airbnb, Booking.com, VRBO
+  Each column shows a green "LIVE" badge or red "Not Live" badge
+- Data stream panel with tabs: Photos, Amenities, Descriptions, Pricing
+- Build log with progress bar
+- "Build New Listing" and "Push Updates" action buttons
+
+Do NOT rewrite this file. Copy it exactly.
+
+---
+
+## STEP 2 — Add Guesty credentials to Replit Secrets
+
+In the Replit Secrets panel (not .env file), add:
+  Key: GUESTY_CLIENT_ID      Value: [from Guesty dashboard]
+  Key: GUESTY_CLIENT_SECRET  Value: [from Guesty dashboard]
+
+Then, in the entry point of the app (index.js, main.jsx, server.js,
+or wherever environment variables are exposed to the frontend), add:
+
+  window.__GUESTY_CLIENT_ID__ = process.env.GUESTY_CLIENT_ID;
+  window.__GUESTY_CLIENT_SECRET__ = process.env.GUESTY_CLIENT_SECRET;
+
+If this is a full-stack app with a backend, it is STRONGLY recommended
+to proxy the Guesty auth call through your backend instead of exposing
+credentials to the browser. In that case:
+  - Create a route: POST /api/guesty-token
+  - That route calls the Guesty auth endpoint server-side
+  - Update the `getAccessToken()` method in guestyService.js to call
+    your /api/guesty-token route instead of Guesty directly
+
+---
+
+## STEP 3 — Replace the existing Lodgify page/component
+
+Find the existing page or component that handles property building
+(previously called something like "Build on Lodgify", "Lodgify Builder",
+or similar). Replace its entire contents with:
+
+  import GuestyListingBuilder from '../components/GuestyListingBuilder';
+
+  export default function BuildPage() {
+    // propertyData comes from your existing scraper agent output
+    // Pass it exactly as your scraper currently produces it,
+    // but map to the Guesty schema (see FIELD MAPPING below)
+    const propertyData = useScrapedData(); // your existing hook/state
+
+    return (
+      <GuestyListingBuilder
+        propertyData={propertyData}
+        onBuildComplete={(result) => {
+          console.log('Built listing:', result.listingId);
+          // Add any post-build logic here (e.g. save ID to DB)
+        }}
+        onUpdateComplete={(result) => {
+          console.log('Updated listing:', result.listingId);
+        }}
+      />
+    );
+  }
+
+---
+
+## STEP 4 — Map your scraped data to the Guesty schema
+
+Your scraper currently produces data for Lodgify fields. Map it to
+the `propertyData` shape that GuestyListingBuilder expects:
+
+  const propertyData = {
+    // ── Core (required) ──────────────────────────────────────
+    nickname: "Internal name for the property",   // REQUIRED
+    title: "Marketing title (shown to guests)",
+
+    address: {
+      full: "123 Ocean Drive, Miami, FL 33139",   // REQUIRED
+      lat: 25.7617,
+      lng: -80.1918,
+      city: "Miami",
+      state: "FL",
+      zipcode: "33139",
+      country: "US",
+    },
+
+    accommodates: 6,
+    propertyType: "House",     // House | Apartment | Villa | Condo | etc.
+    roomType: "Entire home/apartment",
+    otaRoomType: "holiday_home",  // Required for Booking.com
+    amenities: ["WIFI", "POOL", "AIR_CONDITIONING", "KITCHEN"],
+    checkInTime: "15:00",
+    checkOutTime: "11:00",
+    timezone: "America/New_York",
+    areaSquareFeet: 1800,
+
+    // ── Descriptions ─────────────────────────────────────────
+    descriptions: {
+      summary: "Full property summary...",
+      space: "Description of the space...",
+      neighborhood: "About the neighborhood...",
+      transit: "Getting around...",
+      access: "Guest access details...",
+      notes: "Other things to note...",
+      houseRules: "House rules text...",
+    },
+
+    // ── Photos (must be publicly accessible URLs) ─────────────
+    photos: [
+      { url: "https://example.com/photo1.jpg", caption: "Living room" },
+      { url: "https://example.com/photo2.jpg", caption: "Kitchen" },
+      // minimum 5 photos recommended
+    ],
+
+    // ── Pricing ──────────────────────────────────────────────
+    pricing: {
+      basePrice: 250,
+      weekendBasePrice: 320,
+      cleaningFee: 150,
+      securityDeposit: 500,
+      extraPersonFee: 25,
+      guestsIncluded: 4,
+      currency: "USD",
+      weeklyDiscount: 0.90,   // 10% off (e.g. 0.90 = 10% discount)
+      monthlyDiscount: 0.80,  // 20% off
+    },
+
+    // ── Booking Settings ─────────────────────────────────────
+    bookingSettings: {
+      minNights: 2,
+      maxNights: 30,
+      cancellationPolicy: "moderate",
+      instantBooking: true,
+    },
+  };
+
+---
+
+## STEP 5 — Delete all Lodgify code
+
+Remove the following (search the codebase for these and delete):
+  - Any file importing from lodgify or @lodgify
+  - Any Playwright / Puppeteer browser automation for property building
+  - Any references to lodgify.com in fetch/axios calls
+  - The old Lodgify builder component/page
+  - Any LODGIFY_* environment variables (they are no longer needed)
+
+DO NOT delete any scraper logic — only the Lodgify output/submission code.
+
+---
+
+## WHAT THE NEW UI LOOKS LIKE
+
+Once integrated, the page will show:
+
+1. HEADER: "Build Listing On Guesty" title + a green pulsing pill
+   showing "Guesty Connected" when API credentials are valid
+
+2. LISTING SELECTOR: Dropdown of all existing Guesty listings +
+   a "Build New Listing" button (shown when propertyData is loaded)
+
+3. CHANNEL STATUS (3 columns):
+   ┌─────────────┐  ┌──────────────┐  ┌──────────┐
+   │ 🏠 Airbnb   │  │ 🔵 Booking   │  │ 🏖️ VRBO  │
+   │ ● LIVE      │  │ ● Not Live   │  │ No Acct  │
+   │ ID: 123456  │  │ ID: 789012   │  │          │
+   └─────────────┘  └──────────────┘  └──────────┘
+   Green = live on that platform, Red = connected but not live,
+   Grey = not connected to that channel yet
+
+4. DATA STREAM PANEL (tabs):
+   Photos | Amenities | Descriptions | Pricing
+   Shows exactly what data is queued or live in Guesty
+
+5. BUILD LOG: Real-time step-by-step progress when building/updating
+
+---
+
+## DO NOT
+
+- Do not rewrite guestyService.js or GuestyListingBuilder/index.jsx
+- Do not add new dependencies beyond what the project already has
+  (the component uses only React hooks and fetch — no new packages)
+- Do not change the component's prop interface
+- Do not use a browser/Puppeteer for any part of the Guesty workflow
+- Do not store the Guesty client secret in the frontend bundle
+  (use the backend proxy approach described in Step 2 for production)
+
+---
+
+## SUMMARY
+
+Files to create:     src/services/guestyService.js
+                     src/components/GuestyListingBuilder/index.jsx
+
+Files to delete:     Old Lodgify builder page/component
+                     Any Lodgify browser automation files
+
+Secrets to add:      GUESTY_CLIENT_ID
+                     GUESTY_CLIENT_SECRET
+
+Page to update:      Replace Lodgify builder route with
+                     <GuestyListingBuilder propertyData={...} />
