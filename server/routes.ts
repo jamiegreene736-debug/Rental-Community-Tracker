@@ -1014,8 +1014,25 @@ export async function registerRoutes(
   });
 
   // ── Guesty OAuth token proxy ────────────────────────────────────────────────
-  // Server-side Guesty token cache — avoids hitting the OAuth rate limit on every page load
-  let _guestyTokenCache: { token: string; expiry: number } | null = null;
+  // Token is cached in-memory AND on disk so server restarts don't exhaust the
+  // Guesty rate limit (~5 token requests per 24 hrs).
+  const GUESTY_TOKEN_FILE = path.join(process.cwd(), ".guesty_token_cache.json");
+
+  function _loadGuestyFileToken(): { token: string; expiry: number } | null {
+    try {
+      if (!fs.existsSync(GUESTY_TOKEN_FILE)) return null;
+      const data = JSON.parse(fs.readFileSync(GUESTY_TOKEN_FILE, "utf8")) as { token: string; expiry: number };
+      if (data.token && data.expiry && Date.now() < data.expiry) return data;
+      return null;
+    } catch { return null; }
+  }
+
+  function _saveGuestyFileToken(token: string, expiry: number) {
+    try { fs.writeFileSync(GUESTY_TOKEN_FILE, JSON.stringify({ token, expiry }), "utf8"); } catch { /* non-fatal */ }
+  }
+
+  // Pre-populate from disk on first load
+  let _guestyTokenCache: { token: string; expiry: number } | null = _loadGuestyFileToken();
 
   app.post("/api/guesty-token", async (_req, res) => {
     const clientId = process.env.GUESTY_CLIENT_ID;
@@ -1024,11 +1041,12 @@ export async function registerRoutes(
       return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET in environment" });
     }
 
-    // Return cached token if still valid (with 60-second buffer)
+    // 1. Return in-memory cached token if still valid
     if (_guestyTokenCache && Date.now() < _guestyTokenCache.expiry) {
       return res.json({ access_token: _guestyTokenCache.token, expires_in: Math.floor((_guestyTokenCache.expiry - Date.now()) / 1000) });
     }
 
+    // 2. Try refreshing from Guesty
     try {
       const response = await fetch("https://open-api.guesty.com/oauth2/token", {
         method: "POST",
@@ -1040,14 +1058,26 @@ export async function registerRoutes(
           scope: "open-api",
         }),
       });
+
       if (!response.ok) {
         const err = await response.json().catch(() => ({})) as { error?: string; message?: string; code?: string };
-        // Attach a machine-readable code so the client can distinguish rate limit from auth failure
+
+        // 3. On rate-limit (429): try to serve any still-valid file-cached token before giving up
+        if (response.status === 429) {
+          const fileCached = _loadGuestyFileToken();
+          if (fileCached) {
+            _guestyTokenCache = fileCached;
+            return res.json({ access_token: fileCached.token, expires_in: Math.floor((fileCached.expiry - Date.now()) / 1000) });
+          }
+        }
+
         return res.status(response.status).json({ ...err, _statusCode: response.status });
       }
+
       const data = await response.json() as { access_token: string; expires_in: number };
-      // Cache for (expires_in - 60) seconds
-      _guestyTokenCache = { token: data.access_token, expiry: Date.now() + (data.expires_in - 60) * 1000 };
+      const expiry = Date.now() + (data.expires_in - 60) * 1000;
+      _guestyTokenCache = { token: data.access_token, expiry };
+      _saveGuestyFileToken(data.access_token, expiry);
       return res.json({ access_token: data.access_token, expires_in: data.expires_in });
     } catch (err: any) {
       return res.status(500).json({ error: "Guesty auth failed", message: err.message });

@@ -42,6 +42,7 @@ const CSS = `
   .glb-pill.connected { background:var(--green-bg); border-color:var(--green-border); color:var(--green); }
   .glb-pill.disconnected { background:var(--red-bg); border-color:var(--red-border); color:var(--red); }
   .glb-pill.checking { background:var(--amber-bg); border-color:var(--amber-border); color:var(--amber); }
+  .glb-pill.rate-limited { background:var(--amber-bg); border-color:var(--amber-border); color:var(--amber); }
   .glb-dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex-shrink:0; }
   .glb-pill.connected .glb-dot { animation:glb-blink 2s ease-in-out infinite; }
   @keyframes glb-blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
@@ -136,7 +137,7 @@ const CSS = `
 `;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type ConnState = "checking" | "connected" | "disconnected";
+type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = { _id: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
 
@@ -193,7 +194,8 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
           if (!cancelled) setListings(data.results || []);
         } catch { /* non-fatal */ }
       } else {
-        setConn("disconnected");
+        const isRateLimited = result.error === "RATE_LIMITED";
+        setConn(isRateLimited ? "rate-limited" : "disconnected");
         setConnError(result.error || null);
       }
     }
@@ -267,7 +269,7 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
     onUpdateComplete?.({ listingId: result.listingId });
   }, [propertyData, selectedId, building, onUpdateComplete]);
 
-  const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : "Guesty Disconnected";
+  const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
   const amenities = propertyData?.amenities || [];
   const descriptions = propertyData?.descriptions;
@@ -290,8 +292,12 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
               setConn("checking");
               setConnError(null);
               guestyService.checkConnection().then((r) => {
-                setConn(r.connected ? "connected" : "disconnected");
-                if (!r.connected) setConnError(r.error || null);
+                if (r.connected) {
+                  setConn("connected");
+                } else {
+                  setConn(r.error === "RATE_LIMITED" ? "rate-limited" : "disconnected");
+                  setConnError(r.error || null);
+                }
               });
             }}
             data-testid="btn-guesty-connection"
@@ -499,13 +505,14 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
         )}
 
         {/* ── Error banner ──────────────────────────────────────── */}
+        {conn === "rate-limited" && (
+          <div className="glb-error-banner" style={{ background: "var(--amber-bg)", borderColor: "var(--amber-border)", color: "var(--amber)" }}>
+            <strong>Guesty API rate limited.</strong> Guesty limits how often new auth tokens can be requested (~5 per 24 hours). Your token will auto-refresh when the limit resets. Click the pill above to retry — it will reconnect automatically once the limit clears.
+          </div>
+        )}
         {conn === "disconnected" && (
           <div className="glb-error-banner">
-            {connError === "RATE_LIMITED" ? (
-              <>
-                <strong>Guesty API rate limited.</strong> The connection token is being refreshed too frequently. Please wait 60 seconds, then click the connection pill above to retry.
-              </>
-            ) : connError?.includes("Missing GUESTY") ? (
+            {connError?.includes("Missing GUESTY") ? (
               <>
                 <strong>Guesty credentials not set.</strong> Add <code>GUESTY_CLIENT_ID</code> and <code>GUESTY_CLIENT_SECRET</code> to the Replit Secrets tab, then click the connection pill above to retry.
               </>
