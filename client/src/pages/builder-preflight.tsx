@@ -420,28 +420,56 @@ export default function BuilderPreflight() {
 
           {/* Committed swaps summary */}
           {Object.keys(unitOverrides).length > 0 && swapsCommitted && (
-            <div className="mb-5 rounded-md border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/40 p-4 space-y-2">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0" />
-                <p className="text-sm font-semibold text-green-800 dark:text-green-300">
-                  Unit replacement{Object.keys(unitOverrides).length > 1 ? "s" : ""} committed
-                </p>
+            <div className="mb-5 rounded-md border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/40 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0" />
+                  <p className="text-sm font-semibold text-green-800 dark:text-green-300">
+                    Unit replacement{Object.keys(unitOverrides).length > 1 ? "s" : ""} committed
+                  </p>
+                </div>
+                <Button
+                  id="btn-recheck-committed"
+                  size="sm"
+                  variant="outline"
+                  onClick={rerunChecks}
+                  disabled={isCheckRunning}
+                  className="h-7 px-3 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40 flex-shrink-0"
+                >
+                  {isCheckRunning ? (
+                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Checking…</>
+                  ) : (
+                    <><RotateCcw className="h-3 w-3 mr-1" /> Recheck these units</>
+                  )}
+                </Button>
               </div>
               <div className="space-y-1.5">
                 {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
                   const origUnit = property.units.find(u => u.id === oldUnitId);
                   return (
-                    <div key={oldUnitId} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
+                    <div key={oldUnitId} className="flex items-center justify-between gap-2 rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
                       <div className="text-sm flex items-center gap-1.5 flex-wrap min-w-0">
                         <span className="text-muted-foreground line-through text-xs">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
                         <span className="text-muted-foreground">→</span>
                         <span className="font-medium">{override.unitLabel}</span>
                         <span className="text-xs text-muted-foreground truncate">{override.address}</span>
                       </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 flex-shrink-0"
+                        onClick={() => { setSwapsCommitted(false); handleUndoSwap(oldUnitId); }}
+                        data-testid={`button-undo-committed-swap-${oldUnitId}`}
+                      >
+                        Undo
+                      </Button>
                     </div>
                   );
                 })}
               </div>
+              <p className="text-xs text-green-700 dark:text-green-400">
+                Click "Recheck these units" to verify the replacement units aren't already listed on Airbnb, VRBO, or Booking.com before continuing to the builder.
+              </p>
             </div>
           )}
 
