@@ -214,11 +214,11 @@ export default function AvailabilityScanner() {
             <div className="min-w-[250px] flex-1 max-w-sm">
               <Select value={selectedLodgifyId} onValueChange={v => setSelectedLodgifyId(v)}>
                 <SelectTrigger data-testid="select-lodgify-property">
-                  <SelectValue placeholder="Lodgify listing for blackouts..." />
+                  <SelectValue placeholder="Calendar property for blackouts..." />
                 </SelectTrigger>
                 <SelectContent>
                   {lodgifyProperties.length === 0 ? (
-                    <SelectItem value="none" disabled>Loading Lodgify properties...</SelectItem>
+                    <SelectItem value="none" disabled>Loading calendar properties...</SelectItem>
                   ) : (
                     lodgifyProperties.map((p: LodgifyProperty) => (
                       <SelectItem key={p.id} value={String(p.id)} data-testid={`option-lodgify-${p.id}`}>
@@ -243,7 +243,7 @@ export default function AvailabilityScanner() {
           </div>
           {!selectedPropertyId && !status?.running && (
             <p className="text-xs text-muted-foreground mt-2">
-              Choose a listing to scan, then pick which Lodgify property should receive blackout blocks when no buy-in inventory is found.
+              Choose a listing to scan, then pick which calendar property should receive blackout blocks when no buy-in inventory is found.
             </p>
           )}
         </Card>
@@ -305,7 +305,7 @@ export default function AvailabilityScanner() {
             <p className="text-lg font-bold text-red-600 dark:text-red-400">
               {status?.latestRun?.totalBlocked || 0}
             </p>
-            <p className="text-xs text-muted-foreground mt-1">Lodgify calendar auto-blocked</p>
+            <p className="text-xs text-muted-foreground mt-1">Calendar auto-blocked</p>
           </Card>
 
           <Card className="p-4" data-testid="card-available-count">
@@ -423,7 +423,7 @@ export default function AvailabilityScanner() {
                           <TableHead>Bedrooms</TableHead>
                           <TableHead className="text-center">Airbnb Results</TableHead>
                           <TableHead>Status</TableHead>
-                          <TableHead>Lodgify</TableHead>
+                          <TableHead>Calendar</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>

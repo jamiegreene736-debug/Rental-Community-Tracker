@@ -106,8 +106,13 @@ class GuestyService {
 
     const res = await fetch("/api/guesty-token", { method: "POST" });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error((err as { error?: string }).error || `Auth failed: ${res.status}`);
+      const err = await res.json().catch(() => ({}) as any);
+      // Distinguish rate-limit from credential errors
+      const code: string = err?.code || err?.error || "";
+      if (res.status === 429 || code.includes("TOO_MANY") || code.includes("RATE")) {
+        throw new Error("RATE_LIMITED");
+      }
+      throw new Error(err?.error || err?.message || `Auth failed: ${res.status}`);
     }
 
     const data = await res.json() as { access_token: string; expires_in: number };

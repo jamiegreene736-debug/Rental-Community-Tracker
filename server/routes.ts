@@ -1014,12 +1014,21 @@ export async function registerRoutes(
   });
 
   // ── Guesty OAuth token proxy ────────────────────────────────────────────────
+  // Server-side Guesty token cache — avoids hitting the OAuth rate limit on every page load
+  let _guestyTokenCache: { token: string; expiry: number } | null = null;
+
   app.post("/api/guesty-token", async (_req, res) => {
     const clientId = process.env.GUESTY_CLIENT_ID;
     const clientSecret = process.env.GUESTY_CLIENT_SECRET;
     if (!clientId || !clientSecret) {
       return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET in environment" });
     }
+
+    // Return cached token if still valid (with 60-second buffer)
+    if (_guestyTokenCache && Date.now() < _guestyTokenCache.expiry) {
+      return res.json({ access_token: _guestyTokenCache.token, expires_in: Math.floor((_guestyTokenCache.expiry - Date.now()) / 1000) });
+    }
+
     try {
       const response = await fetch("https://open-api.guesty.com/oauth2/token", {
         method: "POST",
@@ -1032,10 +1041,13 @@ export async function registerRoutes(
         }),
       });
       if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        return res.status(response.status).json(err);
+        const err = await response.json().catch(() => ({})) as { error?: string; message?: string; code?: string };
+        // Attach a machine-readable code so the client can distinguish rate limit from auth failure
+        return res.status(response.status).json({ ...err, _statusCode: response.status });
       }
       const data = await response.json() as { access_token: string; expires_in: number };
+      // Cache for (expires_in - 60) seconds
+      _guestyTokenCache = { token: data.access_token, expiry: Date.now() + (data.expires_in - 60) * 1000 };
       return res.json({ access_token: data.access_token, expires_in: data.expires_in });
     } catch (err: any) {
       return res.status(500).json({ error: "Guesty auth failed", message: err.message });

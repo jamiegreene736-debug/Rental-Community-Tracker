@@ -1279,7 +1279,7 @@ function BookingsTab() {
     <div>
       <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
         <p className="text-sm text-muted-foreground">
-          Guest bookings synced from Lodgify (Booking.com, VRBO, etc.)
+          Guest bookings synced from your PMS (Booking.com, VRBO, etc.)
         </p>
         <Button
           variant="outline"
@@ -1290,7 +1290,7 @@ function BookingsTab() {
           {syncMutation.isPending ? (
             <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Syncing...</>
           ) : (
-            <><RefreshCw className="h-4 w-4 mr-2" /> Sync from Lodgify</>
+            <><RefreshCw className="h-4 w-4 mr-2" /> Sync Bookings</>
           )}
         </Button>
       </div>
@@ -1304,7 +1304,7 @@ function BookingsTab() {
           <Calendar className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
           <h3 className="font-medium text-lg">No bookings synced yet</h3>
           <p className="text-muted-foreground text-sm mt-1">
-            Click "Sync from Lodgify" to pull in your latest guest reservations
+            Click "Sync Bookings" to pull in your latest guest reservations
           </p>
         </div>
       ) : (
@@ -1326,7 +1326,7 @@ function BookingsTab() {
               {bookings.map((booking) => (
                 <TableRow key={booking.id} data-testid={`row-booking-${booking.id}`}>
                   <TableCell className="font-medium max-w-[200px] truncate">
-                    {booking.lodgifyPropertyName || `Lodgify #${booking.lodgifyPropertyId}`}
+                    {booking.lodgifyPropertyName || `Property #${booking.lodgifyPropertyId}`}
                   </TableCell>
                   <TableCell>{booking.guestName || "N/A"}</TableCell>
                   <TableCell>{formatDate(booking.checkIn)}</TableCell>
@@ -1480,7 +1480,7 @@ function ReportsTab() {
       {!hasData && (
         <div className="text-center py-8">
           <p className="text-muted-foreground">
-            Record buy-ins and sync bookings from Lodgify to see your monthly profitability breakdown
+            Record buy-ins and sync bookings from your PMS to see your monthly profitability breakdown
           </p>
         </div>
       )}

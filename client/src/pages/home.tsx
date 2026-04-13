@@ -582,7 +582,7 @@ export default function Home() {
           <Card className="p-4 cursor-pointer" onClick={() => setLodgifyFilter(lodgifyFilter === "all" ? "in_lodgify" : "all")}>
             <div className="flex items-center gap-2 mb-1">
               <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">In Lodgify</span>
+              <span className="text-xs text-muted-foreground font-medium">PMS Synced</span>
             </div>
             <p className="text-2xl font-bold" data-testid="text-in-lodgify-count">
               {inLodgifyCount} <span className="text-base font-normal text-muted-foreground">/ {multiUnitCount}</span>
@@ -648,13 +648,13 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={lodgifyFilter} onValueChange={setLodgifyFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status" id="select-lodgify-filter" aria-label="Filter by Lodgify status">
-                <SelectValue placeholder="Lodgify Status" />
+              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status" id="select-lodgify-filter" aria-label="Filter by PMS sync status">
+                <SelectValue placeholder="Sync Status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All Lodgify Status</SelectItem>
-                <SelectItem value="in_lodgify">In Lodgify</SelectItem>
-                <SelectItem value="not_lodgify">Not in Lodgify</SelectItem>
+                <SelectItem value="all">All Sync Status</SelectItem>
+                <SelectItem value="in_lodgify">PMS Synced</SelectItem>
+                <SelectItem value="not_lodgify">Not Synced</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -743,7 +743,7 @@ export default function Home() {
                     <SortIcon field="guests" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center min-w-[120px]">Lodgify</TableHead>
+                <TableHead className="text-center min-w-[120px]">PMS Sync</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -818,14 +818,14 @@ export default function Home() {
                         <div className="flex flex-col items-center gap-0.5" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
                           <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-full px-2 py-0.5 whitespace-nowrap">
                             <CheckCircle2 className="h-3 w-3" />
-                            In Lodgify
+                            Synced
                           </span>
                           <span className="text-[9px] text-muted-foreground">#{propertyMapById.get(property.id)}</span>
                         </div>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted rounded-full px-2 py-0.5 whitespace-nowrap" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
                           <XCircle className="h-3 w-3" />
-                          Not in Lodgify
+                          Not Synced
                         </span>
                       )
                     ) : (

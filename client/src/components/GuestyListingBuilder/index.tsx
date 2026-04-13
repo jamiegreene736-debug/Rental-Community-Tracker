@@ -168,6 +168,7 @@ function statusIcon(status: string) {
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function GuestyListingBuilder({ propertyData, onBuildComplete, onUpdateComplete }: Props) {
   const [conn, setConn] = useState<ConnState>("checking");
+  const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
@@ -182,6 +183,7 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
     let cancelled = false;
     async function init() {
       setConn("checking");
+      setConnError(null);
       const result = await guestyService.checkConnection();
       if (cancelled) return;
       if (result.connected) {
@@ -192,6 +194,7 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
         } catch { /* non-fatal */ }
       } else {
         setConn("disconnected");
+        setConnError(result.error || null);
       }
     }
     init();
@@ -285,7 +288,11 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
             className={`glb-pill ${conn}`}
             onClick={() => {
               setConn("checking");
-              guestyService.checkConnection().then((r) => setConn(r.connected ? "connected" : "disconnected"));
+              setConnError(null);
+              guestyService.checkConnection().then((r) => {
+                setConn(r.connected ? "connected" : "disconnected");
+                if (!r.connected) setConnError(r.error || null);
+              });
             }}
             data-testid="btn-guesty-connection"
             title="Click to retry connection"
@@ -494,7 +501,19 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
         {/* ── Error banner ──────────────────────────────────────── */}
         {conn === "disconnected" && (
           <div className="glb-error-banner">
-            <strong>Cannot connect to Guesty.</strong> Make sure <code>GUESTY_CLIENT_ID</code> and <code>GUESTY_CLIENT_SECRET</code> are set in the Replit Secrets tab, then click the connection pill above to retry.
+            {connError === "RATE_LIMITED" ? (
+              <>
+                <strong>Guesty API rate limited.</strong> The connection token is being refreshed too frequently. Please wait 60 seconds, then click the connection pill above to retry.
+              </>
+            ) : connError?.includes("Missing GUESTY") ? (
+              <>
+                <strong>Guesty credentials not set.</strong> Add <code>GUESTY_CLIENT_ID</code> and <code>GUESTY_CLIENT_SECRET</code> to the Replit Secrets tab, then click the connection pill above to retry.
+              </>
+            ) : (
+              <>
+                <strong>Cannot connect to Guesty.</strong> {connError ? `Error: ${connError}. ` : ""}Click the connection pill above to retry, or check that your Guesty API credentials are valid.
+              </>
+            )}
           </div>
         )}
 
