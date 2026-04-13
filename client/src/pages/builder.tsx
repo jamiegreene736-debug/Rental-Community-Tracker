@@ -192,20 +192,21 @@ export default function Builder() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0A0C10]">
-      <div style={{ borderBottom: "1px solid #1E2330", padding: "10px 20px", display: "flex", alignItems: "center", gap: 10 }}>
+    <div className="min-h-screen bg-white">
+      <div style={{ borderBottom: "1px solid #e5e7eb", padding: "10px 20px", display: "flex", alignItems: "center", gap: 10, background: "#f9fafb" }}>
         <Button
           variant="ghost"
           size="sm"
           onClick={() => navigate(`/builder/${propertyId}/preflight`)}
-          style={{ color: "#7B8299", fontSize: 12, gap: 6 }}
+          className="text-muted-foreground"
+          style={{ fontSize: 12, gap: 6 }}
           data-testid="btn-back-to-preflight"
         >
           <ArrowLeft className="h-3 w-3" />
           Pre-Flight
         </Button>
-        <span style={{ color: "#454D66", fontSize: 12 }}>·</span>
-        <span style={{ color: "#7B8299", fontSize: 12, fontFamily: "monospace" }}>
+        <span className="text-muted-foreground" style={{ fontSize: 12 }}>·</span>
+        <span className="text-muted-foreground" style={{ fontSize: 12 }}>
           {property.propertyName}
         </span>
       </div>
