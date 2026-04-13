@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -12,6 +12,7 @@ import {
   XCircle,
   AlertTriangle,
   ArrowLeft,
+  RefreshCw,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
@@ -35,7 +36,8 @@ type UnitCheckResult = {
   };
 };
 
-type PlatformCheckData = { units: UnitCheckResult[] } | null;
+// Maps unitId → per-platform result (populated progressively as checks complete)
+type ProgressiveResults = Record<string, UnitCheckResult>;
 
 // A swapped unit's effective display data
 type UnitOverride = {
@@ -44,7 +46,7 @@ type UnitOverride = {
   bedrooms: number;
   unitLabel: string;
   sourceUrl: string;
-  swapId?: number; // DB record ID — used to delete the swap
+  swapId?: number;
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -67,40 +69,45 @@ function StatusBadge({
     case "confirmed":
       return (
         <span className="status-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
-          <CheckCircle2 className="h-3 w-3" /> ✓ Yes — Listed (title confirmed)
+          <CheckCircle2 className="h-3 w-3" /> Yes — Listed (title confirmed)
         </span>
       );
     case "photo-confirmed":
       return (
         <span className="status-photo-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
-          <CheckCircle2 className="h-3 w-3" /> ✓ Yes — Listed (photos confirmed)
+          <CheckCircle2 className="h-3 w-3" /> Yes — Listed (photos confirmed)
         </span>
       );
     case "photo-only":
       return (
         <span className="status-photo-only inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300">
-          <AlertTriangle className="h-3 w-3" /> ⚠ Likely Listed — Found via photos only
+          <AlertTriangle className="h-3 w-3" /> Likely Listed — Found via photos only
         </span>
       );
     case "unconfirmed":
       return (
         <span className="status-unconfirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
-          <AlertTriangle className="h-3 w-3" /> ⚠ Possible Match — Check Manually
+          <AlertTriangle className="h-3 w-3" /> Possible Match — Check Manually
         </span>
       );
     case "not-listed":
       return (
         <span className="status-not-listed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">
-          <XCircle className="h-3 w-3" /> ✗ No — Not Listed
+          <XCircle className="h-3 w-3" /> Not Found — Likely Safe to Use
         </span>
       );
     default:
       return (
-        <span className="status-error inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
+        <span className="status-error inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
           <AlertTriangle className="h-3 w-3" /> Could not verify
         </span>
       );
   }
+}
+
+// Whether a status is "listed" (should suggest replacing the unit)
+function isListedStatus(status: UnitPlatformResult["status"]) {
+  return status === "confirmed" || status === "photo-confirmed" || status === "photo-only";
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -120,11 +127,15 @@ export default function BuilderPreflight() {
   const property = getUnitBuilderByPropertyId(id);
 
   const [platformChecking, setPlatformChecking] = useState(false);
-  const [platformData, setPlatformData] = useState<PlatformCheckData>(null);
+  // Track which unit IDs are still being checked (for per-row spinner)
+  const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
+  const [results, setResults] = useState<ProgressiveResults>({});
   const [platformDone, setPlatformDone] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
+  const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
   const [swapsCommitted, setSwapsCommitted] = useState(false);
   const [committing, setCommitting] = useState(false);
+  const autoRunFired = useRef(false);
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
@@ -135,7 +146,14 @@ export default function BuilderPreflight() {
     fetch(`/api/unit-swaps/${id}`)
       .then(r => r.ok ? r.json() : null)
       .then((data: { swaps: any[] } | null) => {
-        if (!data?.swaps?.length) return;
+        if (!data?.swaps?.length) {
+          // No saved swaps — auto-run the platform check immediately
+          if (!autoRunFired.current && property) {
+            autoRunFired.current = true;
+            runPlatformCheck();
+          }
+          return;
+        }
         const restored: Record<string, UnitOverride> = {};
         let allCommitted = true;
         for (const swap of data.swaps) {
@@ -152,7 +170,14 @@ export default function BuilderPreflight() {
         setUnitOverrides(restored);
         setSwapsCommitted(allCommitted);
       })
-      .catch(() => {/* best effort */});
+      .catch(() => {
+        // On error, still auto-run
+        if (!autoRunFired.current && property) {
+          autoRunFired.current = true;
+          runPlatformCheck();
+        }
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const commitAndContinue = async () => {
@@ -187,7 +212,6 @@ export default function BuilderPreflight() {
         ...u,
         unitNumber: override.unitNumber,
         bedrooms: override.bedrooms,
-        // address is on the property, but we surface it in the override for the platform check
         _overrideAddress: override.address,
         _isReplaced: true,
         _replacedLabel: override.unitLabel,
@@ -202,51 +226,83 @@ export default function BuilderPreflight() {
   const cityMatch = property.address.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
   const city = cityMatch ? cityMatch[1].trim() : property.address;
 
+  // ── Check one unit at a time, updating results as each completes ──────────
   const runPlatformCheck = async (unitsToCheck = effectiveUnits) => {
     setPlatformChecking(true);
-    setPlatformData(null);
-    try {
-      const units = unitsToCheck.map(u => {
-        const address = (u as any)._overrideAddress || `${property.address}, Unit ${u.unitNumber}`;
-        return {
-          unitId: u.id,
-          unitNumber: u.unitNumber,
+    setPlatformDone(false);
+    setResults({});
+    const pendingIds = new Set(unitsToCheck.map(u => u.id));
+    setCheckingUnitIds(new Set(pendingIds));
+
+    await Promise.all(
+      unitsToCheck.map(async (unit) => {
+        const address = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
+        const unitPayload = [{
+          unitId: unit.id,
+          unitNumber: unit.unitNumber,
           address,
-          // Replaced units have no local photo folder — skip photo check so the
-          // old unit's photos don't produce false "Likely Listed" signals
-          photoFolder: (u as any)._isReplaced ? "" : u.photoFolder,
-        };
-      });
-      const params = new URLSearchParams({
-        name: property.propertyName,
-        city,
-        units: JSON.stringify(units),
-      });
-      const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`);
-      if (!resp.ok) throw new Error("Check failed");
-      setPlatformData(await resp.json());
-    } catch {
-      setPlatformData({
-        units: unitsToCheck.map(u => ({
-          unitId: u.id,
-          unitNumber: u.unitNumber,
-          address: (u as any)._overrideAddress || `${property.address}, Unit ${u.unitNumber}`,
-          platforms: {
-            airbnb:  { status: "error", url: null, detection: "Could not verify" },
-            vrbo:    { status: "error", url: null, detection: "Could not verify" },
-            booking: { status: "error", url: null, detection: "Could not verify" },
-          },
-        })),
-      });
-    } finally {
-      setPlatformChecking(false);
-      setPlatformDone(true);
-    }
+          photoFolder: (unit as any)._isReplaced ? "" : unit.photoFolder,
+        }];
+        const params = new URLSearchParams({
+          name: property.propertyName,
+          city,
+          units: JSON.stringify(unitPayload),
+        });
+        try {
+          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`);
+          if (resp.ok) {
+            const data = await resp.json();
+            const unitResult: UnitCheckResult | undefined = data?.units?.[0];
+            if (unitResult) {
+              setResults(prev => ({ ...prev, [unit.id]: unitResult }));
+            }
+          } else {
+            // Mark as error
+            setResults(prev => ({
+              ...prev,
+              [unit.id]: {
+                unitId: unit.id,
+                unitNumber: unit.unitNumber,
+                address,
+                platforms: {
+                  airbnb:  { status: "error", url: null, detection: "Could not verify" },
+                  vrbo:    { status: "error", url: null, detection: "Could not verify" },
+                  booking: { status: "error", url: null, detection: "Could not verify" },
+                },
+              },
+            }));
+          }
+        } catch {
+          setResults(prev => ({
+            ...prev,
+            [unit.id]: {
+              unitId: unit.id,
+              unitNumber: unit.unitNumber,
+              address,
+              platforms: {
+                airbnb:  { status: "error", url: null, detection: "Could not verify" },
+                vrbo:    { status: "error", url: null, detection: "Could not verify" },
+                booking: { status: "error", url: null, detection: "Could not verify" },
+              },
+            },
+          }));
+        } finally {
+          setCheckingUnitIds(prev => {
+            const next = new Set(prev);
+            next.delete(unit.id);
+            return next;
+          });
+        }
+      })
+    );
+
+    setPlatformChecking(false);
+    setPlatformDone(true);
   };
 
   const rerunChecks = () => {
     setPlatformDone(false);
-    setPlatformData(null);
+    setResults({});
     runPlatformCheck();
   };
 
@@ -260,7 +316,7 @@ export default function BuilderPreflight() {
     delete remaining[oldUnitId];
     setUnitOverrides(remaining);
     setPlatformDone(false);
-    setPlatformData(null);
+    setResults({});
   };
 
   // Called when user confirms "Yes, Replace Unit" in the replacement flow
@@ -277,8 +333,9 @@ export default function BuilderPreflight() {
     const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
     setUnitOverrides(updatedOverrides);
     setShowReplacementFlow(false);
+    setReplacementTargetId(null);
 
-    // Immediately re-run the platform check with the updated units
+    // Re-run the platform check with updated units
     const updatedUnits = property.units.map(u => {
       const override = updatedOverrides[u.id];
       if (override) {
@@ -297,6 +354,19 @@ export default function BuilderPreflight() {
     });
     runPlatformCheck(updatedUnits);
   }
+
+  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
+  const hasAnyResults = Object.keys(results).length > 0;
+  const targetUnit = replacementTargetId
+    ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
+    : property.units[0];
+
+  // Does any unit across any platform show a "listed" status?
+  const anyUnitListed = effectiveUnits.some(unit => {
+    const r = results[unit.id];
+    if (!r) return false;
+    return PLATFORM_LIST.some(({ key }) => isListedStatus(r.platforms[key].status));
+  });
 
   return (
     <div className="min-h-screen bg-background">
@@ -327,11 +397,28 @@ export default function BuilderPreflight() {
 
         {/* ── Platform Check ── */}
         <Card className="p-6 mb-6">
-          <h2 className="text-base font-semibold mb-1">Platform Check</h2>
+          <div className="flex items-start justify-between gap-4 mb-1">
+            <h2 className="text-base font-semibold">Platform Check</h2>
+            {platformDone && (
+              <Button
+                id="btn-rerun-checks"
+                aria-label="Re-run platform check"
+                variant="ghost"
+                size="sm"
+                onClick={rerunChecks}
+                disabled={isCheckRunning}
+                className="h-7 px-2 text-xs flex-shrink-0"
+              >
+                <RotateCcw className="h-3 w-3 mr-1" />
+                Re-run
+              </Button>
+            )}
+          </div>
           <p className="text-sm text-muted-foreground mb-4">
-            Searches Airbnb, VRBO, and Booking.com for each unit using both text search and reverse image search.
+            Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search.
           </p>
 
+          {/* Committed swaps summary */}
           {Object.keys(unitOverrides).length > 0 && swapsCommitted && (
             <div className="mb-5 rounded-md border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/40 p-4 space-y-2">
               <div className="flex items-center gap-2">
@@ -358,6 +445,7 @@ export default function BuilderPreflight() {
             </div>
           )}
 
+          {/* Pending (not yet committed) swaps summary */}
           {Object.keys(unitOverrides).length > 0 && !swapsCommitted && (
             <div className="mb-5 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 p-4 space-y-3">
               <div className="flex items-center gap-2">
@@ -390,55 +478,35 @@ export default function BuilderPreflight() {
                   );
                 })}
               </div>
-              {!platformDone && !platformChecking && (
-                <Button
-                  size="sm"
-                  onClick={() => runPlatformCheck()}
-                  className="w-full"
-                  data-testid="button-reverify-with-swap"
-                >
-                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
-                  Run Platform Check with Replacement Unit
-                </Button>
-              )}
             </div>
           )}
 
-          {!platformDone && !platformChecking && Object.keys(unitOverrides).length === 0 && (
-            <Button
-              id="btn-run-platform-check"
-              aria-label="Run platform check using text search and reverse image search"
-              onClick={() => runPlatformCheck()}
-            >
-              Run Platform Check
-            </Button>
-          )}
-
-          {platformChecking && (
+          {/* Loading indicator */}
+          {isCheckRunning && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Searching all platforms with text search + photo matching…
+              Checking {checkingUnitIds.size} unit{checkingUnitIds.size !== 1 ? "s" : ""} across Airbnb, VRBO, and Booking.com…
             </div>
           )}
 
-          {(platformDone || platformChecking) && (
+          {/* Results table — shown as soon as any check starts or has results */}
+          {(isCheckRunning || hasAnyResults) && (
             <table id="platform-check-table" className="w-full text-sm mt-2 border-collapse">
               <thead>
                 <tr className="text-left text-xs text-muted-foreground border-b border-border">
-                  <th className="pb-2 font-medium w-28">Platform</th>
                   <th className="pb-2 font-medium w-24">Unit</th>
-                  <th className="pb-2 font-medium hidden sm:table-cell w-52">Address</th>
+                  <th className="pb-2 font-medium hidden sm:table-cell">Address</th>
                   <th className="pb-2 font-medium">Status</th>
-                  <th className="pb-2 font-medium w-16">Link</th>
+                  <th className="pb-2 font-medium w-16 text-right">Link</th>
                 </tr>
               </thead>
               <tbody>
                 {PLATFORM_LIST.map(({ key, label }, pIdx) => (
-                  <>
+                  <Fragment key={key}>
                     {/* Platform group header */}
-                    <tr key={`header-${key}`} className={pIdx > 0 ? "border-t-2 border-border" : ""}>
+                    <tr className={pIdx > 0 ? "border-t-2 border-border" : ""}>
                       <td
-                        colSpan={5}
+                        colSpan={4}
                         className="pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 px-2 rounded"
                       >
                         {label}
@@ -447,17 +515,18 @@ export default function BuilderPreflight() {
 
                     {/* One row per effective unit */}
                     {effectiveUnits.map(unit => {
-                      const unitResult = platformData?.units.find(u => u.unitId === unit.id);
+                      const unitResult = results[unit.id];
                       const r = unitResult?.platforms[key];
                       const isReplaced = (unit as any)._isReplaced;
                       const displayAddress = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
+                      const unitChecking = checkingUnitIds.has(unit.id);
+                      const listed = r && isListedStatus(r.status);
                       return (
                         <tr
                           key={`${key}-${unit.id}`}
                           id={`check-${key}-${unit.id}`}
                           className="border-b border-border/40 last:border-0"
                         >
-                          <td className="py-2.5 text-xs text-muted-foreground pl-2">—</td>
                           <td className="py-2.5 text-sm font-medium">
                             <span>Unit {unit.unitNumber}</span>
                             {isReplaced && !swapsCommitted && (
@@ -470,12 +539,28 @@ export default function BuilderPreflight() {
                             {displayAddress}
                           </td>
                           <td className="py-2.5">
-                            <StatusBadge result={r} checking={platformChecking} />
+                            <StatusBadge result={r} checking={unitChecking} />
                             {r && (
                               <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
                             )}
+                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition) */}
+                            {key === "airbnb" && listed && !isReplaced && property.communityPhotoFolder && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="mt-2 h-7 px-2 text-xs"
+                                data-testid={`button-replace-unit-${unit.id}`}
+                                onClick={() => {
+                                  setReplacementTargetId(unit.id);
+                                  setShowReplacementFlow(true);
+                                }}
+                              >
+                                <RefreshCw className="h-3 w-3 mr-1" />
+                                Replace this unit
+                              </Button>
+                            )}
                           </td>
-                          <td className="py-2.5">
+                          <td className="py-2.5 text-right">
                             {r?.url && (
                               <a
                                 id={`link-${key}-${unit.id}`}
@@ -491,29 +576,22 @@ export default function BuilderPreflight() {
                         </tr>
                       );
                     })}
-                  </>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
           )}
-        </Card>
 
-        {/* Re-run button */}
-        {platformDone && (
-          <div className="mb-6">
-            <Button
-              id="btn-rerun-checks"
-              aria-label="Re-run platform check"
-              variant="ghost"
-              size="sm"
-              onClick={rerunChecks}
-              disabled={platformChecking}
-            >
-              <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
-              Re-run Checks
-            </Button>
-          </div>
-        )}
+          {/* Status legend */}
+          {hasAnyResults && (
+            <div className="mt-4 pt-4 border-t border-border/60 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-600" /> Listed &amp; verified</span>
+              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-orange-500" /> Likely listed — review recommended</span>
+              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-yellow-500" /> Possible match — check manually</span>
+              <span className="flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" /> Not found — safe to use</span>
+            </div>
+          )}
+        </Card>
 
         {/* Bottom action buttons */}
         <div className="flex flex-col sm:flex-row gap-3" id="preflight-actions">
@@ -543,27 +621,37 @@ export default function BuilderPreflight() {
               Continue to Builder <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
           )}
-          <Button
-            id="btn-use-different-unit"
-            aria-label="Find a replacement unit"
-            size="lg"
-            variant="outline"
-            onClick={() => setShowReplacementFlow(v => !v)}
-            className="sm:w-auto"
-          >
-            Use a Different Unit
-          </Button>
+          {anyUnitListed && property.communityPhotoFolder && (
+            <Button
+              id="btn-use-different-unit"
+              aria-label="Find a replacement unit"
+              size="lg"
+              variant="outline"
+              onClick={() => {
+                setReplacementTargetId(null);
+                setShowReplacementFlow(v => !v);
+              }}
+              className="sm:w-auto"
+            >
+              Use a Different Unit
+            </Button>
+          )}
         </div>
 
+        {/* Unit replacement flow */}
         {showReplacementFlow && property.communityPhotoFolder && (
           <div className="mt-6">
             <UnitReplacementFlow
-              unit={{ id: property.units[0].id, unitNumber: property.units[0].unitNumber, bedrooms: property.units[0].bedrooms }}
+              unit={{
+                id: targetUnit.id,
+                unitNumber: targetUnit.unitNumber,
+                bedrooms: targetUnit.bedrooms,
+              }}
               allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms }))}
               communityFolder={property.communityPhotoFolder}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
-              onClose={() => setShowReplacementFlow(false)}
+              onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); }}
               onUnitReplaced={handleUnitReplaced}
             />
           </div>
