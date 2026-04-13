@@ -300,24 +300,6 @@ export default function BuilderPreflight() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Skip banner — FIRST element, critical for Cowork */}
-      <div
-        id="cowork-skip-banner"
-        className="w-full bg-gray-900 text-white px-4 py-3 flex items-center justify-between gap-4"
-      >
-        <span className="text-sm font-medium">Automated agent? Skip this step.</span>
-        <Button
-          id="btn-skip-preflight"
-          aria-label="Skip pre-flight check and go directly to Step 1"
-          tabIndex={1}
-          size="sm"
-          className="bg-white text-gray-900 hover:bg-gray-100 shrink-0"
-          onClick={() => setLocation(step1Url)}
-        >
-          Skip → Go to Step 1
-        </Button>
-      </div>
-
       <div className="max-w-3xl mx-auto px-4 py-8">
         {/* Back link */}
         <button
