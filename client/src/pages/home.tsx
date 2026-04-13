@@ -37,6 +37,8 @@ import {
   Trash2,
   CheckCircle2,
   XCircle,
+  MapPin,
+  Star,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import { apiRequest } from "@/lib/queryClient";

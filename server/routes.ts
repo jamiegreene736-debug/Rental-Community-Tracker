@@ -1021,7 +1021,7 @@ export async function registerRoutes(
       return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET in environment" });
     }
     try {
-      const response = await fetch("https://auth.guesty.com/oauth/token", {
+      const response = await fetch("https://open-api.guesty.com/oauth2/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
