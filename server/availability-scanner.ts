@@ -41,12 +41,6 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
 
 const AVAILABILITY_THRESHOLD = 10;
 
-interface LodgifyPropertyInfo {
-  lodgifyId: number;
-  name: string;
-  rooms: { id: number; name: string }[];
-}
-
 type CacheEntry = { airbnb: number; error: boolean };
 type SearchCache = Map<string, CacheEntry>;
 
@@ -171,126 +165,6 @@ async function searchAirbnb(
   return (data.properties || []).length;
 }
 
-async function fetchLodgifyProperties(): Promise<LodgifyPropertyInfo[]> {
-  const apiKey = process.env.LODGIFY_API_KEY;
-  if (!apiKey) {
-    log("Lodgify API key not configured, cannot fetch properties for blocking", "scanner");
-    return [];
-  }
-
-  try {
-    const response = await fetch("https://api.lodgify.com/v2/properties?page=1&size=50", {
-      headers: {
-        "X-ApiKey": apiKey,
-        "accept": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      log(`Failed to fetch Lodgify properties: ${response.status}`, "scanner");
-      return [];
-    }
-
-    const data = await response.json();
-    const items = data.items || data;
-    if (!Array.isArray(items)) {
-      log("Unexpected Lodgify properties response format", "scanner");
-      return [];
-    }
-
-    const results: LodgifyPropertyInfo[] = [];
-    for (const prop of items) {
-      const propId = prop.id;
-      const propName = prop.name || "";
-
-      const detailResponse = await fetch(`https://api.lodgify.com/v2/properties/${propId}`, {
-        headers: {
-          "X-ApiKey": apiKey,
-          "accept": "application/json",
-        },
-      });
-
-      if (!detailResponse.ok) {
-        log(`Failed to fetch Lodgify property ${propId} details: ${detailResponse.status}`, "scanner");
-        continue;
-      }
-
-      const detail = await detailResponse.json();
-      const rooms = (detail.rooms || []).map((r: any) => ({
-        id: r.id,
-        name: r.name || `Room ${r.id}`,
-      }));
-
-      results.push({ lodgifyId: propId, name: propName, rooms });
-      await sleep(300);
-    }
-
-    log(`Fetched ${results.length} Lodgify properties with room types`, "scanner");
-    return results;
-  } catch (err: any) {
-    log(`Error fetching Lodgify properties: ${err.message}`, "scanner");
-    return [];
-  }
-}
-
-async function createLodgifyBlock(
-  lodgifyPropertyId: number,
-  roomTypeId: number,
-  checkIn: string,
-  checkOut: string,
-  reason: string
-): Promise<string | null> {
-  const apiKey = process.env.LODGIFY_API_KEY;
-  if (!apiKey) return null;
-
-  try {
-    const response = await fetch("https://api.lodgify.com/v1/reservation/booking", {
-      method: "POST",
-      headers: {
-        "X-ApiKey": apiKey,
-        "Content-Type": "application/json",
-        "accept": "application/json",
-      },
-      body: JSON.stringify({
-        guest: {
-          name: "No Availability - Auto Block",
-          email: "scanner@nexstay.com",
-        },
-        status: "Declined",
-        property_id: lodgifyPropertyId,
-        arrival: checkIn,
-        departure: checkOut,
-        bookability: "InstantBooking",
-        origin: "manual",
-        total: 0,
-        currency_code: "USD",
-        source_text: "Availability Scanner",
-        rooms: [
-          {
-            room_type_id: roomTypeId,
-            people: 1,
-          },
-        ],
-        notes: reason,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      log(`Lodgify block failed for property ${lodgifyPropertyId} room ${roomTypeId}: ${response.status} - ${errText}`, "scanner");
-      return null;
-    }
-
-    const data = await response.json();
-    const blockId = String(data.id || data.booking_id || "created");
-    log(`Lodgify block created: property ${lodgifyPropertyId}, room ${roomTypeId}, ${checkIn}-${checkOut} (ID: ${blockId})`, "scanner");
-    return blockId;
-  } catch (err: any) {
-    log(`Lodgify block error for property ${lodgifyPropertyId}: ${err.message}`, "scanner");
-    return null;
-  }
-}
-
 async function searchCommunityBedroom(
   cache: SearchCache,
   community: string,
@@ -346,7 +220,7 @@ export function getPropertyName(propertyId: number): string {
   return PROPERTY_UNIT_NEEDS[propertyId]?.name || `Property #${propertyId}`;
 }
 
-export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number, lodgifyPropertyId?: number): Promise<number> {
+export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number): Promise<number> {
   if (scannerRunning) {
     log("Scanner already running, skipping", "scanner");
     return -1;
@@ -381,21 +255,6 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
       totalErrors: 0,
     });
     runId = run.id;
-
-    let lodgifyProperties: LodgifyPropertyInfo[] = [];
-    if (lodgifyPropertyId) {
-      const allProps = await fetchLodgifyProperties();
-      const match = allProps.find(p => p.lodgifyId === lodgifyPropertyId);
-      if (match) {
-        lodgifyProperties = [match];
-        log(`Will block Lodgify property ${lodgifyPropertyId} (${match.name})`, "scanner");
-      } else {
-        log(`Lodgify property ${lodgifyPropertyId} not found, skipping blocks`, "scanner");
-      }
-    } else if (!targetPropertyId) {
-      lodgifyProperties = await fetchLodgifyProperties();
-      log(`Loaded ${lodgifyProperties.length} Lodgify properties for calendar blocking`, "scanner");
-    }
 
     const windows = generateScanWindows(periodsAhead);
 
@@ -459,26 +318,6 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
           totalAvailable++;
         }
 
-        let lodgifyBlockIds: string[] = [];
-
-        if (shouldBlock && lodgifyProperties.length > 0) {
-          for (const lp of lodgifyProperties) {
-            for (const room of lp.rooms) {
-              const blockId = await createLodgifyBlock(
-                lp.lodgifyId,
-                room.id,
-                window.checkIn,
-                window.checkOut,
-                `Auto-block: Under ${AVAILABILITY_THRESHOLD} Airbnb listings (${totalAirbnb} found) for ${uniqueBedrooms.map(b => `${b}BR`).join("/")} in ${config.community} ${window.checkIn} to ${window.checkOut}`
-              );
-              if (blockId) {
-                lodgifyBlockIds.push(`${lp.lodgifyId}:${room.id}:${blockId}`);
-              }
-              await sleep(500);
-            }
-          }
-        }
-
         await storage.createAvailabilityScan({
           runId: run.id,
           propertyId,
@@ -490,7 +329,7 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
           vrboResults: 0,
           totalResults,
           blocked: shouldBlock ? "true" : "false",
-          lodgifyBlockIds: lodgifyBlockIds.length > 0 ? JSON.stringify(lodgifyBlockIds) : null,
+          lodgifyBlockIds: null,
           status,
         });
 

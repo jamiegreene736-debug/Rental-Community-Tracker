@@ -35,8 +35,6 @@ import {
   Images,
   Plus,
   Trash2,
-  CheckCircle2,
-  XCircle,
   MapPin,
   Star,
 } from "lucide-react";
@@ -407,7 +405,6 @@ export default function Home() {
   const [communityFilter, setCommunityFilter] = useState("all");
   const [islandFilter, setIslandFilter] = useState("all");
   const [multiUnitFilter, setMultiUnitFilter] = useState("all");
-  const [lodgifyFilter, setLodgifyFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("community");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -420,18 +417,6 @@ export default function Home() {
     const set = new Set(properties.map((p) => p.island));
     return Array.from(set).sort();
   }, []);
-
-  const { data: propertyMapData = [] } = useQuery<{ propertyId: number; lodgifyPropertyId: string }[]>({
-    queryKey: ["/api/lodgify/property-map"],
-  });
-
-  const propertyMapById = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const entry of propertyMapData) {
-      map.set(entry.propertyId, entry.lodgifyPropertyId);
-    }
-    return map;
-  }, [propertyMapData]);
 
   const filtered = useMemo(() => {
     let result = properties;
@@ -455,11 +440,6 @@ export default function Home() {
       const isMulti = multiUnitFilter === "yes";
       result = result.filter((p) => p.multiUnit === isMulti);
     }
-    if (lodgifyFilter === "in_lodgify") {
-      result = result.filter((p) => propertyMapById.has(p.id));
-    } else if (lodgifyFilter === "not_lodgify") {
-      result = result.filter((p) => p.multiUnit && !propertyMapById.has(p.id));
-    }
     result = [...result].sort((a, b) => {
       let aVal: string | number | null = a[sortField];
       let bVal: string | number | null = b[sortField];
@@ -473,7 +453,7 @@ export default function Home() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, lodgifyFilter, propertyMapById, sortField, sortDir]);
+  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -494,7 +474,6 @@ export default function Home() {
   };
 
   const multiUnitCount = properties.filter((p) => p.multiUnit).length;
-  const inLodgifyCount = properties.filter((p) => p.multiUnit && propertyMapById.has(p.id)).length;
   const avgBedrooms = Math.round((properties.reduce((s, p) => s + p.bedrooms, 0) / properties.length) * 10) / 10;
   const pricedProperties = properties.filter((p) => p.lowPrice !== null);
   const avgLow = pricedProperties.length
@@ -579,15 +558,6 @@ export default function Home() {
             </div>
             <p className="text-2xl font-bold" data-testid="text-multi-unit-count">{multiUnitCount}</p>
           </Card>
-          <Card className="p-4 cursor-pointer" onClick={() => setLodgifyFilter(lodgifyFilter === "all" ? "in_lodgify" : "all")}>
-            <div className="flex items-center gap-2 mb-1">
-              <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">PMS Synced</span>
-            </div>
-            <p className="text-2xl font-bold" data-testid="text-in-lodgify-count">
-              {inLodgifyCount} <span className="text-base font-normal text-muted-foreground">/ {multiUnitCount}</span>
-            </p>
-          </Card>
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
               <DollarSign className="h-4 w-4 text-muted-foreground" />
@@ -645,16 +615,6 @@ export default function Home() {
                 <SelectItem value="all">All Types</SelectItem>
                 <SelectItem value="yes">Multi-Unit</SelectItem>
                 <SelectItem value="no">Single Unit</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={lodgifyFilter} onValueChange={setLodgifyFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-lodgify-status" id="select-lodgify-filter" aria-label="Filter by PMS sync status">
-                <SelectValue placeholder="Sync Status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Sync Status</SelectItem>
-                <SelectItem value="in_lodgify">PMS Synced</SelectItem>
-                <SelectItem value="not_lodgify">Not Synced</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -743,7 +703,6 @@ export default function Home() {
                     <SortIcon field="guests" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center min-w-[120px]">PMS Sync</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -812,31 +771,11 @@ export default function Home() {
                       {property.guests}
                     </span>
                   </TableCell>
-                  <TableCell className="text-center">
-                    {property.multiUnit ? (
-                      propertyMapById.has(property.id) ? (
-                        <div className="flex flex-col items-center gap-0.5" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
-                          <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-full px-2 py-0.5 whitespace-nowrap">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Synced
-                          </span>
-                          <span className="text-[9px] text-muted-foreground">#{propertyMapById.get(property.id)}</span>
-                        </div>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted rounded-full px-2 py-0.5 whitespace-nowrap" data-testid={`status-lodgify-${property.id}`} id={`status-lodgify-${property.id}`}>
-                          <XCircle className="h-3 w-3" />
-                          Not Synced
-                        </span>
-                      )
-                    ) : (
-                      <span className="text-xs text-muted-foreground">-</span>
-                    )}
-                  </TableCell>
                 </TableRow>
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>

@@ -36,10 +36,8 @@ import {
   TrendingUp,
   TrendingDown,
   ShoppingCart,
-  RefreshCw,
   Plus,
   Trash2,
-  Calendar,
   BarChart3,
   FileText,
   Loader2,
@@ -57,7 +55,7 @@ import {
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { BuyIn, LodgifyBooking } from "@shared/schema";
+import type { BuyIn } from "@shared/schema";
 import { getPropertyPricing, getAllUnitPricings, calculateStaySellRate, type PropertyPricing, type UnitPricing } from "@/data/pricing-data";
 import { getAllMultiUnitProperties } from "@/data/unit-builder-data";
 
@@ -1251,110 +1249,6 @@ function BuyInsTab() {
   );
 }
 
-function BookingsTab() {
-  const { toast } = useToast();
-  const { data: bookings = [], isLoading } = useQuery<LodgifyBooking[]>({
-    queryKey: ["/api/lodgify/bookings"],
-  });
-
-  const syncMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/lodgify/sync-bookings");
-      return res.json();
-    },
-    onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/lodgify/bookings"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/reports/summary"] });
-      toast({
-        title: "Booking sync complete",
-        description: `${data.synced} bookings synced, ${data.skipped} skipped`,
-      });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  return (
-    <div>
-      <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
-        <p className="text-sm text-muted-foreground">
-          Guest bookings synced from your PMS (Booking.com, VRBO, etc.)
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => syncMutation.mutate()}
-          disabled={syncMutation.isPending}
-          data-testid="button-sync-bookings"
-        >
-          {syncMutation.isPending ? (
-            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Syncing...</>
-          ) : (
-            <><RefreshCw className="h-4 w-4 mr-2" /> Sync Bookings</>
-          )}
-        </Button>
-      </div>
-
-      {isLoading ? (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </div>
-      ) : bookings.length === 0 ? (
-        <div className="text-center py-12">
-          <Calendar className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-          <h3 className="font-medium text-lg">No bookings synced yet</h3>
-          <p className="text-muted-foreground text-sm mt-1">
-            Click "Sync Bookings" to pull in your latest guest reservations
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Property</TableHead>
-                <TableHead>Guest</TableHead>
-                <TableHead>Check-in</TableHead>
-                <TableHead>Check-out</TableHead>
-                <TableHead>Nights</TableHead>
-                <TableHead className="text-right">Revenue</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {bookings.map((booking) => (
-                <TableRow key={booking.id} data-testid={`row-booking-${booking.id}`}>
-                  <TableCell className="font-medium max-w-[200px] truncate">
-                    {booking.lodgifyPropertyName || `Property #${booking.lodgifyPropertyId}`}
-                  </TableCell>
-                  <TableCell>{booking.guestName || "N/A"}</TableCell>
-                  <TableCell>{formatDate(booking.checkIn)}</TableCell>
-                  <TableCell>{formatDate(booking.checkOut)}</TableCell>
-                  <TableCell>{booking.nights || "-"}</TableCell>
-                  <TableCell className="text-right font-medium">
-                    {booking.totalAmount ? formatCurrency(booking.totalAmount) : "-"}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">
-                      {booking.source || "Unknown"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={booking.status === "Booked" || booking.status === "Open" ? "default" : "secondary"}>
-                      {booking.status || "N/A"}
-                    </Badge>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ReportsTab() {
   const { data: summary, isLoading } = useQuery<ReportSummary>({
     queryKey: ["/api/reports/summary"],
@@ -1513,10 +1407,6 @@ export default function BuyInTracker() {
               <ShoppingCart className="h-4 w-4 mr-2" />
               Buy-Ins
             </TabsTrigger>
-            <TabsTrigger value="bookings" data-testid="tab-bookings">
-              <Calendar className="h-4 w-4 mr-2" />
-              Guest Bookings
-            </TabsTrigger>
             <TabsTrigger value="reports" data-testid="tab-reports">
               <BarChart3 className="h-4 w-4 mr-2" />
               Profitability
@@ -1526,12 +1416,6 @@ export default function BuyInTracker() {
           <TabsContent value="buy-ins">
             <Card className="p-4">
               <BuyInsTab />
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="bookings">
-            <Card className="p-4">
-              <BookingsTab />
             </Card>
           </TabsContent>
 

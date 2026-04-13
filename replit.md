@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is **NexStay** — a property research and management dashboard for bundled vacation rental listings. It manages 35+ cataloged multi-unit vacation rental properties, allowing operators to combine individually-owned units in the same community into single large-group listings. Key features include: a sortable/filterable property dashboard, a 5-step Add New Community wizard (research → unit selection → photos → listing draft), an Availability Scanner, a Photo Audit tool, a Buy-In Tracker, and **Guesty API integration** for building/publishing listings. The tool is rebranded as NexStay throughout (previously thevacationrentalexperts.com).
+This project is **NexStay** — a property research and management dashboard for bundled vacation rental listings. It manages 35+ cataloged multi-unit vacation rental properties, allowing operators to combine individually-owned units in the same community into single large-group listings. Key features include: a sortable/filterable property dashboard, a 5-step Add New Community wizard (research → unit selection → photos → listing draft), an Availability Scanner, a Photo Audit tool, a Buy-In Tracker, and **Guesty API integration** for building/publishing listings. The tool is rebranded as NexStay throughout. All PMS integration uses **Guesty API only** — Lodgify API has been fully removed.
 
 ## User Preferences
 
@@ -42,7 +42,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Feature Specifications
 -   **Dashboard**: Displays 35 vacation rental properties with sortable and filterable data (name, community, bedrooms, capacity, pricing, multi-unit indicator).
--   **Lodgify Preparation**: Dedicated pages (`/lodgify-prep/:id`) for each multi-unit property with tools for generating titles, descriptions, amenity checklists, ordered photo downloads, and sync status checking with Lodgify. Includes combined descriptions for all units.
+-   **Listing Builder**: Guesty-powered listing builder accessible from the dashboard via the "Build" button. Step-by-step workflow to configure and publish listings to Airbnb/VRBO/Booking.com through Guesty. Route: `/builder/:propertyId/preflight` → `/builder/:propertyId/:step`.
 -   **Buy-In Tracker & Profitability Dashboard**: Tracks Airbnb buy-in purchases, syncs Lodgify guest reservations, and provides profitability reports (`/buy-in-tracker`).
 -   **Real-time Buy-In Search**: Searches Airbnb, VRBO, and Google Hotels for cheapest available units based on property, dates, and bedroom configuration.
 -   **Photo Audit**: Analyzes property photos, identifies unit numbers, flags potential VRBO conflicts, and validates community photo folders (`/photo-audit`).
@@ -77,5 +77,5 @@ Preferred communication style: Simple, everyday language.
 
 ### Third-Party Services
 -   **SearchAPI.io**: Used for real-time Airbnb, VRBO, and Google Hotels search queries for property availability and photo auditing.
--   **Lodgify API**: Still used for availability blocking (`/api/lodgify/sync-bookings`, `/api/lodgify/push-rates`), booking sync, and the Lodgify Prep page (`/lodgify-prep/:id`). Lodgify property map is preserved.
+-   **Lodgify**: All Lodgify API routes have been removed. The database tables (`lodgify_bookings`, `lodgify_property_map`) are preserved for historical data. Storage methods remain for profitability report queries against existing data.
 -   **Guesty Open API v1**: New primary listing builder. `POST /api/guesty-token` proxies OAuth 2.0 credentials server-side. Requires `GUESTY_CLIENT_ID` and `GUESTY_CLIENT_SECRET` in Replit Secrets. Service layer: `client/src/services/guestyService.ts`. UI component: `client/src/components/GuestyListingBuilder/index.tsx`. Builder page (`/builder/:propertyId/:step`) now renders the Guesty builder instead of the old 9-step Lodgify wizard.

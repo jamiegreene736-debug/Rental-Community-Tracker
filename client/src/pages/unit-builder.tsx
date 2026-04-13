@@ -358,10 +358,10 @@ export default function UnitBuilder() {
                 Buy In
               </Button>
             </Link>
-            <Link href={`/lodgify-prep/${property.propertyId}`}>
-              <Button variant="outline" data-testid="button-prepare-lodgify">
+            <Link href={`/builder/${property.propertyId}/preflight`}>
+              <Button variant="outline" data-testid="button-build-guesty">
                 <ClipboardList className="h-4 w-4 mr-2" />
-                Prepare for Lodgify
+                Build Listing
               </Button>
             </Link>
             {totalPhotos > 0 && (
