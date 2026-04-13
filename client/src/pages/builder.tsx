@@ -211,6 +211,7 @@ export default function Builder() {
 
       <GuestyListingBuilder
         propertyData={propertyData}
+        propertyId={propertyId}
         onBuildComplete={(result) => {
           if (result.listingId) {
             toast({

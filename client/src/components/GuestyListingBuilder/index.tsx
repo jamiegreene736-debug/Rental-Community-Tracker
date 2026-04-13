@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -134,6 +135,18 @@ const CSS = `
 
   /* Divider */
   .glb-divider { border:none; border-top:1px solid var(--border); margin:24px 0; }
+
+  /* Seasonal rate table */
+  .glb-season-hdr { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--faint); margin:22px 0 10px; }
+  .glb-season-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .glb-season-table th { text-align:left; padding:6px 10px; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--faint); border-bottom:1px solid var(--border); }
+  .glb-season-table td { padding:7px 10px; border-bottom:1px solid var(--border); color:var(--text); }
+  .glb-season-table tr:last-child td { border-bottom:none; }
+  .glb-season-table tr:hover td { background:var(--bg-hover); }
+  .glb-season-badge { display:inline-block; padding:2px 8px; border-radius:100px; font-size:10px; font-weight:600; }
+  .glb-season-badge.LOW { background:#f0fdf4; color:#16a34a; }
+  .glb-season-badge.HIGH { background:#fffbeb; color:#d97706; }
+  .glb-season-badge.HOLIDAY { background:#f5f3ff; color:#7c3aed; }
 `;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -143,6 +156,7 @@ type LogEntry = BuildStepEntry & { icon: string };
 
 type Props = {
   propertyData?: GuestyPropertyData | null;
+  propertyId?: number;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
 };
@@ -167,7 +181,7 @@ function statusIcon(status: string) {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function GuestyListingBuilder({ propertyData, onBuildComplete, onUpdateComplete }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, onBuildComplete, onUpdateComplete }: Props) {
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
@@ -274,6 +288,21 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
   const amenities = propertyData?.amenities || [];
   const descriptions = propertyData?.descriptions;
   const pricing = propertyData?.pricing;
+
+  // Aggregate monthly rates across all units for the 24-month seasonal table
+  const seasonalMonths = useMemo(() => {
+    if (!propertyId) return [];
+    const propPricing = getPropertyPricing(propertyId);
+    if (!propPricing || !propPricing.units.length) return [];
+    return propPricing.units[0].monthlyRates.map((row, i) => ({
+      month: row.month,
+      year: row.year,
+      yearMonth: row.yearMonth,
+      season: row.season,
+      totalBuyIn: propPricing.units.reduce((s, u) => s + u.monthlyRates[i].buyInRate, 0),
+      totalSell:  propPricing.units.reduce((s, u) => s + u.monthlyRates[i].sellRate, 0),
+    }));
+  }, [propertyId]);
 
   return (
     <>
@@ -438,23 +467,57 @@ export default function GuestyListingBuilder({ propertyData, onBuildComplete, on
 
                 {activeTab === "pricing" && (
                   pricing
-                    ? <div className="glb-price-grid">
-                        {[
-                          { label: "Base Price / Night", val: pricing.basePrice != null ? `$${pricing.basePrice}` : null },
-                          { label: "Weekend Price", val: pricing.weekendBasePrice != null ? `$${pricing.weekendBasePrice}` : null },
-                          { label: "Cleaning Fee", val: pricing.cleaningFee != null ? `$${pricing.cleaningFee}` : null },
-                          { label: "Security Deposit", val: pricing.securityDeposit != null ? `$${pricing.securityDeposit}` : null },
-                          { label: "Extra Person Fee", val: pricing.extraPersonFee != null ? `$${pricing.extraPersonFee}` : null },
-                          { label: "Guests Included", val: pricing.guestsIncluded != null ? `${pricing.guestsIncluded}` : null },
-                          { label: "Weekly Discount", val: pricing.weeklyDiscount != null ? `${Math.round((1 - pricing.weeklyDiscount) * 100)}% off` : null },
-                          { label: "Monthly Discount", val: pricing.monthlyDiscount != null ? `${Math.round((1 - pricing.monthlyDiscount) * 100)}% off` : null },
-                          { label: "Currency", val: pricing.currency || "USD" },
-                        ].filter((r) => r.val != null).map((r) => (
-                          <div key={r.label} className="glb-price-card">
-                            <div className="glb-price-label">{r.label}</div>
-                            <div className="glb-price-val">{r.val}</div>
-                          </div>
-                        ))}
+                    ? <div>
+                        <div className="glb-price-grid">
+                          {[
+                            { label: "Base Price / Night", val: pricing.basePrice != null ? `$${pricing.basePrice.toLocaleString()}` : null },
+                            { label: "Weekend Price", val: pricing.weekendBasePrice != null ? `$${pricing.weekendBasePrice.toLocaleString()}` : null },
+                            { label: "Cleaning Fee", val: pricing.cleaningFee != null ? `$${pricing.cleaningFee.toLocaleString()}` : null },
+                            { label: "Security Deposit", val: pricing.securityDeposit != null ? `$${pricing.securityDeposit.toLocaleString()}` : null },
+                            { label: "Extra Person Fee", val: pricing.extraPersonFee != null ? `$${pricing.extraPersonFee}` : null },
+                            { label: "Guests Included", val: pricing.guestsIncluded != null ? `${pricing.guestsIncluded}` : null },
+                            { label: "Weekly Discount", val: pricing.weeklyDiscount != null ? `${Math.round((1 - pricing.weeklyDiscount) * 100)}% off` : null },
+                            { label: "Monthly Discount", val: pricing.monthlyDiscount != null ? `${Math.round((1 - pricing.monthlyDiscount) * 100)}% off` : null },
+                            { label: "Currency", val: pricing.currency || "USD" },
+                          ].filter((r) => r.val != null).map((r) => (
+                            <div key={r.label} className="glb-price-card">
+                              <div className="glb-price-label">{r.label}</div>
+                              <div className="glb-price-val">{r.val}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {seasonalMonths.length > 0 && (
+                          <>
+                            <div className="glb-season-hdr">24-Month Rate Schedule</div>
+                            <table className="glb-season-table">
+                              <thead>
+                                <tr>
+                                  <th>Month</th>
+                                  <th>Season</th>
+                                  <th>Buy-In / Night</th>
+                                  <th>Guest Charge / Night</th>
+                                  <th>Profit / Night</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {seasonalMonths.map((row) => (
+                                  <tr key={row.yearMonth}>
+                                    <td style={{ fontWeight: 500 }}>{row.month} {row.year}</td>
+                                    <td>
+                                      <span className={`glb-season-badge ${row.season}`}>
+                                        {getSeasonLabel(row.season)} Season
+                                      </span>
+                                    </td>
+                                    <td>${row.totalBuyIn.toLocaleString()}</td>
+                                    <td style={{ fontWeight: 600 }}>${row.totalSell.toLocaleString()}</td>
+                                    <td style={{ color: "#16a34a" }}>${(row.totalSell - row.totalBuyIn).toLocaleString()}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
                       </div>
                     : <div className="glb-empty">No pricing data</div>
                 )}

@@ -246,12 +246,13 @@ export function getDominantSeason(
   return { season: "LOW", holidayLabel: null };
 }
 
-// Generates 25 months of rates: April 2026 → April 2028
+// Generates 24 months of rates starting from the current month (dynamic)
 const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: number }[] = (() => {
+  const now = new Date();
   const months: { yearMonth: string; monthIndex: number; year: number }[] = [];
-  let year = 2026;
-  let monthIndex = 3;
-  for (let i = 0; i < 25; i++) {
+  let year = now.getFullYear();
+  let monthIndex = now.getMonth();
+  for (let i = 0; i < 24; i++) {
     const mm = String(monthIndex + 1).padStart(2, "0");
     months.push({ yearMonth: `${year}-${mm}`, monthIndex, year });
     monthIndex++;
