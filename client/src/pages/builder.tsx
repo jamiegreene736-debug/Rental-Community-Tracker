@@ -100,9 +100,7 @@ export default function Builder() {
     const totalBedrooms = property.units.reduce((s, u) => s + u.bedrooms, 0);
     const totalSqft = property.units.reduce((s, u) => s + (parseInt(u.sqft) || 0), 0);
 
-    const basePrice = pricing?.totalBaseSellRate
-      ? Math.round(pricing.totalBaseSellRate / 30)
-      : 0;
+    const basePrice = pricing?.totalBaseSellRate ?? 0;
 
     const cleaningFee = Math.round(basePrice * 0.4);
 
