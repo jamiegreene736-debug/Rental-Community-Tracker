@@ -1013,6 +1013,35 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ error: "Find replacement failed", message: err.message }); }
   });
 
+  // ── Guesty OAuth token proxy ────────────────────────────────────────────────
+  app.post("/api/guesty-token", async (_req, res) => {
+    const clientId = process.env.GUESTY_CLIENT_ID;
+    const clientSecret = process.env.GUESTY_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET in environment" });
+    }
+    try {
+      const response = await fetch("https://auth.guesty.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: clientId,
+          client_secret: clientSecret,
+          scope: "open-api",
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return res.status(response.status).json(err);
+      }
+      const data = await response.json() as { access_token: string; expires_in: number };
+      return res.json({ access_token: data.access_token, expires_in: data.expires_in });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Guesty auth failed", message: err.message });
+    }
+  });
+
   app.get("/api/lodgify/properties", async (_req, res) => {
     const apiKey = process.env.LODGIFY_API_KEY;
     if (!apiKey) {
