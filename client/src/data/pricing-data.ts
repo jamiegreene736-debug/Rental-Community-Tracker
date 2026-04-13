@@ -1,10 +1,10 @@
 // ─────────────────────────────────────────────────────────────
-// PRICING DATA
-// Source: Airbnb & VRBO live listings · May 2026 · All-in retail
-// (taxes + cleaning + platform fees already included in base rates)
+// PRICING DATA — Redesigned Methodology
+// Season Types: LOW / HIGH / HOLIDAY
+// Sell Rate = Buy-In Cost × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
 // ─────────────────────────────────────────────────────────────
 
-export type SeasonType = "HIGH" | "MEDIUM" | "LOW";
+export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
 export type RegionType = "hawaii" | "florida";
 
 export type MonthRate = {
@@ -33,79 +33,131 @@ export type PropertyPricing = {
   units: UnitPricing[];
 };
 
-const MARKUP = 1.584;
+// ─────────────────────────────────────────────────────────────
+// TRANSPARENT MARKUP FORMULA
+// Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
+// ─────────────────────────────────────────────────────────────
+
+export const PLATFORM_FEE = 0.15;      // 15% — covers Booking.com / Airbnb guest service fees
+export const BUSINESS_MARKUP = 0.20;   // 20% — your business profit margin
+export const MARKUP = (1 + PLATFORM_FEE) * (1 + BUSINESS_MARKUP); // = 1.38
 
 // ─────────────────────────────────────────────────────────────
-// SEASON MULTIPLIERS — region-specific
+// SEASON MULTIPLIERS — region-specific, 3 tiers
 // ─────────────────────────────────────────────────────────────
 
 const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
-  hawaii:  { LOW: 0.85, MEDIUM: 1.00, HIGH: 1.50 },
-  florida: { LOW: 0.80, MEDIUM: 1.00, HIGH: 1.45 },
+  hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
+  florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
 };
 
 // ─────────────────────────────────────────────────────────────
-// MONTHLY SEASON MAPS — keyed by "YYYY-MM"
+// HOLIDAY DATE RANGES — day-level detection overrides monthly season
+// Month numbers are 1-indexed. Ranges use startMonth/startDay → endMonth/endDay.
+// ─────────────────────────────────────────────────────────────
+
+type HolidayRange = {
+  label: string;
+  sm: number; sd: number;  // start month/day
+  em: number; ed: number;  // end month/day
+};
+
+export const HOLIDAY_RANGES: HolidayRange[] = [
+  { label: "Christmas / New Year",  sm: 12, sd: 20, em: 1,  ed: 5  },
+  { label: "Independence Day Week", sm: 7,  sd: 1,  em: 7,  ed: 7  },
+  { label: "Thanksgiving Week",     sm: 11, sd: 22, em: 11, ed: 30 },
+  { label: "Spring Break",          sm: 3,  sd: 15, em: 4,  ed: 5  },
+  { label: "Presidents' Weekend",   sm: 2,  sd: 14, em: 2,  ed: 17 },
+];
+
+export function getHolidayLabel(date: Date): string | null {
+  const m = date.getMonth() + 1;
+  const d = date.getDate();
+  for (const r of HOLIDAY_RANGES) {
+    if (r.sm > r.em) {
+      // Year-wrapping range (e.g. Dec 20 → Jan 5)
+      if ((m === r.sm && d >= r.sd) || m > r.sm || m < r.em || (m === r.em && d <= r.ed)) {
+        return r.label;
+      }
+    } else if (r.sm === r.em) {
+      if (m === r.sm && d >= r.sd && d <= r.ed) return r.label;
+    } else {
+      if ((m === r.sm && d >= r.sd) || (m > r.sm && m < r.em) || (m === r.em && d <= r.ed)) {
+        return r.label;
+      }
+    }
+  }
+  return null;
+}
+
+export function isHolidayDate(date: Date): boolean {
+  return getHolidayLabel(date) !== null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// MONTHLY SEASON MAPS — LOW or HIGH only
+// (HOLIDAY is detected at the day level and takes priority)
 // ─────────────────────────────────────────────────────────────
 
 const HAWAII_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "HIGH",
-  "2026-05": "MEDIUM",
+  "2026-04": "HIGH",   // Spring Break / Easter
+  "2026-05": "LOW",
   "2026-06": "HIGH",
   "2026-07": "HIGH",
   "2026-08": "HIGH",
   "2026-09": "LOW",
   "2026-10": "LOW",
-  "2026-11": "MEDIUM",
-  "2026-12": "HIGH",
-  "2027-01": "HIGH",
-  "2027-02": "MEDIUM",
-  "2027-03": "HIGH",
+  "2026-11": "LOW",
+  "2026-12": "HIGH",   // Holiday detected within at day level
+  "2027-01": "HIGH",   // Holiday detected within at day level
+  "2027-02": "LOW",
+  "2027-03": "HIGH",   // Spring Break
   "2027-04": "HIGH",
-  "2027-05": "MEDIUM",
+  "2027-05": "LOW",
   "2027-06": "HIGH",
   "2027-07": "HIGH",
   "2027-08": "HIGH",
   "2027-09": "LOW",
   "2027-10": "LOW",
-  "2027-11": "MEDIUM",
+  "2027-11": "LOW",
   "2027-12": "HIGH",
   "2028-01": "HIGH",
-  "2028-02": "MEDIUM",
+  "2028-02": "LOW",
   "2028-03": "HIGH",
   "2028-04": "HIGH",
 };
 
 const FLORIDA_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "MEDIUM",
-  "2026-05": "MEDIUM",
+  "2026-04": "HIGH",
+  "2026-05": "LOW",
   "2026-06": "HIGH",
   "2026-07": "HIGH",
   "2026-08": "HIGH",
   "2026-09": "LOW",
-  "2026-10": "MEDIUM",
-  "2026-11": "MEDIUM",
+  "2026-10": "LOW",
+  "2026-11": "LOW",
   "2026-12": "HIGH",
   "2027-01": "LOW",
-  "2027-02": "MEDIUM",
+  "2027-02": "LOW",
   "2027-03": "HIGH",
-  "2027-04": "MEDIUM",
-  "2027-05": "MEDIUM",
+  "2027-04": "HIGH",
+  "2027-05": "LOW",
   "2027-06": "HIGH",
   "2027-07": "HIGH",
   "2027-08": "HIGH",
   "2027-09": "LOW",
-  "2027-10": "MEDIUM",
-  "2027-11": "MEDIUM",
+  "2027-10": "LOW",
+  "2027-11": "LOW",
   "2027-12": "HIGH",
   "2028-01": "LOW",
-  "2028-02": "MEDIUM",
+  "2028-02": "LOW",
   "2028-03": "HIGH",
-  "2028-04": "MEDIUM",
+  "2028-04": "HIGH",
 };
 
 // ─────────────────────────────────────────────────────────────
 // BASE BUY-IN RATES — per community, per bedroom count
+// Source: Airbnb & VRBO live listings · May 2026 · nightly, pre-fees
 // ─────────────────────────────────────────────────────────────
 
 type CommunityRate = {
@@ -146,7 +198,7 @@ const MONTH_NAMES = [
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 
-function getCommunityRegion(community: string): RegionType {
+export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
@@ -160,14 +212,45 @@ function getBuyInRate(community: string, bedrooms: number): number {
 
 function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
   const map = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
-  return map[yearMonth] ?? "MEDIUM";
+  return map[yearMonth] ?? "LOW";
+}
+
+// Get season for a specific calendar date (holiday detection takes priority)
+export function getSeasonForDate(date: Date, region: RegionType): SeasonType {
+  if (isHolidayDate(date)) return "HOLIDAY";
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  return getSeasonForMonth(`${date.getFullYear()}-${mm}`, region);
+}
+
+// Get the dominant season for a date range (for summary display)
+export function getDominantSeason(
+  checkIn: string,
+  checkOut: string,
+  region: RegionType
+): { season: SeasonType; holidayLabel: string | null } {
+  const start = new Date(checkIn + "T12:00:00");
+  const end = new Date(checkOut + "T12:00:00");
+  const counts: Record<SeasonType, number> = { LOW: 0, HIGH: 0, HOLIDAY: 0 };
+  let holidayLabel: string | null = null;
+
+  const cur = new Date(start);
+  while (cur < end) {
+    const season = getSeasonForDate(cur, region);
+    counts[season]++;
+    if (season === "HOLIDAY" && !holidayLabel) holidayLabel = getHolidayLabel(cur);
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  if (counts.HOLIDAY > 0) return { season: "HOLIDAY", holidayLabel };
+  if (counts.HIGH >= counts.LOW) return { season: "HIGH", holidayLabel: null };
+  return { season: "LOW", holidayLabel: null };
 }
 
 // Generates 25 months of rates: April 2026 → April 2028
 const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: number }[] = (() => {
   const months: { yearMonth: string; monthIndex: number; year: number }[] = [];
   let year = 2026;
-  let monthIndex = 3; // April = index 3
+  let monthIndex = 3;
   for (let i = 0; i < 25; i++) {
     const mm = String(monthIndex + 1).padStart(2, "0");
     months.push({ yearMonth: `${year}-${mm}`, monthIndex, year });
@@ -184,15 +267,62 @@ function generateMonthlyRates(baseBuyIn: number, community: string): MonthRate[]
     const multiplier = SEASON_MULTIPLIERS[region][season];
     const buyInRate = Math.round(baseBuyIn * multiplier);
     const sellRate = Math.round(buyInRate * MARKUP);
-    return {
-      month: MONTH_NAMES[monthIndex],
-      year,
-      yearMonth,
-      season,
-      buyInRate,
-      sellRate,
-    };
+    return { month: MONTH_NAMES[monthIndex], year, yearMonth, season, buyInRate, sellRate };
   });
+}
+
+// ─────────────────────────────────────────────────────────────
+// SELL RATE CALCULATION — transparent breakdown
+// ─────────────────────────────────────────────────────────────
+
+export function calcSellRateFromBuyIn(buyInCost: number): {
+  platformFeeAmount: number;
+  markupAmount: number;
+  sellRate: number;
+  profit: number;
+  margin: number;
+} {
+  const platformFeeAmount = Math.round(buyInCost * PLATFORM_FEE);
+  const subtotal = buyInCost + platformFeeAmount;
+  const markupAmount = Math.round(subtotal * BUSINESS_MARKUP);
+  const sellRate = subtotal + markupAmount;
+  const profit = sellRate - buyInCost;
+  const margin = buyInCost > 0 ? Math.round((profit / sellRate) * 100) : 0;
+  return { platformFeeAmount, markupAmount, sellRate, profit, margin };
+}
+
+// ─────────────────────────────────────────────────────────────
+// SEASONAL RATE REFERENCE — what you'd charge per season for a property
+// Based on community BUY_IN_RATES × season multiplier × MARKUP
+// ─────────────────────────────────────────────────────────────
+
+export type SeasonalRateRef = {
+  season: SeasonType;
+  nightly: number;       // sell rate per night
+  multiplier: number;
+};
+
+export function getSeasonalRateReference(
+  propertyId: number,
+  nights = 7
+): { community: string; region: RegionType; rates: SeasonalRateRef[]; totalUnits: number } | null {
+  const config = PROPERTY_UNIT_CONFIGS[propertyId];
+  if (!config) return null;
+
+  const region = getCommunityRegion(config.community);
+
+  const rates: SeasonalRateRef[] = (["LOW", "HIGH", "HOLIDAY"] as SeasonType[]).map(season => {
+    const multiplier = SEASON_MULTIPLIERS[region][season];
+    let nightlyBuyIn = 0;
+    for (const unit of config.units) {
+      const base = getBuyInRate(config.community, unit.bedrooms);
+      nightlyBuyIn += Math.round(base * multiplier);
+    }
+    const nightlySell = Math.round(nightlyBuyIn * MARKUP);
+    return { season, nightly: nightlySell, multiplier };
+  });
+
+  return { community: config.community, region, rates, totalUnits: config.units.length };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -206,175 +336,30 @@ type UnitConfig = {
 };
 
 const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConfig[] }> = {
-  1: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "924", unitLabel: "Unit 924", bedrooms: 3 },
-      { unitId: "114", unitLabel: "Unit 114", bedrooms: 2 },
-      { unitId: "911", unitLabel: "Unit 911", bedrooms: 2 },
-    ],
-  },
-  4: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "721", unitLabel: "Unit 721", bedrooms: 3 },
-      { unitId: "812", unitLabel: "Unit 812", bedrooms: 3 },
-    ],
-  },
-  7: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Villa A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Villa B", bedrooms: 3 },
-      { unitId: "C", unitLabel: "Villa C", bedrooms: 2 },
-    ],
-  },
-  8: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
-    ],
-  },
-  9: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
-    ],
-  },
-  10: {
-    community: "Kekaha Beachfront",
-    units: [
-      { unitId: "main", unitLabel: "Main House", bedrooms: 3 },
-      { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 },
-    ],
-  },
-  12: {
-    community: "Kekaha Beachfront",
-    units: [
-      { unitId: "main", unitLabel: "Main House", bedrooms: 3 },
-      { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 },
-    ],
-  },
-  14: {
-    community: "Keauhou",
-    units: [
-      { unitId: "main", unitLabel: "Main House", bedrooms: 4 },
-      { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 },
-    ],
-  },
-  18: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
-    ],
-  },
-  19: {
-    community: "Princeville",
-    units: [
-      { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 },
-    ],
-  },
-  20: {
-    community: "Princeville",
-    units: [
-      { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 },
-    ],
-  },
-  21: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Villa A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Villa B", bedrooms: 3 },
-      { unitId: "C", unitLabel: "Villa C", bedrooms: 2 },
-    ],
-  },
-  23: {
-    community: "Kapaa Beachfront",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
-    ],
-  },
-  24: {
-    community: "Poipu Oceanfront",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
-    ],
-  },
-  26: {
-    community: "Keauhou",
-    units: [
-      { unitId: "main", unitLabel: "Main House", bedrooms: 5 },
-      { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 },
-    ],
-  },
-  27: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 2 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
-    ],
-  },
-  28: {
-    community: "Poipu Brenneckes",
-    units: [
-      { unitId: "A", unitLabel: "Home A", bedrooms: 4 },
-      { unitId: "B", unitLabel: "Home B", bedrooms: 3 },
-    ],
-  },
-  29: {
-    community: "Princeville",
-    units: [
-      { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Townhome B", bedrooms: 4 },
-    ],
-  },
-  31: {
-    community: "Poipu Brenneckes",
-    units: [
-      { unitId: "main", unitLabel: "Main Home", bedrooms: 5 },
-      { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 },
-    ],
-  },
-  32: {
-    community: "Pili Mai",
-    units: [
-      { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 },
-    ],
-  },
-  33: {
-    community: "Pili Mai",
-    units: [
-      { unitId: "A", unitLabel: "Townhome A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 },
-    ],
-  },
-  34: {
-    community: "Poipu Kai",
-    units: [
-      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
-      { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
-    ],
-  },
-  36: {
-    community: "Southern Dunes",
-    units: [
-      { unitId: "main", unitLabel: "Main House", bedrooms: 3 },
-    ],
-  },
-  37: {
-    community: "Windsor Hills",
-    units: [
-      { unitId: "main", unitLabel: "Main Condo", bedrooms: 3 },
-    ],
-  },
+  1:  { community: "Poipu Kai",         units: [{ unitId: "924", unitLabel: "Unit 924", bedrooms: 3 }, { unitId: "114", unitLabel: "Unit 114", bedrooms: 2 }, { unitId: "911", unitLabel: "Unit 911", bedrooms: 2 }] },
+  4:  { community: "Poipu Kai",         units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }, { unitId: "812", unitLabel: "Unit 812", bedrooms: 3 }] },
+  7:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Villa A", bedrooms: 3 }, { unitId: "B", unitLabel: "Villa B", bedrooms: 3 }, { unitId: "C", unitLabel: "Villa C", bedrooms: 2 }] },
+  8:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
+  9:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
+  10: { community: "Kekaha Beachfront", units: [{ unitId: "main", unitLabel: "Main House", bedrooms: 3 }, { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 }] },
+  12: { community: "Kekaha Beachfront", units: [{ unitId: "main", unitLabel: "Main House", bedrooms: 3 }, { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 }] },
+  14: { community: "Keauhou",           units: [{ unitId: "main", unitLabel: "Main House", bedrooms: 4 }, { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 }] },
+  18: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
+  19: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
+  20: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
+  21: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Villa A", bedrooms: 3 }, { unitId: "B", unitLabel: "Villa B", bedrooms: 3 }, { unitId: "C", unitLabel: "Villa C", bedrooms: 2 }] },
+  23: { community: "Kapaa Beachfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
+  24: { community: "Poipu Oceanfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
+  26: { community: "Keauhou",           units: [{ unitId: "main", unitLabel: "Main House", bedrooms: 5 }, { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 }] },
+  27: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 2 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
+  28: { community: "Poipu Brenneckes",  units: [{ unitId: "A", unitLabel: "Home A", bedrooms: 4 }, { unitId: "B", unitLabel: "Home B", bedrooms: 3 }] },
+  29: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 4 }] },
+  31: { community: "Poipu Brenneckes",  units: [{ unitId: "main", unitLabel: "Main Home", bedrooms: 5 }, { unitId: "guest", unitLabel: "Guest Quarters", bedrooms: 2 }] },
+  32: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
+  33: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
+  34: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
+  36: { community: "Southern Dunes",    units: [{ unitId: "main", unitLabel: "Main House", bedrooms: 3 }] },
+  37: { community: "Windsor Hills",     units: [{ unitId: "main", unitLabel: "Main Condo", bedrooms: 3 }] },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -389,44 +374,43 @@ export function getPropertyPricing(propertyId: number): PropertyPricing | null {
     const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
     const baseSellRate = Math.round(baseBuyIn * MARKUP);
     const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
-    return {
-      unitId: unit.unitId,
-      unitLabel: unit.unitLabel,
-      bedrooms: unit.bedrooms,
-      community: config.community,
-      baseBuyIn,
-      baseSellRate,
-      monthlyRates,
-    };
+    return { unitId: unit.unitId, unitLabel: unit.unitLabel, bedrooms: unit.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates };
   });
 
   const totalBaseBuyIn = units.reduce((sum, u) => sum + u.baseBuyIn, 0);
   const totalBaseSellRate = units.reduce((sum, u) => sum + u.baseSellRate, 0);
-
   return { propertyId, totalBaseBuyIn, totalBaseSellRate, units };
 }
 
 export function getSeasonLabel(season: SeasonType): string {
   switch (season) {
-    case "HIGH":   return "High";
-    case "MEDIUM": return "Mid";
-    case "LOW":    return "Low";
+    case "HIGH":    return "High";
+    case "LOW":     return "Low";
+    case "HOLIDAY": return "Holiday";
   }
 }
 
 export function getSeasonColor(season: SeasonType): string {
   switch (season) {
-    case "HIGH":   return "text-red-600 dark:text-red-400";
-    case "MEDIUM": return "text-yellow-600 dark:text-yellow-400";
-    case "LOW":    return "text-green-600 dark:text-green-400";
+    case "HIGH":    return "text-amber-600 dark:text-amber-400";
+    case "LOW":     return "text-green-600 dark:text-green-400";
+    case "HOLIDAY": return "text-purple-600 dark:text-purple-400";
+  }
+}
+
+export function getSeasonBgClass(season: SeasonType): string {
+  switch (season) {
+    case "HIGH":    return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
+    case "LOW":     return "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300";
+    case "HOLIDAY": return "bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300";
   }
 }
 
 export function getSeasonBadgeVariant(season: SeasonType): "destructive" | "secondary" | "default" {
   switch (season) {
-    case "HIGH":   return "destructive";
-    case "MEDIUM": return "secondary";
-    case "LOW":    return "default";
+    case "HIGH":    return "destructive";
+    case "LOW":     return "default";
+    case "HOLIDAY": return "secondary";
   }
 }
 
@@ -441,15 +425,7 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
       results.push({
         propertyId,
         community: config.community,
-        unit: {
-          unitId: unitCfg.unitId,
-          unitLabel: unitCfg.unitLabel,
-          bedrooms: unitCfg.bedrooms,
-          community: config.community,
-          baseBuyIn,
-          baseSellRate,
-          monthlyRates,
-        },
+        unit: { unitId: unitCfg.unitId, unitLabel: unitCfg.unitLabel, bedrooms: unitCfg.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates },
       });
     }
   }
@@ -460,33 +436,30 @@ export function calculateStaySellRate(
   propertyId: number,
   checkIn: string,
   checkOut: string
-): { totalSellRate: number; totalNights: number; nightlyBreakdown: { date: string; sellRate: number }[] } | null {
+): { totalSellRate: number; totalNights: number; nightlyBreakdown: { date: string; sellRate: number; season: SeasonType }[] } | null {
   const config = PROPERTY_UNIT_CONFIGS[propertyId];
   if (!config) return null;
 
   const region = getCommunityRegion(config.community);
   const start = new Date(checkIn + "T12:00:00");
   const end = new Date(checkOut + "T12:00:00");
-  const nightlyBreakdown: { date: string; sellRate: number }[] = [];
+  const nightlyBreakdown: { date: string; sellRate: number; season: SeasonType }[] = [];
   let totalSellRate = 0;
   let totalNights = 0;
 
   const current = new Date(start);
   while (current < end) {
-    const mm = String(current.getMonth() + 1).padStart(2, "0");
-    const yearMonth = `${current.getFullYear()}-${mm}`;
-    const season = getSeasonForMonth(yearMonth, region);
+    const season = getSeasonForDate(current, region);
     const multiplier = SEASON_MULTIPLIERS[region][season];
 
-    let nightlySellRate = 0;
+    let nightlyBuyIn = 0;
     for (const unit of config.units) {
       const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
-      const buyInRate = Math.round(baseBuyIn * multiplier);
-      const sellRate = Math.round(buyInRate * MARKUP);
-      nightlySellRate += sellRate;
+      nightlyBuyIn += Math.round(baseBuyIn * multiplier);
     }
+    const nightlySellRate = Math.round(nightlyBuyIn * MARKUP);
 
-    nightlyBreakdown.push({ date: current.toISOString().split("T")[0], sellRate: nightlySellRate });
+    nightlyBreakdown.push({ date: current.toISOString().split("T")[0], sellRate: nightlySellRate, season });
     totalSellRate += nightlySellRate;
     totalNights++;
     current.setDate(current.getDate() + 1);
@@ -495,4 +468,4 @@ export function calculateStaySellRate(
   return { totalSellRate, totalNights, nightlyBreakdown };
 }
 
-export { MARKUP, SEASON_MULTIPLIERS, BUY_IN_RATES };
+export { MARKUP as _MARKUP_TOTAL, SEASON_MULTIPLIERS, BUY_IN_RATES };
