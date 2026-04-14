@@ -97,12 +97,9 @@ export default function Builder() {
     if (!property) return null;
 
     const totalGuests = property.units.reduce((s, u) => s + u.maxGuests, 0);
-    const totalBedrooms = property.units.reduce((s, u) => s + u.bedrooms, 0);
     const totalSqft = property.units.reduce((s, u) => s + (parseInt(u.sqft) || 0), 0);
 
     const basePrice = pricing?.totalBaseSellRate ?? 0;
-
-    const cleaningFee = Math.round(basePrice * 0.4);
 
     const lodgifyAmenities = getDefaultAmenities(propertyId);
     const guestyAmenities = toGuestyAmenities(lodgifyAmenities);
@@ -162,14 +159,7 @@ export default function Builder() {
       photos,
       pricing: {
         basePrice,
-        weekendBasePrice: Math.round(basePrice * 1.15),
-        cleaningFee,
-        securityDeposit: Math.round(basePrice * 1.5),
-        extraPersonFee: 25,
-        guestsIncluded: Math.max(2, totalBedrooms * 2),
         currency: "USD",
-        weeklyDiscount: 0.92,
-        monthlyDiscount: 0.85,
       },
       bookingSettings: {
         minNights: 4,

@@ -191,19 +191,10 @@ class GuestyService {
   }
 
   async updateFinancials(id: string, pricing: GuestyPricing) {
-    const payload: Record<string, unknown> = {
+    return this.request("PUT", `/financials/listing/${id}`, {
       basePrice: pricing.basePrice,
       currency: pricing.currency || "USD",
-    };
-    if (pricing.weekendBasePrice != null) payload.weekendBasePrice = pricing.weekendBasePrice;
-    if (pricing.weeklyDiscount != null) payload.weeklyPriceFactor = pricing.weeklyDiscount;
-    if (pricing.monthlyDiscount != null) payload.monthlyPriceFactor = pricing.monthlyDiscount;
-    if (pricing.cleaningFee != null) payload.cleaningFee = pricing.cleaningFee;
-    if (pricing.securityDeposit != null) payload.securityDepositFee = pricing.securityDeposit;
-    if (pricing.extraPersonFee != null) payload.extraPersonFee = pricing.extraPersonFee;
-    if (pricing.guestsIncluded != null) payload.guestsIncludedInRegularFee = pricing.guestsIncluded;
-    if (pricing.channelCleaningFees) payload.channelCleaningFees = pricing.channelCleaningFees;
-    return this.request("PUT", `/financials/listing/${id}`, payload);
+    });
   }
 
   async updateBookingSettings(id: string, settings: GuestyBookingSettings) {

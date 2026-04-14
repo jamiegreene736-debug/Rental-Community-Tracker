@@ -471,13 +471,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         <div className="glb-price-grid">
                           {[
                             { label: "Base Price / Night", val: pricing.basePrice != null ? `$${pricing.basePrice.toLocaleString()}` : null },
-                            { label: "Weekend Price", val: pricing.weekendBasePrice != null ? `$${pricing.weekendBasePrice.toLocaleString()}` : null },
-                            { label: "Cleaning Fee", val: pricing.cleaningFee != null ? `$${pricing.cleaningFee.toLocaleString()}` : null },
-                            { label: "Security Deposit", val: pricing.securityDeposit != null ? `$${pricing.securityDeposit.toLocaleString()}` : null },
-                            { label: "Extra Person Fee", val: pricing.extraPersonFee != null ? `$${pricing.extraPersonFee}` : null },
-                            { label: "Guests Included", val: pricing.guestsIncluded != null ? `${pricing.guestsIncluded}` : null },
-                            { label: "Weekly Discount", val: pricing.weeklyDiscount != null ? `${Math.round((1 - pricing.weeklyDiscount) * 100)}% off` : null },
-                            { label: "Monthly Discount", val: pricing.monthlyDiscount != null ? `${Math.round((1 - pricing.monthlyDiscount) * 100)}% off` : null },
                             { label: "Currency", val: pricing.currency || "USD" },
                           ].filter((r) => r.val != null).map((r) => (
                             <div key={r.label} className="glb-price-card">
