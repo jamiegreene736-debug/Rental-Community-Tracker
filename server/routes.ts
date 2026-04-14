@@ -1623,6 +1623,73 @@ export async function registerRoutes(
     }
   });
 
+  // ========== BUILDER PHOTO UPSCALE & UPLOAD ==========
+
+  // Upscales a single local photo via Real-ESRGAN, hosts on ImgBB, returns public URL.
+  // Client calls this for each photo in sequence then passes ImgBB URLs to Guesty.
+  app.post("/api/builder/upscale-photo", async (req, res) => {
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    const replicateKey = process.env.REPLICATE_API_KEY;
+
+    const { localPath } = req.body as { localPath: string };
+    if (!localPath || !localPath.startsWith("/photos/")) {
+      return res.status(400).json({ error: "Invalid localPath — must start with /photos/" });
+    }
+
+    const safePath = localPath.replace(/\.\./g, "");
+    const fullPath = path.join(process.cwd(), "public", safePath);
+
+    let rawData: Buffer;
+    try {
+      rawData = fs.readFileSync(fullPath);
+    } catch {
+      return res.status(404).json({ error: "Photo file not found", localPath: safePath });
+    }
+
+    const ext = path.extname(safePath).toLowerCase();
+    const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+
+    // Upscale with Real-ESRGAN if key available
+    let finalBuffer = rawData;
+    let wasUpscaled = false;
+    if (replicateKey) {
+      console.log(`[builder-upscale] Upscaling ${safePath}...`);
+      const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
+      if (upscaled) {
+        finalBuffer = upscaled;
+        wasUpscaled = true;
+        console.log(`[builder-upscale] ✓ ${safePath} upscaled (${rawData.length} → ${upscaled.length} bytes)`);
+      } else {
+        console.warn(`[builder-upscale] Upscale failed for ${safePath}, using original`);
+      }
+    }
+
+    // Upload to ImgBB to get a publicly accessible URL for Guesty
+    if (!imgbbKey) {
+      return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to host photos for Guesty" });
+    }
+
+    try {
+      const form = new FormData();
+      form.append("image", finalBuffer.toString("base64"));
+      const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+        method: "POST",
+        body: form,
+      });
+      if (!imgbbResp.ok) {
+        const errText = await imgbbResp.text();
+        return res.status(502).json({ error: "ImgBB upload failed", detail: errText });
+      }
+      const imgbbData = await imgbbResp.json() as any;
+      const publicUrl = imgbbData?.data?.url;
+      if (!publicUrl) return res.status(502).json({ error: "ImgBB returned no URL" });
+
+      res.json({ url: publicUrl, wasUpscaled, localPath: safePath });
+    } catch (err: any) {
+      res.status(500).json({ error: "Upload to ImgBB failed", message: err.message });
+    }
+  });
+
   // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========
 
   app.get("/api/builder/scan-window", async (req, res) => {

@@ -290,6 +290,65 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     alert(`Pushed ${toBlock.length} blackout block(s) to Guesty.`);
   }, [availWindows, selectedId]);
 
+  // ── Photo upscale + upload ─────────────────────────────────────────────────
+  type UpscalePhase = "idle" | "upscaling" | "uploading" | "done" | "error";
+  const [upscalePhase, setUpscalePhase] = useState<UpscalePhase>("idle");
+  const [upscaleCurrent, setUpscaleCurrent] = useState(0);
+  const [upscaleTotal, setUpscaleTotal] = useState(0);
+  const [upscaledCount, setUpscaledCount] = useState(0);
+  const [upscaleError, setUpscaleError] = useState<string | null>(null);
+
+  const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"]) => {
+    if (!selectedId || !photos?.length) return;
+    setUpscalePhase("upscaling");
+    setUpscaleTotal(photos.length);
+    setUpscaleCurrent(0);
+    setUpscaledCount(0);
+    setUpscaleError(null);
+
+    const origin = window.location.origin;
+    const upgradedPhotos: { url: string; caption: string }[] = [];
+
+    for (let i = 0; i < photos.length; i++) {
+      setUpscaleCurrent(i + 1);
+      const p = photos[i];
+      // Extract local path from absolute URL (e.g. "/photos/pili-mai/photo_00.jpg")
+      let localPath: string;
+      try {
+        localPath = new URL(p.url).pathname;
+      } catch {
+        localPath = p.url.startsWith("/") ? p.url : p.url.replace(origin, "");
+      }
+
+      try {
+        const resp = await fetch("/api/builder/upscale-photo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ localPath }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.url) {
+          upgradedPhotos.push({ url: data.url, caption: p.caption || "" });
+          if (data.wasUpscaled) setUpscaledCount(c => c + 1);
+        } else {
+          // Fall back to original URL if upscale fails for this photo
+          upgradedPhotos.push({ url: p.url, caption: p.caption || "" });
+        }
+      } catch {
+        upgradedPhotos.push({ url: p.url, caption: p.caption || "" });
+      }
+    }
+
+    setUpscalePhase("uploading");
+    try {
+      await guestyService.uploadPhotos(selectedId, upgradedPhotos.map(p => ({ ...p, source: "" })));
+      setUpscalePhase("done");
+    } catch (err: any) {
+      setUpscaleError(err?.message || "Upload to Guesty failed");
+      setUpscalePhase("error");
+    }
+  }, [selectedId]);
+
   // ── Check connection + load listings ──────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -861,6 +920,56 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                 {activeTab === "photos" && (
                   photos.length > 0
                     ? <div>
+                        {/* Upscale & Upload header */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+                          {upscalePhase === "idle" || upscalePhase === "done" || upscalePhase === "error" ? (
+                            <>
+                              <button
+                                className="glb-btn glb-btn-primary"
+                                onClick={() => upscaleAndUpload(photos)}
+                                disabled={!selectedId || upscalePhase === "upscaling" || upscalePhase === "uploading"}
+                                data-testid="btn-upscale-upload"
+                                style={{ fontSize: 13 }}
+                              >
+                                {upscalePhase === "done" ? "↺ Upscale & Re-upload to Guesty" : "⬆ Upscale & Upload to Guesty"}
+                              </button>
+                              {!selectedId && (
+                                <span style={{ fontSize: 12, color: "#9ca3af" }}>Select a Guesty listing above first</span>
+                              )}
+                              {upscalePhase === "done" && (
+                                <span style={{ fontSize: 13, color: "#16a34a" }}>
+                                  ✓ Done — {upscaledCount} of {upscaleTotal} photos upscaled, all sent to Guesty
+                                </span>
+                              )}
+                              {upscalePhase === "error" && (
+                                <span style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</span>
+                              )}
+                            </>
+                          ) : (
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
+                                <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500 }}>
+                                  {upscalePhase === "upscaling"
+                                    ? `Upscaling photo ${upscaleCurrent} of ${upscaleTotal}…`
+                                    : "Sending upscaled photos to Guesty…"}
+                                </span>
+                              </div>
+                              <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{
+                                  height: "100%", borderRadius: 3, background: "#2563eb",
+                                  width: upscalePhase === "uploading" ? "100%" : `${Math.round((upscaleCurrent / upscaleTotal) * 100)}%`,
+                                  transition: "width 0.3s ease",
+                                }} />
+                              </div>
+                              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                                {upscaledCount} upscaled so far — Real-ESRGAN 2× via Replicate
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Photo groups */}
                         {(() => {
                           const groups: { source: string; items: typeof photos }[] = [];
                           photos.forEach((p, i) => {
