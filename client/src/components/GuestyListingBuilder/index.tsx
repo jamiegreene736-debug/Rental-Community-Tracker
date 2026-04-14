@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
+import { GUESTY_AMENITY_CATALOG } from "@/data/guesty-amenities";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -455,14 +456,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
                 {activeTab === "amenities" && (
                   amenities.length > 0
-                    ? <div className="glb-amenity-grid">
-                        {amenities.map((a) => (
-                          <div key={a} className="glb-amenity">
-                            <span className="glb-amenity-check">✓</span>
-                            {a.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())}
+                    ? (() => {
+                        const amenitySet = new Set(amenities);
+                        const groups: Record<string, { key: string; label: string }[]> = {};
+                        for (const entry of GUESTY_AMENITY_CATALOG) {
+                          if (!amenitySet.has(entry.key)) continue;
+                          if (!groups[entry.category]) groups[entry.category] = [];
+                          groups[entry.category].push({ key: entry.key, label: entry.label });
+                        }
+                        const ungrouped = amenities.filter(a => !GUESTY_AMENITY_CATALOG.find(e => e.key === a));
+                        if (ungrouped.length) {
+                          if (!groups["Other"]) groups["Other"] = [];
+                          ungrouped.forEach(a => groups["Other"].push({ key: a, label: a.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()) }));
+                        }
+                        return (
+                          <div>
+                            {Object.entries(groups).map(([cat, items]) => (
+                              <div key={cat} style={{ marginBottom: 16 }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.07em", padding: "6px 0 5px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
+                                  {cat} — {items.length}
+                                </div>
+                                <div className="glb-amenity-grid">
+                                  {items.map(({ key, label }) => (
+                                    <div key={key} className="glb-amenity">
+                                      <span className="glb-amenity-check">✓</span>
+                                      {label}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
+                        );
+                      })()
                     : <div className="glb-empty">No amenities listed</div>
                 )}
 

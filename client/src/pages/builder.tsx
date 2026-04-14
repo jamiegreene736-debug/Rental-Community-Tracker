@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
 import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE } from "@/data/unit-builder-data";
 import { getPropertyPricing } from "@/data/pricing-data";
-import { getDefaultAmenities } from "@/data/lodgify-amenities";
+import { getGuestyAmenities } from "@/data/guesty-amenities";
 import type { GuestyPropertyData } from "@/services/guestyService";
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -30,59 +30,6 @@ function parseAddress(addr: string) {
   return { full, city, state, zipcode, country: "US" };
 }
 
-// ─── Map Lodgify amenity keys → Guesty amenity strings ───────────────────────
-const AMENITY_MAP: Record<string, string> = {
-  wifi: "WIFI",
-  internet: "WIFI",
-  pool: "POOL",
-  "swimming pool": "POOL",
-  "air conditioning": "AIR_CONDITIONING",
-  ac: "AIR_CONDITIONING",
-  kitchen: "KITCHEN",
-  washer: "WASHER",
-  dryer: "DRYER",
-  "washer/dryer": "WASHER",
-  parking: "FREE_PARKING_ON_PREMISES",
-  "free parking": "FREE_PARKING_ON_PREMISES",
-  gym: "GYM",
-  fitness: "GYM",
-  "hot tub": "HOT_TUB",
-  jacuzzi: "HOT_TUB",
-  "bbq grill": "BBQ_GRILL",
-  barbecue: "BBQ_GRILL",
-  balcony: "PATIO_OR_BALCONY",
-  lanai: "PATIO_OR_BALCONY",
-  patio: "PATIO_OR_BALCONY",
-  dishwasher: "DISHWASHER",
-  tv: "TV",
-  cable: "CABLE_TV",
-  "cable tv": "CABLE_TV",
-  elevator: "ELEVATOR",
-  "beach access": "BEACH_ESSENTIALS",
-  "beach nearby": "BEACH_ESSENTIALS",
-  "ocean view": "OCEAN_VIEW",
-  tennis: "TENNIS_COURT",
-  "tennis court": "TENNIS_COURT",
-  shampoo: "SHAMPOO",
-  "hair dryer": "HAIR_DRYER",
-  iron: "IRON",
-  "smoke alarm": "SMOKE_ALARM",
-  "carbon monoxide alarm": "CARBON_MONOXIDE_ALARM",
-  "fire extinguisher": "FIRE_EXTINGUISHER",
-  "first aid kit": "FIRST_AID_KIT",
-};
-
-function toGuestyAmenities(lodgifyAmenities: string[]): string[] {
-  const result = new Set<string>();
-  for (const a of lodgifyAmenities) {
-    const key = a.toLowerCase().trim();
-    const mapped = AMENITY_MAP[key];
-    if (mapped) result.add(mapped);
-    else result.add(a.toUpperCase().replace(/[\s/]+/g, "_"));
-  }
-  return Array.from(result);
-}
-
 // ─── Builder page ─────────────────────────────────────────────────────────────
 export default function Builder() {
   const { propertyId: pidStr } = useParams<{ propertyId: string }>();
@@ -101,8 +48,7 @@ export default function Builder() {
 
     const basePrice = pricing?.totalBaseSellRate ?? 0;
 
-    const lodgifyAmenities = getDefaultAmenities(propertyId);
-    const guestyAmenities = toGuestyAmenities(lodgifyAmenities);
+    const guestyAmenities = getGuestyAmenities(propertyId);
 
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     const photos = [
