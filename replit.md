@@ -41,7 +41,7 @@ Preferred communication style: Simple, everyday language.
 3.  **API request helper**: `client/src/lib/queryClient.ts` provides `apiRequest()` and `getQueryFn()` for consistent API interaction.
 
 ### Feature Specifications
--   **Dashboard**: Displays 35 vacation rental properties with sortable and filterable data (name, community, bedrooms, capacity, pricing, multi-unit indicator).
+-   **Dashboard**: Displays 35 vacation rental properties with sortable and filterable data (name, community, bedrooms, capacity, pricing, multi-unit indicator, quality score). Includes a **Quality Score (0–10)** column computed by `client/src/data/quality-score.ts` with 5 factors: Market Value Gap (0–4 pts), Profit Margin (0–2 pts), Location Demand (0–2 pts), Group Size Scarcity (0–1 pt), Unit Pairing Match (0–1 pt). Each score shows a color-coded grade (A/B/C/D) with a hover tooltip breaking down each factor and showing estimated market savings %. Sortable.
 -   **Listing Builder**: Guesty-powered listing builder accessible from the dashboard via the "Build" button. Step-by-step workflow to configure and publish listings to Airbnb/VRBO/Booking.com through Guesty. Route: `/builder/:propertyId/preflight` → `/builder/:propertyId/:step`.
 -   **Buy-In Tracker & Profitability Dashboard**: Tracks Airbnb buy-in purchases, syncs Lodgify guest reservations, and provides profitability reports (`/buy-in-tracker`).
 -   **Real-time Buy-In Search**: Searches Airbnb, VRBO, and Google Hotels for cheapest available units based on property, dates, and bedroom configuration.

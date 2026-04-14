@@ -26,7 +26,15 @@ import {
   ExternalLink,
   ShieldCheck,
   ShieldX,
+  TrendingUp,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { estimateNewCommunityScore, gradeColor, gradeBg } from "@/data/quality-score";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -376,7 +384,16 @@ export default function AddCommunity() {
               Found {communities.length} qualifying communities in <strong>{cityInput}, {selectedState}</strong>. Click a card to select it.
             </p>
             <div className="grid grid-cols-1 gap-4">
-              {communities.map((c, i) => (
+              {communities.map((c, i) => {
+                const qs = estimateNewCommunityScore({
+                  state: c.state,
+                  city: c.city,
+                  estimatedLowRate: c.estimatedLowRate,
+                  estimatedHighRate: c.estimatedHighRate,
+                  unitTypes: c.unitTypes,
+                  confidenceScore: c.confidenceScore,
+                });
+                return (
                 <Card
                   key={i}
                   className="p-4 cursor-pointer hover:border-primary transition-colors"
@@ -385,12 +402,71 @@ export default function AddCommunity() {
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
                         <h3 className="font-semibold text-base" data-testid={`text-community-name-${i}`}>{c.name}</h3>
                         <Badge variant={c.confidenceScore >= 75 ? "default" : c.confidenceScore >= 50 ? "secondary" : "outline"}>
                           <Star className="h-3 w-3 mr-1" />
-                          {c.confidenceScore}/100
+                          {c.confidenceScore}/100 confidence
                         </Badge>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-xs font-semibold cursor-help ${gradeBg(qs.grade)}`}
+                                data-testid={`badge-quality-community-${i}`}
+                                onClick={e => e.stopPropagation()}
+                              >
+                                <TrendingUp className={`h-3 w-3 ${gradeColor(qs.grade)}`} />
+                                <span className={gradeColor(qs.grade)}>{qs.total}</span>
+                                <span className="text-muted-foreground font-normal">/10</span>
+                                <span className={`font-bold ${gradeColor(qs.grade)}`}>{qs.grade}</span>
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="w-64 p-3">
+                              <p className="font-semibold mb-2 flex items-center gap-1.5">
+                                <TrendingUp className="h-3.5 w-3.5" />
+                                Estimated Quality Score
+                              </p>
+                              <p className="text-xs text-muted-foreground mb-2">
+                                Based on location, estimated rates, and unit configuration. Refines as more data is gathered.
+                              </p>
+                              <div className="space-y-1.5 text-xs">
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Market Value Gap</span>
+                                  <span className="font-medium">{qs.marketDiscount.toFixed(1)} / 4</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Profit Margin</span>
+                                  <span className="font-medium">{qs.profitMargin.toFixed(1)} / 2</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Location Demand</span>
+                                  <span className="font-medium">{qs.locationDemand.toFixed(1)} / 2</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Group Scarcity</span>
+                                  <span className="font-medium">{qs.groupScarcity.toFixed(1)} / 1</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Unit Pairing</span>
+                                  <span className="font-medium">{qs.unitMatch.toFixed(1)} / 1</span>
+                                </div>
+                                <div className="border-t pt-1.5 mt-1.5 text-muted-foreground space-y-0.5">
+                                  <div className="flex justify-between">
+                                    <span>Est. standalone market rate</span>
+                                    <span>${qs.marketRate.toLocaleString()}/night</span>
+                                  </div>
+                                  {qs.discountPct > 0 && (
+                                    <div className="flex justify-between">
+                                      <span>Projected savings vs market</span>
+                                      <span className="text-emerald-600 font-medium">{qs.discountPct}% cheaper</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       </div>
                       <p className="text-sm text-muted-foreground mb-2">
                         <MapPin className="h-3.5 w-3.5 inline mr-1" />{c.city}, {c.state} · {c.unitTypes}
@@ -417,7 +493,8 @@ export default function AddCommunity() {
                     </div>
                   </div>
                 </Card>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

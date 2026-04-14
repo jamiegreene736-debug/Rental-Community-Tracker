@@ -21,6 +21,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
@@ -37,8 +43,10 @@ import {
   Trash2,
   MapPin,
   Star,
+  TrendingUp,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
+import { computeQualityScore, gradeColor, gradeBg } from "@/data/quality-score";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
 
@@ -397,7 +405,7 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island";
+type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality";
 type SortDir = "asc" | "desc";
 
 export default function Home() {
@@ -407,6 +415,14 @@ export default function Home() {
   const [multiUnitFilter, setMultiUnitFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("community");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const qualityScores = useMemo(() => {
+    const map = new Map<number, ReturnType<typeof computeQualityScore>>();
+    for (const p of properties) {
+      map.set(p.id, computeQualityScore(p));
+    }
+    return map;
+  }, []);
 
   const communities = useMemo(() => {
     const set = new Set(properties.map((p) => p.community));
@@ -441,8 +457,13 @@ export default function Home() {
       result = result.filter((p) => p.multiUnit === isMulti);
     }
     result = [...result].sort((a, b) => {
-      let aVal: string | number | null = a[sortField];
-      let bVal: string | number | null = b[sortField];
+      if (sortField === "quality") {
+        const aScore = qualityScores.get(a.id)?.total ?? 0;
+        const bScore = qualityScores.get(b.id)?.total ?? 0;
+        return sortDir === "asc" ? aScore - bScore : bScore - aScore;
+      }
+      let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
+      let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
       if (bVal === null) bVal = sortDir === "asc" ? Infinity : -Infinity;
       if (typeof aVal === "string" && typeof bVal === "string") {
@@ -453,7 +474,7 @@ export default function Home() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir]);
+  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -703,6 +724,20 @@ export default function Home() {
                     <SortIcon field="guests" />
                   </Button>
                 </TableHead>
+                <TableHead className="text-center w-[90px]">
+                  <Button
+                    variant="ghost"
+                    className="font-medium px-1"
+                    onClick={() => handleSort("quality")}
+                    data-testid="button-sort-quality"
+                    id="button-sort-quality"
+                    aria-label="Sort by quality score"
+                  >
+                    <TrendingUp className="h-3.5 w-3.5 mr-1" />
+                    Quality
+                    <SortIcon field="quality" />
+                  </Button>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -771,11 +806,75 @@ export default function Home() {
                       {property.guests}
                     </span>
                   </TableCell>
+                  <TableCell className="text-center" data-testid={`cell-quality-${property.id}`}>
+                    {(() => {
+                      const qs = qualityScores.get(property.id);
+                      if (!qs) return null;
+                      return (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div
+                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs font-semibold cursor-help ${gradeBg(qs.grade)}`}
+                                data-testid={`badge-quality-${property.id}`}
+                              >
+                                <span className={gradeColor(qs.grade)}>{qs.total}</span>
+                                <span className="text-muted-foreground font-normal">/10</span>
+                                <span className={`ml-0.5 font-bold ${gradeColor(qs.grade)}`}>{qs.grade}</span>
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="left" className="w-64 p-3">
+                              <p className="font-semibold mb-2 flex items-center gap-1.5">
+                                <TrendingUp className="h-3.5 w-3.5" />
+                                Arbitrage Quality Score
+                              </p>
+                              <div className="space-y-1.5 text-xs">
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Market Value Gap</span>
+                                  <span className="font-medium">{qs.marketDiscount.toFixed(1)} / 4</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Profit Margin</span>
+                                  <span className="font-medium">{qs.profitMargin.toFixed(1)} / 2</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Location Demand</span>
+                                  <span className="font-medium">{qs.locationDemand.toFixed(1)} / 2</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Group Scarcity</span>
+                                  <span className="font-medium">{qs.groupScarcity.toFixed(1)} / 1</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-muted-foreground">Unit Pairing</span>
+                                  <span className="font-medium">{qs.unitMatch.toFixed(1)} / 1</span>
+                                </div>
+                                <div className="border-t pt-1.5 mt-1.5 flex justify-between font-semibold">
+                                  <span>Total</span>
+                                  <span>{qs.total} / 10 ({qs.grade})</span>
+                                </div>
+                                <div className="border-t pt-1.5 mt-0.5 text-muted-foreground space-y-0.5">
+                                  <div className="flex justify-between">
+                                    <span>Est. standalone market rate</span>
+                                    <span>${qs.marketRate.toLocaleString()}/night</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>Our listing savings</span>
+                                    <span className="text-emerald-600 font-medium">{qs.discountPct}% cheaper</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      );
+                    })()}
+                  </TableCell>
                 </TableRow>
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
