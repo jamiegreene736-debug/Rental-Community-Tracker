@@ -523,25 +523,25 @@ const PHOTOS_KAIULANI: UnitPhoto[] = [
 ];
 
 const PHOTOS_PILI_MAI_UNIT_A: UnitPhoto[] = [
-  { src: "/photos/pili-mai-unit-a/photo_00.jpg", label: "Living Room" },
-  { src: "/photos/pili-mai-unit-a/photo_01.jpg", label: "Interior — Great Room" },
-  { src: "/photos/pili-mai-unit-a/photo_02.jpg", label: "Interior — Dining Area" },
-  { src: "/photos/pili-mai-unit-a/photo_03.jpg", label: "Master Bedroom — King" },
-  { src: "/photos/pili-mai-unit-a/photo_04.jpg", label: "Second Bedroom" },
-  { src: "/photos/pili-mai-unit-a/photo_05.jpg", label: "Kitchen" },
-  { src: "/photos/pili-mai-unit-a/photo_06.jpg", label: "Bathroom" },
-  { src: "/photos/pili-mai-unit-a/photo_07.jpg", label: "Covered Lanai" },
+  { filename: "photo_00.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_01.jpg", label: "Interior — Great Room", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Interior — Dining Area", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Master Bedroom — King", category: "Bedrooms" },
+  { filename: "photo_04.jpg", label: "Second Bedroom", category: "Bedrooms" },
+  { filename: "photo_05.jpg", label: "Kitchen", category: "Kitchen" },
+  { filename: "photo_06.jpg", label: "Bathroom", category: "Bathrooms" },
+  { filename: "photo_07.jpg", label: "Covered Lanai", category: "Exterior" },
 ];
 
 const PHOTOS_PILI_MAI_UNIT_B: UnitPhoto[] = [
-  { src: "/photos/pili-mai-unit-b/photo_00.jpg", label: "Living Room" },
-  { src: "/photos/pili-mai-unit-b/photo_01.jpg", label: "Interior — Open Floor Plan" },
-  { src: "/photos/pili-mai-unit-b/photo_02.jpg", label: "Interior — Dining Area" },
-  { src: "/photos/pili-mai-unit-b/photo_03.jpg", label: "Master Bedroom — King" },
-  { src: "/photos/pili-mai-unit-b/photo_04.jpg", label: "Second Bedroom" },
-  { src: "/photos/pili-mai-unit-b/photo_05.jpg", label: "Kitchen" },
-  { src: "/photos/pili-mai-unit-b/photo_06.jpg", label: "Bathroom" },
-  { src: "/photos/pili-mai-unit-b/photo_07.jpg", label: "Covered Lanai" },
+  { filename: "photo_00.jpg", label: "Living Room", category: "Living Areas" },
+  { filename: "photo_01.jpg", label: "Interior — Open Floor Plan", category: "Living Areas" },
+  { filename: "photo_02.jpg", label: "Interior — Dining Area", category: "Living Areas" },
+  { filename: "photo_03.jpg", label: "Master Bedroom — King", category: "Bedrooms" },
+  { filename: "photo_04.jpg", label: "Second Bedroom", category: "Bedrooms" },
+  { filename: "photo_05.jpg", label: "Kitchen", category: "Kitchen" },
+  { filename: "photo_06.jpg", label: "Bathroom", category: "Bathrooms" },
+  { filename: "photo_07.jpg", label: "Covered Lanai", category: "Exterior" },
 ];
 
 export const unitBuilderData: PropertyUnitBuilder[] = [

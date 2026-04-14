@@ -96,6 +96,7 @@ const CSS = `
   .glb-photo-thumb { aspect-ratio:4/3; border-radius:8px; overflow:hidden; position:relative; background:var(--bg-hover); border:1px solid var(--border); }
   .glb-photo-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
   .glb-photo-idx { position:absolute; top:5px; left:5px; background:rgba(0,0,0,.55); color:#fff; font-size:10px; padding:1px 6px; border-radius:3px; font-family:monospace; }
+  .glb-photo-caption { position:absolute; bottom:0; left:0; right:0; background:rgba(0,0,0,.6); color:#fff; font-size:10px; padding:3px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
   /* Amenities tab */
   .glb-amenity-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:6px; }
@@ -517,13 +518,36 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
                 {activeTab === "photos" && (
                   photos.length > 0
-                    ? <div className="glb-photo-grid">
-                        {photos.map((p, i) => (
-                          <div key={i} className="glb-photo-thumb">
-                            <img src={p.url} alt={p.caption || `Photo ${i + 1}`} loading="lazy" />
-                            <span className="glb-photo-idx">{i + 1}</span>
-                          </div>
-                        ))}
+                    ? <div>
+                        {(() => {
+                          const groups: { source: string; items: typeof photos }[] = [];
+                          photos.forEach((p, i) => {
+                            const src = p.source || "Other";
+                            const last = groups[groups.length - 1];
+                            if (last && last.source === src) last.items.push(p);
+                            else groups.push({ source: src, items: [p] });
+                          });
+                          let globalIdx = 0;
+                          return groups.map((g) => (
+                            <div key={g.source} style={{ marginBottom: 16 }}>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
+                                {g.source} — {g.items.length} photo{g.items.length !== 1 ? "s" : ""}
+                              </div>
+                              <div className="glb-photo-grid">
+                                {g.items.map((p) => {
+                                  const idx = ++globalIdx;
+                                  return (
+                                    <div key={idx} className="glb-photo-thumb" title={p.caption || ""}>
+                                      <img src={p.url} alt={p.caption || `Photo ${idx}`} loading="lazy" />
+                                      <span className="glb-photo-idx">{idx}</span>
+                                      {p.caption && <span className="glb-photo-caption">{p.caption}</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ));
+                        })()}
                       </div>
                     : <div className="glb-empty">No photos attached to this property</div>
                 )}

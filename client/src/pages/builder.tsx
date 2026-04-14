@@ -111,11 +111,13 @@ export default function Builder() {
         .map((p) => ({
           url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
           caption: p.label,
+          source: `Community — ${property.complexName}`,
         })),
       ...property.units.flatMap((u) =>
         u.photos.map((p) => ({
           url: `${origin}/photos/${u.photoFolder}/${p.filename}`,
           caption: p.label,
+          source: `Unit ${u.unitNumber} (${u.bedrooms}BR)`,
         }))
       ),
       ...property.communityPhotos
@@ -123,6 +125,7 @@ export default function Builder() {
         .map((p) => ({
           url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
           caption: p.label,
+          source: `Community — ${property.complexName}`,
         })),
     ];
 

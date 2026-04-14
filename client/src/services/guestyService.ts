@@ -13,6 +13,7 @@ export type GuestyAddress = {
 export type GuestyPhoto = {
   url: string;
   caption?: string;
+  source?: string;
 };
 
 export type GuestyDescriptions = {
