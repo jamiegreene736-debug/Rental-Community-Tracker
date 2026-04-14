@@ -203,6 +203,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     status: AvailStatus;
     availableCount?: number; neededCount?: number;
     unitResults?: { bedrooms: number; needed: number; found: number }[];
+    cheapestByBedroom?: Record<number, { price: number; title: string; link: string }>;
+    estimatedBuyInCost?: number;
   };
   const [availWindows, setAvailWindows] = useState<AvailWindow[]>([]);
   const [scanningAll, setScanningAll] = useState(false);
@@ -245,6 +247,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         status: (data.status || "error") as AvailStatus,
         availableCount: data.availableCount, neededCount: data.neededCount,
         unitResults: data.unitResults,
+        cheapestByBedroom: data.cheapestByBedroom,
+        estimatedBuyInCost: data.estimatedBuyInCost,
       } : w));
     } catch {
       setAvailWindows(p => p.map(w => w.id === win.id ? { ...w, status: "error" } : w));
@@ -675,7 +679,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         )}
                         <button
                           className="glb-btn"
-                          onClick={() => setAvailWindows(p => p.map(w => ({ ...w, status: "unscanned" as const, availableCount: undefined, neededCount: undefined, unitResults: undefined })))}
+                          onClick={() => setAvailWindows(p => p.map(w => ({ ...w, status: "unscanned" as const, availableCount: undefined, neededCount: undefined, unitResults: undefined, cheapestByBedroom: undefined, estimatedBuyInCost: undefined })))}
                           data-testid="btn-reset-scan"
                           style={{ fontSize: 12 }}
                         >
@@ -713,8 +717,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                       background: statusBg(w.status),
                                       borderRadius: 8,
                                       padding: "8px 12px",
-                                      minWidth: 180,
-                                      cursor: "pointer",
+                                      minWidth: 190,
+                                      cursor: w.status !== "scanning" && w.status !== "available" ? "pointer" : "default",
                                     }}
                                     onClick={() => w.status !== "scanning" && w.status !== "available" && scanWindow(w)}
                                   >
@@ -734,7 +738,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                         </span>
                                       )}
                                     </div>
-                                    {w.unitResults && (
+                                    {w.estimatedBuyInCost !== undefined && (
+                                      <div style={{ marginTop: 5, fontSize: 11, fontWeight: 600, color: "#374151" }}>
+                                        Est. buy-in: ~${w.estimatedBuyInCost.toLocaleString()}
+                                      </div>
+                                    )}
+                                    {w.cheapestByBedroom && (
+                                      <div style={{ marginTop: 3 }}>
+                                        {Object.entries(w.cheapestByBedroom).map(([br, info]) => (
+                                          <div key={br} style={{ fontSize: 10, color: "#6b7280" }}>
+                                            {br}BR: ${info.price.toLocaleString()} cheapest ({info.title.slice(0, 20)}{info.title.length > 20 ? "…" : ""})
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {w.unitResults && !w.cheapestByBedroom && (
                                       <div style={{ marginTop: 4 }}>
                                         {w.unitResults.map(r => (
                                           <div key={r.bedrooms} style={{ fontSize: 10, color: "#9ca3af" }}>
@@ -743,6 +761,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                         ))}
                                       </div>
                                     )}
+                                    {(w.status === "available" || w.status === "low") && propertyId && (
+                                      <a
+                                        href={`/buy-in-tracker?propertyId=${propertyId}&checkIn=${w.checkIn}&checkOut=${w.checkOut}`}
+                                        data-testid={`btn-find-buyin-${w.id}`}
+                                        onClick={e => e.stopPropagation()}
+                                        style={{
+                                          display: "inline-block", marginTop: 6,
+                                          fontSize: 11, fontWeight: 600,
+                                          color: "#2563eb", textDecoration: "none",
+                                          background: "#eff6ff", borderRadius: 4,
+                                          padding: "2px 8px", border: "1px solid #bfdbfe",
+                                        }}
+                                      >
+                                        Find Buy-Ins →
+                                      </a>
+                                    )}
                                   </div>
                                 ))}
                               </div>
@@ -750,6 +784,45 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           );
                         })}
                       </div>
+
+                      {/* Rate Trend Summary */}
+                      {(() => {
+                        const scannedWithCost = availWindows.filter(w => w.estimatedBuyInCost !== undefined);
+                        if (scannedWithCost.length === 0) return null;
+                        const monthMap: Record<string, number> = {};
+                        scannedWithCost.forEach(w => {
+                          const cur = monthMap[w.monthKey];
+                          if (cur === undefined || w.estimatedBuyInCost! < cur) {
+                            monthMap[w.monthKey] = w.estimatedBuyInCost!;
+                          }
+                        });
+                        const sortedMonths = Object.keys(monthMap).sort();
+                        if (sortedMonths.length === 0) return null;
+                        return (
+                          <div style={{ marginTop: 24, borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+                              Rate Trend — Cheapest Est. Buy-In per Month
+                            </div>
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} data-testid="rate-trend-summary">
+                              {sortedMonths.map(mk => {
+                                const [yr, mo] = mk.split("-");
+                                const monthName = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(mo)-1];
+                                const cost = monthMap[mk];
+                                return (
+                                  <div key={mk} style={{
+                                    background: "#f9fafb", border: "1px solid #e5e7eb",
+                                    borderRadius: 8, padding: "6px 10px", textAlign: "center",
+                                    minWidth: 70,
+                                  }}>
+                                    <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 600 }}>{monthName} {yr.slice(2)}</div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginTop: 2 }}>${Math.round(cost / 100) * 100 === cost ? cost.toLocaleString() : Math.round(cost).toLocaleString()}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {!propertyId && (
                         <div className="glb-empty">No propertyId — cannot scan</div>

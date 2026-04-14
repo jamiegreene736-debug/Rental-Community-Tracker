@@ -1652,6 +1652,7 @@ export async function registerRoutes(
     try {
       let totalFound = 0;
       const unitResults: { bedrooms: number; needed: number; found: number }[] = [];
+      const cheapestByBedroom: Record<number, { price: number; title: string; link: string }> = {};
 
       for (const [bedroomStr, needed] of Object.entries(bedroomCounts)) {
         const bedrooms = parseInt(bedroomStr);
@@ -1700,12 +1701,32 @@ export async function registerRoutes(
         const found = Math.min(properties.length, needed);
         totalFound += found;
         unitResults.push({ bedrooms, needed, found });
+
+        // Track cheapest listing for pricing estimate
+        const withPrice = (properties as any[]).filter(p => p.price?.extracted_total_price);
+        withPrice.sort((a, b) => a.price.extracted_total_price - b.price.extracted_total_price);
+        const cheapest = withPrice[0];
+        if (cheapest) {
+          cheapestByBedroom[bedrooms] = {
+            price: cheapest.price.extracted_total_price,
+            title: cheapest.name || cheapest.title || "Unknown",
+            link: cheapest.link || cheapest.url || "",
+          };
+        }
+      }
+
+      // Estimated buy-in cost = sum of cheapest price × needed count per bedroom type
+      let estimatedBuyInCost = 0;
+      for (const [bedroomStr, needed] of Object.entries(bedroomCounts)) {
+        const bedrooms = parseInt(bedroomStr);
+        const cheap = cheapestByBedroom[bedrooms];
+        if (cheap) estimatedBuyInCost += cheap.price * needed;
       }
 
       const status = totalFound >= neededCount ? "available" :
                      totalFound > 0            ? "low"       : "none";
 
-      res.json({ status, availableCount: totalFound, neededCount, unitResults, checkIn, checkOut });
+      res.json({ status, availableCount: totalFound, neededCount, unitResults, checkIn, checkOut, cheapestByBedroom, estimatedBuyInCost: estimatedBuyInCost > 0 ? estimatedBuyInCost : undefined });
     } catch (err: any) {
       res.status(500).json({ error: "Scan failed", message: err.message });
     }

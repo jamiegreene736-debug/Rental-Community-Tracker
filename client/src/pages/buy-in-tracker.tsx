@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -389,8 +389,66 @@ function BestBuyInFinder() {
   const [recording, setRecording] = useState(false);
   const [activePlatform, setActivePlatform] = useState<"airbnb" | "vrbo" | "suite-paradise">("airbnb");
   const { toast } = useToast();
+  const autoSearchFired = useRef(false);
 
   const allProperties = getAllMultiUnitProperties();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paramPropId = params.get("propertyId");
+    const paramCheckIn = params.get("checkIn");
+    const paramCheckOut = params.get("checkOut");
+    if (paramPropId) setSelectedPropertyId(paramPropId);
+    if (paramCheckIn) setCheckIn(paramCheckIn);
+    if (paramCheckOut) setCheckOut(paramCheckOut);
+  }, []);
+
+  useEffect(() => {
+    if (autoSearchFired.current) return;
+    if (!selectedPropertyId || !checkIn || !checkOut) return;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get("propertyId") || !params.get("checkIn") || !params.get("checkOut")) return;
+    autoSearchFired.current = true;
+    findBestUnitsFromParams(selectedPropertyId, checkIn, checkOut);
+  }, [selectedPropertyId, checkIn, checkOut]);
+
+  const findBestUnitsFromParams = async (propId: string, ci: string, co: string) => {
+    if (co <= ci) return;
+    setLoading(true);
+    setResults(null);
+    setOtherResults(null);
+    setSelectedListings({});
+    setActivePlatform("airbnb");
+    try {
+      const [airbnbRes, otherRes] = await Promise.all([
+        fetch(`/api/airbnb/search?propertyId=${propId}&checkIn=${ci}&checkOut=${co}`),
+        fetch(`/api/vrbo/search?propertyId=${propId}&checkIn=${ci}&checkOut=${co}`),
+      ]);
+      let airbnbData: AirbnbSearchResults | null = null;
+      let otherData: OtherPlatformResults | null = null;
+      if (airbnbRes.ok) {
+        airbnbData = await airbnbRes.json();
+        for (const key of Object.keys(airbnbData!.searches)) {
+          for (const prop of airbnbData!.searches[key].properties) prop.source = "airbnb";
+        }
+        setResults(airbnbData);
+      }
+      if (otherRes.ok) {
+        otherData = await otherRes.json();
+        for (const key of Object.keys(otherData!.vrbo)) {
+          for (const prop of otherData!.vrbo[key].properties) prop.source = "vrbo";
+        }
+        for (const key of Object.keys(otherData!.suiteParadise)) {
+          for (const prop of otherData!.suiteParadise[key].properties) prop.source = "suite-paradise";
+        }
+        setOtherResults(otherData);
+      }
+      if (airbnbData) autoSelectCheapest(airbnbData, otherData);
+    } catch {
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const toggleListingSelection = (bedroomKey: string, property: AirbnbProperty, maxCount: number) => {
     setSelectedListings(prev => {
