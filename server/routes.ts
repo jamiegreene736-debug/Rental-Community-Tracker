@@ -1362,14 +1362,13 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
+        // q is always required by SearchAPI; bounds are added on top for geo-precision
+        searchParams.q = searchLocation;
         if (communityBounds) {
-          // Use bounding box to restrict results to the actual resort community
           searchParams.sw_lat = String(communityBounds.sw_lat);
           searchParams.sw_lng = String(communityBounds.sw_lng);
           searchParams.ne_lat = String(communityBounds.ne_lat);
           searchParams.ne_lng = String(communityBounds.ne_lng);
-        } else {
-          searchParams.q = searchLocation;
         }
 
         const params = new URLSearchParams(searchParams);
@@ -1734,18 +1733,20 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
+        // q is always required by SearchAPI; bounds are added on top for geo-precision
+        searchParams.q = searchLocation;
         if (communityBounds) {
           searchParams.sw_lat = String(communityBounds.sw_lat);
           searchParams.sw_lng = String(communityBounds.sw_lng);
           searchParams.ne_lat = String(communityBounds.ne_lat);
           searchParams.ne_lng = String(communityBounds.ne_lng);
-        } else {
-          searchParams.q = searchLocation;
         }
 
         const params = new URLSearchParams(searchParams);
         const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
         if (!response.ok) {
+          const errText = await response.text();
+          console.error(`[scan-window] SearchAPI error for ${bedrooms}BR:`, errText);
           unitResults.push({ bedrooms, needed, found: 0 });
           continue;
         }
