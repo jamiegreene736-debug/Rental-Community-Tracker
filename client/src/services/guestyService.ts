@@ -1,4 +1,4 @@
-const GUESTY_API_BASE = "https://open-api.guesty.com/v1";
+const GUESTY_API_BASE = "/api/guesty-proxy";
 
 export type GuestyAddress = {
   full: string;
@@ -96,39 +96,14 @@ export type BuildResult = {
 };
 
 class GuestyService {
-  private accessToken: string | null = null;
-  private tokenExpiry: number | null = null;
-
-  async getAccessToken(): Promise<string> {
-    if (this.accessToken && this.tokenExpiry && Date.now() < this.tokenExpiry) {
-      return this.accessToken;
-    }
-
-    const res = await fetch("/api/guesty-token", { method: "POST" });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}) as any);
-      // Distinguish rate-limit from credential errors
-      const code: string = err?.code || err?.error || "";
-      if (res.status === 429 || code.includes("TOO_MANY") || code.includes("RATE")) {
-        throw new Error("RATE_LIMITED");
-      }
-      throw new Error(err?.error || err?.message || `Auth failed: ${res.status}`);
-    }
-
-    const data = await res.json() as { access_token: string; expires_in: number };
-    this.accessToken = data.access_token;
-    this.tokenExpiry = Date.now() + data.expires_in * 1000 - 60_000;
-    return this.accessToken;
-  }
-
+  // All Guesty API calls are proxied through /api/guesty-proxy — the server
+  // handles OAuth token management, caching, and rate-limit recovery.
   async request<T = unknown>(method: string, endpoint: string, body: unknown = null, queryParams = ""): Promise<T> {
-    const token = await this.getAccessToken();
     const url = `${GUESTY_API_BASE}${endpoint}${queryParams ? `?${queryParams}` : ""}`;
 
     const options: RequestInit = {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -139,6 +114,7 @@ class GuestyService {
     const res = await fetch(url, options);
 
     if (!res.ok) {
+      if (res.status === 429) throw new Error("RATE_LIMITED");
       const err = await res.json().catch(() => ({})) as { message?: string; error?: string };
       throw new Error(err.message || err.error || `Guesty API ${res.status}: ${endpoint}`);
     }
@@ -149,7 +125,6 @@ class GuestyService {
 
   async checkConnection(): Promise<{ connected: boolean; accountId?: string | null; error?: string }> {
     try {
-      await this.getAccessToken();
       const data = await this.request<{ results?: Array<{ accountId?: string }> }>(
         "GET", "/listings", null, "limit=1&fields=_id,accountId"
       );
@@ -158,7 +133,8 @@ class GuestyService {
         accountId: data?.results?.[0]?.accountId || null,
       };
     } catch (e) {
-      return { connected: false, error: (e as Error).message };
+      const msg = (e as Error).message;
+      return { connected: false, error: msg };
     }
   }
 

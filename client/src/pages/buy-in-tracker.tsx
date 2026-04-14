@@ -905,6 +905,12 @@ function BestBuyInFinder() {
                   {!searchData.error && (
                     <Badge variant="secondary">{searchData.totalResults} found on {platformInfo.name}</Badge>
                   )}
+                  {!searchData.error && searchData.geoFiltered && activePlatform === "airbnb" && (
+                    <Badge variant="outline" className="text-xs text-blue-600 dark:text-blue-400 border-blue-300 dark:border-blue-700">
+                      <MapPin className="h-3 w-3 mr-1" />
+                      Community area only
+                    </Badge>
+                  )}
                   {!searchData.error && (selectedListings[key] || []).length > 0 && (
                     <Badge variant="default">
                       <Check className="h-3 w-3 mr-1" />

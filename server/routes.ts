@@ -1084,6 +1084,102 @@ export async function registerRoutes(
     }
   });
 
+  // ── Guesty API proxy ─────────────────────────────────────────────────────────
+  // All Guesty Open API calls are routed through here so the browser never needs
+  // to call Guesty directly — avoids CORS issues and keeps the token server-side.
+  // Usage: GET /api/guesty-proxy/listings?limit=5
+  //        PUT /api/guesty-proxy/listings/:id
+  //        etc. — maps 1:1 to https://open-api.guesty.com/v1/*
+  app.all("/api/guesty-proxy/*path", async (req: Request, res: Response) => {
+    const clientId = process.env.GUESTY_CLIENT_ID;
+    const clientSecret = process.env.GUESTY_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET" });
+    }
+
+    // ── Ensure we have a valid token (reuses the same in-memory + file cache) ──
+    let token: string | null = null;
+
+    if (_guestyTokenCache && Date.now() < _guestyTokenCache.expiry) {
+      token = _guestyTokenCache.token;
+    } else {
+      try {
+        const tokenRes = await fetch("https://open-api.guesty.com/oauth2/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "client_credentials",
+            client_id: clientId,
+            client_secret: clientSecret,
+            scope: "open-api",
+          }),
+        });
+
+        if (!tokenRes.ok) {
+          if (tokenRes.status === 429) {
+            const fileCached = _loadGuestyFileToken();
+            if (fileCached) {
+              _guestyTokenCache = fileCached;
+              token = fileCached.token;
+            } else {
+              return res.status(429).json({ error: "RATE_LIMITED", message: "Guesty rate limit hit and no cached token available" });
+            }
+          } else {
+            const err = await tokenRes.json().catch(() => ({})) as Record<string, string>;
+            return res.status(tokenRes.status).json({ error: "Guesty auth failed", ...err });
+          }
+        } else {
+          const data = await tokenRes.json() as { access_token: string; expires_in: number };
+          const expiry = Date.now() + (data.expires_in - 60) * 1000;
+          _guestyTokenCache = { token: data.access_token, expiry };
+          _saveGuestyFileToken(data.access_token, expiry);
+          token = data.access_token;
+        }
+      } catch (err: any) {
+        return res.status(500).json({ error: "Guesty auth error", message: err.message });
+      }
+    }
+
+    // ── Forward request to Guesty ────────────────────────────────────────────
+    // Strip the "/api/guesty-proxy" prefix to get the Guesty API path
+    const guestyPath = req.path.replace(/^\/api\/guesty-proxy/, "") || "/";
+    const qs = new URLSearchParams(req.query as Record<string, string>).toString();
+    const url = `https://open-api.guesty.com/v1${guestyPath}${qs ? "?" + qs : ""}`;
+
+    const fetchOptions: RequestInit = {
+      method: req.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    };
+
+    if (req.method !== "GET" && req.method !== "HEAD" && req.body && Object.keys(req.body).length > 0) {
+      fetchOptions.body = JSON.stringify(req.body);
+    }
+
+    try {
+      const guestyRes = await fetch(url, fetchOptions);
+
+      if (guestyRes.status === 204) {
+        return res.status(204).send();
+      }
+
+      const contentType = guestyRes.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await guestyRes.json();
+        return res.status(guestyRes.status).json(data);
+      } else {
+        const text = await guestyRes.text();
+        return res.status(guestyRes.status).send(text);
+      }
+    } catch (err: any) {
+      return res.status(502).json({ error: "Guesty proxy error", message: err.message });
+    }
+  });
+
   // ========== BUY-IN CRUD ==========
 
   app.get("/api/buy-ins", async (_req, res) => {
@@ -1195,6 +1291,20 @@ export async function registerRoutes(
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
   };
 
+  // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
+  // SearchAPI Airbnb supports sw_lat/sw_lng/ne_lat/ne_lng to geo-constrain results.
+  // We also post-filter by GPS coordinates in the returned listings for extra precision.
+  const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
+    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
+    "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
+    "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
+    "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
+    "Princeville":      { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
+    "Kapaa Beachfront": { sw_lat: 22.060, sw_lng: -159.333, ne_lat: 22.085, ne_lng: -159.308 },
+    "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
+    "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
+  };
+
   app.get("/api/airbnb/search", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) {
@@ -1237,6 +1347,8 @@ export async function registerRoutes(
         searches: {},
       };
 
+      const communityBounds = COMMUNITY_BOUNDS[propertyConfig.community];
+
       for (const [bedroomStr, count] of Object.entries(bedroomCounts)) {
         const bedrooms = parseInt(bedroomStr);
         const searchParams: Record<string, string> = {
@@ -1250,7 +1362,15 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
-        searchParams.q = searchLocation;
+        if (communityBounds) {
+          // Use bounding box to restrict results to the actual resort community
+          searchParams.sw_lat = String(communityBounds.sw_lat);
+          searchParams.sw_lng = String(communityBounds.sw_lng);
+          searchParams.ne_lat = String(communityBounds.ne_lat);
+          searchParams.ne_lng = String(communityBounds.ne_lng);
+        } else {
+          searchParams.q = searchLocation;
+        }
 
         const params = new URLSearchParams(searchParams);
 
@@ -1263,7 +1383,7 @@ export async function registerRoutes(
         }
 
         const data = await response.json();
-        const properties = (data.properties || []).map((p: any) => ({
+        let properties = (data.properties || []).map((p: any) => ({
           id: p.id,
           title: p.title,
           description: p.description,
@@ -1276,7 +1396,23 @@ export async function registerRoutes(
           images: (p.images || []).slice(0, 3),
           badges: p.badges,
           gpsCoordinates: p.gps_coordinates,
+          source: "airbnb",
         }));
+
+        // Post-filter by GPS coordinates if bounding box is defined and listings have coordinates
+        if (communityBounds) {
+          const geoFiltered = properties.filter((p: any) => {
+            const lat = p.gpsCoordinates?.latitude;
+            const lng = p.gpsCoordinates?.longitude;
+            if (!lat || !lng) return true; // keep if no coords (don't drop unknowns)
+            return (
+              lat >= communityBounds.sw_lat && lat <= communityBounds.ne_lat &&
+              lng >= communityBounds.sw_lng && lng <= communityBounds.ne_lng
+            );
+          });
+          // Only apply GPS filter if it retains at least some results
+          if (geoFiltered.length > 0) properties = geoFiltered;
+        }
 
         properties.sort((a: any, b: any) => {
           const priceA = a.price?.extracted_total_price ?? Infinity;
@@ -1288,6 +1424,7 @@ export async function registerRoutes(
           count,
           totalResults: properties.length,
           properties: properties.slice(0, 10),
+          geoFiltered: !!communityBounds,
         };
       }
 
