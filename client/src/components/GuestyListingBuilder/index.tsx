@@ -209,6 +209,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [availWindows, setAvailWindows] = useState<AvailWindow[]>([]);
   const [scanningAll, setScanningAll] = useState(false);
   const [scanIdx, setScanIdx] = useState(0);
+  const [scanCompletedAt, setScanCompletedAt] = useState<Date | null>(null);
   const scanAbort = useRef(false);
 
   function fmtDate(d: string) {
@@ -255,20 +256,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     }
   }, [propertyId]);
 
-  const runScanAll = useCallback(async () => {
+  const runScanAll = useCallback(async (windows?: typeof availWindows) => {
     if (scanningAll) { scanAbort.current = true; return; }
     scanAbort.current = false;
     setScanningAll(true);
-    const unscanned = availWindows.filter(w => w.status === "unscanned");
-    for (let i = 0; i < unscanned.length; i++) {
+    const toScan = (windows ?? availWindows).filter(w => w.status === "unscanned");
+    for (let i = 0; i < toScan.length; i++) {
       if (scanAbort.current) break;
       setScanIdx(i + 1);
-      await scanWindow(unscanned[i]);
+      await scanWindow(toScan[i]);
       await new Promise(r => setTimeout(r, 800));
     }
     setScanningAll(false);
     setScanIdx(0);
+    setScanCompletedAt(new Date());
   }, [scanningAll, availWindows, scanWindow]);
+
+  // Auto-trigger scan when user first opens the Availability tab
+  const autoScanFired = useRef(false);
+  useEffect(() => {
+    if (activeTab === "availability" && !autoScanFired.current && !scanningAll && availWindows.length > 0 && propertyId) {
+      autoScanFired.current = true;
+      runScanAll(availWindows);
+    }
+  }, [activeTab, availWindows, scanningAll, propertyId, runScanAll]);
 
   const pushBlackouts = useCallback(async () => {
     if (!selectedId) return;
@@ -656,18 +667,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
                   return (
                     <div>
-                      {/* Controls */}
+                      {/* Status bar */}
                       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-                        <button
-                          className="glb-btn glb-btn-primary"
-                          onClick={runScanAll}
-                          disabled={!propertyId}
-                          data-testid="btn-scan-all"
-                          style={{ minWidth: 130 }}
-                        >
-                          {scanningAll ? `Stop (${scanIdx}/${availWindows.filter(w => w.status === "unscanned").length + scanIdx})` : "Scan All Windows"}
-                        </button>
-                        {selectedId && toBlockCount > 0 && (
+                        {scanningAll ? (
+                          <span style={{ fontSize: 13, color: "#2563eb", display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
+                            Scanning {scanIdx} of {availWindows.length} windows…
+                            <button
+                              className="glb-btn"
+                              onClick={() => { scanAbort.current = true; }}
+                              data-testid="btn-stop-scan"
+                              style={{ fontSize: 11, marginLeft: 4, padding: "2px 8px" }}
+                            >
+                              Stop
+                            </button>
+                          </span>
+                        ) : scanCompletedAt ? (
+                          <span style={{ fontSize: 13, color: "#6b7280", display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ color: "#16a34a" }}>✓</span>
+                            Scan complete — {scanCompletedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            <button
+                              className="glb-btn"
+                              onClick={() => {
+                                setAvailWindows(p => p.map(w => ({ ...w, status: "unscanned" as const, availableCount: undefined, neededCount: undefined, unitResults: undefined, cheapestByBedroom: undefined, estimatedBuyInCost: undefined })));
+                                setScanCompletedAt(null);
+                                autoScanFired.current = false;
+                              }}
+                              data-testid="btn-rescan"
+                              style={{ fontSize: 11, padding: "2px 8px" }}
+                            >
+                              ↺ Rescan
+                            </button>
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 13, color: "#9ca3af" }}>Preparing scan…</span>
+                        )}
+                        {selectedId && toBlockCount > 0 && !scanningAll && (
                           <button
                             className="glb-btn"
                             onClick={pushBlackouts}
@@ -677,14 +712,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             Push {toBlockCount} Blackout{toBlockCount !== 1 ? "s" : ""} to Guesty
                           </button>
                         )}
-                        <button
-                          className="glb-btn"
-                          onClick={() => setAvailWindows(p => p.map(w => ({ ...w, status: "unscanned" as const, availableCount: undefined, neededCount: undefined, unitResults: undefined, cheapestByBedroom: undefined, estimatedBuyInCost: undefined })))}
-                          data-testid="btn-reset-scan"
-                          style={{ fontSize: 12 }}
-                        >
-                          Reset
-                        </button>
                       </div>
 
                       {/* Summary */}
