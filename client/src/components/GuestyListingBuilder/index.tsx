@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
@@ -190,10 +190,90 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [selectedId, setSelectedId] = useState("");
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
-  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing">("descriptions");
+  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState(0);
+
+  // ── Availability windows ───────────────────────────────────────────────────
+  type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
+  type AvailWindow = {
+    id: string; checkIn: string; checkOut: string;
+    label: string; shortLabel: string; monthKey: string;
+    status: AvailStatus;
+    availableCount?: number; neededCount?: number;
+    unitResults?: { bedrooms: number; needed: number; found: number }[];
+  };
+  const [availWindows, setAvailWindows] = useState<AvailWindow[]>([]);
+  const [scanningAll, setScanningAll] = useState(false);
+  const [scanIdx, setScanIdx] = useState(0);
+  const scanAbort = useRef(false);
+
+  function fmtDate(d: string) {
+    const [, m, day] = d.split("-");
+    const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${months[parseInt(m)-1]} ${parseInt(day)}`;
+  }
+
+  useEffect(() => {
+    const wins: AvailWindow[] = [];
+    const today = new Date(); today.setHours(0,0,0,0);
+    const endDate = new Date(today); endDate.setMonth(endDate.getMonth() + 24);
+    let cur = new Date(today);
+    while (cur < endDate) {
+      const ci = cur.toISOString().split("T")[0];
+      const next = new Date(cur); next.setDate(next.getDate() + 14);
+      const co = next.toISOString().split("T")[0];
+      const mk = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,"0")}`;
+      wins.push({ id: `${ci}_${co}`, checkIn: ci, checkOut: co,
+        label: `${fmtDate(ci)} – ${fmtDate(co)}, ${cur.getFullYear()}`,
+        shortLabel: `${fmtDate(ci)} – ${fmtDate(co)}`,
+        monthKey: mk, status: "unscanned" });
+      cur = next;
+    }
+    setAvailWindows(wins);
+  }, []);
+
+  const scanWindow = useCallback(async (win: { id: string; checkIn: string; checkOut: string }) => {
+    if (!propertyId) return;
+    setAvailWindows(p => p.map(w => w.id === win.id ? { ...w, status: "scanning" } : w));
+    try {
+      const res = await fetch(`/api/builder/scan-window?propertyId=${propertyId}&checkIn=${win.checkIn}&checkOut=${win.checkOut}`);
+      const data = await res.json();
+      setAvailWindows(p => p.map(w => w.id === win.id ? {
+        ...w,
+        status: (data.status || "error") as AvailStatus,
+        availableCount: data.availableCount, neededCount: data.neededCount,
+        unitResults: data.unitResults,
+      } : w));
+    } catch {
+      setAvailWindows(p => p.map(w => w.id === win.id ? { ...w, status: "error" } : w));
+    }
+  }, [propertyId]);
+
+  const runScanAll = useCallback(async () => {
+    if (scanningAll) { scanAbort.current = true; return; }
+    scanAbort.current = false;
+    setScanningAll(true);
+    const unscanned = availWindows.filter(w => w.status === "unscanned");
+    for (let i = 0; i < unscanned.length; i++) {
+      if (scanAbort.current) break;
+      setScanIdx(i + 1);
+      await scanWindow(unscanned[i]);
+      await new Promise(r => setTimeout(r, 800));
+    }
+    setScanningAll(false);
+    setScanIdx(0);
+  }, [scanningAll, availWindows, scanWindow]);
+
+  const pushBlackouts = useCallback(async () => {
+    if (!selectedId) return;
+    const toBlock = availWindows.filter(w => w.status === "none" || w.status === "low");
+    for (const w of toBlock) {
+      await guestyService.blockCalendarDates(selectedId, w.checkIn, w.checkOut);
+    }
+    alert(`Pushed ${toBlock.length} blackout block(s) to Guesty.`);
+  }, [availWindows, selectedId]);
 
   // ── Check connection + load listings ──────────────────────────────────────
   useEffect(() => {
@@ -431,9 +511,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
             <div className="glb-section-label">Property Data Preview</div>
             <div className="glb-panel">
               <div className="glb-tabs">
-                {(["descriptions", "amenities", "pricing", "photos"] as const).map((t) => (
+                {(["descriptions", "amenities", "pricing", "photos", "availability"] as const).map((t) => (
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
-                    {t === "photos" ? `Photos (${photos.length})` : t === "amenities" ? `Amenities (${amenities.length})` : t.charAt(0).toUpperCase() + t.slice(1)}
+                    {t === "photos" ? `Photos (${photos.length})` :
+                     t === "amenities" ? `Amenities (${amenities.length})` :
+                     t === "availability" ? "Availability" :
+                     t.charAt(0).toUpperCase() + t.slice(1)}
                   </button>
                 ))}
               </div>
@@ -541,6 +624,139 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                       </div>
                     : <div className="glb-empty">No pricing data</div>
                 )}
+
+                {activeTab === "availability" && (() => {
+                  const scanned = availWindows.filter(w => w.status !== "unscanned" && w.status !== "scanning");
+                  const okCount = availWindows.filter(w => w.status === "available").length;
+                  const lowCount = availWindows.filter(w => w.status === "low").length;
+                  const noneCount = availWindows.filter(w => w.status === "none").length;
+
+                  // Group windows by year-month
+                  const months: Record<string, typeof availWindows> = {};
+                  availWindows.forEach(w => {
+                    if (!months[w.monthKey]) months[w.monthKey] = [];
+                    months[w.monthKey].push(w);
+                  });
+
+                  const statusColor = (s: string) =>
+                    s === "available" ? "#16a34a" : s === "low" ? "#d97706" : s === "none" ? "#dc2626" :
+                    s === "scanning" ? "#2563eb" : s === "error" ? "#9ca3af" : "#9ca3af";
+                  const statusBg = (s: string) =>
+                    s === "available" ? "#f0fdf4" : s === "low" ? "#fffbeb" : s === "none" ? "#fef2f2" :
+                    s === "scanning" ? "#eff6ff" : "#f9fafb";
+                  const statusLabel = (s: string) =>
+                    s === "available" ? "✓ Available" : s === "low" ? "⚠ Low" : s === "none" ? "✗ Blocked" :
+                    s === "scanning" ? "…" : s === "error" ? "Error" : "—";
+
+                  const toBlockCount = availWindows.filter(w => w.status === "none" || w.status === "low").length;
+
+                  return (
+                    <div>
+                      {/* Controls */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+                        <button
+                          className="glb-btn glb-btn-primary"
+                          onClick={runScanAll}
+                          disabled={!propertyId}
+                          data-testid="btn-scan-all"
+                          style={{ minWidth: 130 }}
+                        >
+                          {scanningAll ? `Stop (${scanIdx}/${availWindows.filter(w => w.status === "unscanned").length + scanIdx})` : "Scan All Windows"}
+                        </button>
+                        {selectedId && toBlockCount > 0 && (
+                          <button
+                            className="glb-btn"
+                            onClick={pushBlackouts}
+                            data-testid="btn-push-blackouts"
+                            style={{ borderColor: "#dc2626", color: "#dc2626" }}
+                          >
+                            Push {toBlockCount} Blackout{toBlockCount !== 1 ? "s" : ""} to Guesty
+                          </button>
+                        )}
+                        <button
+                          className="glb-btn"
+                          onClick={() => setAvailWindows(p => p.map(w => ({ ...w, status: "unscanned" as const, availableCount: undefined, neededCount: undefined, unitResults: undefined })))}
+                          data-testid="btn-reset-scan"
+                          style={{ fontSize: 12 }}
+                        >
+                          Reset
+                        </button>
+                      </div>
+
+                      {/* Summary */}
+                      {scanned.length > 0 && (
+                        <div style={{ display: "flex", gap: 16, marginBottom: 16, fontSize: 13 }}>
+                          <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ {okCount} available</span>
+                          <span style={{ color: "#d97706", fontWeight: 600 }}>⚠ {lowCount} low</span>
+                          <span style={{ color: "#dc2626", fontWeight: 600 }}>✗ {noneCount} blocked</span>
+                          <span style={{ color: "#9ca3af" }}>{availWindows.length - scanned.length} unscanned</span>
+                        </div>
+                      )}
+
+                      {/* Calendar grid */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                        {Object.entries(months).map(([mk, wins]) => {
+                          const [yr, mo] = mk.split("-");
+                          const monthName = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(mo)-1];
+                          return (
+                            <div key={mk}>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                                {monthName} {yr}
+                              </div>
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                {wins.map(w => (
+                                  <div
+                                    key={w.id}
+                                    data-testid={`avail-window-${w.id}`}
+                                    style={{
+                                      border: `1px solid ${statusColor(w.status)}40`,
+                                      background: statusBg(w.status),
+                                      borderRadius: 8,
+                                      padding: "8px 12px",
+                                      minWidth: 180,
+                                      cursor: "pointer",
+                                    }}
+                                    onClick={() => w.status !== "scanning" && w.status !== "available" && scanWindow(w)}
+                                  >
+                                    <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>{w.shortLabel}</div>
+                                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                                      <span style={{
+                                        fontSize: 12, fontWeight: 700,
+                                        color: statusColor(w.status),
+                                        background: `${statusColor(w.status)}18`,
+                                        borderRadius: 4, padding: "2px 6px",
+                                      }}>
+                                        {statusLabel(w.status)}
+                                      </span>
+                                      {w.neededCount !== undefined && (
+                                        <span style={{ fontSize: 11, color: "#9ca3af" }}>
+                                          {w.availableCount}/{w.neededCount} units
+                                        </span>
+                                      )}
+                                    </div>
+                                    {w.unitResults && (
+                                      <div style={{ marginTop: 4 }}>
+                                        {w.unitResults.map(r => (
+                                          <div key={r.bedrooms} style={{ fontSize: 10, color: "#9ca3af" }}>
+                                            {r.bedrooms}BR: {r.found}/{r.needed}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {!propertyId && (
+                        <div className="glb-empty">No propertyId — cannot scan</div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {activeTab === "photos" && (
                   photos.length > 0

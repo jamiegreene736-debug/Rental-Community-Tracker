@@ -1623,6 +1623,94 @@ export async function registerRoutes(
     }
   });
 
+  // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========
+
+  app.get("/api/builder/scan-window", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const propertyId = parseInt(req.query.propertyId as string, 10);
+    const checkIn = req.query.checkIn as string;
+    const checkOut = req.query.checkOut as string;
+
+    if (!propertyId || isNaN(propertyId)) return res.status(400).json({ error: "propertyId required" });
+    if (!checkIn || !checkOut) return res.status(400).json({ error: "checkIn and checkOut required" });
+
+    const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!propertyConfig) return res.status(404).json({ error: "Property not in config" });
+
+    const communityBounds = COMMUNITY_BOUNDS[propertyConfig.community];
+    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+
+    // Count how many of each bedroom type we need
+    const bedroomCounts: Record<number, number> = {};
+    for (const unit of propertyConfig.units) {
+      bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
+    }
+    const neededCount = propertyConfig.units.length;
+
+    try {
+      let totalFound = 0;
+      const unitResults: { bedrooms: number; needed: number; found: number }[] = [];
+
+      for (const [bedroomStr, needed] of Object.entries(bedroomCounts)) {
+        const bedrooms = parseInt(bedroomStr);
+        const searchParams: Record<string, string> = {
+          engine: "airbnb",
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          bedrooms: String(bedrooms),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+        };
+
+        if (communityBounds) {
+          searchParams.sw_lat = String(communityBounds.sw_lat);
+          searchParams.sw_lng = String(communityBounds.sw_lng);
+          searchParams.ne_lat = String(communityBounds.ne_lat);
+          searchParams.ne_lng = String(communityBounds.ne_lng);
+        } else {
+          searchParams.q = searchLocation;
+        }
+
+        const params = new URLSearchParams(searchParams);
+        const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!response.ok) {
+          unitResults.push({ bedrooms, needed, found: 0 });
+          continue;
+        }
+
+        const data = await response.json();
+        let properties = data.properties || [];
+
+        // GPS post-filter
+        if (communityBounds) {
+          const geoFiltered = properties.filter((p: any) => {
+            const lat = p.gps_coordinates?.latitude;
+            const lng = p.gps_coordinates?.longitude;
+            if (!lat || !lng) return true;
+            return lat >= communityBounds.sw_lat && lat <= communityBounds.ne_lat &&
+                   lng >= communityBounds.sw_lng && lng <= communityBounds.ne_lng;
+          });
+          if (geoFiltered.length > 0) properties = geoFiltered;
+        }
+
+        const found = Math.min(properties.length, needed);
+        totalFound += found;
+        unitResults.push({ bedrooms, needed, found });
+      }
+
+      const status = totalFound >= neededCount ? "available" :
+                     totalFound > 0            ? "low"       : "none";
+
+      res.json({ status, availableCount: totalFound, neededCount, unitResults, checkIn, checkOut });
+    } catch (err: any) {
+      res.status(500).json({ error: "Scan failed", message: err.message });
+    }
+  });
+
   // ========== AVAILABILITY / RECOMMENDATIONS ==========
 
   app.get("/api/availability", async (req, res) => {

@@ -209,6 +209,16 @@ class GuestyService {
     });
   }
 
+  async blockCalendarDates(listingId: string, startDate: string, endDate: string) {
+    return this.request("POST", `/blocks`, {
+      listingId,
+      startDate,
+      endDate,
+      reasonType: "owner_block",
+      note: "Auto-blocked: low buy-in availability",
+    });
+  }
+
   async listOnChannels(id: string) {
     return this.request("PUT", `/listings/${id}`, { isListed: true });
   }
