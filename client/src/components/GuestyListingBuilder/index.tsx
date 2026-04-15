@@ -379,7 +379,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   }, []);
 
   // ── Cover collage: score labels → pick best outdoor + indoor → canvas → ImgBB → Guesty ──
-  type CollagePhase = "idle" | "generating" | "uploading" | "done" | "error";
+  type CollagePhase = "idle" | "upscaling" | "generating" | "uploading" | "done" | "error";
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
   const [collagePreviewUrl, setCollagePreviewUrl] = useState<string | null>(null);
@@ -417,7 +417,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
   const generateCoverCollage = useCallback(async (allPhotos: GuestyPropertyData["photos"]) => {
     if (!selectedId) return;
-    setCollagePhase("generating");
+    setCollagePhase("upscaling");
     setCollageError(null);
     setCollagePreviewUrl(null);
     setCollagePicks(null);
@@ -426,7 +426,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
     setCollagePicks({ outdoor: picks.outdoor.caption || picks.outdoor.url, indoor: picks.indoor.caption || picks.indoor.url });
 
-    // Load both images
+    // Extract local path from URL (e.g. "/photos/kaha-lani-109/photo_00.jpg")
+    const toLocalPath = (url: string): string => {
+      try { return new URL(url, window.location.origin).pathname; }
+      catch { return url.startsWith("/") ? url : `/${url}`; }
+    };
+    const outdoorLocal = toLocalPath(picks.outdoor.url);
+    const indoorLocal  = toLocalPath(picks.indoor.url);
+
+    // Upscale both picks via server (Real-ESRGAN → ImgBB), run in parallel
+    let outdoorSrc = picks.outdoor.url;
+    let indoorSrc = picks.indoor.url;
+    if (outdoorLocal.startsWith("/photos/") || indoorLocal.startsWith("/photos/")) {
+      const upscaleOne = async (localPath: string, fallback: string) => {
+        try {
+          const r = await fetch("/api/builder/upscale-photo", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ localPath }),
+          });
+          if (!r.ok) return fallback;
+          const d = await r.json() as any;
+          return d.url || fallback;
+        } catch { return fallback; }
+      };
+      [outdoorSrc, indoorSrc] = await Promise.all([
+        outdoorLocal.startsWith("/photos/") ? upscaleOne(outdoorLocal, picks.outdoor.url) : Promise.resolve(picks.outdoor.url),
+        indoorLocal.startsWith("/photos/")  ? upscaleOne(indoorLocal,  picks.indoor.url)  : Promise.resolve(picks.indoor.url),
+      ]);
+    }
+
+    setCollagePhase("generating");
+
+    // Load both images (upscaled or original)
     const loadImg = (src: string): Promise<HTMLImageElement> => new Promise((res, rej) => {
       const img = new Image(); img.crossOrigin = "anonymous";
       img.onload = () => res(img); img.onerror = rej; img.src = src;
@@ -434,13 +466,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
     let outdoorImg: HTMLImageElement, indoorImg: HTMLImageElement;
     try {
-      [outdoorImg, indoorImg] = await Promise.all([loadImg(picks.outdoor.url), loadImg(picks.indoor.url)]);
+      [outdoorImg, indoorImg] = await Promise.all([loadImg(outdoorSrc), loadImg(indoorSrc)]);
     } catch {
       setCollageError("Failed to load photos for collage"); setCollagePhase("error"); return;
     }
 
-    // Draw side-by-side on canvas — 2400×1200 (2:1 landscape)
-    const W = 2400, H = 1200, half = W / 2;
+    // Draw side-by-side on canvas — 1600×800 (2:1 landscape, ~1.5MB → well within limits)
+    const W = 1600, H = 800, half = W / 2;
     const canvas = document.createElement("canvas");
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext("2d")!;
@@ -1450,7 +1482,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                     </div>
                                   ) : (
                                     <div style={{ fontSize: 12, color: "#2563eb" }}>
-                                      {collagePhase === "generating" ? "⏳ Generating collage…" : "⏳ Uploading to Guesty…"}
+                                      {collagePhase === "upscaling" ? "⏳ Upscaling photos for best quality… (~30s)" :
+                                       collagePhase === "generating" ? "⏳ Generating collage…" :
+                                       "⏳ Uploading to Guesty…"}
                                     </div>
                                   )}
                                 </div>
