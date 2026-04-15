@@ -1751,7 +1751,61 @@ export async function registerRoutes(
     }
   });
 
-  // ========== BUILDER PHOTO PUSH — streaming SSE (host on ImgBB → push to Guesty) ==========
+  // POST /api/builder/push-descriptions
+  // Pushes publicDescriptions fields to a Guesty listing via server-side guestyRequest.
+  // Returns { success, sent, response?, error? } for debugging.
+  app.post("/api/builder/push-descriptions", async (req: Request, res: Response) => {
+    const { listingId, descriptions } = req.body as {
+      listingId: string;
+      descriptions: {
+        title?: string;
+        summary?: string;
+        space?: string;
+        neighborhood?: string;
+        transit?: string;
+        access?: string;
+        notes?: string;
+        houseRules?: string;
+      };
+    };
+
+    if (!listingId) return res.status(400).json({ error: "listingId is required" });
+    if (!descriptions) return res.status(400).json({ error: "descriptions is required" });
+
+    const payload: Record<string, unknown> = {};
+    if (descriptions.title) payload.title = descriptions.title;
+
+    const publicDescriptions: Record<string, string> = {};
+    if (descriptions.summary)      publicDescriptions.summary      = descriptions.summary;
+    if (descriptions.space)        publicDescriptions.space        = descriptions.space;
+    if (descriptions.access)       publicDescriptions.access       = descriptions.access;
+    if (descriptions.neighborhood) publicDescriptions.neighborhood = descriptions.neighborhood;
+    if (descriptions.transit)      publicDescriptions.transit      = descriptions.transit;
+    if (descriptions.notes)        publicDescriptions.notes        = descriptions.notes;
+    if (descriptions.houseRules)   publicDescriptions.houseRules   = descriptions.houseRules;
+
+    if (Object.keys(publicDescriptions).length > 0) {
+      payload.publicDescriptions = publicDescriptions;
+    }
+
+    console.log(`[push-descriptions] PUT /listings/${listingId}`, JSON.stringify(payload).slice(0, 200) + "...");
+
+    try {
+      const result = await guestyRequest("PUT", `/listings/${listingId}`, payload);
+      const resp = result as Record<string, unknown>;
+      const returnedDesc = resp.publicDescriptions as Record<string, string> | undefined;
+      console.log(`[push-descriptions] success, returned publicDescriptions keys:`, Object.keys(returnedDesc ?? {}));
+      return res.json({
+        success: true,
+        sent: payload,
+        returnedDescriptions: returnedDesc ?? null,
+      });
+    } catch (err: any) {
+      console.error(`[push-descriptions] error:`, err.message);
+      return res.status(500).json({ success: false, error: err.message, sent: payload });
+    }
+  });
+
   // POST /api/builder/push-photos
   // Streams NDJSON events as each photo completes so the connection never times out.
   // Each line: { type:"photo", index, total, localPath, success, url?, wasUpscaled?, error? }

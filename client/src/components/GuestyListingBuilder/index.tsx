@@ -202,6 +202,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [buildError, setBuildError] = useState<string | null>(null);
   const [buildSuccess, setBuildSuccess] = useState(false);
   const [editableTitle, setEditableTitle] = useState("");
+  const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
+  const [descPushError, setDescPushError] = useState<string | null>(null);
 
   useEffect(() => {
     setEditableTitle(propertyData?.descriptions?.title ?? "");
@@ -772,6 +774,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     onUpdateComplete?.({ listingId: result.listingId });
   }, [effectivePropertyData, selectedId, building, onUpdateComplete]);
 
+  const pushDescriptions = useCallback(async () => {
+    if (!effectivePropertyData?.descriptions || !selectedId || descPushState === "pushing") return;
+    setDescPushState("pushing");
+    setDescPushError(null);
+    try {
+      const res = await fetch("/api/builder/push-descriptions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: selectedId, descriptions: effectivePropertyData.descriptions }),
+      });
+      const data = await res.json() as { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
+      if (!res.ok || !data.success) {
+        setDescPushState("error");
+        setDescPushError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        setDescPushState("success");
+        toast({ title: "Descriptions pushed to Guesty", description: "Summary, Space, Neighborhood, and other description fields updated." });
+      }
+    } catch (e) {
+      setDescPushState("error");
+      setDescPushError((e as Error).message);
+    }
+  }, [effectivePropertyData, selectedId, descPushState, toast]);
+
   const [syncingDetails, setSyncingDetails] = useState(false);
   const handleSyncDetails = useCallback(async () => {
     if (!selectedId || syncingDetails || building) return;
@@ -1095,6 +1121,38 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     })()
                     : <div className="glb-empty">No descriptions provided</div>
                     }
+                    {descriptions && (
+                      <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <button
+                            className="glb-btn"
+                            disabled={!selectedId || descPushState === "pushing"}
+                            onClick={() => pushDescriptions()}
+                            data-testid="btn-push-descriptions"
+                            style={{
+                              background: descPushState === "success" ? "#10b981" : descPushState === "error" ? "#ef4444" : "#6366f1",
+                              color: "#fff",
+                              opacity: !selectedId || descPushState === "pushing" ? 0.6 : 1,
+                            }}
+                          >
+                            {descPushState === "pushing" ? "Pushing…" : descPushState === "success" ? "✓ Pushed" : descPushState === "error" ? "✗ Failed — Retry" : "Push Descriptions to Guesty"}
+                          </button>
+                          {!selectedId && (
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>Select or build a listing first</span>
+                          )}
+                          {descPushState === "error" && descPushError && (
+                            <span style={{ fontSize: 11, color: "#ef4444", maxWidth: 400, wordBreak: "break-word" }}>
+                              {descPushError}
+                            </span>
+                          )}
+                          {descPushState === "success" && (
+                            <span style={{ fontSize: 11, color: "#10b981" }}>
+                              Summary, Space, Neighborhood & other fields updated in Guesty
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
