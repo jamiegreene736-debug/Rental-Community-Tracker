@@ -1788,17 +1788,28 @@ export async function registerRoutes(
       payload.publicDescriptions = publicDescriptions;
     }
 
-    console.log(`[push-descriptions] PUT /listings/${listingId}`, JSON.stringify(payload).slice(0, 200) + "...");
+    console.log(`[push-descriptions] PUT /listings/${listingId}`, JSON.stringify(payload).slice(0, 300) + "...");
 
     try {
-      const result = await guestyRequest("PUT", `/listings/${listingId}`, payload);
-      const resp = result as Record<string, unknown>;
-      const returnedDesc = resp.publicDescriptions as Record<string, string> | undefined;
-      console.log(`[push-descriptions] success, returned publicDescriptions keys:`, Object.keys(returnedDesc ?? {}));
+      await guestyRequest("PUT", `/listings/${listingId}`, payload);
+
+      // Immediately GET the listing back to verify what Guesty actually stored
+      const fetched = await guestyRequest("GET", `/listings/${listingId}?fields=publicDescriptions,nickname,title`) as Record<string, unknown>;
+      const savedDesc = fetched.publicDescriptions as Record<string, string> | undefined;
+      const savedNickname = fetched.nickname as string | undefined;
+      const savedTitle = fetched.title as string | undefined;
+
+      console.log(`[push-descriptions] GET after PUT — nickname: "${savedNickname}", publicDescriptions keys: ${JSON.stringify(Object.keys(savedDesc ?? {}))}`);
+      console.log(`[push-descriptions] summary preview: "${String(savedDesc?.summary ?? "").slice(0, 80)}"`);
+
+      const summaryWasSaved = !!(savedDesc?.summary && savedDesc.summary.length > 10);
+
       return res.json({
         success: true,
-        sent: payload,
-        returnedDescriptions: returnedDesc ?? null,
+        verified: summaryWasSaved,
+        savedDescriptions: savedDesc ?? null,
+        savedNickname: savedNickname ?? null,
+        savedTitle: savedTitle ?? null,
       });
     } catch (err: any) {
       console.error(`[push-descriptions] error:`, err.message);
