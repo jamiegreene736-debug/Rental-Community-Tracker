@@ -194,6 +194,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState(0);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const [buildSuccess, setBuildSuccess] = useState(false);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -389,6 +391,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setBuilding(true);
     setLog([]);
     setProgress(0);
+    setBuildError(null);
+    setBuildSuccess(false);
 
     const totalSteps = [true, !!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
     let done = 0;
@@ -406,7 +410,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setProgress(100);
     setBuilding(false);
 
-    if (result.listingId) {
+    if (!result.success || !result.listingId) {
+      const firstErr = result.errors?.[0]?.error as string | undefined;
+      setBuildError(firstErr || "Listing creation failed. Check the build log below for details.");
+    } else {
+      setBuildSuccess(true);
       const fresh = await guestyService.getListings(50, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
@@ -538,6 +546,51 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
             <p style={{ fontSize: 12, color: "#9ca3af", marginTop: 8 }}>
               Creates a new unlisted draft in Guesty — push descriptions, photos, pricing, and booking rules in one click.
             </p>
+
+            {/* Inline progress bar shown while building */}
+            {building && (
+              <div style={{ marginTop: 14, background: "var(--card-bg,#1e293b)", border: "1px solid var(--border,#334155)", borderRadius: 8, padding: "12px 16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text,#e2e8f0)" }}>Building listing on Guesty…</span>
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>{progress}%</span>
+                </div>
+                <div style={{ height: 6, background: "rgba(255,255,255,0.08)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ height: "100%", background: "#6366f1", borderRadius: 4, width: `${progress}%`, transition: "width 0.4s ease" }} />
+                </div>
+                {log.length > 0 && (
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+                    {log.map((entry, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                        <span style={{ color: entry.status === "success" ? "#4ade80" : entry.status === "error" ? "#f87171" : "#fbbf24", minWidth: 16 }}>
+                          {entry.icon}
+                        </span>
+                        <span style={{ color: "var(--text,#e2e8f0)" }}>{STEP_LABELS[entry.step] || entry.step}</span>
+                        {entry.error && <span style={{ color: "#f87171", marginLeft: "auto" }}>{entry.error}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Success banner */}
+            {buildSuccess && !building && (
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(74,222,128,0.1)", border: "1px solid #4ade80", borderRadius: 8, fontSize: 13, color: "#4ade80", display: "flex", alignItems: "center", gap: 8 }}>
+                <span>✓</span>
+                <span>Listing created successfully on Guesty! It appears in the dropdown above as a draft.</span>
+              </div>
+            )}
+
+            {/* Error banner */}
+            {buildError && !building && (
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(248,113,113,0.1)", border: "1px solid #f87171", borderRadius: 8, fontSize: 13, color: "#f87171", display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <span style={{ flexShrink: 0 }}>✗</span>
+                <div>
+                  <strong>Failed to create listing:</strong> {buildError}
+                  <div style={{ marginTop: 4, fontSize: 11, color: "#9ca3af" }}>Scroll down to the build log for full details.</div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

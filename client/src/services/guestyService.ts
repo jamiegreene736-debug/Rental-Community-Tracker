@@ -116,8 +116,12 @@ class GuestyService {
 
     if (!res.ok) {
       if (res.status === 429) throw new Error("RATE_LIMITED");
-      const err = await res.json().catch(() => ({})) as { message?: string; error?: string };
-      throw new Error(err.message || err.error || `Guesty API ${res.status}: ${endpoint}`);
+      const err = await res.json().catch(() => ({})) as { message?: string; error?: string | { message?: string; code?: string } };
+      const msg =
+        err.message ||
+        (typeof err.error === "object" ? err.error?.message : err.error) ||
+        `Guesty API ${res.status}: ${endpoint}`;
+      throw new Error(msg);
     }
 
     if (res.status === 204) return { success: true } as T;
@@ -155,7 +159,7 @@ class GuestyService {
       title: data.title,
       address: data.address,
       accommodates: data.accommodates,
-      roomType: data.roomType || "Entire home/apartment",
+      roomType: data.roomType || "Entire home/apt",
       propertyType: data.propertyType || "House",
       otaRoomType: data.otaRoomType || "holiday_home",
       amenities: data.amenities || [],

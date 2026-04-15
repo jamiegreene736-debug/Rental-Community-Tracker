@@ -89,7 +89,7 @@ export default function Builder() {
       },
       accommodates: totalGuests,
       propertyType: "Condominium",
-      roomType: "Entire home/apartment",
+      roomType: "Entire home/apt",
       otaRoomType: "holiday_home",
       amenities: guestyAmenities,
       checkInTime: "15:00",
