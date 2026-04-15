@@ -1701,11 +1701,11 @@ export async function registerRoutes(
     }
   });
 
-  // ========== BUILDER PHOTO PUSH (host on ImgBB → push to Guesty) ==========
+  // ========== BUILDER PHOTO PUSH — streaming SSE (host on ImgBB → push to Guesty) ==========
   // POST /api/builder/push-photos
-  // Accepts { guestyListingId, photos: [{ localPath, caption }] }
-  // For each photo: reads local file → uploads to ImgBB → POSTs to Guesty /listings/{id}/pictures
-  // Returns { results: [{ localPath, success, url?, error? }] }
+  // Streams NDJSON events as each photo completes so the connection never times out.
+  // Each line: { type:"photo", index, total, localPath, success, url?, wasUpscaled?, error? }
+  // Final line: { type:"done", successCount, upscaledCount, total }
   app.post("/api/builder/push-photos", async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     const replicateKey = process.env.REPLICATE_API_KEY;
@@ -1714,23 +1714,37 @@ export async function registerRoutes(
       return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to host photos for Guesty" });
     }
 
-    const { guestyListingId, photos } = req.body as {
+    const { guestyListingId, photos, upscale = true } = req.body as {
       guestyListingId: string;
       photos: { localPath: string; caption: string }[];
+      upscale?: boolean;
     };
 
     if (!guestyListingId || !Array.isArray(photos) || photos.length === 0) {
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
 
-    const results: { localPath: string; success: boolean; url?: string; error?: string; wasUpscaled?: boolean }[] = [];
+    // Stream NDJSON — one JSON line per photo + a final summary line.
+    // This keeps the HTTP connection alive for as long as needed (no timeout).
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering if present
+    res.flushHeaders();
 
-    for (const photo of photos) {
-      const { localPath, caption } = photo;
+    const emit = (obj: Record<string, unknown>) => {
+      res.write(JSON.stringify(obj) + "\n");
+    };
+
+    let successCount = 0;
+    let upscaledCount = 0;
+
+    for (let i = 0; i < photos.length; i++) {
+      const { localPath, caption } = photos[i];
+      const index = i + 1;
 
       // Validate path
       if (!localPath || !localPath.startsWith("/photos/")) {
-        results.push({ localPath, success: false, error: "Invalid path — must start with /photos/" });
+        emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "Invalid path" });
         continue;
       }
 
@@ -1742,17 +1756,17 @@ export async function registerRoutes(
       try {
         rawData = fs.readFileSync(fullPath);
       } catch {
-        results.push({ localPath, success: false, error: "File not found on server" });
+        emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "File not found on server" });
         continue;
       }
 
       const ext = path.extname(safePath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
 
-      // Optionally upscale with Replicate
+      // Optionally upscale with Replicate (skipped if upscale=false or no key)
       let finalBuffer = rawData;
       let wasUpscaled = false;
-      if (replicateKey) {
+      if (upscale && replicateKey) {
         try {
           const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
           if (upscaled) {
@@ -1760,7 +1774,7 @@ export async function registerRoutes(
             wasUpscaled = true;
           }
         } catch {
-          // upscale failure is non-fatal — continue with original
+          // upscale failure is non-fatal — push original
         }
       }
 
@@ -1775,35 +1789,36 @@ export async function registerRoutes(
         });
         if (!imgbbResp.ok) {
           const errText = await imgbbResp.text();
-          results.push({ localPath, success: false, error: `ImgBB upload failed: ${imgbbResp.status} ${errText.slice(0, 120)}` });
+          emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB ${imgbbResp.status}: ${errText.slice(0, 100)}` });
           continue;
         }
         const imgbbData = await imgbbResp.json() as any;
         publicUrl = imgbbData?.data?.url;
         if (!publicUrl) {
-          results.push({ localPath, success: false, error: "ImgBB returned no URL" });
+          emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "ImgBB returned no URL" });
           continue;
         }
       } catch (e: any) {
-        results.push({ localPath, success: false, error: `ImgBB error: ${e.message}` });
+        emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB error: ${e.message}` });
         continue;
       }
 
-      // Push to Guesty: POST /listings/{id}/pictures  (one at a time — correct Guesty v1 API)
+      // Push to Guesty: POST /listings/{id}/pictures (correct Guesty v1 API — one at a time)
       try {
         await guestyRequest("POST", `/listings/${guestyListingId}/pictures`, { url: publicUrl, caption: caption || "" });
-        results.push({ localPath, success: true, url: publicUrl, wasUpscaled });
-        console.log(`[push-photos] ✓ ${safePath} → ${publicUrl.slice(0, 60)}…`);
+        successCount++;
+        if (wasUpscaled) upscaledCount++;
+        emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled });
+        console.log(`[push-photos] ✓ ${index}/${photos.length} ${safePath}`);
       } catch (e: any) {
-        results.push({ localPath, success: false, url: publicUrl, error: `Guesty rejected: ${e.message}` });
-        console.error(`[push-photos] Guesty rejected ${safePath}: ${e.message}`);
+        emit({ type: "photo", index, total: photos.length, localPath, success: false, url: publicUrl, error: `Guesty: ${e.message}` });
+        console.error(`[push-photos] ✗ ${index}/${photos.length} ${safePath}: ${e.message}`);
       }
     }
 
-    const successCount = results.filter(r => r.success).length;
-    const upscaledCount = results.filter(r => r.wasUpscaled).length;
+    emit({ type: "done", successCount, upscaledCount, total: photos.length });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, ${upscaledCount} upscaled`);
-    res.json({ results, successCount, upscaledCount, total: photos.length });
+    res.end();
   });
 
   // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========

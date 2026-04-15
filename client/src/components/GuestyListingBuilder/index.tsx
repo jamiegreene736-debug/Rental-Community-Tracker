@@ -322,8 +322,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [upscaledCount, setUpscaledCount] = useState(0);
   const [upscaleError, setUpscaleError] = useState<string | null>(null);
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
+  const [doUpscale, setDoUpscale] = useState(true);
 
-  const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"]) => {
+  const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
     if (!selectedId || !photos?.length) return;
     setUpscalePhase("pushing");
     setUpscaleTotal(photos.length);
@@ -346,36 +347,70 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     });
 
     try {
-      // Single server-side call: reads files → ImgBB (public URLs) → Guesty /pictures (one at a time)
+      // Streaming NDJSON: server sends one JSON line per photo as it completes.
+      // This keeps the HTTP connection alive indefinitely — no timeout possible.
       const resp = await fetch("/api/builder/push-photos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guestyListingId: selectedId, photos: photosPayload }),
+        body: JSON.stringify({ guestyListingId: selectedId, photos: photosPayload, upscale: withUpscale }),
       });
-      const data = await resp.json() as {
-        results: { localPath: string; success: boolean; url?: string; error?: string; wasUpscaled?: boolean }[];
-        successCount: number;
-        upscaledCount: number;
-        total: number;
-      };
 
       if (!resp.ok) {
-        setUpscaleError((data as any).error || `Server error ${resp.status}`);
+        const err = await resp.json().catch(() => ({})) as any;
+        setUpscaleError(err.error || `Server error ${resp.status}`);
         setUpscalePhase("error");
         return;
       }
 
-      setUpscaleCurrent(data.total);
-      setUpscaledCount(data.upscaledCount);
-      setPushResults(data.results);
+      // Read the streaming NDJSON body line-by-line
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      const failedCount = data.total - data.successCount;
-      if (failedCount > 0 && data.successCount === 0) {
-        const firstErr = data.results.find(r => r.error)?.error || "All photos failed";
-        setUpscaleError(firstErr);
-        setUpscalePhase("error");
-      } else {
-        setUpscalePhase("done");
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop()!; // keep incomplete last line
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as {
+              type: "photo" | "done";
+              index?: number;
+              total?: number;
+              localPath?: string;
+              success?: boolean;
+              url?: string;
+              wasUpscaled?: boolean;
+              error?: string;
+              successCount?: number;
+              upscaledCount?: number;
+            };
+
+            if (event.type === "photo") {
+              setUpscaleCurrent(event.index ?? 0);
+              if (event.wasUpscaled) setUpscaledCount(c => c + 1);
+              setPushResults(prev => [...prev, {
+                localPath: event.localPath || "",
+                success: event.success ?? false,
+                error: event.error,
+              }]);
+            } else if (event.type === "done") {
+              setUpscaledCount(event.upscaledCount ?? 0);
+              setUpscalePhase(
+                (event.successCount ?? 0) === 0 && (event.total ?? 0) > 0
+                  ? "error"
+                  : "done"
+              );
+              if ((event.successCount ?? 0) === 0 && (event.total ?? 0) > 0) {
+                setUpscaleError("All photos failed — check per-photo errors below");
+              }
+            }
+          } catch { /* malformed line — skip */ }
+        }
       }
     } catch (err: any) {
       setUpscaleError(err?.message || "Network error — could not reach server");
@@ -1139,54 +1174,89 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                   photos.length > 0
                     ? <div>
                         {/* Push Photos header */}
-                        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+                        <div style={{ marginBottom: 16 }}>
                           {upscalePhase !== "pushing" ? (
                             <>
-                              <button
-                                className="glb-btn glb-btn-primary"
-                                onClick={() => upscaleAndUpload(photos)}
-                                disabled={!selectedId || upscalePhase === "pushing"}
-                                data-testid="btn-upscale-upload"
-                                style={{ fontSize: 13 }}
-                              >
-                                {upscalePhase === "done" ? "↺ Re-push Photos to Guesty" : "⬆ Push Photos to Guesty"}
-                              </button>
-                              {!selectedId && (
-                                <span style={{ fontSize: 12, color: "#9ca3af" }}>Select a Guesty listing above first</span>
-                              )}
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+                                <button
+                                  className="glb-btn glb-btn-primary"
+                                  onClick={() => upscaleAndUpload(photos, doUpscale)}
+                                  disabled={!selectedId}
+                                  data-testid="btn-upscale-upload"
+                                  style={{ fontSize: 13 }}
+                                >
+                                  {upscalePhase === "done" ? "↺ Re-push Photos to Guesty" : "⬆ Push Photos to Guesty"}
+                                </button>
+
+                                {/* Upscale toggle */}
+                                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#6b7280", cursor: "pointer", userSelect: "none" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={doUpscale}
+                                    onChange={e => setDoUpscale(e.target.checked)}
+                                    data-testid="toggle-upscale"
+                                    style={{ width: 14, height: 14, cursor: "pointer" }}
+                                  />
+                                  Upscale 2× before pushing
+                                  <span style={{ color: "#9ca3af" }}>(slower — ~30s/photo)</span>
+                                </label>
+
+                                {!selectedId && (
+                                  <span style={{ fontSize: 12, color: "#9ca3af" }}>Select a Guesty listing above first</span>
+                                )}
+                              </div>
+
                               {upscalePhase === "done" && (() => {
                                 const failed = pushResults.filter(r => !r.success);
                                 const succeeded = pushResults.filter(r => r.success);
                                 return (
-                                  <span style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
+                                  <div style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
                                     ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
                                     {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
                                     {failed.length > 0 && ` — ${failed.length} failed`}
-                                  </span>
+                                  </div>
                                 );
                               })()}
                               {upscalePhase === "error" && (
-                                <span style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</span>
+                                <div style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</div>
                               )}
                             </>
                           ) : (
-                            <div style={{ flex: 1 }}>
+                            <div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                                 <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
                                 <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500 }}>
-                                  Uploading {upscaleTotal} photos to Guesty… (hosting on ImgBB first)
+                                  {upscaleCurrent > 0
+                                    ? `${upscaleCurrent} / ${upscaleTotal} photos pushed${upscaledCount > 0 ? ` (${upscaledCount} upscaled)` : ""}…`
+                                    : `Starting — processing ${upscaleTotal} photos…`}
                                 </span>
                               </div>
-                              <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
-                                <div style={{ height: "100%", borderRadius: 3, background: "#2563eb", width: "100%", animation: "glb-pulse 1.5s ease-in-out infinite" }} />
+                              <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+                                <div style={{
+                                  height: "100%", borderRadius: 3, background: "#2563eb",
+                                  width: upscaleTotal > 0 ? `${Math.round((upscaleCurrent / upscaleTotal) * 100)}%` : "5%",
+                                  transition: "width 0.4s ease",
+                                }} />
                               </div>
-                              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                                Processing on server — this may take a minute for large photo sets
+                              <div style={{ fontSize: 11, color: "#9ca3af" }}>
+                                {doUpscale
+                                  ? "Upscaling + hosting on ImgBB + pushing to Guesty — ~30s per photo"
+                                  : "Hosting on ImgBB + pushing to Guesty — a few seconds per photo"}
                               </div>
+                              {/* Live per-photo results */}
+                              {pushResults.length > 0 && (
+                                <div style={{ marginTop: 8, maxHeight: 120, overflowY: "auto", fontSize: 11, display: "flex", flexDirection: "column", gap: 2 }}>
+                                  {pushResults.slice(-6).map((r, i) => (
+                                    <div key={i} style={{ color: r.success ? "#16a34a" : "#dc2626" }}>
+                                      {r.success ? "✓" : "✗"} {r.localPath.split("/").pop()}{r.error ? ` — ${r.error}` : ""}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
-                        {/* Per-photo error details */}
+                        {/* Per-photo error details after done */}
                         {upscalePhase === "done" && pushResults.some(r => !r.success) && (
                           <div style={{ marginBottom: 12, padding: "8px 12px", background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 6, fontSize: 12 }}>
                             <div style={{ fontWeight: 600, color: "#92400e", marginBottom: 4 }}>Some photos failed:</div>
