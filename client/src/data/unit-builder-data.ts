@@ -37,11 +37,9 @@ export type PropertyUnitBuilder = {
   communityPhotoFolder: string;
 };
 
-const DEFAULT_DISCLAIMER = "This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.";
+const DEFAULT_DISCLAIMER = "Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.";
 
-export const LISTING_DISCLOSURE = `⚠️ IMPORTANT DISCLOSURE
-
-This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.
+export const LISTING_DISCLOSURE = `Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.
 
 ---`;
 
