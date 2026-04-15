@@ -7,7 +7,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
-import { scheduleGuestySync, syncPropertyToGuesty } from "./guesty-sync";
+import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -1699,6 +1699,111 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(500).json({ error: "Upload to ImgBB failed", message: err.message });
     }
+  });
+
+  // ========== BUILDER PHOTO PUSH (host on ImgBB → push to Guesty) ==========
+  // POST /api/builder/push-photos
+  // Accepts { guestyListingId, photos: [{ localPath, caption }] }
+  // For each photo: reads local file → uploads to ImgBB → POSTs to Guesty /listings/{id}/pictures
+  // Returns { results: [{ localPath, success, url?, error? }] }
+  app.post("/api/builder/push-photos", async (req, res) => {
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    const replicateKey = process.env.REPLICATE_API_KEY;
+
+    if (!imgbbKey) {
+      return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to host photos for Guesty" });
+    }
+
+    const { guestyListingId, photos } = req.body as {
+      guestyListingId: string;
+      photos: { localPath: string; caption: string }[];
+    };
+
+    if (!guestyListingId || !Array.isArray(photos) || photos.length === 0) {
+      return res.status(400).json({ error: "guestyListingId and photos[] are required" });
+    }
+
+    const results: { localPath: string; success: boolean; url?: string; error?: string; wasUpscaled?: boolean }[] = [];
+
+    for (const photo of photos) {
+      const { localPath, caption } = photo;
+
+      // Validate path
+      if (!localPath || !localPath.startsWith("/photos/")) {
+        results.push({ localPath, success: false, error: "Invalid path — must start with /photos/" });
+        continue;
+      }
+
+      const safePath = localPath.replace(/\.\./g, "");
+      const fullPath = path.join(process.cwd(), "public", safePath);
+
+      // Read local file
+      let rawData: Buffer;
+      try {
+        rawData = fs.readFileSync(fullPath);
+      } catch {
+        results.push({ localPath, success: false, error: "File not found on server" });
+        continue;
+      }
+
+      const ext = path.extname(safePath).toLowerCase();
+      const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+
+      // Optionally upscale with Replicate
+      let finalBuffer = rawData;
+      let wasUpscaled = false;
+      if (replicateKey) {
+        try {
+          const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
+          if (upscaled) {
+            finalBuffer = upscaled;
+            wasUpscaled = true;
+          }
+        } catch {
+          // upscale failure is non-fatal — continue with original
+        }
+      }
+
+      // Upload to ImgBB to get a publicly accessible URL
+      let publicUrl: string;
+      try {
+        const form = new FormData();
+        form.append("image", finalBuffer.toString("base64"));
+        const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+          method: "POST",
+          body: form,
+        });
+        if (!imgbbResp.ok) {
+          const errText = await imgbbResp.text();
+          results.push({ localPath, success: false, error: `ImgBB upload failed: ${imgbbResp.status} ${errText.slice(0, 120)}` });
+          continue;
+        }
+        const imgbbData = await imgbbResp.json() as any;
+        publicUrl = imgbbData?.data?.url;
+        if (!publicUrl) {
+          results.push({ localPath, success: false, error: "ImgBB returned no URL" });
+          continue;
+        }
+      } catch (e: any) {
+        results.push({ localPath, success: false, error: `ImgBB error: ${e.message}` });
+        continue;
+      }
+
+      // Push to Guesty: POST /listings/{id}/pictures  (one at a time — correct Guesty v1 API)
+      try {
+        await guestyRequest("POST", `/listings/${guestyListingId}/pictures`, { url: publicUrl, caption: caption || "" });
+        results.push({ localPath, success: true, url: publicUrl, wasUpscaled });
+        console.log(`[push-photos] ✓ ${safePath} → ${publicUrl.slice(0, 60)}…`);
+      } catch (e: any) {
+        results.push({ localPath, success: false, url: publicUrl, error: `Guesty rejected: ${e.message}` });
+        console.error(`[push-photos] Guesty rejected ${safePath}: ${e.message}`);
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const upscaledCount = results.filter(r => r.wasUpscaled).length;
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, ${upscaledCount} upscaled`);
+    res.json({ results, successCount, upscaledCount, total: photos.length });
   });
 
   // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========

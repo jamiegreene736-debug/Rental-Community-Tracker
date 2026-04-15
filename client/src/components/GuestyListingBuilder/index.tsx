@@ -51,6 +51,7 @@ const CSS = `
   .glb-dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex-shrink:0; }
   .glb-pill.connected .glb-dot { animation:glb-blink 2s ease-in-out infinite; }
   @keyframes glb-blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  @keyframes glb-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 
   /* Section label */
   .glb-section-label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.6px; color:var(--faint); margin-bottom:10px; }
@@ -313,61 +314,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     alert(`Pushed ${toBlock.length} blackout block(s) to Guesty.`);
   }, [availWindows, selectedId]);
 
-  // ── Photo upscale + upload ─────────────────────────────────────────────────
-  type UpscalePhase = "idle" | "upscaling" | "uploading" | "done" | "error";
+  // ── Photo push: host on ImgBB (+ optional upscale) → push to Guesty ────────
+  type UpscalePhase = "idle" | "pushing" | "done" | "error";
   const [upscalePhase, setUpscalePhase] = useState<UpscalePhase>("idle");
   const [upscaleCurrent, setUpscaleCurrent] = useState(0);
   const [upscaleTotal, setUpscaleTotal] = useState(0);
   const [upscaledCount, setUpscaledCount] = useState(0);
   const [upscaleError, setUpscaleError] = useState<string | null>(null);
+  const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"]) => {
     if (!selectedId || !photos?.length) return;
-    setUpscalePhase("upscaling");
+    setUpscalePhase("pushing");
     setUpscaleTotal(photos.length);
     setUpscaleCurrent(0);
     setUpscaledCount(0);
     setUpscaleError(null);
+    setPushResults([]);
 
     const origin = window.location.origin;
-    const upgradedPhotos: { url: string; caption: string }[] = [];
 
-    for (let i = 0; i < photos.length; i++) {
-      setUpscaleCurrent(i + 1);
-      const p = photos[i];
-      // Extract local path from absolute URL (e.g. "/photos/pili-mai/photo_00.jpg")
+    // Extract local path from each photo URL (e.g. "/photos/pili-mai/photo_00.jpg")
+    const photosPayload = photos.map(p => {
       let localPath: string;
       try {
         localPath = new URL(p.url).pathname;
       } catch {
         localPath = p.url.startsWith("/") ? p.url : p.url.replace(origin, "");
       }
+      return { localPath, caption: p.caption || "" };
+    });
 
-      try {
-        const resp = await fetch("/api/builder/upscale-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ localPath }),
-        });
-        const data = await resp.json();
-        if (resp.ok && data.url) {
-          upgradedPhotos.push({ url: data.url, caption: p.caption || "" });
-          if (data.wasUpscaled) setUpscaledCount(c => c + 1);
-        } else {
-          // Fall back to original URL if upscale fails for this photo
-          upgradedPhotos.push({ url: p.url, caption: p.caption || "" });
-        }
-      } catch {
-        upgradedPhotos.push({ url: p.url, caption: p.caption || "" });
-      }
-    }
-
-    setUpscalePhase("uploading");
     try {
-      await guestyService.uploadPhotos(selectedId, upgradedPhotos.map(p => ({ ...p, source: "" })));
-      setUpscalePhase("done");
+      // Single server-side call: reads files → ImgBB (public URLs) → Guesty /pictures (one at a time)
+      const resp = await fetch("/api/builder/push-photos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guestyListingId: selectedId, photos: photosPayload }),
+      });
+      const data = await resp.json() as {
+        results: { localPath: string; success: boolean; url?: string; error?: string; wasUpscaled?: boolean }[];
+        successCount: number;
+        upscaledCount: number;
+        total: number;
+      };
+
+      if (!resp.ok) {
+        setUpscaleError((data as any).error || `Server error ${resp.status}`);
+        setUpscalePhase("error");
+        return;
+      }
+
+      setUpscaleCurrent(data.total);
+      setUpscaledCount(data.upscaledCount);
+      setPushResults(data.results);
+
+      const failedCount = data.total - data.successCount;
+      if (failedCount > 0 && data.successCount === 0) {
+        const firstErr = data.results.find(r => r.error)?.error || "All photos failed";
+        setUpscaleError(firstErr);
+        setUpscalePhase("error");
+      } else {
+        setUpscalePhase("done");
+      }
     } catch (err: any) {
-      setUpscaleError(err?.message || "Upload to Guesty failed");
+      setUpscaleError(err?.message || "Network error — could not reach server");
       setUpscalePhase("error");
     }
   }, [selectedId]);
@@ -669,9 +680,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
             {/* Success banner */}
             {buildSuccess && !building && (
-              <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(74,222,128,0.1)", border: "1px solid #4ade80", borderRadius: 8, fontSize: 13, color: "#4ade80", display: "flex", alignItems: "center", gap: 8 }}>
-                <span>✓</span>
-                <span>Listing created successfully on Guesty! It appears in the dropdown above as a draft.</span>
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(74,222,128,0.1)", border: "1px solid #4ade80", borderRadius: 8, fontSize: 13, color: "#4ade80" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span>✓</span>
+                  <span>Listing created successfully on Guesty! It appears in the dropdown above as a draft.</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#86efac", paddingLeft: 22 }}>
+                  Next: select the new listing from the dropdown, then click the <strong>Photos</strong> tab and hit <strong>"Push Photos to Guesty"</strong> to upload your photos.
+                </div>
               </div>
             )}
 
@@ -1122,27 +1138,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                 {activeTab === "photos" && (
                   photos.length > 0
                     ? <div>
-                        {/* Upscale & Upload header */}
+                        {/* Push Photos header */}
                         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-                          {upscalePhase === "idle" || upscalePhase === "done" || upscalePhase === "error" ? (
+                          {upscalePhase !== "pushing" ? (
                             <>
                               <button
                                 className="glb-btn glb-btn-primary"
                                 onClick={() => upscaleAndUpload(photos)}
-                                disabled={!selectedId || upscalePhase === "upscaling" || upscalePhase === "uploading"}
+                                disabled={!selectedId || upscalePhase === "pushing"}
                                 data-testid="btn-upscale-upload"
                                 style={{ fontSize: 13 }}
                               >
-                                {upscalePhase === "done" ? "↺ Upscale & Re-upload to Guesty" : "⬆ Upscale & Upload to Guesty"}
+                                {upscalePhase === "done" ? "↺ Re-push Photos to Guesty" : "⬆ Push Photos to Guesty"}
                               </button>
                               {!selectedId && (
                                 <span style={{ fontSize: 12, color: "#9ca3af" }}>Select a Guesty listing above first</span>
                               )}
-                              {upscalePhase === "done" && (
-                                <span style={{ fontSize: 13, color: "#16a34a" }}>
-                                  ✓ Done — {upscaledCount} of {upscaleTotal} photos upscaled, all sent to Guesty
-                                </span>
-                              )}
+                              {upscalePhase === "done" && (() => {
+                                const failed = pushResults.filter(r => !r.success);
+                                const succeeded = pushResults.filter(r => r.success);
+                                return (
+                                  <span style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
+                                    ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
+                                    {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
+                                    {failed.length > 0 && ` — ${failed.length} failed`}
+                                  </span>
+                                );
+                              })()}
                               {upscalePhase === "error" && (
                                 <span style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</span>
                               )}
@@ -1152,24 +1174,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                                 <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
                                 <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500 }}>
-                                  {upscalePhase === "upscaling"
-                                    ? `Upscaling photo ${upscaleCurrent} of ${upscaleTotal}…`
-                                    : "Sending upscaled photos to Guesty…"}
+                                  Uploading {upscaleTotal} photos to Guesty… (hosting on ImgBB first)
                                 </span>
                               </div>
                               <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
-                                <div style={{
-                                  height: "100%", borderRadius: 3, background: "#2563eb",
-                                  width: upscalePhase === "uploading" ? "100%" : `${Math.round((upscaleCurrent / upscaleTotal) * 100)}%`,
-                                  transition: "width 0.3s ease",
-                                }} />
+                                <div style={{ height: "100%", borderRadius: 3, background: "#2563eb", width: "100%", animation: "glb-pulse 1.5s ease-in-out infinite" }} />
                               </div>
                               <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                                {upscaledCount} upscaled so far — Real-ESRGAN 2× via Replicate
+                                Processing on server — this may take a minute for large photo sets
                               </div>
                             </div>
                           )}
                         </div>
+                        {/* Per-photo error details */}
+                        {upscalePhase === "done" && pushResults.some(r => !r.success) && (
+                          <div style={{ marginBottom: 12, padding: "8px 12px", background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 6, fontSize: 12 }}>
+                            <div style={{ fontWeight: 600, color: "#92400e", marginBottom: 4 }}>Some photos failed:</div>
+                            {pushResults.filter(r => !r.success).map((r, i) => (
+                              <div key={i} style={{ color: "#b45309" }}>• {r.localPath.split("/").pop()} — {r.error}</div>
+                            ))}
+                          </div>
+                        )}
 
                         {/* Photo groups */}
                         {(() => {

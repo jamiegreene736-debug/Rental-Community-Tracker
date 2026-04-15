@@ -214,9 +214,12 @@ class GuestyService {
   }
 
   async uploadPhotos(id: string, photos: GuestyPhoto[]) {
-    return this.request("POST", `/listings/${id}/pictures/upload-by-urls`, {
-      urls: photos.map((p) => ({ url: p.url, caption: p.caption || "" })),
-    });
+    // Guesty v1 API: add pictures one at a time via POST /listings/{id}/pictures
+    // Note: photos must have publicly accessible URLs (not local /photos/... paths)
+    for (const p of photos) {
+      await this.request("POST", `/listings/${id}/pictures`, { url: p.url, caption: p.caption || "" });
+    }
+    return { success: true, count: photos.length };
   }
 
   async updateFinancials(id: string, pricing: GuestyPricing) {
@@ -336,15 +339,9 @@ class GuestyService {
       }
     }
 
-    if (propertyData.photos && propertyData.photos.length > 0) {
-      try {
-        log("photos", "pending");
-        await this.uploadPhotos(listingId!, propertyData.photos);
-        log("photos", "success", { count: propertyData.photos.length });
-      } catch (e) {
-        log("photos", "error", { error: (e as Error).message });
-      }
-    }
+    // Photos are NOT pushed during auto-build — use the Photos tab's dedicated
+    // "Push Photos to Guesty" button which hosts each file on ImgBB first to
+    // get a public URL that Guesty can fetch.
 
     if (propertyData.pricing) {
       try {
@@ -424,15 +421,8 @@ class GuestyService {
       }
     }
 
-    if (propertyData.photos && propertyData.photos.length > 0) {
-      try {
-        log("photos", "pending");
-        await this.uploadPhotos(listingId, propertyData.photos);
-        log("photos", "success", { count: propertyData.photos.length });
-      } catch (e) {
-        log("photos", "error", { error: (e as Error).message });
-      }
-    }
+    // Photos are NOT pushed via Push Updates — use the Photos tab's dedicated
+    // "Push Photos to Guesty" button which hosts each file on ImgBB first.
 
     if (propertyData.pricing) {
       try {
