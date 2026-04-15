@@ -44,6 +44,7 @@ import {
   MapPin,
   Star,
   TrendingUp,
+  MessageSquare,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import { computeQualityScore, gradeColor, gradeBg } from "@/data/quality-score";
@@ -561,6 +562,12 @@ export default function Home() {
               <Button variant="outline" data-testid="button-availability-scanner">
                 <CalendarSearch className="h-4 w-4 mr-2" />
                 Availability Scanner
+              </Button>
+            </Link>
+            <Link href="/inbox">
+              <Button variant="outline" data-testid="button-inbox">
+                <MessageSquare className="h-4 w-4 mr-2" />
+                Guest Inbox
               </Button>
             </Link>
             <Link href="/buy-in-tracker">

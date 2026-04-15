@@ -8,7 +8,8 @@ import {
   type LodgifyPropertyMap,
   type UnitSwap, type InsertUnitSwap,
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap,
+  type MessageTemplate, type InsertMessageTemplate,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -65,6 +66,12 @@ export interface IStorage {
   getGuestyPropertyMap(): Promise<GuestyPropertyMap[]>;
   getGuestyListingId(propertyId: number): Promise<string | null>;
   updateGuestyLastSynced(propertyId: number): Promise<void>;
+
+  getMessageTemplates(): Promise<MessageTemplate[]>;
+  getMessageTemplate(id: number): Promise<MessageTemplate | undefined>;
+  createMessageTemplate(t: InsertMessageTemplate): Promise<MessageTemplate>;
+  updateMessageTemplate(id: number, data: Partial<InsertMessageTemplate>): Promise<MessageTemplate | undefined>;
+  deleteMessageTemplate(id: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -332,6 +339,30 @@ export class DatabaseStorage implements IStorage {
 
   async updateGuestyLastSynced(propertyId: number): Promise<void> {
     await db.update(guestyPropertyMap).set({ lastSyncedAt: new Date() }).where(eq(guestyPropertyMap.propertyId, propertyId));
+  }
+
+  async getMessageTemplates(): Promise<MessageTemplate[]> {
+    return db.select().from(messageTemplates).orderBy(messageTemplates.createdAt);
+  }
+
+  async getMessageTemplate(id: number): Promise<MessageTemplate | undefined> {
+    const [row] = await db.select().from(messageTemplates).where(eq(messageTemplates.id, id));
+    return row;
+  }
+
+  async createMessageTemplate(t: InsertMessageTemplate): Promise<MessageTemplate> {
+    const [row] = await db.insert(messageTemplates).values(t).returning();
+    return row;
+  }
+
+  async updateMessageTemplate(id: number, data: Partial<InsertMessageTemplate>): Promise<MessageTemplate | undefined> {
+    const [row] = await db.update(messageTemplates).set(data).where(eq(messageTemplates.id, id)).returning();
+    return row;
+  }
+
+  async deleteMessageTemplate(id: number): Promise<boolean> {
+    const result = await db.delete(messageTemplates).where(eq(messageTemplates.id, id)).returning();
+    return result.length > 0;
   }
 }
 

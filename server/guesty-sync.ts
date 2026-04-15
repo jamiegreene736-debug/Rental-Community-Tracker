@@ -38,7 +38,7 @@ async function getGuestyToken(): Promise<string> {
   return data.access_token;
 }
 
-async function guestyRequest(method: string, endpoint: string, body?: unknown) {
+export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
   const token = await getGuestyToken();
   const res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
     method,

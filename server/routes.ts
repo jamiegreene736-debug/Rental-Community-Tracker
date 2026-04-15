@@ -8,6 +8,8 @@ import JSZip from "jszip";
 import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { scheduleGuestySync, syncPropertyToGuesty } from "./guesty-sync";
+import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
+import { insertMessageTemplateSchema } from "@shared/schema";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
 // All other communities fall back to Google Images search.
@@ -3630,6 +3632,118 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
       const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}.`;
       return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate });
+    }
+  });
+
+  // ========== INBOX — Auto-Approve ==========
+
+  app.get("/api/inbox/auto-approve/status", (_req, res) => {
+    res.json(getAutoApproveStatus());
+  });
+
+  app.post("/api/inbox/auto-approve/toggle", (req, res) => {
+    const { enabled } = req.body as { enabled: boolean };
+    setAutoApproveEnabled(!!enabled);
+    res.json(getAutoApproveStatus());
+  });
+
+  app.post("/api/inbox/auto-approve/run", async (_req, res) => {
+    try {
+      const result = await runAutoApprove();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Auto-approve run failed", message: err.message });
+    }
+  });
+
+  // ========== INBOX — Message Templates ==========
+
+  app.get("/api/inbox/templates", async (_req, res) => {
+    try {
+      const templates = await storage.getMessageTemplates();
+      res.json(templates);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch templates", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/templates", async (req, res) => {
+    try {
+      const parsed = insertMessageTemplateSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Validation failed", issues: parsed.error.issues });
+      const template = await storage.createMessageTemplate(parsed.data);
+      res.status(201).json(template);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to create template", message: err.message });
+    }
+  });
+
+  app.put("/api/inbox/templates/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const template = await storage.updateMessageTemplate(id, req.body);
+      if (!template) return res.status(404).json({ error: "Template not found" });
+      res.json(template);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update template", message: err.message });
+    }
+  });
+
+  app.delete("/api/inbox/templates/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const ok = await storage.deleteMessageTemplate(id);
+      if (!ok) return res.status(404).json({ error: "Template not found" });
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to delete template", message: err.message });
+    }
+  });
+
+  // ========== INBOX — AI Draft Reply ==========
+
+  app.post("/api/inbox/ai-draft", async (req, res) => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
+
+    const { guestMessage, propertyName, guestName, checkIn, checkOut } = req.body as {
+      guestMessage: string;
+      propertyName?: string;
+      guestName?: string;
+      checkIn?: string;
+      checkOut?: string;
+    };
+
+    if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
+
+    const systemPrompt = `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages. Never mention that units are combined. Sign off as "The NexStay Team".`;
+
+    const userPrompt = `Guest name: ${guestName || "Guest"}
+Property: ${propertyName || "our property"}
+${checkIn ? `Check-in: ${checkIn}` : ""}
+${checkOut ? `Check-out: ${checkOut}` : ""}
+
+Guest message:
+"${guestMessage}"
+
+Write a helpful, friendly reply in 3-4 sentences. Be specific and warm. Do not include a subject line.`;
+
+    try {
+      const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": anthropicKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 400,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+        }),
+      });
+      const claudeData = await claudeResp.json() as any;
+      const draft: string = claudeData?.content?.[0]?.text ?? "";
+      res.json({ draft });
+    } catch (err: any) {
+      res.status(500).json({ error: "AI draft failed", message: err.message });
     }
   });
 

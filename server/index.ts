@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startWeeklyScheduler, cleanupStaleRuns } from "./availability-scanner";
+import { startAutoApproveScheduler } from "./auto-approve";
 
 const app = express();
 const httpServer = createServer(app);
@@ -101,6 +102,7 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
       await cleanupStaleRuns();
       startWeeklyScheduler();
+      startAutoApproveScheduler();
     },
   );
 })();

@@ -184,6 +184,24 @@ export const insertLodgifyPropertyMapSchema = createInsertSchema(lodgifyProperty
 export type InsertLodgifyPropertyMap = z.infer<typeof insertLodgifyPropertyMapSchema>;
 export type LodgifyPropertyMap = typeof lodgifyPropertyMap.$inferSelect;
 
+export const messageTemplates = pgTable("message_templates", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  trigger: text("trigger").notNull(),
+  daysOffset: integer("days_offset").notNull().default(0),
+  body: text("body").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertMessageTemplateSchema = createInsertSchema(messageTemplates).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertMessageTemplate = z.infer<typeof insertMessageTemplateSchema>;
+export type MessageTemplate = typeof messageTemplates.$inferSelect;
+
 export const guestyPropertyMap = pgTable("guesty_property_map", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().unique(),

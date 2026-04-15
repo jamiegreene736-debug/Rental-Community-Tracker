@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is **NexStay** — a property research and management dashboard for bundled vacation rental listings. It manages 35+ cataloged multi-unit vacation rental properties, allowing operators to combine individually-owned units in the same community into single large-group listings. Key features include: a sortable/filterable property dashboard, a 5-step Add New Community wizard (research → unit selection → photos → listing draft), an Availability Scanner, a Photo Audit tool, a Buy-In Tracker, and **Guesty API integration** for building/publishing listings. The tool is rebranded as NexStay throughout. All PMS integration uses **Guesty API only** — Lodgify API has been fully removed.
+This project is **NexStay** — a property research and management dashboard for bundled vacation rental listings. It manages 35+ cataloged multi-unit vacation rental properties, allowing operators to combine individually-owned units in the same community into single large-group listings. Key features include: a sortable/filterable property dashboard, a 5-step Add New Community wizard (research → unit selection → photos → listing draft), an Availability Scanner, a Photo Audit tool, a Buy-In Tracker, **Guesty API integration** for building/publishing listings, and a **Guest Inbox** with auto-approve, messaging, and automated message templates. The tool is rebranded as NexStay throughout. All PMS integration uses **Guesty API only** — Lodgify API has been fully removed.
 
 ## User Preferences
 
