@@ -194,6 +194,10 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, payload);
   }
 
+  async updateAddress(id: string, address: GuestyAddress) {
+    return this.request("PUT", `/listings/${id}`, { address });
+  }
+
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {
     return this.request("PUT", `/listings/${id}`, {
       title: descriptions.title,
@@ -384,6 +388,16 @@ class GuestyService {
       else steps.push(entry);
       onProgress(step, status, detail);
     };
+
+    if (propertyData.address) {
+      try {
+        log("address", "pending");
+        await this.updateAddress(listingId, propertyData.address);
+        log("address", "success");
+      } catch (e) {
+        log("address", "error", { error: (e as Error).message });
+      }
+    }
 
     if (propertyData.listingRooms && propertyData.listingRooms.length > 0) {
       try {

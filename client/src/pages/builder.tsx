@@ -63,11 +63,11 @@ export default function Builder() {
           caption: p.label,
           source: `Community — ${property.complexName}`,
         })),
-      ...property.units.flatMap((u) =>
+      ...property.units.flatMap((u, i) =>
         u.photos.map((p) => ({
           url: `${origin}/photos/${u.photoFolder}/${p.filename}`,
           caption: p.label,
-          source: `Unit ${u.unitNumber} (${u.bedrooms}BR)`,
+          source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         }))
       ),
       ...property.communityPhotos
@@ -107,7 +107,7 @@ export default function Builder() {
         title: property.bookingTitle,
         summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
         space: property.units
-          .map((u) => `Unit ${u.unitNumber} (${u.bedrooms}BR): ${u.longDescription}`)
+          .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
           .join("\n\n"),
         houseRules:
           "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",

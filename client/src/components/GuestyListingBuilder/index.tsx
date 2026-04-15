@@ -727,18 +727,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
               <div className="glb-tab-body">
 
                 {activeTab === "descriptions" && (
-                  descriptions
-                    ? <div>
-                        {(Object.entries(descriptions) as [string, string | undefined][]).map(([key, val]) =>
+                  <div>
+                    {propertyData?.address && (
+                      <div className="glb-desc-block">
+                        <div className="glb-desc-label">Address (sent to Guesty)</div>
+                        <div className="glb-desc-text" style={{ fontFamily: "monospace", fontSize: 12 }}>
+                          {propertyData.address.full}
+                          {propertyData.areaSquareFeet ? ` · ${propertyData.areaSquareFeet.toLocaleString()} sqft` : ""}
+                          {propertyData.bedrooms ? ` · ${propertyData.bedrooms} bed` : ""}
+                          {propertyData.bathrooms ? ` · ${propertyData.bathrooms} bath` : ""}
+                        </div>
+                      </div>
+                    )}
+                    {descriptions
+                      ? (Object.entries(descriptions) as [string, string | undefined][]).map(([key, val]) =>
                           val ? (
                             <div key={key} className="glb-desc-block">
                               <div className="glb-desc-label">{key.replace(/([A-Z])/g, " $1").trim()}</div>
                               <div className="glb-desc-text">{val}</div>
                             </div>
                           ) : null
-                        )}
-                      </div>
-                    : <div className="glb-empty">No descriptions provided</div>
+                        )
+                      : <div className="glb-empty">No descriptions provided</div>
+                    }
+                  </div>
                 )}
 
                 {activeTab === "amenities" && (
