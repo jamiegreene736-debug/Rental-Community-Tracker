@@ -13,6 +13,7 @@ export type AmenityEntry = {
 export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   // ── Essentials ────────────────────────────────────────────────────────────
   { key: "WIFI",                        label: "WiFi",                          category: "Essentials" },
+  { key: "ESSENTIALS",                  label: "Essentials (towels, soap, TP)", category: "Essentials" },
   { key: "AIR_CONDITIONING",            label: "Air Conditioning",              category: "Essentials" },
   { key: "HEATING",                     label: "Heating",                       category: "Essentials" },
   { key: "CEILING_FAN",                 label: "Ceiling Fans",                  category: "Essentials" },
@@ -140,6 +141,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
 // ─────────────────────────────────────────────────────────────────────────────
 const HAWAII_BASE = [
   "WIFI",
+  "ESSENTIALS",
   "AIR_CONDITIONING",
   "CEILING_FAN",
   "WASHER",
@@ -159,6 +161,7 @@ const HAWAII_BASE = [
   "DISHES_AND_SILVERWARE",
   "DINING_TABLE",
   "TV",
+  "CABLE_TV",
   "STREAMING_SERVICES",
   "BED_LINENS",
   "EXTRA_PILLOWS_AND_BLANKETS",
@@ -188,6 +191,7 @@ const HAWAII_BASE = [
 // Regency at Poipu Kai — resort condo, pool/spa, tennis, 10-min walk to beach
 const REGENCY_POIPU_KAI = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "HOT_TUB",
   "TENNIS_COURT",
@@ -197,7 +201,6 @@ const REGENCY_POIPU_KAI = [
   "NEAR_BEACH",
   "RESORT_ACCESS",
   "COVERED_PATIO",
-  "CABLE_TV",
 ];
 
 // Kekaha Beachfront Estate — private beachfront, ocean-direct access, private pool
@@ -233,6 +236,7 @@ const KEAUHOU_ESTATES = [
 // Mauna Kai Princeville — North Shore condo, mountain/valley views, near Princeville golf
 const MAUNA_KAI = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "HOT_TUB",
   "MOUNTAIN_VIEW",
@@ -240,12 +244,12 @@ const MAUNA_KAI = [
   "NEAR_GOLF_COURSE",
   "NEAR_BEACH",
   "RESORT_ACCESS",
-  "CABLE_TV",
 ];
 
 // Kaha Lani Resort — Kapaa oceanfront/ocean view, direct ocean access
 const KAHA_LANI = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "OCEAN_VIEW",
   "OCEAN_FRONT",
@@ -253,12 +257,12 @@ const KAHA_LANI = [
   "NEAR_BEACH",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
-  "CABLE_TV",
 ];
 
 // Lae Nani Resort — Kapaa beachfront condo resort, ocean view, pool
 const LAE_NANI = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "HOT_TUB",
   "OCEAN_VIEW",
@@ -267,12 +271,12 @@ const LAE_NANI = [
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   "GARDEN_VIEW",
-  "CABLE_TV",
 ];
 
 // Poipu Brenneckes Beachside — steps to Brenneckes Beach, shared pool, ocean nearby
 const POIPU_BEACHSIDE = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "HOT_TUB",
   "NEAR_BEACH",
@@ -280,12 +284,12 @@ const POIPU_BEACHSIDE = [
   "WATERFRONT",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
-  "CABLE_TV",
 ];
 
 // Poipu Brenneckes Oceanfront — direct oceanfront, pool, beachfront access
 const POIPU_OCEANFRONT = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "BEACHFRONT",
   "OCEAN_FRONT",
@@ -294,12 +298,12 @@ const POIPU_OCEANFRONT = [
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   "BBQ_GRILL",
-  "CABLE_TV",
 ];
 
 // Kaiulani of Princeville — North Shore condo, mountain & valley views, near golf
 const KAIULANI = [
   ...HAWAII_BASE,
+  "ELEVATOR",
   "POOL",
   "HOT_TUB",
   "MOUNTAIN_VIEW",
@@ -307,10 +311,10 @@ const KAIULANI = [
   "NEAR_GOLF_COURSE",
   "NEAR_BEACH",
   "RESORT_ACCESS",
-  "CABLE_TV",
 ];
 
 // Pili Mai at Poipu — resort townhomes, AC throughout, pool, steps to Poipu Beach
+// Townhomes are 2–3 stories — no elevator
 const PILI_MAI = [
   ...HAWAII_BASE,
   "POOL",
@@ -319,7 +323,6 @@ const PILI_MAI = [
   "GARDEN_VIEW",
   "GARDEN",
   "RESORT_ACCESS",
-  "CABLE_TV",
   "COVERED_PATIO",
 ];
 
