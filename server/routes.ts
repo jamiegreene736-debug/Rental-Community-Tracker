@@ -1752,6 +1752,50 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/push-descriptions
+  // POST /api/builder/push-compliance — pushes TMK and TAT license to Guesty's publicDescription.notes
+  app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
+    const { listingId, taxMapKey, tatLicense } = req.body as {
+      listingId: string;
+      taxMapKey?: string;
+      tatLicense?: string;
+    };
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+
+    const notesText = [
+      taxMapKey ? `Tax Map Key (TMK): ${taxMapKey}` : null,
+      tatLicense ? `Transient Accommodations Tax License: ${tatLicense}` : null,
+    ].filter(Boolean).join("\n");
+
+    if (!notesText) return res.status(400).json({ error: "taxMapKey or tatLicense required" });
+
+    console.log(`[push-compliance] listing ${listingId} notes:`, notesText);
+    try {
+      await guestyRequest("PUT", `/listings/${listingId}`, {
+        publicDescription: { notes: notesText },
+      });
+      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const saved = (fetched.publicDescription as Record<string, string> | undefined)?.notes ?? "";
+      const verified = saved.includes(taxMapKey ?? "") || saved.includes(tatLicense ?? "");
+      console.log(`[push-compliance] verified=${verified}, notes preview: "${saved.slice(0, 100)}"`);
+      return res.json({ success: true, verified, savedNotes: saved });
+    } catch (err: any) {
+      console.error(`[push-compliance] error:`, err.message);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET /api/builder/inspect-listing?listingId=xxx  — returns raw Guesty listing JSON
+  app.get("/api/builder/inspect-listing", async (req: Request, res: Response) => {
+    const { listingId } = req.query as { listingId?: string };
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    try {
+      const data = await guestyRequest("GET", `/listings/${listingId}`);
+      return res.json(data);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Pushes publicDescriptions fields to a Guesty listing via server-side guestyRequest.
   // Returns { success, sent, response?, error? } for debugging.
   app.post("/api/builder/push-descriptions", async (req: Request, res: Response) => {
@@ -1785,7 +1829,7 @@ export async function registerRoutes(
     if (descriptions.houseRules)   publicDescriptions.houseRules   = descriptions.houseRules;
 
     if (Object.keys(publicDescriptions).length > 0) {
-      payload.publicDescriptions = publicDescriptions;
+      payload.publicDescription = publicDescriptions;
     }
 
     console.log(`[push-descriptions] PUT /listings/${listingId}`, JSON.stringify(payload).slice(0, 300) + "...");
@@ -1794,12 +1838,12 @@ export async function registerRoutes(
       await guestyRequest("PUT", `/listings/${listingId}`, payload);
 
       // Immediately GET the listing back to verify what Guesty actually stored
-      const fetched = await guestyRequest("GET", `/listings/${listingId}?fields=publicDescriptions,nickname,title`) as Record<string, unknown>;
-      const savedDesc = fetched.publicDescriptions as Record<string, string> | undefined;
+      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const savedDesc = fetched.publicDescription as Record<string, string> | undefined;
       const savedNickname = fetched.nickname as string | undefined;
       const savedTitle = fetched.title as string | undefined;
 
-      console.log(`[push-descriptions] GET after PUT — nickname: "${savedNickname}", publicDescriptions keys: ${JSON.stringify(Object.keys(savedDesc ?? {}))}`);
+      console.log(`[push-descriptions] GET after PUT — nickname: "${savedNickname}", publicDescription keys: ${JSON.stringify(Object.keys(savedDesc ?? {}))}`);
       console.log(`[push-descriptions] summary preview: "${String(savedDesc?.summary ?? "").slice(0, 80)}"`);
 
       const summaryWasSaved = !!(savedDesc?.summary && savedDesc.summary.length > 10);

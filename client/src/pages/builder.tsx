@@ -103,6 +103,8 @@ export default function Builder() {
       timezone: "Pacific/Honolulu",
       areaSquareFeet: totalSqft || undefined,
       listingRooms: listingRooms.length > 0 ? listingRooms : undefined,
+      taxMapKey: property.taxMapKey,
+      tatLicense: property.tatLicense,
       descriptions: {
         title: property.bookingTitle,
         summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,

@@ -204,6 +204,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  const [compliancePushState, setCompliancePushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
+  const [compliancePushError, setCompliancePushError] = useState<string | null>(null);
 
   useEffect(() => {
     setEditableTitle(propertyData?.descriptions?.title ?? "");
@@ -798,6 +800,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     }
   }, [effectivePropertyData, selectedId, descPushState, toast]);
 
+  const pushCompliance = useCallback(async () => {
+    if (!selectedId || compliancePushState === "pushing") return;
+    const tmk = effectivePropertyData?.taxMapKey;
+    const tat = effectivePropertyData?.tatLicense;
+    if (!tmk && !tat) return;
+    setCompliancePushState("pushing");
+    setCompliancePushError(null);
+    try {
+      const res = await fetch("/api/builder/push-compliance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: selectedId, taxMapKey: tmk, tatLicense: tat }),
+      });
+      const data = await res.json() as { success: boolean; error?: string; verified?: boolean };
+      if (!res.ok || !data.success) {
+        setCompliancePushState("error");
+        setCompliancePushError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        setCompliancePushState("success");
+        toast({ title: "Compliance info pushed to Guesty", description: "TMK and TAT License saved in listing notes." });
+      }
+    } catch (e) {
+      setCompliancePushState("error");
+      setCompliancePushError((e as Error).message);
+    }
+  }, [effectivePropertyData, selectedId, compliancePushState, toast]);
+
   const [syncingDetails, setSyncingDetails] = useState(false);
   const handleSyncDetails = useCallback(async () => {
     if (!selectedId || syncingDetails || building) return;
@@ -1149,6 +1178,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             <span style={{ fontSize: 11, color: "#10b981" }}>
                               Summary, Space, Neighborhood & other fields updated in Guesty
                             </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Compliance & Registration Section */}
+                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense) && (
+                      <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                          <span>🏛</span> Compliance &amp; Registration
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                              Tax Map Key (TMK)
+                            </div>
+                            <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                              data-testid="text-tmk-value">
+                              <span>{effectivePropertyData.taxMapKey ?? "—"}</span>
+                              {effectivePropertyData.taxMapKey && (
+                                <button
+                                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.taxMapKey!); toast({ title: "Copied TMK" }); }}
+                                  title="Copy to clipboard"
+                                >📋</button>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                              TAT License Number
+                            </div>
+                            <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                              data-testid="text-tat-value">
+                              <span>{effectivePropertyData.tatLicense ?? "—"}</span>
+                              {effectivePropertyData.tatLicense && (
+                                <button
+                                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.tatLicense!); toast({ title: "Copied TAT License" }); }}
+                                  title="Copy to clipboard"
+                                >📋</button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <button
+                            className="glb-btn"
+                            disabled={!selectedId || compliancePushState === "pushing"}
+                            onClick={pushCompliance}
+                            data-testid="btn-push-compliance"
+                            style={{
+                              background: compliancePushState === "success" ? "#10b981" : compliancePushState === "error" ? "#ef4444" : "#0f766e",
+                              color: "#fff",
+                              opacity: !selectedId || compliancePushState === "pushing" ? 0.6 : 1,
+                            }}
+                          >
+                            {compliancePushState === "pushing" ? "Pushing…" : compliancePushState === "success" ? "✓ Pushed to Guesty" : compliancePushState === "error" ? "✗ Failed — Retry" : "Push Compliance to Guesty"}
+                          </button>
+                          {!selectedId && <span style={{ fontSize: 11, color: "var(--muted-foreground)" }}>Select or build a listing first</span>}
+                          {compliancePushState === "error" && compliancePushError && (
+                            <span style={{ fontSize: 11, color: "#ef4444" }}>{compliancePushError}</span>
+                          )}
+                          {compliancePushState === "success" && (
+                            <span style={{ fontSize: 11, color: "#10b981" }}>TMK &amp; TAT License saved to Guesty listing notes</span>
                           )}
                         </div>
                       </div>

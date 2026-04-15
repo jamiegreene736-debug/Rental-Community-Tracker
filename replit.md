@@ -50,6 +50,8 @@ Preferred communication style: Simple, everyday language.
 -   **Community Photo Finder**: Searches Google Images for community-specific photos, filters irrelevant images, and allows direct saving to project folders (`/community-photo-finder`).
 -   **Add New Community Wizard** (`/add-community`): 5-step workflow to research, validate, and draft new bundled listings. Step 1: State/city selection. Step 2: SearchAPI + Claude (claude-3-5-sonnet-20241022) research with 0-100 confidence scoring. Step 3: Zillow/Homes.com unit pair selection. Step 4: Photo fetch + platform check (reverse image search). Step 5: AI-generated VRBO listing draft with legal disclosure. Saved communities appear on the main dashboard.
 -   **Legal Disclosure**: All listing `combinedDescription` fields are automatically prepended with the required two-unit disclosure language when rendered in the Lodgify prep page. The `LISTING_DISCLOSURE` constant is exported from `unit-builder-data.ts`.
+-   **Compliance & Registration**: All 22 properties in `unit-builder-data.ts` have `taxMapKey` (Hawaii TMK e.g. `4-2-015-008-0001`) and `tatLicense` (TAT License e.g. `TA-0246301`) sample values. These display in the builder's Descriptions tab under a "Compliance & Registration" section, with copy buttons and a "Push Compliance to Guesty" button (`POST /api/builder/push-compliance`) that saves them to `publicDescription.notes`.
+-   **Guesty `publicDescription` fix**: Guesty Open API v1 uses `publicDescription` (singular), NOT `publicDescriptions` (plural). All description pushes (via `updateDescriptions` in `guestyService.ts` and `POST /api/builder/push-descriptions`) now use the correct field name. A GET-after-PUT verification confirms what Guesty actually stored.
 
 ## External Dependencies
 

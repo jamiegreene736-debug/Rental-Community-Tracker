@@ -66,6 +66,8 @@ export type GuestyPropertyData = {
   timezone?: string;
   minimumAge?: number;
   areaSquareFeet?: number;
+  taxMapKey?: string;
+  tatLicense?: string;
   bedrooms?: number;
   bathrooms?: number;
   listingRooms?: GuestyRoom[];
@@ -207,7 +209,7 @@ class GuestyService {
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {
     return this.request("PUT", `/listings/${id}`, {
       title: descriptions.title,
-      publicDescriptions: {
+      publicDescription: {
         summary: descriptions.summary,
         space: descriptions.space,
         access: descriptions.access,

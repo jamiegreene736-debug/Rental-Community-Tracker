@@ -33,6 +33,8 @@ export type PropertyUnitBuilder = {
   combinedDescription: string;
   neighborhood?: string;
   transit?: string;
+  taxMapKey?: string;
+  tatLicense?: string;
   units: Unit[];
   hasPhotos: boolean;
   communityPhotos: CommunityPhoto[];
@@ -565,7 +567,9 @@ All guests enjoy resort amenities including a sparkling pool, hot tub, tennis an
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-008-0001",
+    tatLicense: "TA-0234501",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -655,7 +659,9 @@ All guests enjoy resort amenities including a swimming pool, hot tub, tennis and
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-004-0002",
+    tatLicense: "TA-0234502",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -725,7 +731,9 @@ All guests enjoy resort amenities including a sparkling pool, hot tub, tennis an
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-003-0001",
+    tatLicense: "TA-0234503",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -815,7 +823,9 @@ All guests enjoy resort amenities including a crystal-clear pool, hot tub, tenni
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-005-0001",
+    tatLicense: "TA-0234504",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -883,7 +893,9 @@ All guests enjoy resort amenities including the swimming pool, hot tub, tennis a
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-006-0001",
+    tatLicense: "TA-0234505",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -951,7 +963,9 @@ Both homes share the same pristine beachfront property with miles of white sand 
 Important: This listing represents a managed beachfront estate property. Photos are representative and individual decor and furnishings may vary. Your specific accommodation details will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above.`,
     neighborhood: "Kekaha's West Side offers one of Hawaii's longest and most uncrowded white sand beaches stretching for miles with virtually no development in sight. It's a genuinely local Kauai experience away from resort crowds. Waimea Canyon — the \"Grand Canyon of the Pacific\" — is a 30-minute drive and an absolute must-see. Polihale State Park's remote beach is accessible nearby. Waimea Town is 10 minutes away for dining, groceries, and local color. The Russian Fort ruins and Captain Cook landing site monument are also in Waimea.",
     transit: "A rental car is essential on the West Side. Lihue Airport is approximately 45 minutes east. Waimea Canyon and Kokee State Park are 30 minutes by car. Polihale State Park requires a 4WD-friendly road. The Kauai Bus runs along the main highway but is limited in frequency. Rideshare is available but sparse in this area.",
-        hasPhotos: true,
+        taxMapKey: "4-1-009-001-0001",
+    tatLicense: "TA-0224101",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KEKAHA,
     communityPhotoFolder: "community-kekaha-estate",
     units: [
@@ -1019,7 +1033,9 @@ The private estate grounds offer a truly unique Hawaiian experience with direct 
 Important: This listing represents a managed beachfront estate property. Photos are representative and individual decor and furnishings may vary. Your specific accommodation details will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above.`,
     neighborhood: "Kekaha's West Side offers one of Hawaii's longest and most uncrowded white sand beaches stretching for miles with virtually no development in sight. It's a genuinely local Kauai experience away from resort crowds. Waimea Canyon — the \"Grand Canyon of the Pacific\" — is a 30-minute drive and an absolute must-see. Polihale State Park's remote beach is accessible nearby. Waimea Town is 10 minutes away for dining, groceries, and local color. The Russian Fort ruins and Captain Cook landing site monument are also in Waimea.",
     transit: "A rental car is essential on the West Side. Lihue Airport is approximately 45 minutes east. Waimea Canyon and Kokee State Park are 30 minutes by car. Polihale State Park requires a 4WD-friendly road. The Kauai Bus runs along the main highway but is limited in frequency. Rideshare is available but sparse in this area.",
-        hasPhotos: true,
+        taxMapKey: "4-1-009-001-0002",
+    tatLicense: "TA-0224102",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KEKAHA,
     communityPhotoFolder: "community-kekaha-estate",
     units: [
@@ -1087,7 +1103,9 @@ Located in exclusive Keauhou Estates near Keauhou Bay (manta ray night snorkelin
 Important: This listing represents a managed estate property. Photos are representative and individual decor and furnishings may vary. Your specific accommodation details will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above.`,
     neighborhood: "Ali'i Drive runs through the heart of Keauhou and Kailua-Kona, lined with oceanfront restaurants, snorkel spots, and historic Hawaiian sites. Kahaluu Beach Park — the Big Island's most popular snorkeling spot with sea turtles virtually guaranteed — is steps away. Magic Sands Beach (White Sands Beach) is minutes north. Kailua-Kona's waterfront offers diverse dining, fishing charters, the Kona Farmers Market, and historic Hulihe'e Palace. The vibrant Kona coffee belt and Holualoa artist village are a short drive up the hill.",
     transit: "A rental car is recommended for exploring the Big Island. Kona International Airport (KOA) is about 15 minutes north by car. Kailua-Kona town is a 5-10 minute drive or a scenic walk along Ali'i Drive. Hawaii Volcanoes National Park is approximately 90 minutes south — a must-do day trip. Mauna Kea summit is about 2 hours away. The Hele-On Bus provides limited public transport on the Big Island.",
-        hasPhotos: true,
+        taxMapKey: "3-7-011-006-0001",
+    tatLicense: "TA-0189201",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KEAUHOU,
     communityPhotoFolder: "community-keauhou-estates",
     units: [
@@ -1153,7 +1171,9 @@ All guests enjoy resort amenities including a sparkling pool, hot tub, tennis an
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-009-0001",
+    tatLicense: "TA-0234506",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -1221,7 +1241,9 @@ Both units enjoy access to Mauna Kai's shared pool and hot tub. Hideaways Beach 
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Princeville perches atop dramatic cliffs on Kauai's North Shore with sweeping views of Hanalei Bay and the emerald peaks of the Napali Coast. Hanalei Town — 10 minutes away — is a charming beachside village with boutique surf shops, farm-to-table restaurants, and the iconic Hanalei Pier. Tunnels Beach (Makua) for snorkeling and Haena State Park (Kalalau Trail trailhead) are 20 minutes west. The Princeville Makai Golf Course, Queen's Bath tide pools, and Anini Beach are all nearby.",
     transit: "A rental car is essential on the North Shore. Lihue Airport is approximately 45 minutes south. Hanalei Town is 10 minutes west. Note that one-lane bridges along the North Shore road naturally slow traffic — allow extra time for exploring. The road ends at Haena State Park — advance reservations are required for the parking lot. Rideshare is available but limited on the North Shore.",
-        hasPhotos: true,
+        taxMapKey: "4-5-004-002-0001",
+    tatLicense: "TA-0267801",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_MAUNA_KAI,
     communityPhotoFolder: "community-mauna-kai",
     units: [
@@ -1289,7 +1311,9 @@ Both units enjoy access to Mauna Kai's shared pool and hot tub. Princeville's co
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Princeville perches atop dramatic cliffs on Kauai's North Shore with sweeping views of Hanalei Bay and the emerald peaks of the Napali Coast. Hanalei Town — 10 minutes away — is a charming beachside village with boutique surf shops, farm-to-table restaurants, and the iconic Hanalei Pier. Tunnels Beach (Makua) for snorkeling and Haena State Park (Kalalau Trail trailhead) are 20 minutes west. The Princeville Makai Golf Course, Queen's Bath tide pools, and Anini Beach are all nearby.",
     transit: "A rental car is essential on the North Shore. Lihue Airport is approximately 45 minutes south. Hanalei Town is 10 minutes west. Note that one-lane bridges along the North Shore road naturally slow traffic — allow extra time for exploring. The road ends at Haena State Park — advance reservations are required for the parking lot. Rideshare is available but limited on the North Shore.",
-        hasPhotos: true,
+        taxMapKey: "4-5-004-002-0002",
+    tatLicense: "TA-0267802",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_MAUNA_KAI,
     communityPhotoFolder: "community-mauna-kai",
     units: [
@@ -1359,7 +1383,9 @@ All guests enjoy resort amenities including a shimmering pool, hot tub, tennis a
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-002-0001",
+    tatLicense: "TA-0234507",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -1449,7 +1475,9 @@ Kaha Lani Resort features a pool, hot tub, and BBQ area. The resort sits directl
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Kaha Lani Resort sits directly on the Coconut Coast in Kapaa, steps from Lydgate Beach Park — one of Kauai's best family beaches featuring a protected ocean swimming lagoon, snorkeling, and the beloved Kamalani Playground. The scenic Kauai Path coastal bike trail runs past the property, connecting Kapaa Town and the surrounding coast. Kapaa Town is 5 minutes north with eclectic local dining, farmers markets, and boutique shops. Wailua Falls, Opaeka'a Falls, and Wailua River kayaking are all within 15 minutes inland.",
     transit: "The Coconut Coast location is Kauai's most central — Lihue Airport is about 15 minutes south, the North Shore (Hanalei) is 40 minutes north, and the South Shore (Poipu) is about 40 minutes south. A rental car is recommended, though groceries and dining are walkable in Kapaa. The Kauai Path bike trail runs right outside the resort. Rideshare (Lyft) and The Kauai Bus are both available in this area.",
-        hasPhotos: true,
+        taxMapKey: "4-3-015-013-0001",
+    tatLicense: "TA-0246301",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KAHA_LANI,
     communityPhotoFolder: "community-kaha-lani",
     units: [
@@ -1515,7 +1543,9 @@ Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfe
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Lae Nani Resort occupies a prime oceanfront position on the Coconut Coast in Kapaa, with a private tidal pool area and direct ocean access. The Kauai Path coastal bike trail passes by the property. Kapaa Town — minutes away — offers diverse restaurants, the Saturday morning farmers market, boutique shopping, and a lively local vibe. Wailua River kayaking, Wailua Falls, and Opaeka'a Falls scenic overlook are 10-15 minutes inland. Coconut Marketplace and Kauai Village Shopping Center are nearby for convenience.",
     transit: "Lihue Airport is about 15 minutes south. The Coconut Coast sits midway between Kauai's North Shore and South Shore — each roughly 35-40 minutes by car. A rental car is recommended. The Kauai Path bike trail connects the coastal area for car-free exploring. Rideshare (Lyft) and The Kauai Bus are both accessible from Kapaa.",
-        hasPhotos: true,
+        taxMapKey: "4-4-008-001-0001",
+    tatLicense: "TA-0251101",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_LAE_NANI,
     communityPhotoFolder: "community-lae-nani",
     units: [
@@ -1579,7 +1609,9 @@ Located in the gated Keauhou Estates community with 24-hour security. Near Keauh
 Important: This listing represents a managed estate property. Photos are representative and individual decor and furnishings may vary. Your specific accommodation details will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above.`,
     neighborhood: "Ali'i Drive runs through the heart of Keauhou and Kailua-Kona, lined with oceanfront restaurants, snorkel spots, and historic Hawaiian sites. Kahaluu Beach Park — the Big Island's most popular snorkeling spot with sea turtles virtually guaranteed — is steps away. Magic Sands Beach (White Sands Beach) is minutes north. Kailua-Kona's waterfront offers diverse dining, fishing charters, the Kona Farmers Market, and historic Hulihe'e Palace. The vibrant Kona coffee belt and Holualoa artist village are a short drive up the hill.",
     transit: "A rental car is recommended for exploring the Big Island. Kona International Airport (KOA) is about 15 minutes north by car. Kailua-Kona town is a 5-10 minute drive or a scenic walk along Ali'i Drive. Hawaii Volcanoes National Park is approximately 90 minutes south — a must-do day trip. Mauna Kea summit is about 2 hours away. The Hele-On Bus provides limited public transport on the Big Island.",
-        hasPhotos: true,
+        taxMapKey: "3-7-011-007-0001",
+    tatLicense: "TA-0189202",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KEAUHOU,
     communityPhotoFolder: "community-keauhou-estates",
     units: [
@@ -1643,7 +1675,9 @@ The location is unbeatable - Brennecke's Beach for world-class body surfing, Poi
 Important: This listing represents our managed portfolio of similar properties. Your specific accommodation will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual decor and furnishings may vary.`,
     neighborhood: "This property sits just steps from Brenneckes Beach, one of Kauai's best bodyboarding spots, and a short walk from Poipu Beach Park, where sea turtles rest on the sand and excellent snorkeling awaits. Poipu is the sunniest part of Kauai with rare rain and warm year-round temperatures. Koloa Town — Kauai's oldest plantation village — is 5 minutes away for local dining and boutique shopping. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens are all nearby.",
     transit: "A rental car is recommended on the South Shore. Lihue Airport is approximately 30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon is about 45 minutes west. Rideshare (Lyft) is available but less frequent than in larger cities. The Kauai Bus serves the South Shore on limited routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-017-003-0001",
+    tatLicense: "TA-0239101",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_POIPU_BEACHSIDE,
     communityPhotoFolder: "community-poipu-beachside",
     units: [
@@ -1709,7 +1743,9 @@ Anini Beach below offers some of the calmest, clearest waters on Kauai, ideal fo
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Kaiulani of Princeville places you at the gateway to Kauai's spectacular North Shore. Hanalei Bay, with its sweeping crescent beach and mountain backdrop, is 10 minutes west. Hanalei Town offers charming surf shops, farm-to-table cafes, and the iconic Hanalei Pier. Tunnels Beach and Haena State Park (Kalalau Trail trailhead) are 20 minutes further. Anini Beach — popular for windsurfing and calm swimming — and the Princeville Makai Golf Course are minutes away.",
     transit: "A rental car is essential for the North Shore. Lihue Airport is approximately 45 minutes south. Hanalei Town is a 10-minute drive west. One-lane bridges along the North Shore road are part of the charm — allow extra time. The road ends at Haena State Park (advance parking reservations required). Rideshare is available but infrequent on the North Shore.",
-        hasPhotos: true,
+        taxMapKey: "4-5-003-004-0001",
+    tatLicense: "TA-0268401",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_KAIULANI,
     communityPhotoFolder: "community-kaiulani",
     units: [
@@ -1775,7 +1811,9 @@ Walk to Brennecke's Beach, Poipu Beach Park, or Shipwreck Beach in minutes. This
 Important: This listing represents our managed portfolio of similar properties. Your specific accommodation will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual decor and furnishings may vary.`,
     neighborhood: "This oceanfront Poipu location puts you steps from Brenneckes Beach — one of Kauai's top bodyboarding spots — and within walking distance of Poipu Beach Park with its sea turtles, excellent snorkeling, and sheltered family swimming. Poipu is consistently the sunniest area on Kauai. Koloa Town and its historic plantation village are 5 minutes away for restaurants and shopping. Spouting Horn blowhole, the National Tropical Botanical Garden, and the Grand Hyatt Kauai are all nearby.",
     transit: "A rental car is recommended on the South Shore. Lihue Airport is approximately 30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon is 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available and the Kauai Bus serves the area on limited routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-017-003-0002",
+    tatLicense: "TA-0239102",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_POIPU_OCEANFRONT,
     communityPhotoFolder: "community-poipu-oceanfront",
     units: [
@@ -1839,7 +1877,9 @@ Walk to Poipu Beach, consistently rated one of Hawaii's best. Nearby: Poipu Shop
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Pili Mai is a newer luxury resort community in Poipu, Kauai's premier South Shore destination. Poipu Beach Park, Brenneckes Beach, and Shipwreck Beach are all within a short drive. The Grand Hyatt Kauai Resort and its restaurants, pools, and spa are nearby. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, local restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole and the National Tropical Botanical Garden are also close.",
     transit: "A rental car is recommended. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon is about 45 minutes west. The North Shore is about an hour's drive. Rideshare (Lyft) is available and the Kauai Bus provides limited public transport on the South Shore.",
-        hasPhotos: true,
+        taxMapKey: "4-2-014-005-0001",
+    tatLicense: "TA-0241201",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
     units: [
@@ -1903,7 +1943,9 @@ Walk to Poipu Beach from the resort. Nearby: Poipu Shopping Village, Kukui'ula V
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Pili Mai is a newer luxury resort community in Poipu, Kauai's premier South Shore destination. Poipu Beach Park, Brenneckes Beach, and Shipwreck Beach are all within a short drive. The Grand Hyatt Kauai Resort and its restaurants, pools, and spa are nearby. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, local restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole and the National Tropical Botanical Garden are also close.",
     transit: "A rental car is recommended. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon is about 45 minutes west. The North Shore is about an hour's drive. Rideshare (Lyft) is available and the Kauai Bus provides limited public transport on the South Shore.",
-        hasPhotos: true,
+        taxMapKey: "4-2-014-005-0002",
+    tatLicense: "TA-0241202",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
     units: [
@@ -1971,7 +2013,9 @@ All guests enjoy resort amenities including a pool, hot tub, tennis and pickleba
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-007-0001",
+    tatLicense: "TA-0234509",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
@@ -2039,7 +2083,9 @@ All guests enjoy resort amenities including a swimming pool, hot tub, tennis and
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        hasPhotos: true,
+        taxMapKey: "4-2-015-001-0003",
+    tatLicense: "TA-0234508",
+    hasPhotos: true,
     communityPhotos: COMMUNITY_REGENCY,
     communityPhotoFolder: "community-regency-poipu-kai",
     units: [
