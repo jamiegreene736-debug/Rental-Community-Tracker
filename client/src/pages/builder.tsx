@@ -82,7 +82,7 @@ export default function Builder() {
     const parsedAddr = parseAddress(property.address);
 
     return {
-      nickname: property.propertyName,
+      nickname: property.propertyName.slice(0, 40).trimEnd(),
       title: property.bookingTitle,
       address: {
         full: parsedAddr.full,

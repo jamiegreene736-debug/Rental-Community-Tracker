@@ -163,7 +163,7 @@ class GuestyService {
 
   async createListing(data: GuestyPropertyData) {
     const payload: Record<string, unknown> = {
-      nickname: data.nickname,
+      nickname: (data.nickname || "").slice(0, 40).trimEnd(),
       title: data.title,
       address: data.address,
       accommodates: data.accommodates,
