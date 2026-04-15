@@ -324,6 +324,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
   const [savingToGuesty, setSavingToGuesty] = useState(false);
   const [doUpscale, setDoUpscale] = useState(true);
+  const pushAbortRef = useRef<AbortController | null>(null);
+
+  const cancelPush = useCallback(() => {
+    pushAbortRef.current?.abort();
+    pushAbortRef.current = null;
+    setSavingToGuesty(false);
+    setUpscalePhase("idle");
+    setUpscaleCurrent(0);
+    setUpscaleTotal(0);
+    setPushResults([]);
+    setUpscaleError(null);
+  }, []);
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
     if (!selectedId || !photos?.length) return;
@@ -348,6 +360,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       return { localPath, caption: p.caption || "" };
     });
 
+    const controller = new AbortController();
+    pushAbortRef.current = controller;
+
     try {
       // Streaming NDJSON: server sends one JSON line per photo as it completes.
       // This keeps the HTTP connection alive indefinitely — no timeout possible.
@@ -355,6 +370,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ guestyListingId: selectedId, photos: photosPayload, upscale: withUpscale }),
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
@@ -420,8 +436,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         }
       }
     } catch (err: any) {
+      if (err?.name === "AbortError") {
+        // User cancelled — state is already reset by cancelPush()
+        return;
+      }
       setUpscaleError(err?.message || "Network error — could not reach server");
       setUpscalePhase("error");
+    } finally {
+      pushAbortRef.current = null;
     }
   }, [selectedId]);
 
@@ -1217,28 +1239,46 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 const failed = pushResults.filter(r => !r.success);
                                 const succeeded = pushResults.filter(r => r.success);
                                 return (
-                                  <div style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
-                                    ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
-                                    {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
-                                    {failed.length > 0 && ` — ${failed.length} failed`}
+                                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                    <span style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
+                                      ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
+                                      {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
+                                      {failed.length > 0 && ` — ${failed.length} failed`}
+                                    </span>
+                                    <button onClick={cancelPush} style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                                      Reset
+                                    </button>
                                   </div>
                                 );
                               })()}
                               {upscalePhase === "error" && (
-                                <div style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                  <span style={{ fontSize: 13, color: "#dc2626" }}>✗ {upscaleError}</span>
+                                  <button onClick={cancelPush} style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                                    Reset
+                                  </button>
+                                </div>
                               )}
                             </>
                           ) : (
                             <div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                                 <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
-                                <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500 }}>
+                                <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500, flex: 1 }}>
                                   {savingToGuesty
                                     ? `Saving ${upscaleCurrent} photos to Guesty…`
                                     : upscaleCurrent > 0
                                     ? `${upscaleCurrent} / ${upscaleTotal} photos uploaded${upscaledCount > 0 ? ` (${upscaledCount} upscaled)` : ""}…`
                                     : `Starting — processing ${upscaleTotal} photos…`}
                                 </span>
+                                {!savingToGuesty && (
+                                  <button
+                                    onClick={cancelPush}
+                                    style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}
+                                  >
+                                    Cancel
+                                  </button>
+                                )}
                               </div>
                               <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
                                 <div style={{
