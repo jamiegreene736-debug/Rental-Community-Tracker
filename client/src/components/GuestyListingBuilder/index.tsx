@@ -322,6 +322,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [upscaledCount, setUpscaledCount] = useState(0);
   const [upscaleError, setUpscaleError] = useState<string | null>(null);
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
+  const [savingToGuesty, setSavingToGuesty] = useState(false);
   const [doUpscale, setDoUpscale] = useState(true);
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
@@ -332,6 +333,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setUpscaledCount(0);
     setUpscaleError(null);
     setPushResults([]);
+    setSavingToGuesty(false);
 
     const origin = window.location.origin;
 
@@ -398,14 +400,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                 success: event.success ?? false,
                 error: event.error,
               }]);
+            } else if (event.type === "saving") {
+              setSavingToGuesty(true);
             } else if (event.type === "done") {
+              setSavingToGuesty(false);
               setUpscaledCount(event.upscaledCount ?? 0);
+              const guestyError = (event as any).guestyError as string | undefined;
+              if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
               setUpscalePhase(
                 (event.successCount ?? 0) === 0 && (event.total ?? 0) > 0
                   ? "error"
                   : "done"
               );
-              if ((event.successCount ?? 0) === 0 && (event.total ?? 0) > 0) {
+              if ((event.successCount ?? 0) === 0 && (event.total ?? 0) > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");
               }
             }
@@ -1226,22 +1233,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                                 <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#2563eb", animation: "glb-blink 1s infinite" }} />
                                 <span style={{ fontSize: 13, color: "#2563eb", fontWeight: 500 }}>
-                                  {upscaleCurrent > 0
-                                    ? `${upscaleCurrent} / ${upscaleTotal} photos pushed${upscaledCount > 0 ? ` (${upscaledCount} upscaled)` : ""}…`
+                                  {savingToGuesty
+                                    ? `Saving ${upscaleCurrent} photos to Guesty…`
+                                    : upscaleCurrent > 0
+                                    ? `${upscaleCurrent} / ${upscaleTotal} photos uploaded${upscaledCount > 0 ? ` (${upscaledCount} upscaled)` : ""}…`
                                     : `Starting — processing ${upscaleTotal} photos…`}
                                 </span>
                               </div>
                               <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
                                 <div style={{
-                                  height: "100%", borderRadius: 3, background: "#2563eb",
-                                  width: upscaleTotal > 0 ? `${Math.round((upscaleCurrent / upscaleTotal) * 100)}%` : "5%",
+                                  height: "100%", borderRadius: 3, background: savingToGuesty ? "#16a34a" : "#2563eb",
+                                  width: savingToGuesty ? "100%" : upscaleTotal > 0 ? `${Math.round((upscaleCurrent / upscaleTotal) * 100)}%` : "5%",
                                   transition: "width 0.4s ease",
                                 }} />
                               </div>
                               <div style={{ fontSize: 11, color: "#9ca3af" }}>
-                                {doUpscale
-                                  ? "Upscaling + hosting on ImgBB + pushing to Guesty — ~30s per photo"
-                                  : "Hosting on ImgBB + pushing to Guesty — a few seconds per photo"}
+                                {savingToGuesty
+                                  ? "Sending all photos to Guesty in one request…"
+                                  : doUpscale
+                                  ? "Upscaling + hosting on ImgBB — ~30s per photo, then saving to Guesty"
+                                  : "Hosting on ImgBB — a few seconds per photo, then saving to Guesty"}
                               </div>
                               {/* Live per-photo results */}
                               {pushResults.length > 0 && (

@@ -1735,8 +1735,14 @@ export async function registerRoutes(
       res.write(JSON.stringify(obj) + "\n");
     };
 
-    let successCount = 0;
     let upscaledCount = 0;
+
+    // Phase 1: Upload each photo to ImgBB (stream per-photo progress).
+    // Collect successful { original, caption } objects for a single Guesty PUT at the end.
+    // Guesty's v1 API does NOT have POST /listings/{id}/pictures — pictures are set via
+    // PUT /listings/{id} with a "pictures" array where each item uses the "original" field.
+    const collected: { original: string; caption: string }[] = [];
+    const perPhotoResults: Array<{ index: number; localPath: string; success: boolean; url?: string; wasUpscaled?: boolean; error?: string }> = [];
 
     for (let i = 0; i < photos.length; i++) {
       const { localPath, caption } = photos[i];
@@ -1745,6 +1751,7 @@ export async function registerRoutes(
       // Validate path
       if (!localPath || !localPath.startsWith("/photos/")) {
         emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "Invalid path" });
+        perPhotoResults.push({ index, localPath, success: false, error: "Invalid path" });
         continue;
       }
 
@@ -1757,6 +1764,7 @@ export async function registerRoutes(
         rawData = fs.readFileSync(fullPath);
       } catch {
         emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "File not found on server" });
+        perPhotoResults.push({ index, localPath, success: false, error: "File not found" });
         continue;
       }
 
@@ -1790,29 +1798,45 @@ export async function registerRoutes(
         if (!imgbbResp.ok) {
           const errText = await imgbbResp.text();
           emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB ${imgbbResp.status}: ${errText.slice(0, 100)}` });
+          perPhotoResults.push({ index, localPath, success: false, error: `ImgBB ${imgbbResp.status}` });
           continue;
         }
         const imgbbData = await imgbbResp.json() as any;
         publicUrl = imgbbData?.data?.url;
         if (!publicUrl) {
           emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "ImgBB returned no URL" });
+          perPhotoResults.push({ index, localPath, success: false, error: "ImgBB no URL" });
           continue;
         }
       } catch (e: any) {
         emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB error: ${e.message}` });
+        perPhotoResults.push({ index, localPath, success: false, error: e.message });
         continue;
       }
 
-      // Push to Guesty: POST /listings/{id}/pictures (correct Guesty v1 API — one at a time)
+      // ImgBB upload succeeded — queue for Guesty PUT
+      if (wasUpscaled) upscaledCount++;
+      collected.push({ original: publicUrl, caption: caption || "" });
+      perPhotoResults.push({ index, localPath, success: true, url: publicUrl, wasUpscaled });
+      emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, pending: true });
+      console.log(`[push-photos] ✓ ImgBB ${index}/${photos.length} ${safePath}`);
+    }
+
+    // Phase 2: Single PUT to Guesty with all collected pictures.
+    // Guesty stores pictures via PUT /listings/{id} with pictures[].original (not url).
+    // This replaces all existing photos on the listing.
+    let successCount = 0;
+    if (collected.length > 0) {
+      emit({ type: "saving", count: collected.length });
       try {
-        await guestyRequest("POST", `/listings/${guestyListingId}/pictures`, { url: publicUrl, caption: caption || "" });
-        successCount++;
-        if (wasUpscaled) upscaledCount++;
-        emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled });
-        console.log(`[push-photos] ✓ ${index}/${photos.length} ${safePath}`);
+        await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
+        successCount = collected.length;
+        console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}`);
       } catch (e: any) {
-        emit({ type: "photo", index, total: photos.length, localPath, success: false, url: publicUrl, error: `Guesty: ${e.message}` });
-        console.error(`[push-photos] ✗ ${index}/${photos.length} ${safePath}: ${e.message}`);
+        console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
+        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, guestyError: e.message });
+        res.end();
+        return;
       }
     }
 
