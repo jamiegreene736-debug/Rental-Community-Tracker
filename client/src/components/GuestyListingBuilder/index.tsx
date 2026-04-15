@@ -3,6 +3,7 @@ import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG } from "@/data/guesty-amenities";
+import { useToast } from "@/hooks/use-toast";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -184,6 +185,7 @@ function statusIcon(status: string) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function GuestyListingBuilder({ propertyData, propertyId, onBuildComplete, onUpdateComplete }: Props) {
+  const { toast } = useToast();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
@@ -387,40 +389,64 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
   // ── Build new listing ──────────────────────────────────────────────────────
   const handleBuild = useCallback(async () => {
-    if (!propertyData || building) return;
+    if (!propertyData) {
+      toast({ title: "No property data", description: "Property data is missing. Try refreshing the page.", variant: "destructive" });
+      return;
+    }
+    if (building) return;
+    if (conn !== "connected") {
+      toast({ title: "Not connected to Guesty", description: "Wait for the connection to establish, then try again.", variant: "destructive" });
+      return;
+    }
+
     setBuilding(true);
     setLog([]);
     setProgress(0);
     setBuildError(null);
     setBuildSuccess(false);
 
+    toast({ title: "Creating listing on Guesty…", description: "Please wait while we build your listing." });
+
     const totalSteps = [true, !!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
     let done = 0;
 
-    const result = await guestyService.buildFullListing(propertyData, (step, status) => {
-      setLog((prev) => {
-        const entry: LogEntry = { step, status: status as "pending" | "success" | "error", icon: statusIcon(status), timestamp: new Date().toISOString() };
-        const idx = prev.findIndex((e) => e.step === step);
-        if (idx >= 0) { const next = [...prev]; next[idx] = entry; return next; }
-        return [...prev, entry];
+    let result: Awaited<ReturnType<typeof guestyService.buildFullListing>>;
+    try {
+      result = await guestyService.buildFullListing(propertyData, (step, status) => {
+        setLog((prev) => {
+          const entry: LogEntry = { step, status: status as "pending" | "success" | "error", icon: statusIcon(status), timestamp: new Date().toISOString() };
+          const idx = prev.findIndex((e) => e.step === step);
+          if (idx >= 0) { const next = [...prev]; next[idx] = entry; return next; }
+          return [...prev, entry];
+        });
+        if (status === "success" || status === "error") { done++; setProgress(Math.round((done / totalSteps) * 100)); }
       });
-      if (status === "success" || status === "error") { done++; setProgress(Math.round((done / totalSteps) * 100)); }
-    });
+    } catch (e: any) {
+      setBuilding(false);
+      setProgress(0);
+      const msg = e?.message || "Unexpected error";
+      setBuildError(msg);
+      toast({ title: "Listing creation failed", description: msg, variant: "destructive" });
+      return;
+    }
 
     setProgress(100);
     setBuilding(false);
 
-    if (!result.success || !result.listingId) {
+    if (!result.listingId) {
       const firstErr = result.errors?.[0]?.error as string | undefined;
-      setBuildError(firstErr || "Listing creation failed. Check the build log below for details.");
+      const msg = firstErr || "Listing creation failed — check the build log for details.";
+      setBuildError(msg);
+      toast({ title: "Listing creation failed", description: msg, variant: "destructive" });
     } else {
       setBuildSuccess(true);
+      toast({ title: "✓ Listing created on Guesty!", description: `ID: ${result.listingId} — it now appears in the dropdown above as a draft.` });
       const fresh = await guestyService.getListings(50, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
     }
     onBuildComplete?.({ listingId: result.listingId });
-  }, [propertyData, building, onBuildComplete]);
+  }, [propertyData, building, conn, onBuildComplete, toast]);
 
   // ── Push updates ──────────────────────────────────────────────────────────
   const handleUpdate = useCallback(async () => {
@@ -537,7 +563,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
             <button
               className="glb-btn glb-btn-primary"
               onClick={handleBuild}
-              disabled={building || conn !== "connected"}
+              disabled={building}
               data-testid="btn-build-new-listing"
               style={{ fontSize: 14, padding: "10px 20px" }}
             >
