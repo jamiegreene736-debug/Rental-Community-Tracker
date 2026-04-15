@@ -378,6 +378,114 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setUpscaleError(null);
   }, []);
 
+  // ── Cover collage: score labels → pick best outdoor + indoor → canvas → ImgBB → Guesty ──
+  type CollagePhase = "idle" | "generating" | "uploading" | "done" | "error";
+  const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
+  const [collageError, setCollageError] = useState<string | null>(null);
+  const [collagePreviewUrl, setCollagePreviewUrl] = useState<string | null>(null);
+  const [collagePicks, setCollagePicks] = useState<{ outdoor: string; indoor: string } | null>(null);
+
+  function scoreOutdoor(label: string): number {
+    const l = label.toLowerCase();
+    return (l.includes("ocean") ? 10 : 0) + (l.includes("sunrise") ? 9 : 0) +
+           (l.includes("pool") ? 8 : 0) + (l.includes("beach") ? 7 : 0) +
+           (l.includes("coastal") ? 6 : 0) + (l.includes("bay") ? 6 : 0) +
+           (l.includes("view") ? 4 : 0) + (l.includes("waterfront") ? 8 : 0) +
+           (l.includes("resort") ? 3 : 0) + (l.includes("lanai") ? 3 : 0);
+  }
+  function scoreIndoor(label: string): number {
+    const l = label.toLowerCase();
+    return (l.includes("living room") ? 9 : 0) + (l.includes("great room") ? 8 : 0) +
+           (l.includes("open kitchen") ? 7 : 0) + (l.includes("kitchen") ? 5 : 0) +
+           (l.includes("master suite") || l.includes("king master") || l.includes("master king") ? 7 : 0) +
+           (l.includes("master bedroom") ? 6 : 0) + (l.includes("ocean") ? 4 : 0) +
+           (l.includes("bright") ? 2 : 0) + (l.includes("dining") ? 3 : 0);
+  }
+
+  function pickCollagePhotos(allPhotos: GuestyPropertyData["photos"]): { outdoor: typeof allPhotos[0]; indoor: typeof allPhotos[0] } | null {
+    if (!allPhotos?.length) return null;
+    let bestOutdoor = allPhotos[0], bestOutdoorScore = -1;
+    let bestIndoor = allPhotos[0], bestIndoorScore = -1;
+    for (const p of allPhotos) {
+      const os = scoreOutdoor(p.caption || "");
+      const is_ = scoreIndoor(p.caption || "");
+      if (os > bestOutdoorScore) { bestOutdoorScore = os; bestOutdoor = p; }
+      if (is_ > bestIndoorScore) { bestIndoorScore = is_; bestIndoor = p; }
+    }
+    return { outdoor: bestOutdoor, indoor: bestIndoor };
+  }
+
+  const generateCoverCollage = useCallback(async (allPhotos: GuestyPropertyData["photos"]) => {
+    if (!selectedId) return;
+    setCollagePhase("generating");
+    setCollageError(null);
+    setCollagePreviewUrl(null);
+    setCollagePicks(null);
+
+    const picks = pickCollagePhotos(allPhotos);
+    if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
+    setCollagePicks({ outdoor: picks.outdoor.caption || picks.outdoor.url, indoor: picks.indoor.caption || picks.indoor.url });
+
+    // Load both images
+    const loadImg = (src: string): Promise<HTMLImageElement> => new Promise((res, rej) => {
+      const img = new Image(); img.crossOrigin = "anonymous";
+      img.onload = () => res(img); img.onerror = rej; img.src = src;
+    });
+
+    let outdoorImg: HTMLImageElement, indoorImg: HTMLImageElement;
+    try {
+      [outdoorImg, indoorImg] = await Promise.all([loadImg(picks.outdoor.url), loadImg(picks.indoor.url)]);
+    } catch {
+      setCollageError("Failed to load photos for collage"); setCollagePhase("error"); return;
+    }
+
+    // Draw side-by-side on canvas — 2400×1200 (2:1 landscape)
+    const W = 2400, H = 1200, half = W / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d")!;
+
+    const drawCover = (img: HTMLImageElement, x: number, w: number) => {
+      const scale = Math.max(w / img.width, H / img.height);
+      const sw = img.width * scale, sh = img.height * scale;
+      ctx.drawImage(img, x + (w - sw) / 2, (H - sh) / 2, sw, sh);
+    };
+
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, half, H); ctx.clip();
+    drawCover(outdoorImg, 0, half);
+    ctx.restore();
+
+    ctx.save(); ctx.beginPath(); ctx.rect(half, 0, half, H); ctx.clip();
+    drawCover(indoorImg, half, half);
+    ctx.restore();
+
+    // Thin divider line
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.fillRect(half - 1, 0, 2, H);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    setCollagePreviewUrl(dataUrl);
+
+    // Upload to ImgBB + set as Guesty cover
+    setCollagePhase("uploading");
+    try {
+      const resp = await fetch("/api/builder/upload-collage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64: dataUrl, listingId: selectedId }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({})) as any;
+        throw new Error(err.error || `Server error ${resp.status}`);
+      }
+      const result = await resp.json() as any;
+      setGuestyPhotoCount(result.totalPhotos);
+      setCollagePhase("done");
+    } catch (e: any) {
+      setCollageError(e.message); setCollagePhase("error");
+    }
+  }, [selectedId]);
+
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
     if (!selectedId || !photos?.length) return;
     setUpscalePhase("pushing");
@@ -1313,6 +1421,40 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                   </span>
                                 )}
                               </div>
+
+                              {/* Cover collage generator */}
+                              {selectedId && (guestyPhotoCount ?? 0) > 0 && (
+                                <div style={{ marginBottom: 10 }}>
+                                  {collagePhase === "idle" || collagePhase === "done" || collagePhase === "error" ? (
+                                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
+                                      <div>
+                                        <button
+                                          className="glb-btn"
+                                          onClick={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
+                                          disabled={collagePhase === "generating" || collagePhase === "uploading"}
+                                          style={{ fontSize: 12, background: "#f0f9ff", color: "#0369a1", border: "1px solid #bae6fd" }}
+                                        >
+                                          {collagePhase === "done" ? "↺ Regenerate Cover Collage" : "🖼 Auto-Set Cover Collage"}
+                                        </button>
+                                        {collagePicks && (
+                                          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 3 }}>
+                                            Picks: <em>{collagePicks.outdoor}</em> + <em>{collagePicks.indoor}</em>
+                                          </div>
+                                        )}
+                                        {collagePhase === "done" && <div style={{ fontSize: 11, color: "#16a34a", marginTop: 2 }}>✓ Set as cover photo in Guesty</div>}
+                                        {collagePhase === "error" && <div style={{ fontSize: 11, color: "#dc2626", marginTop: 2 }}>✗ {collageError}</div>}
+                                      </div>
+                                      {collagePreviewUrl && (
+                                        <img src={collagePreviewUrl} alt="Cover collage preview" style={{ height: 54, borderRadius: 4, border: "1px solid #e5e7eb", objectFit: "cover" }} />
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: 12, color: "#2563eb" }}>
+                                      {collagePhase === "generating" ? "⏳ Generating collage…" : "⏳ Uploading to Guesty…"}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
                               {/* Persisted last-push summary — shown after refresh */}
                               {upscalePhase === "idle" && lastPushSummary && lastPushSummary.listingId === selectedId && (

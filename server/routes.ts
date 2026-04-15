@@ -1701,6 +1701,56 @@ export async function registerRoutes(
     }
   });
 
+  // ========== BUILDER COVER COLLAGE UPLOAD ==========
+  // POST /api/builder/upload-collage
+  // Accepts { base64: string (data URL or raw base64), listingId: string }
+  // Uploads to ImgBB, prepends to Guesty listing pictures as cover photo.
+  app.post("/api/builder/upload-collage", async (req, res) => {
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    if (!imgbbKey) return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
+
+    const { base64, listingId } = req.body as { base64: string; listingId: string };
+    if (!base64 || !listingId) return res.status(400).json({ error: "base64 and listingId required" });
+
+    // Strip data URL prefix if present
+    const raw = base64.replace(/^data:image\/[a-z]+;base64,/, "");
+
+    // Upload to ImgBB
+    let collageUrl: string;
+    try {
+      const form = new FormData();
+      form.append("image", raw);
+      const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, { method: "POST", body: form });
+      if (!imgbbResp.ok) {
+        const t = await imgbbResp.text();
+        return res.status(502).json({ error: "ImgBB upload failed", detail: t.slice(0, 200) });
+      }
+      const imgbbData = await imgbbResp.json() as any;
+      collageUrl = imgbbData?.data?.url;
+      if (!collageUrl) return res.status(502).json({ error: "ImgBB returned no URL" });
+    } catch (e: any) {
+      return res.status(500).json({ error: "ImgBB error", message: e.message });
+    }
+
+    // Fetch existing pictures from Guesty, prepend collage as cover
+    try {
+      const listing = await guestyRequest("GET", `/listings/${listingId}`) as any;
+      const existing: { original: string; caption: string }[] = (listing?.pictures || []).map((p: any) => ({
+        original: p.original || p.url || "",
+        caption: p.caption || "",
+      })).filter((p: any) => p.original);
+
+      // Remove any previous collage (first photo tagged with caption "Cover Collage")
+      const withoutOldCollage = existing.filter(p => p.caption !== "Cover Collage");
+      const updated = [{ original: collageUrl, caption: "Cover Collage" }, ...withoutOldCollage];
+      await guestyRequest("PUT", `/listings/${listingId}`, { pictures: updated });
+
+      res.json({ success: true, collageUrl, totalPhotos: updated.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Guesty update failed", message: e.message });
+    }
+  });
+
   // ========== BUILDER PHOTO PUSH — streaming SSE (host on ImgBB → push to Guesty) ==========
   // POST /api/builder/push-photos
   // Streams NDJSON events as each photo completes so the connection never times out.
