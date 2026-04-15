@@ -12,8 +12,9 @@ export type AmenityEntry = {
 
 export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   // ── Essentials ────────────────────────────────────────────────────────────
-  { key: "WIFI",                        label: "WiFi",                          category: "Essentials" },
+  { key: "WIFI",                        label: "WiFi / Wireless Internet",      category: "Essentials" },
   { key: "ESSENTIALS",                  label: "Essentials (towels, soap, TP)", category: "Essentials" },
+  { key: "HANGERS",                     label: "Hangers",                       category: "Essentials" },
   { key: "AIR_CONDITIONING",            label: "Air Conditioning",              category: "Essentials" },
   { key: "HEATING",                     label: "Heating",                       category: "Essentials" },
   { key: "CEILING_FAN",                 label: "Ceiling Fans",                  category: "Essentials" },
@@ -21,7 +22,8 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "DRYER",                       label: "Dryer",                         category: "Essentials" },
   { key: "IRON",                        label: "Iron & Ironing Board",          category: "Essentials" },
   { key: "HAIR_DRYER",                  label: "Hair Dryer",                    category: "Essentials" },
-  { key: "DEDICATED_WORKSPACE",         label: "Dedicated Workspace / Desk",    category: "Essentials" },
+  { key: "DEDICATED_WORKSPACE",         label: "Laptop-Friendly Workspace",     category: "Essentials" },
+  { key: "LONG_TERM_STAYS_ALLOWED",     label: "Long-Term Stays Allowed",       category: "Essentials" },
   { key: "ELEVATOR",                    label: "Elevator Access",               category: "Essentials" },
   { key: "LUGGAGE_DROPOFF",             label: "Luggage Drop-off",              category: "Essentials" },
   { key: "KEYPAD",                      label: "Keyless Entry",                 category: "Essentials" },
@@ -30,14 +32,18 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   // ── Kitchen ───────────────────────────────────────────────────────────────
   { key: "KITCHEN",                     label: "Full Kitchen",                  category: "Kitchen" },
   { key: "REFRIGERATOR",                label: "Refrigerator",                  category: "Kitchen" },
+  { key: "FREEZER",                     label: "Freezer",                       category: "Kitchen" },
+  { key: "ICE_MAKER",                   label: "Ice Maker",                     category: "Kitchen" },
   { key: "MICROWAVE",                   label: "Microwave",                     category: "Kitchen" },
   { key: "DISHWASHER",                  label: "Dishwasher",                    category: "Kitchen" },
   { key: "STOVE",                       label: "Stove",                         category: "Kitchen" },
   { key: "OVEN",                        label: "Oven",                          category: "Kitchen" },
   { key: "COFFEE_MAKER",                label: "Coffee Maker",                  category: "Kitchen" },
+  { key: "KETTLE",                      label: "Electric Kettle",               category: "Kitchen" },
   { key: "TOASTER",                     label: "Toaster",                       category: "Kitchen" },
   { key: "BLENDER",                     label: "Blender",                       category: "Kitchen" },
   { key: "COOKING_BASICS",              label: "Cookware & Utensils",           category: "Kitchen" },
+  { key: "BAKING_SHEET",                label: "Baking Sheet",                  category: "Kitchen" },
   { key: "DISHES_AND_SILVERWARE",       label: "Dishes & Silverware",           category: "Kitchen" },
   { key: "DINING_TABLE",                label: "Dining Table",                  category: "Kitchen" },
   { key: "WINE_GLASSES",                label: "Wine Glasses",                  category: "Kitchen" },
@@ -63,13 +69,15 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "SHAMPOO",                     label: "Shampoo & Toiletries",          category: "Bathroom" },
   { key: "BODY_SOAP",                   label: "Body Soap",                     category: "Bathroom" },
   { key: "BATHTUB",                     label: "Bathtub",                       category: "Bathroom" },
-  { key: "JETTED_TUB",                  label: "Jetted / Soaking Tub",         category: "Bathroom" },
+  { key: "JETTED_TUB",                  label: "Jetted / Soaking Tub",          category: "Bathroom" },
   { key: "WALK_IN_SHOWER",              label: "Walk-in Shower",                category: "Bathroom" },
   { key: "HOT_WATER",                   label: "Hot Water",                     category: "Bathroom" },
   { key: "TOWELS_PROVIDED",             label: "Bath Towels Provided",          category: "Bathroom" },
 
   // ── Pool & Water ──────────────────────────────────────────────────────────
   { key: "POOL",                        label: "Swimming Pool (Shared)",        category: "Pool & Water" },
+  { key: "OUTDOOR_POOL",                label: "Outdoor Pool",                  category: "Pool & Water" },
+  { key: "COMMUNAL_POOL",               label: "Communal Pool",                 category: "Pool & Water" },
   { key: "PRIVATE_POOL",                label: "Private Pool",                  category: "Pool & Water" },
   { key: "HOT_TUB",                     label: "Hot Tub / Jacuzzi (Shared)",    category: "Pool & Water" },
   { key: "PRIVATE_HOT_TUB",             label: "Private Hot Tub",               category: "Pool & Water" },
@@ -88,16 +96,24 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "TENNIS_COURT",                label: "Tennis Court",                  category: "Outdoor" },
   { key: "PICKLEBALL_COURT",            label: "Pickleball Court",              category: "Outdoor" },
   { key: "EXERCISE_EQUIPMENT",          label: "Exercise Equipment",            category: "Outdoor" },
-  { key: "GYM",                         label: "Fitness Center / Gym",          category: "Outdoor" },
   { key: "BICYCLE",                     label: "Bicycle",                       category: "Outdoor" },
   { key: "KAYAK",                       label: "Kayak",                         category: "Outdoor" },
   { key: "BOAT",                        label: "Boat / Canoe",                  category: "Outdoor" },
+
+  // ── Activities (Nearby) ───────────────────────────────────────────────────
+  { key: "CYCLING",                     label: "Cycling / Bike Path Nearby",    category: "Activities" },
+  { key: "FISHING",                     label: "Fishing Nearby",                category: "Activities" },
+  { key: "HIKING",                      label: "Hiking Trails Nearby",          category: "Activities" },
+  { key: "SURFING",                     label: "Surfing / Bodyboarding",        category: "Activities" },
+  { key: "SNORKELING",                  label: "Snorkeling Nearby",             category: "Activities" },
+  { key: "GOLF",                        label: "Golf Nearby",                   category: "Activities" },
+  { key: "SHOPPING",                    label: "Shopping Nearby",               category: "Activities" },
 
   // ── Beach & Water Access ──────────────────────────────────────────────────
   { key: "BEACH_ESSENTIALS",            label: "Beach Essentials (gear/towels)",category: "Beach" },
   { key: "BEACH_CHAIR",                 label: "Beach Chairs",                  category: "Beach" },
   { key: "BEACH_UMBRELLA",              label: "Beach Umbrella",                category: "Beach" },
-  { key: "SNORKELING_GEAR",             label: "Snorkeling Gear",               category: "Beach" },
+  { key: "SNORKELING_GEAR",             label: "Snorkeling Gear Provided",      category: "Beach" },
   { key: "COOLER",                      label: "Cooler / Ice Chest",            category: "Beach" },
 
   // ── Location & Views ──────────────────────────────────────────────────────
@@ -107,7 +123,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "WATERFRONT",                  label: "Waterfront",                    category: "Location & Views" },
   { key: "LAKE_FRONT",                  label: "Lakefront",                     category: "Location & Views" },
   { key: "NEAR_BEACH",                  label: "Near Beach (walking distance)", category: "Location & Views" },
-  { key: "MOUNTAIN_VIEW",               label: "Mountain View",                 category: "Location & Views" },
+  { key: "MOUNTAIN_VIEW",               label: "Mountain / Valley View",        category: "Location & Views" },
   { key: "GARDEN_VIEW",                 label: "Garden / Tropical View",        category: "Location & Views" },
   { key: "POOL_VIEW",                   label: "Pool View",                     category: "Location & Views" },
   { key: "CITY_VIEW",                   label: "City View",                     category: "Location & Views" },
@@ -122,6 +138,10 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "COVERED_PARKING",             label: "Covered Parking",               category: "Parking" },
   { key: "GARAGE",                      label: "Garage",                        category: "Parking" },
 
+  // ── Wellness ──────────────────────────────────────────────────────────────
+  { key: "GYM",                         label: "Fitness Center / Gym",          category: "Wellness" },
+  { key: "SPA",                         label: "Spa Services",                  category: "Wellness" },
+
   // ── Family ────────────────────────────────────────────────────────────────
   { key: "CHILDREN_WELCOME",            label: "Children Welcome",              category: "Family" },
   { key: "CRIB",                        label: "Crib / Pack-n-Play",            category: "Family" },
@@ -129,10 +149,10 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "BOARD_GAMES_KIDS",            label: "Children's Toys & Games",       category: "Family" },
 
   // ── Safety ────────────────────────────────────────────────────────────────
-  { key: "SMOKE_ALARM",                 label: "Smoke Alarm",                   category: "Safety" },
+  { key: "SMOKE_ALARM",                 label: "Smoke Detector",                category: "Safety" },
   { key: "CARBON_MONOXIDE_ALARM",       label: "Carbon Monoxide Alarm",         category: "Safety" },
   { key: "FIRE_EXTINGUISHER",           label: "Fire Extinguisher",             category: "Safety" },
-  { key: "FIRST_AID_KIT",              label: "First Aid Kit",                 category: "Safety" },
+  { key: "FIRST_AID_KIT",               label: "First Aid Kit",                 category: "Safety" },
   { key: "SECURITY_CAMERA",             label: "Security Camera (exterior)",    category: "Safety" },
 ];
 
@@ -140,190 +160,324 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
 // Base amenity set shared by ALL Hawaii vacation rental condos/homes
 // ─────────────────────────────────────────────────────────────────────────────
 const HAWAII_BASE = [
+  // Essentials
   "WIFI",
   "ESSENTIALS",
+  "HANGERS",
   "AIR_CONDITIONING",
   "CEILING_FAN",
   "WASHER",
   "DRYER",
   "IRON",
   "HAIR_DRYER",
+  "DEDICATED_WORKSPACE",
+  "LONG_TERM_STAYS_ALLOWED",
+  "PRIVATE_ENTRANCE",
+  // Kitchen
   "KITCHEN",
   "REFRIGERATOR",
+  "FREEZER",
   "MICROWAVE",
   "DISHWASHER",
   "STOVE",
   "OVEN",
   "COFFEE_MAKER",
+  "KETTLE",
   "TOASTER",
   "BLENDER",
   "COOKING_BASICS",
+  "BAKING_SHEET",
   "DISHES_AND_SILVERWARE",
   "DINING_TABLE",
+  "WINE_GLASSES",
+  // Entertainment
   "TV",
   "CABLE_TV",
   "STREAMING_SERVICES",
+  // Bedrooms
   "BED_LINENS",
   "EXTRA_PILLOWS_AND_BLANKETS",
+  // Bathroom
   "SHAMPOO",
   "TOWELS_PROVIDED",
   "HOT_WATER",
+  "BATHTUB",
+  // Outdoor
   "PATIO_OR_BALCONY",
   "OUTDOOR_FURNITURE",
+  // Beach
   "BEACH_ESSENTIALS",
   "BEACH_CHAIR",
   "COOLER",
+  // Parking
   "FREE_PARKING_ON_PREMISES",
+  // Family
   "CHILDREN_WELCOME",
+  // Safety
   "SMOKE_ALARM",
   "CARBON_MONOXIDE_ALARM",
   "FIRE_EXTINGUISHER",
   "FIRST_AID_KIT",
-  "PRIVATE_ENTRANCE",
-  "NEAR_RESTAURANTS",
-  "NEAR_SHOPPING",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Community-specific amenity profiles
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Regency at Poipu Kai — resort condo, pool/spa, tennis, 10-min walk to beach
+// Regency at Poipu Kai — resort condo complex, pool/spa/tennis, ~10 min walk to Poipu Beach
+// Nearby: Kiahuna & Poipu Bay Golf, Kukuiula Village shopping, cycling paths, Poipu Beach snorkeling
 const REGENCY_POIPU_KAI = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "GYM",
   "TENNIS_COURT",
   "PICKLEBALL_COURT",
+  "BBQ_GRILL",
   "GARDEN",
   "GARDEN_VIEW",
   "NEAR_BEACH",
   "RESORT_ACCESS",
   "COVERED_PATIO",
+  "SNORKELING_GEAR",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
+  "SHOPPING",
 ];
 
-// Kekaha Beachfront Estate — private beachfront, ocean-direct access, private pool
+// Kekaha Beachfront Estate — private beachfront homes, direct ocean access, private pool
+// Nearby: Kekaha Beach cycling path, Polihale State Park, deep-sea fishing charters
 const KEKAHA_ESTATE = [
-  ...HAWAII_BASE.filter(a => a !== "POOL"),
+  ...HAWAII_BASE,
   "BEACHFRONT",
   "OCEAN_FRONT",
   "OCEAN_VIEW",
   "WATERFRONT",
   "PRIVATE_POOL",
+  "OUTDOOR_POOL",
   "BBQ_GRILL",
   "COVERED_PATIO",
   "GARDEN",
   "BICYCLE",
   "SNORKELING_GEAR",
   "BEACH_UMBRELLA",
+  // Nearby activities
+  "CYCLING",
+  "FISHING",
+  "HIKING",
+  "SNORKELING",
+  "SURFING",
 ];
 
-// Keauhou Estates — Big Island ocean view estate, private pool, near Keauhou golf
+// Keauhou Estates — Big Island ocean-view estate, private pool, near Keauhou Golf Course
+// Nearby: Keauhou Golf Course, Keauhou Bay snorkeling (manta rays), world-class cycling (Ironman route)
 const KEAUHOU_ESTATES = [
   ...HAWAII_BASE,
   "OCEAN_VIEW",
   "PRIVATE_POOL",
+  "OUTDOOR_POOL",
   "PRIVATE_HOT_TUB",
   "BBQ_GRILL",
   "COVERED_PATIO",
   "GARDEN",
-  "NEAR_GOLF_COURSE",
   "OUTDOOR_KITCHEN",
   "EXERCISE_EQUIPMENT",
+  "SNORKELING_GEAR",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "NEAR_BEACH",
+  "CYCLING",
+  "FISHING",
+  "HIKING",
+  "SNORKELING",
+  "GOLF",
 ];
 
-// Mauna Kai Princeville — North Shore condo, mountain/valley views, near Princeville golf
+// Mauna Kai Princeville — North Shore condo, mountain/valley views, near Princeville Makai Golf
+// Nearby: Princeville Makai Golf Course, Hanalei Bay (snorkeling/surfing), Napali hiking, cycling
 const MAUNA_KAI = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "GYM",
   "MOUNTAIN_VIEW",
   "GARDEN_VIEW",
-  "NEAR_GOLF_COURSE",
   "NEAR_BEACH",
   "RESORT_ACCESS",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "CYCLING",
+  "FISHING",
+  "HIKING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
 ];
 
-// Kaha Lani Resort — Kapaa oceanfront/ocean view, direct ocean access
+// Kaha Lani Resort — Kapaa oceanfront condo resort, beachfront, direct ocean access
+// Nearby: Kapaa Bike Path (famous 8-mile coastal path), Kapaa Town shopping, snorkeling, fishing
 const KAHA_LANI = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
-  "OCEAN_VIEW",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
+  "BEACHFRONT",
   "OCEAN_FRONT",
+  "OCEAN_VIEW",
   "WATERFRONT",
   "NEAR_BEACH",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
+  // Nearby activities
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "SHOPPING",
 ];
 
 // Lae Nani Resort — Kapaa beachfront condo resort, ocean view, pool
+// Nearby: Kapaa Bike Path, Lydgate Beach Park (snorkeling lagoon), Kapaa shopping, fishing
 const LAE_NANI = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "BEACHFRONT",
   "OCEAN_VIEW",
   "WATERFRONT",
   "NEAR_BEACH",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   "GARDEN_VIEW",
+  // Nearby activities
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "SHOPPING",
 ];
 
 // Poipu Brenneckes Beachside — steps to Brenneckes Beach, shared pool, ocean nearby
+// Nearby: Brenneckes Beach (bodyboarding/surfing), Poipu Beach snorkeling, Poipu Bay Golf, Kukuiula shopping
 const POIPU_BEACHSIDE = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "BBQ_GRILL",
   "NEAR_BEACH",
   "OCEAN_VIEW",
   "WATERFRONT",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
+  "SHOPPING",
 ];
 
-// Poipu Brenneckes Oceanfront — direct oceanfront, pool, beachfront access
+// Poipu Brenneckes Oceanfront — direct oceanfront/beachfront, pool, immediate beach access
+// Nearby: Brenneckes Beach (bodyboarding/surfing), Poipu Beach snorkeling, Poipu Bay Golf, Kukuiula shopping
 const POIPU_OCEANFRONT = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
+  "HOT_TUB",
+  "BBQ_GRILL",
   "BEACHFRONT",
   "OCEAN_FRONT",
   "OCEAN_VIEW",
   "WATERFRONT",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
-  "BBQ_GRILL",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
+  "SHOPPING",
 ];
 
-// Kaiulani of Princeville — North Shore condo, mountain & valley views, near golf
+// Kaiulani of Princeville — North Shore resort condos, mountain & valley views, near Princeville Golf
+// Nearby: Princeville Makai Golf Course, Hanalei Bay, Napali hiking, North Shore surfing, cycling
 const KAIULANI = [
   ...HAWAII_BASE,
   "ELEVATOR",
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "GYM",
   "MOUNTAIN_VIEW",
   "GARDEN_VIEW",
-  "NEAR_GOLF_COURSE",
   "NEAR_BEACH",
   "RESORT_ACCESS",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "CYCLING",
+  "FISHING",
+  "HIKING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
 ];
 
-// Pili Mai at Poipu — resort townhomes, AC throughout, pool, steps to Poipu Beach
+// Pili Mai at Poipu — resort townhomes, pool, steps to Poipu Beach
 // Townhomes are 2–3 stories — no elevator
+// Nearby: Poipu Beach Park, Poipu Bay Golf, Kukuiula Village, cycling, snorkeling
 const PILI_MAI = [
   ...HAWAII_BASE,
   "POOL",
+  "OUTDOOR_POOL",
+  "COMMUNAL_POOL",
   "HOT_TUB",
+  "GYM",
+  "BBQ_GRILL",
   "NEAR_BEACH",
   "GARDEN_VIEW",
   "GARDEN",
   "RESORT_ACCESS",
   "COVERED_PATIO",
+  "SNORKELING_GEAR",
+  // Nearby activities
+  "NEAR_GOLF_COURSE",
+  "NEAR_SHOPPING",
+  "CYCLING",
+  "FISHING",
+  "SNORKELING",
+  "SURFING",
+  "GOLF",
+  "SHOPPING",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
