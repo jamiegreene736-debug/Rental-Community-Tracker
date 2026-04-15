@@ -48,7 +48,7 @@ import {
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import { computeQualityScore, gradeColor, gradeBg } from "@/data/quality-score";
 import { apiRequest } from "@/lib/queryClient";
-import type { CommunityDraft } from "@shared/schema";
+import type { CommunityDraft, GuestyPropertyMap } from "@shared/schema";
 
 const STATUS_LABELS: Record<string, string> = {
   researching: "Researching",
@@ -507,6 +507,14 @@ export default function Home() {
     queryKey: ["/api/community/drafts"],
   });
 
+  const { data: guestyMapData } = useQuery<GuestyPropertyMap[]>({
+    queryKey: ["/api/guesty-property-map"],
+  });
+  const guestyConnected = useMemo(() => {
+    if (!guestyMapData) return new Set<number>();
+    return new Set(guestyMapData.map((m) => m.propertyId));
+  }, [guestyMapData]);
+
   const queryClient = useQueryClient();
 
   const deleteDraftMutation = useMutation({
@@ -659,7 +667,8 @@ export default function Home() {
               <TableRow>
                 <TableHead className="w-[140px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[30px] text-center">#</TableHead>
-                <TableHead className="min-w-[180px]">
+                <TableHead className="w-[28px] text-center px-1" title="Guesty listing connected">G</TableHead>
+                <TableHead className="w-[180px] max-w-[180px]">
                   <Button
                     variant="ghost"
                     className="font-medium"
@@ -776,12 +785,28 @@ export default function Home() {
                     </div>
                   </TableCell>
                   <TableCell className="text-center text-muted-foreground text-xs">{idx + 1}</TableCell>
-                  <TableCell>
-                    <div>
-                      <span className="font-medium text-sm leading-tight" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`}>
+                  <TableCell className="text-center px-1">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            className="inline-block w-2.5 h-2.5 rounded-full"
+                            style={{ background: guestyConnected.has(property.id) ? "#16a34a" : "#d1d5db" }}
+                            data-testid={`dot-guesty-${property.id}`}
+                          />
+                        </TooltipTrigger>
+                        <TooltipContent side="right">
+                          {guestyConnected.has(property.id) ? "Connected to Guesty" : "Not in Guesty"}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </TableCell>
+                  <TableCell className="max-w-[180px]">
+                    <div className="min-w-0">
+                      <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
                         {property.name}
                       </span>
-                      <p className="text-xs text-muted-foreground mt-0.5">{property.unitDetails}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{property.unitDetails}</p>
                     </div>
                   </TableCell>
                   <TableCell>

@@ -1035,6 +1035,15 @@ export async function registerRoutes(
   // Pre-populate from disk on first load
   let _guestyTokenCache: { token: string; expiry: number } | null = _loadGuestyFileToken();
 
+  app.get("/api/guesty-property-map", async (_req, res) => {
+    try {
+      const map = await storage.getGuestyPropertyMap();
+      res.json(map);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch Guesty property map", message: err.message });
+    }
+  });
+
   app.post("/api/guesty-token", async (_req, res) => {
     const clientId = process.env.GUESTY_CLIENT_ID;
     const clientSecret = process.env.GUESTY_CLIENT_SECRET;
