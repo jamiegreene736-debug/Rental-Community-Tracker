@@ -161,7 +161,7 @@ class GuestyService {
       accommodates: data.accommodates,
       roomType: data.roomType || "Entire home/apt",
       propertyType: data.propertyType || "House",
-      otaRoomType: data.otaRoomType || "holiday_home",
+      otaRoomType: data.otaRoomType || "Holiday home",
       amenities: data.amenities || [],
       defaultCheckInTime: data.checkInTime || "15:00",
       defaultCheckoutTime: data.checkOutTime || "11:00",
