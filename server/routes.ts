@@ -1648,7 +1648,7 @@ export async function registerRoutes(
     }
 
     const safePath = localPath.replace(/\.\./g, "");
-    const fullPath = path.join(process.cwd(), "public", safePath);
+    const fullPath = path.join(process.cwd(), "client", "public", safePath);
 
     let rawData: Buffer;
     try {
@@ -1749,7 +1749,7 @@ export async function registerRoutes(
       }
 
       const safePath = localPath.replace(/\.\./g, "");
-      const fullPath = path.join(process.cwd(), "public", safePath);
+      const fullPath = path.join(process.cwd(), "client", "public", safePath);
 
       // Read local file
       let rawData: Buffer;
