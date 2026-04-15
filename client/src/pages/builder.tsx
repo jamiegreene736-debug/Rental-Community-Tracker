@@ -7,6 +7,7 @@ import GuestyListingBuilder from "@/components/GuestyListingBuilder";
 import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE } from "@/data/unit-builder-data";
 import { getPropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
+import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import type { GuestyPropertyData } from "@/services/guestyService";
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -44,7 +45,10 @@ export default function Builder() {
     if (!property) return null;
 
     const totalGuests = property.units.reduce((s, u) => s + u.maxGuests, 0);
-    const totalSqft = property.units.reduce((s, u) => s + (parseInt(u.sqft) || 0), 0);
+    const totalSqft = property.units.reduce((s, u) => s + parseSqft(u.sqft), 0);
+    const totalBedrooms = property.units.reduce((s, u) => s + u.bedrooms, 0);
+    const totalBathrooms = property.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0);
+    const listingRooms = buildListingRooms(propertyId);
 
     const basePrice = pricing?.totalBaseSellRate ?? 0;
 
@@ -88,6 +92,8 @@ export default function Builder() {
         country: parsedAddr.country,
       },
       accommodates: totalGuests,
+      bedrooms: totalBedrooms || undefined,
+      bathrooms: totalBathrooms || undefined,
       propertyType: "Condominium",
       roomType: "Entire home/apt",
       otaRoomType: "Holiday home",
@@ -96,6 +102,7 @@ export default function Builder() {
       checkOutTime: "11:00",
       timezone: "Pacific/Honolulu",
       areaSquareFeet: totalSqft || undefined,
+      listingRooms: listingRooms.length > 0 ? listingRooms : undefined,
       descriptions: {
         title: property.bookingTitle,
         summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,

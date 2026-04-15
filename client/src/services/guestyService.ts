@@ -47,6 +47,11 @@ export type GuestyBookingSettings = {
   instantBooking?: boolean;
 };
 
+export type GuestyRoom = {
+  roomNumber: number;
+  beds: { type: string; quantity: number }[];
+};
+
 export type GuestyPropertyData = {
   nickname: string;
   title?: string;
@@ -61,6 +66,9 @@ export type GuestyPropertyData = {
   timezone?: string;
   minimumAge?: number;
   areaSquareFeet?: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  listingRooms?: GuestyRoom[];
   descriptions?: GuestyDescriptions;
   photos?: GuestyPhoto[];
   pricing?: GuestyPricing;
@@ -154,7 +162,7 @@ class GuestyService {
   }
 
   async createListing(data: GuestyPropertyData) {
-    const payload = {
+    const payload: Record<string, unknown> = {
       nickname: data.nickname,
       title: data.title,
       address: data.address,
@@ -167,11 +175,23 @@ class GuestyService {
       defaultCheckoutTime: data.checkOutTime || "11:00",
       timezone: data.timezone || "Pacific/Honolulu",
       minimumAge: data.minimumAge || 18,
-      areaSquareFeet: data.areaSquareFeet,
       type: "SINGLE",
       isListed: false,
     };
+    if (data.areaSquareFeet) payload.areaSquareFeet = data.areaSquareFeet;
+    if (data.bedrooms) payload.bedrooms = data.bedrooms;
+    if (data.bathrooms) payload.bathrooms = data.bathrooms;
+    if (data.listingRooms && data.listingRooms.length > 0) payload.listingRooms = data.listingRooms;
     return this.request<{ _id: string }>("POST", "/listings", payload);
+  }
+
+  async updateListingDetails(id: string, details: { areaSquareFeet?: number; bedrooms?: number; bathrooms?: number; listingRooms?: GuestyRoom[] }) {
+    const payload: Record<string, unknown> = {};
+    if (details.areaSquareFeet) payload.areaSquareFeet = details.areaSquareFeet;
+    if (details.bedrooms) payload.bedrooms = details.bedrooms;
+    if (details.bathrooms) payload.bathrooms = details.bathrooms;
+    if (details.listingRooms && details.listingRooms.length > 0) payload.listingRooms = details.listingRooms;
+    return this.request("PUT", `/listings/${id}`, payload);
   }
 
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {
@@ -287,6 +307,21 @@ class GuestyService {
       return { listingId: null, steps, errors, success: false };
     }
 
+    if (propertyData.listingRooms && propertyData.listingRooms.length > 0) {
+      try {
+        log("rooms_beds", "pending");
+        await this.updateListingDetails(listingId!, {
+          areaSquareFeet: propertyData.areaSquareFeet,
+          bedrooms: propertyData.bedrooms,
+          bathrooms: propertyData.bathrooms,
+          listingRooms: propertyData.listingRooms,
+        });
+        log("rooms_beds", "success", { rooms: propertyData.listingRooms.length });
+      } catch (e) {
+        log("rooms_beds", "error", { error: (e as Error).message });
+      }
+    }
+
     if (propertyData.descriptions) {
       try {
         log("descriptions", "pending");
@@ -349,6 +384,21 @@ class GuestyService {
       else steps.push(entry);
       onProgress(step, status, detail);
     };
+
+    if (propertyData.listingRooms && propertyData.listingRooms.length > 0) {
+      try {
+        log("rooms_beds", "pending");
+        await this.updateListingDetails(listingId, {
+          areaSquareFeet: propertyData.areaSquareFeet,
+          bedrooms: propertyData.bedrooms,
+          bathrooms: propertyData.bathrooms,
+          listingRooms: propertyData.listingRooms,
+        });
+        log("rooms_beds", "success", { rooms: propertyData.listingRooms.length });
+      } catch (e) {
+        log("rooms_beds", "error", { error: (e as Error).message });
+      }
+    }
 
     if (propertyData.descriptions) {
       try {

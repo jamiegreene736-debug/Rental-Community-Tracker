@@ -3,6 +3,8 @@ import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG } from "@/data/guesty-amenities";
+import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
@@ -468,7 +470,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setLog([]);
     setProgress(0);
 
-    const totalSteps = [!!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
+    const totalSteps = [!!(propertyData.listingRooms?.length), !!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
     let done = 0;
 
     const result = await guestyService.updateFullListing(selectedId, propertyData, (step, status) => {
@@ -485,6 +487,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setBuilding(false);
     onUpdateComplete?.({ listingId: result.listingId });
   }, [propertyData, selectedId, building, onUpdateComplete]);
+
+  const [syncingDetails, setSyncingDetails] = useState(false);
+  const handleSyncDetails = useCallback(async () => {
+    if (!selectedId || syncingDetails || building) return;
+    setSyncingDetails(true);
+    try {
+      const propData = getUnitBuilderByPropertyId(propertyId);
+      const rooms = buildListingRooms(propertyId);
+      const sqft = propData ? propData.units.reduce((s, u) => s + parseSqft(u.sqft), 0) : 0;
+      const beds = propData ? propData.units.reduce((s, u) => s + u.bedrooms, 0) : 0;
+      const baths = propData ? propData.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0) : 0;
+      await guestyService.updateListingDetails(selectedId, {
+        areaSquareFeet: sqft || undefined,
+        bedrooms: beds || undefined,
+        bathrooms: baths || undefined,
+        listingRooms: rooms.length > 0 ? rooms : undefined,
+      });
+      toast({ title: "Rooms & Details Synced", description: `Pushed ${rooms.length} rooms, ${sqft.toLocaleString()} sqft to Guesty.` });
+    } catch (e) {
+      toast({ title: "Sync Failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setSyncingDetails(false);
+    }
+  }, [selectedId, propertyId, syncingDetails, building, toast]);
 
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
@@ -559,6 +585,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
           {selectedId && propertyData && (
             <button className="glb-btn glb-btn-secondary" onClick={handleUpdate} disabled={building || conn !== "connected"} data-testid="btn-push-updates">
               {building ? "Pushing…" : "↑ Push Updates"}
+            </button>
+          )}
+
+          {selectedId && (
+            <button
+              className="glb-btn glb-btn-secondary"
+              onClick={handleSyncDetails}
+              disabled={syncingDetails || building || conn !== "connected"}
+              data-testid="btn-sync-rooms-details"
+              title="Push bedroom count, square footage, and room/bed configuration to Guesty"
+            >
+              {syncingDetails ? "Syncing…" : "🛏 Sync Rooms & sqft"}
             </button>
           )}
 
