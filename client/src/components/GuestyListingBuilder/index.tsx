@@ -200,6 +200,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [progress, setProgress] = useState(0);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [buildSuccess, setBuildSuccess] = useState(false);
+  const [editableTitle, setEditableTitle] = useState("");
+
+  useEffect(() => {
+    setEditableTitle(propertyData?.descriptions?.title ?? "");
+  }, [propertyData?.descriptions?.title]);
+
+  const effectivePropertyData = useMemo(() => {
+    if (!propertyData) return null;
+    if (!propertyData.descriptions) return propertyData;
+    return {
+      ...propertyData,
+      descriptions: {
+        ...propertyData.descriptions,
+        title: editableTitle || propertyData.descriptions.title,
+      },
+    };
+  }, [propertyData, editableTitle]);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -391,7 +408,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
   // ── Build new listing ──────────────────────────────────────────────────────
   const handleBuild = useCallback(async () => {
-    if (!propertyData) {
+    if (!effectivePropertyData) {
       toast({ title: "No property data", description: "Property data is missing. Try refreshing the page.", variant: "destructive" });
       return;
     }
@@ -409,12 +426,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
     toast({ title: "Creating listing on Guesty…", description: "Please wait while we build your listing." });
 
-    const totalSteps = [true, !!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
+    const totalSteps = [true, !!effectivePropertyData.descriptions, !!(effectivePropertyData.photos?.length), !!effectivePropertyData.pricing, !!effectivePropertyData.bookingSettings].filter(Boolean).length;
     let done = 0;
 
     let result: Awaited<ReturnType<typeof guestyService.buildFullListing>>;
     try {
-      result = await guestyService.buildFullListing(propertyData, (step, status) => {
+      result = await guestyService.buildFullListing(effectivePropertyData, (step, status) => {
         setLog((prev) => {
           const entry: LogEntry = { step, status: status as "pending" | "success" | "error", icon: statusIcon(status), timestamp: new Date().toISOString() };
           const idx = prev.findIndex((e) => e.step === step);
@@ -461,19 +478,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       }
     }
     onBuildComplete?.({ listingId: result.listingId });
-  }, [propertyData, building, conn, onBuildComplete, toast]);
+  }, [effectivePropertyData, building, conn, onBuildComplete, toast]);
 
   // ── Push updates ──────────────────────────────────────────────────────────
   const handleUpdate = useCallback(async () => {
-    if (!propertyData || !selectedId || building) return;
+    if (!effectivePropertyData || !selectedId || building) return;
     setBuilding(true);
     setLog([]);
     setProgress(0);
 
-    const totalSteps = [!!(propertyData.listingRooms?.length), !!propertyData.descriptions, !!(propertyData.photos?.length), !!propertyData.pricing, !!propertyData.bookingSettings].filter(Boolean).length;
+    const totalSteps = [!!(effectivePropertyData.listingRooms?.length), !!effectivePropertyData.descriptions, !!(effectivePropertyData.photos?.length), !!effectivePropertyData.pricing, !!effectivePropertyData.bookingSettings].filter(Boolean).length;
     let done = 0;
 
-    const result = await guestyService.updateFullListing(selectedId, propertyData, (step, status) => {
+    const result = await guestyService.updateFullListing(selectedId, effectivePropertyData, (step, status) => {
       setLog((prev) => {
         const entry: LogEntry = { step, status: status as "pending" | "success" | "error", icon: statusIcon(status), timestamp: new Date().toISOString() };
         const idx = prev.findIndex((e) => e.step === step);
@@ -486,7 +503,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setProgress(100);
     setBuilding(false);
     onUpdateComplete?.({ listingId: result.listingId });
-  }, [propertyData, selectedId, building, onUpdateComplete]);
+  }, [effectivePropertyData, selectedId, building, onUpdateComplete]);
 
   const [syncingDetails, setSyncingDetails] = useState(false);
   const handleSyncDetails = useCallback(async () => {
@@ -515,7 +532,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
   const amenities = propertyData?.amenities || [];
-  const descriptions = propertyData?.descriptions;
+  const descriptions = effectivePropertyData?.descriptions;
   const pricing = propertyData?.pricing;
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
@@ -739,16 +756,59 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         </div>
                       </div>
                     )}
-                    {descriptions
-                      ? (Object.entries(descriptions) as [string, string | undefined][]).map(([key, val]) =>
-                          val ? (
+                    {descriptions ? (() => {
+                      const FIELD_LABELS: Record<string, string> = {
+                        title: "Listing Title",
+                        summary: "Summary",
+                        space: "The Space",
+                        neighborhood: "The Neighborhood",
+                        transit: "Getting Around",
+                        access: "Guest Access",
+                        houseRules: "House Rules",
+                        notes: "Other Notes",
+                      };
+                      const FIELD_ORDER = ["title", "summary", "space", "neighborhood", "transit", "access", "houseRules", "notes"];
+                      const orderedEntries = [
+                        ...FIELD_ORDER.filter(k => k in descriptions),
+                        ...Object.keys(descriptions).filter(k => !FIELD_ORDER.includes(k)),
+                      ];
+                      return orderedEntries.map((key) => {
+                        const val = (descriptions as Record<string, string | undefined>)[key];
+                        if (!val && key !== "title") return null;
+                        if (key === "title") {
+                          const len = editableTitle.length;
+                          return (
                             <div key={key} className="glb-desc-block">
-                              <div className="glb-desc-label">{key.replace(/([A-Z])/g, " $1").trim()}</div>
-                              <div className="glb-desc-text">{val}</div>
+                              <div className="glb-desc-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <span>Listing Title</span>
+                                <span style={{ fontWeight: 400, fontSize: 10, color: len > 80 ? "#ef4444" : len > 50 ? "#f59e0b" : "#6b7280" }}>
+                                  {len}/50 Airbnb · {len}/80 VRBO {len > 80 ? "⚠ too long" : len > 50 ? "⚠ Airbnb truncates" : "✓"}
+                                </span>
+                              </div>
+                              <input
+                                type="text"
+                                value={editableTitle}
+                                onChange={e => setEditableTitle(e.target.value)}
+                                placeholder="Listing title (commas and dashes allowed)"
+                                style={{
+                                  width: "100%", padding: "6px 8px", fontSize: 13,
+                                  border: `1px solid ${len > 80 ? "#ef4444" : len > 50 ? "#f59e0b" : "#e5e7eb"}`,
+                                  borderRadius: 4, background: "transparent", color: "inherit", outline: "none",
+                                }}
+                                data-testid="input-listing-title"
+                              />
                             </div>
-                          ) : null
-                        )
-                      : <div className="glb-empty">No descriptions provided</div>
+                          );
+                        }
+                        return (
+                          <div key={key} className="glb-desc-block">
+                            <div className="glb-desc-label">{FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, " $1").trim()}</div>
+                            <div className="glb-desc-text">{val}</div>
+                          </div>
+                        );
+                      });
+                    })()
+                    : <div className="glb-empty">No descriptions provided</div>
                     }
                   </div>
                 )}

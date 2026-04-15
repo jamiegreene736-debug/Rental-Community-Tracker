@@ -109,6 +109,8 @@ export default function Builder() {
         space: property.units
           .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
           .join("\n\n"),
+        neighborhood: property.neighborhood,
+        transit: property.transit,
         houseRules:
           "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
       },
