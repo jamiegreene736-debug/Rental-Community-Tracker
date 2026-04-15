@@ -326,6 +326,47 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [doUpscale, setDoUpscale] = useState(true);
   const pushAbortRef = useRef<AbortController | null>(null);
 
+  // Persisted last-push summary (survives refresh)
+  type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
+  const [lastPushSummary, setLastPushSummary] = useState<PushSummary | null>(null);
+
+  // Live photo count from Guesty for the selected listing
+  const [guestyPhotoCount, setGuestyPhotoCount] = useState<number | null>(null);
+  const [guestyPhotoCountLoading, setGuestyPhotoCountLoading] = useState(false);
+
+  const savePushSummary = useCallback((summary: PushSummary) => {
+    setLastPushSummary(summary);
+    try { localStorage.setItem(`nexstay_push_${summary.listingId}`, JSON.stringify(summary)); } catch { /* non-fatal */ }
+  }, []);
+
+  // Load persisted summary & fetch live photo count when listing selection changes
+  useEffect(() => {
+    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); return; }
+    // Restore from localStorage
+    try {
+      const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
+      if (stored) setLastPushSummary(JSON.parse(stored));
+      else setLastPushSummary(null);
+    } catch { setLastPushSummary(null); }
+    // Fetch live photo count from Guesty
+    setGuestyPhotoCount(null);
+    setGuestyPhotoCountLoading(true);
+    fetch(`/api/guesty-proxy/listings/${selectedId}`)
+      .then(r => r.json())
+      .then((d: any) => setGuestyPhotoCount(d?.pictures?.length ?? 0))
+      .catch(() => setGuestyPhotoCount(null))
+      .finally(() => setGuestyPhotoCountLoading(false));
+  }, [selectedId]);
+
+  // Refresh live count after a successful push
+  const refreshGuestyPhotoCount = useCallback(() => {
+    if (!selectedId) return;
+    fetch(`/api/guesty-proxy/listings/${selectedId}`)
+      .then(r => r.json())
+      .then((d: any) => setGuestyPhotoCount(d?.pictures?.length ?? 0))
+      .catch(() => {});
+  }, [selectedId]);
+
   const cancelPush = useCallback(() => {
     pushAbortRef.current?.abort();
     pushAbortRef.current = null;
@@ -423,13 +464,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
               setUpscaledCount(event.upscaledCount ?? 0);
               const guestyError = (event as any).guestyError as string | undefined;
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
-              setUpscalePhase(
-                (event.successCount ?? 0) === 0 && (event.total ?? 0) > 0
-                  ? "error"
-                  : "done"
-              );
-              if ((event.successCount ?? 0) === 0 && (event.total ?? 0) > 0 && !guestyError) {
+              const sc = event.successCount ?? 0;
+              const tot = event.total ?? 0;
+              const succeeded = sc > 0 && !guestyError;
+              setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
+              if (sc === 0 && tot > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");
+              }
+              // Persist summary to localStorage and refresh live count
+              if (succeeded && selectedId) {
+                savePushSummary({
+                  listingId: selectedId,
+                  timestamp: Date.now(),
+                  successCount: sc,
+                  total: tot,
+                  upscaledCount: event.upscaledCount ?? 0,
+                  failed: tot - sc,
+                });
+                refreshGuestyPhotoCount();
               }
             }
           } catch { /* malformed line — skip */ }
@@ -814,7 +866,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
               <div className="glb-tabs">
                 {(["descriptions", "amenities", "pricing", "photos", "availability"] as const).map((t) => (
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
-                    {t === "photos" ? `Photos (${photos.length})` :
+                    {t === "photos" ? (
+                      <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        {`Photos (${photos.length})`}
+                        {selectedId && (
+                          guestyPhotoCountLoading
+                            ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
+                            : guestyPhotoCount === null
+                            ? null
+                            : guestyPhotoCount > 0
+                            ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`${guestyPhotoCount} photos in Guesty`} />
+                            : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title="No photos in Guesty yet" />
+                        )}
+                      </span>
+                    ) :
                      t === "amenities" ? `Amenities (${amenities.length})` :
                      t === "availability" ? "Availability" :
                      t.charAt(0).toUpperCase() + t.slice(1)}
@@ -1233,7 +1298,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 {!selectedId && (
                                   <span style={{ fontSize: 12, color: "#9ca3af" }}>Select a Guesty listing above first</span>
                                 )}
+
+                                {/* Live Guesty photo count pill */}
+                                {selectedId && (
+                                  <span style={{
+                                    display: "inline-flex", alignItems: "center", gap: 5,
+                                    fontSize: 11, padding: "2px 8px", borderRadius: 12,
+                                    background: guestyPhotoCountLoading ? "#f3f4f6" : (guestyPhotoCount ?? 0) > 0 ? "#dcfce7" : "#fee2e2",
+                                    color: guestyPhotoCountLoading ? "#9ca3af" : (guestyPhotoCount ?? 0) > 0 ? "#15803d" : "#b91c1c",
+                                    fontWeight: 500,
+                                  }}>
+                                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: guestyPhotoCountLoading ? "#9ca3af" : (guestyPhotoCount ?? 0) > 0 ? "#16a34a" : "#dc2626", display: "inline-block" }} />
+                                    {guestyPhotoCountLoading ? "Checking Guesty…" : `${guestyPhotoCount ?? 0} photos in Guesty`}
+                                  </span>
+                                )}
                               </div>
+
+                              {/* Persisted last-push summary — shown after refresh */}
+                              {upscalePhase === "idle" && lastPushSummary && lastPushSummary.listingId === selectedId && (
+                                <div style={{ fontSize: 12, color: "#374151", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, padding: "6px 10px", marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Last push:</span>
+                                  {lastPushSummary.successCount}/{lastPushSummary.total} photos
+                                  {lastPushSummary.upscaledCount > 0 && ` (${lastPushSummary.upscaledCount} upscaled)`}
+                                  {lastPushSummary.failed > 0 && <span style={{ color: "#b45309" }}> — {lastPushSummary.failed} failed</span>}
+                                  <span style={{ color: "#9ca3af", marginLeft: "auto" }}>
+                                    {new Date(lastPushSummary.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                  </span>
+                                </div>
+                              )}
 
                               {upscalePhase === "done" && (() => {
                                 const failed = pushResults.filter(r => !r.success);
