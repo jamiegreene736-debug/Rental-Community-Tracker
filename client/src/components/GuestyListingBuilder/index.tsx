@@ -444,6 +444,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       const fresh = await guestyService.getListings(50, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
+
+      if (propertyId) {
+        try {
+          await fetch("/api/builder/schedule-sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ propertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
+          });
+          toast({ title: "Availability sync scheduled", description: "Blackout dates will be pushed to Guesty in ~1 hour.", duration: 6000 });
+        } catch {
+          // non-fatal
+        }
+      }
     }
     onBuildComplete?.({ listingId: result.listingId });
   }, [propertyData, building, conn, onBuildComplete, toast]);

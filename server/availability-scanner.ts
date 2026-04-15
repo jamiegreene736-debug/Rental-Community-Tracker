@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { log } from "./index";
+import { syncAllPropertiesToGuesty } from "./guesty-sync";
 
 const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
   "Poipu Kai": "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
@@ -413,6 +414,11 @@ export function startWeeklyScheduler() {
         await runAvailabilityScan(52);
       } catch (err: any) {
         log(`Scheduled scan error: ${err.message}`, "scanner");
+      }
+      try {
+        await syncAllPropertiesToGuesty();
+      } catch (err: any) {
+        log(`Guesty weekly sync error: ${err.message}`, "scanner");
       }
       scheduleNext();
     }, msUntilNext);

@@ -183,3 +183,19 @@ export const insertLodgifyPropertyMapSchema = createInsertSchema(lodgifyProperty
 
 export type InsertLodgifyPropertyMap = z.infer<typeof insertLodgifyPropertyMapSchema>;
 export type LodgifyPropertyMap = typeof lodgifyPropertyMap.$inferSelect;
+
+export const guestyPropertyMap = pgTable("guesty_property_map", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull().unique(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  lastSyncedAt: timestamp("last_synced_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertGuestyPropertyMapSchema = createInsertSchema(guestyPropertyMap).omit({
+  id: true,
+  updatedAt: true,
+});
+
+export type InsertGuestyPropertyMap = z.infer<typeof insertGuestyPropertyMapSchema>;
+export type GuestyPropertyMap = typeof guestyPropertyMap.$inferSelect;

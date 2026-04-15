@@ -7,6 +7,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
+import { scheduleGuestySync, syncPropertyToGuesty } from "./guesty-sync";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
 // All other communities fall back to Google Images search.
@@ -1797,6 +1798,38 @@ export async function registerRoutes(
       res.json({ status, availableCount: totalFound, neededCount, unitResults, checkIn, checkOut, cheapestByBedroom, estimatedBuyInCost: estimatedBuyInCost > 0 ? estimatedBuyInCost : undefined });
     } catch (err: any) {
       res.status(500).json({ error: "Scan failed", message: err.message });
+    }
+  });
+
+  // ── Schedule availability sync to Guesty after listing creation ───────────────
+  app.post("/api/builder/schedule-sync", async (req: Request, res: Response) => {
+    const { propertyId, guestyListingId, delayMinutes = 60 } = req.body as {
+      propertyId: number;
+      guestyListingId: string;
+      delayMinutes?: number;
+    };
+
+    if (!propertyId || !guestyListingId) {
+      return res.status(400).json({ error: "propertyId and guestyListingId required" });
+    }
+
+    await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
+    const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
+    scheduleGuestySync(propertyId, guestyListingId, delayMs);
+
+    res.json({ ok: true, syncScheduledInMinutes: Math.round(delayMs / 60000) });
+  });
+
+  // ── Manual Guesty sync trigger (for testing / admin use) ───────────────────
+  app.post("/api/builder/sync-now", async (req: Request, res: Response) => {
+    const { propertyId, guestyListingId } = req.body as { propertyId: number; guestyListingId: string };
+    if (!propertyId || !guestyListingId) return res.status(400).json({ error: "propertyId and guestyListingId required" });
+
+    try {
+      const result = await syncPropertyToGuesty(propertyId, guestyListingId);
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: "Sync failed", message: err.message });
     }
   });
 

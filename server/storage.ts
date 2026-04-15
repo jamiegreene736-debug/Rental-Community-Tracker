@@ -7,7 +7,8 @@ import {
   type CommunityDraft, type InsertCommunityDraft,
   type LodgifyPropertyMap,
   type UnitSwap, type InsertUnitSwap,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps,
+  type GuestyPropertyMap, type InsertGuestyPropertyMap,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -59,6 +60,11 @@ export interface IStorage {
   getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
   deleteUnitSwap(id: number): Promise<boolean>;
   commitUnitSwaps(propertyId: number): Promise<void>;
+
+  upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap>;
+  getGuestyPropertyMap(): Promise<GuestyPropertyMap[]>;
+  getGuestyListingId(propertyId: number): Promise<string | null>;
+  updateGuestyLastSynced(propertyId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -304,6 +310,28 @@ export class DatabaseStorage implements IStorage {
 
   async commitUnitSwaps(propertyId: number): Promise<void> {
     await db.update(unitSwaps).set({ committed: true }).where(eq(unitSwaps.propertyId, propertyId));
+  }
+
+  async upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap> {
+    const [result] = await db
+      .insert(guestyPropertyMap)
+      .values({ propertyId, guestyListingId })
+      .onConflictDoUpdate({ target: guestyPropertyMap.propertyId, set: { guestyListingId, updatedAt: new Date() } })
+      .returning();
+    return result;
+  }
+
+  async getGuestyPropertyMap(): Promise<GuestyPropertyMap[]> {
+    return db.select().from(guestyPropertyMap);
+  }
+
+  async getGuestyListingId(propertyId: number): Promise<string | null> {
+    const [row] = await db.select().from(guestyPropertyMap).where(eq(guestyPropertyMap.propertyId, propertyId));
+    return row?.guestyListingId ?? null;
+  }
+
+  async updateGuestyLastSynced(propertyId: number): Promise<void> {
+    await db.update(guestyPropertyMap).set({ lastSyncedAt: new Date() }).where(eq(guestyPropertyMap.propertyId, propertyId));
   }
 }
 
