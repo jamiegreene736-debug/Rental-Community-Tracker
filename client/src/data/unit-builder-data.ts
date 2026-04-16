@@ -59,10 +59,10 @@ export const LISTING_DISCLOSURE = `Please note: this listing combines two units 
 const COMMUNITY_REGENCY: CommunityPhoto[] = [
   { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
   { filename: "02-community.jpg", label: "Tennis Courts", position: "beginning" },
-  { filename: "03-community.jpg", label: "Garden Walkway", position: "beginning" },
-  { filename: "04-community.jpg", label: "Poipu Beach", position: "end" },
-  { filename: "05-community.jpg", label: "BBQ Area", position: "beginning" },
-  { filename: "06-community.jpg", label: "Tropical Grounds", position: "end" },
+  { filename: "03-community.jpg", label: "Plantation Building", position: "beginning" },
+  { filename: "04-community.jpg", label: "Building Exterior", position: "end" },
+  { filename: "05-community.jpg", label: "Lagoon Pool", position: "beginning" },
+  { filename: "06-community.jpg", label: "Pool & Spa", position: "end" },
 ];
 
 const COMMUNITY_KEKAHA: CommunityPhoto[] = [
