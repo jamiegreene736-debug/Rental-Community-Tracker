@@ -33,8 +33,16 @@ export type PropertyUnitBuilder = {
   combinedDescription: string;
   neighborhood?: string;
   transit?: string;
+  // Hawaii Tax Map Key — format: ##-#-#-###-###-#### (12 digits, county-district-section-parcel)
   taxMapKey?: string;
+  // TAT (Transient Accommodations Tax) License — format: TA-###-###-####-## (issued by Hawaii Dept. of Taxation)
   tatLicense?: string;
+  // Short-Term Rental Permit — format depends on county:
+  //   Kauai County (VDA zones, e.g. Poipu, Princeville):  TVR-YYYY-##    e.g. TVR-2022-048
+  //   Kauai County (non-VDA/residential, e.g. Kekaha, Kaha Lani, Lae Nani):  TVNC-####    e.g. TVNC-0342
+  //   Hawaii County (Big Island, e.g. Keauhou, Kona):  STVR-YYYY-######    e.g. STVR-2019-003461
+  //   Maui County:  STRH-########    e.g. STRH-20220042
+  //   Honolulu (Oahu):  NUC-##-###-####    e.g. NUC-22-001-0134
   strPermit?: string;
   units: Unit[];
   hasPhotos: boolean;

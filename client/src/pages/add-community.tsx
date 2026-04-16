@@ -888,16 +888,26 @@ export default function AddCommunity() {
                   <div>
                     <label htmlFor="input-str-permit" className="text-sm font-medium mb-1.5 block">
                       STR Permit Number
-                      <span className="text-muted-foreground font-normal ml-2">— Local Hawaii county short-term rental permit</span>
+                      <span className="text-muted-foreground font-normal ml-2">— Obtain from county once property is secured</span>
                     </label>
                     <Input
                       id="input-str-permit"
                       value={strPermit}
                       onChange={e => setStrPermit(e.target.value)}
-                      placeholder="e.g. STVR-2024-000123 (obtain from county once property is secured)"
+                      placeholder="e.g. TVR-2024-012 or TVNC-0342"
                       className="font-mono"
                       data-testid="input-str-permit"
                     />
+                    <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground mb-1">Format by county:</p>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-0.5">
+                        <span><span className="font-mono font-semibold">TVR-YYYY-##</span> — Kauai, VDA zone (Poipu, Princeville)</span>
+                        <span><span className="font-mono font-semibold">TVNC-####</span> — Kauai, non-VDA/residential (Kekaha, Kapaa)</span>
+                        <span><span className="font-mono font-semibold">STVR-YYYY-######</span> — Hawaii County (Big Island)</span>
+                        <span><span className="font-mono font-semibold">STRH-########</span> — Maui County</span>
+                        <span><span className="font-mono font-semibold">NUC-##-###-####</span> — Honolulu (Oahu)</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
