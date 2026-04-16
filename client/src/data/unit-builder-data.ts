@@ -84,12 +84,11 @@ const COMMUNITY_KEAUHOU: CommunityPhoto[] = [
 ];
 
 const COMMUNITY_MAUNA_KAI: CommunityPhoto[] = [
-  { filename: "01-community.jpg", label: "Mountain View", position: "beginning" },
-  { filename: "02-community.jpg", label: "Hanalei Bay", position: "beginning" },
-  { filename: "03-community.jpg", label: "Pool Area", position: "beginning" },
-  { filename: "04-community.jpg", label: "Garden Path", position: "end" },
-  { filename: "05-community.jpg", label: "North Shore View", position: "end" },
-  { filename: "06-community.jpg", label: "Community Grounds", position: "end" },
+  { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
+  { filename: "02-community.jpg", label: "Princeville Aerial View", position: "beginning" },
+  { filename: "03-community.jpg", label: "Pool & Norfolk Pines", position: "beginning" },
+  { filename: "04-community.jpg", label: "Community Pool", position: "end" },
+  { filename: "05-community.jpg", label: "Townhome Exterior", position: "end" },
 ];
 
 const COMMUNITY_KAHA_LANI: CommunityPhoto[] = [
@@ -111,12 +110,11 @@ const COMMUNITY_LAE_NANI: CommunityPhoto[] = [
 ];
 
 const COMMUNITY_POIPU_BEACHSIDE: CommunityPhoto[] = [
-  { filename: "photo_00.jpg", label: "Poipu Beach Community", position: "beginning" },
-  { filename: "photo_01.jpg", label: "Brenneckes Beach Area", position: "beginning" },
-  { filename: "photo_02.jpg", label: "Beachside Exterior", position: "beginning" },
-  { filename: "photo_03.jpg", label: "Community Grounds", position: "end" },
-  { filename: "photo_04.jpg", label: "Coastal View", position: "end" },
-  { filename: "photo_05.jpg", label: "Beach Access", position: "end" },
+  { filename: "01-community.jpg", label: "Brennecke Beach Sunset", position: "beginning" },
+  { filename: "02-community.jpg", label: "Brennecke Beach Lava Coast", position: "beginning" },
+  { filename: "03-community.jpg", label: "Plantation-Style Building", position: "beginning" },
+  { filename: "04-community.jpg", label: "Oceanfront Pool", position: "end" },
+  { filename: "05-community.jpg", label: "Cliffside Pool & Surf", position: "end" },
 ];
 
 const COMMUNITY_KAIULANI: CommunityPhoto[] = [
@@ -129,21 +127,20 @@ const COMMUNITY_KAIULANI: CommunityPhoto[] = [
 ];
 
 const COMMUNITY_POIPU_OCEANFRONT: CommunityPhoto[] = [
-  { filename: "01-community.jpg", label: "Ocean View", position: "beginning" },
-  { filename: "02-community.jpg", label: "Sunset", position: "beginning" },
-  { filename: "03-community.jpg", label: "Coastline", position: "end" },
-  { filename: "04-community.jpg", label: "Tropical Garden", position: "end" },
-  { filename: "05-community.jpg", label: "Community Grounds", position: "beginning" },
-  { filename: "06-community.jpg", label: "Community View", position: "end" },
+  { filename: "01-community.jpg", label: "Brennecke Beach Surf", position: "beginning" },
+  { filename: "02-community.jpg", label: "Beach & Lava Rock Coast", position: "beginning" },
+  { filename: "03-community.jpg", label: "Brennecke Aerial View", position: "end" },
+  { filename: "04-community.jpg", label: "Cliffside Resort Aerial", position: "end" },
+  { filename: "05-community.jpg", label: "Oceanfront Lanai View", position: "beginning" },
 ];
 
 const COMMUNITY_PILI_MAI: CommunityPhoto[] = [
-  { filename: "01-community.jpg", label: "Resort Pool", position: "beginning" },
-  { filename: "02-community.jpg", label: "Tropical Pool Area", position: "beginning" },
-  { filename: "03-community.jpg", label: "Hawaiian Sunset", position: "beginning" },
-  { filename: "04-community.jpg", label: "Nearby Beach", position: "end" },
-  { filename: "05-community.jpg", label: "South Shore Coastline", position: "end" },
-  { filename: "06-community.jpg", label: "Tropical Palms", position: "end" },
+  { filename: "01-community.jpg", label: "Resort Pool at Sunset", position: "beginning" },
+  { filename: "02-community.jpg", label: "Plantation Building", position: "beginning" },
+  { filename: "03-community.jpg", label: "Lagoon Pool", position: "beginning" },
+  { filename: "04-community.jpg", label: "Pool Cabana", position: "end" },
+  { filename: "05-community.jpg", label: "Pool & Clubhouse", position: "end" },
+  { filename: "06-community.jpg", label: "Golf Course View", position: "end" },
 ];
 
 const PHOTOS_924: UnitPhoto[] = [
