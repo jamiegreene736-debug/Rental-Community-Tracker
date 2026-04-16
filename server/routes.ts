@@ -1752,7 +1752,7 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/push-descriptions
-  // POST /api/builder/push-compliance — pushes TMK and TAT license to Guesty's publicDescription.notes
+  // POST /api/builder/push-compliance — pushes TMK and TAT license to Guesty's internal tags (not synced to Airbnb/VRBO)
   app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
     const { listingId, taxMapKey, tatLicense } = req.body as {
       listingId: string;
@@ -1760,24 +1760,27 @@ export async function registerRoutes(
       tatLicense?: string;
     };
     if (!listingId) return res.status(400).json({ error: "listingId required" });
+    if (!taxMapKey && !tatLicense) return res.status(400).json({ error: "taxMapKey or tatLicense required" });
 
-    const notesText = [
-      taxMapKey ? `Tax Map Key (TMK): ${taxMapKey}` : null,
-      tatLicense ? `Transient Accommodations Tax License: ${tatLicense}` : null,
-    ].filter(Boolean).join("\n");
-
-    if (!notesText) return res.status(400).json({ error: "taxMapKey or tatLicense required" });
-
-    console.log(`[push-compliance] listing ${listingId} notes:`, notesText);
+    console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense}`);
     try {
-      await guestyRequest("PUT", `/listings/${listingId}`, {
-        publicDescription: { notes: notesText },
-      });
+      // Get current tags, strip out any old compliance tags, then add fresh ones
+      const current = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const existingTags: string[] = Array.isArray(current.tags) ? current.tags : [];
+      const stripped = existingTags.filter(t => !t.startsWith("TMK:") && !t.startsWith("TAT:"));
+      if (taxMapKey) stripped.push(`TMK:${taxMapKey}`);
+      if (tatLicense) stripped.push(`TAT:${tatLicense}`);
+
+      await guestyRequest("PUT", `/listings/${listingId}`, { tags: stripped });
+
+      // Verify
       const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
-      const saved = (fetched.publicDescription as Record<string, string> | undefined)?.notes ?? "";
-      const verified = saved.includes(taxMapKey ?? "") || saved.includes(tatLicense ?? "");
-      console.log(`[push-compliance] verified=${verified}, notes preview: "${saved.slice(0, 100)}"`);
-      return res.json({ success: true, verified, savedNotes: saved });
+      const savedTags: string[] = Array.isArray(fetched.tags) ? fetched.tags : [];
+      const verified =
+        (!taxMapKey || savedTags.some(t => t.includes(taxMapKey))) &&
+        (!tatLicense || savedTags.some(t => t.includes(tatLicense)));
+      console.log(`[push-compliance] verified=${verified}, tags:`, savedTags);
+      return res.json({ success: true, verified, savedTags });
     } catch (err: any) {
       console.error(`[push-compliance] error:`, err.message);
       return res.status(500).json({ success: false, error: err.message });

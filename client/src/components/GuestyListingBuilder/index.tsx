@@ -819,7 +819,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         setCompliancePushError(data.error ?? `HTTP ${res.status}`);
       } else {
         setCompliancePushState("success");
-        toast({ title: "Compliance info pushed to Guesty", description: "TMK and TAT License saved in listing notes." });
+        toast({ title: "Compliance info pushed to Guesty", description: "TMK and TAT License saved as internal Guesty tags (not shown on listing platforms)." });
       }
     } catch (e) {
       setCompliancePushState("error");
@@ -1242,7 +1242,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             <span style={{ fontSize: 11, color: "#ef4444" }}>{compliancePushError}</span>
                           )}
                           {compliancePushState === "success" && (
-                            <span style={{ fontSize: 11, color: "#10b981" }}>TMK &amp; TAT License saved to Guesty listing notes</span>
+                            <span style={{ fontSize: 11, color: "#10b981" }}>Saved as internal Guesty tags — not visible on Airbnb/VRBO</span>
                           )}
                         </div>
                       </div>
