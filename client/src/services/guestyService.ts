@@ -268,32 +268,44 @@ class GuestyService {
 
   async getChannelStatus(id: string): Promise<GuestyChannelStatus> {
     const listing = await this.getListing(id) as Record<string, unknown>;
-
-    const airbnb = (listing.airBnb || (listing.channels as Record<string, unknown>)?.airbnb) as Record<string, string> | undefined;
-    const vrbo = (listing.homeAway || (listing.channels as Record<string, unknown>)?.homeAway) as Record<string, string> | undefined;
-    const bookingCom = (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
     const isListed = !!(listing.isListed);
+
+    // Guesty stores channel connections in listing.integrations[] with platform keys
+    // like "airbnb2", "homeaway", "bookingCom". Fall back to legacy top-level fields.
+    const integrations: Record<string, unknown>[] = Array.isArray(listing.integrations)
+      ? listing.integrations as Record<string, unknown>[]
+      : [];
+
+    const findIntegration = (platformKeys: string[]) => {
+      const entry = integrations.find(i => platformKeys.includes(i.platform as string));
+      if (!entry) return undefined;
+      const key = entry.platform as string;
+      return entry[key] as Record<string, string> | undefined;
+    };
+
+    const airbnbData = findIntegration(["airbnb2", "airbnb"])
+      ?? (listing.airBnb || (listing.channels as Record<string, unknown>)?.airbnb) as Record<string, string> | undefined;
+    const vrboData = findIntegration(["homeaway", "vrbo"])
+      ?? (listing.homeAway || (listing.channels as Record<string, unknown>)?.homeAway) as Record<string, string> | undefined;
+    const bookingComData = findIntegration(["bookingCom", "booking_com"])
+      ?? (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
+
+    const toInfo = (data: Record<string, string> | undefined): ChannelInfo => {
+      const hasId = !!(data?.id || data?.listingId || data?.propertyId || data?.hotelId);
+      const isCompleted = data?.status === "COMPLETED" || data?.status === "connected";
+      return {
+        connected: hasId || isCompleted,
+        live: (hasId || isCompleted) && isListed,
+        id: data?.id || data?.listingId || data?.propertyId || data?.hotelId || null,
+        status: data?.status || null,
+      };
+    };
 
     return {
       isListed,
-      airbnb: {
-        connected: !!(airbnb?.id || airbnb?.listingId),
-        live: !!(airbnb?.id || airbnb?.listingId) && isListed,
-        id: airbnb?.id || airbnb?.listingId || null,
-        status: airbnb?.status || null,
-      },
-      vrbo: {
-        connected: !!(vrbo?.id || vrbo?.propertyId),
-        live: !!(vrbo?.id || vrbo?.propertyId) && isListed,
-        id: vrbo?.id || vrbo?.propertyId || null,
-        status: vrbo?.status || null,
-      },
-      bookingCom: {
-        connected: !!(bookingCom?.id || bookingCom?.hotelId),
-        live: !!(bookingCom?.id || bookingCom?.hotelId) && isListed,
-        id: bookingCom?.id || bookingCom?.hotelId || null,
-        status: bookingCom?.status || null,
-      },
+      airbnb: toInfo(airbnbData),
+      vrbo: toInfo(vrboData),
+      bookingCom: toInfo(bookingComData),
     };
   }
 
