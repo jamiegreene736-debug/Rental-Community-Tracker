@@ -130,6 +130,7 @@ export default function AddCommunity() {
   const [listingLoading, setListingLoading] = useState(false);
   const [editedTitle, setEditedTitle] = useState("");
   const [editedDescription, setEditedDescription] = useState("");
+  const [strPermit, setStrPermit] = useState("");
   const [saving, setSaving] = useState(false);
 
   const combinedBedrooms = (selectedUnit1?.bedrooms ?? 0) + (selectedUnit2?.bedrooms ?? 0);
@@ -301,6 +302,7 @@ export default function AddCommunity() {
         suggestedRate: suggestedRate || null,
         listingTitle: editedTitle || null,
         listingDescription: editedDescription || null,
+        strPermit: strPermit.trim() || null,
         status: "draft_ready",
       });
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
@@ -311,7 +313,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedDescription, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedDescription, strPermit, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -881,6 +883,20 @@ export default function AddCommunity() {
                       className="font-mono text-xs leading-relaxed resize-y"
                       data-testid="textarea-listing-description"
                       aria-label="Listing description"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="input-str-permit" className="text-sm font-medium mb-1.5 block">
+                      STR Permit Number
+                      <span className="text-muted-foreground font-normal ml-2">— Local Hawaii county short-term rental permit</span>
+                    </label>
+                    <Input
+                      id="input-str-permit"
+                      value={strPermit}
+                      onChange={e => setStrPermit(e.target.value)}
+                      placeholder="e.g. STVR-2024-000123 (obtain from county once property is secured)"
+                      className="font-mono"
+                      data-testid="input-str-permit"
                     />
                   </div>
                 </div>

@@ -134,6 +134,7 @@ export const communityDrafts = pgTable("community_drafts", {
   suggestedRate: integer("suggested_rate"),
   listingTitle: text("listing_title"),
   listingDescription: text("listing_description"),
+  strPermit: text("str_permit"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

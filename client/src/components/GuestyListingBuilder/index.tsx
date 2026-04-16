@@ -1155,12 +1155,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     )}
 
                     {/* Compliance & Registration Section */}
-                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense) && (
+                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.strPermit) && (
                       <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
                           <span>🏛</span> Compliance &amp; Registration
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
                               Tax Map Key (TMK)
@@ -1188,6 +1188,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                   onClick={() => { navigator.clipboard.writeText(effectivePropertyData.tatLicense!); toast({ title: "Copied TAT License" }); }}
+                                  title="Copy to clipboard"
+                                >📋</button>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                              STR Permit Number
+                            </div>
+                            <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                              data-testid="text-str-permit-value">
+                              <span>{effectivePropertyData.strPermit ?? "—"}</span>
+                              {effectivePropertyData.strPermit && (
+                                <button
+                                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.strPermit!); toast({ title: "Copied STR Permit" }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
