@@ -68,6 +68,7 @@ export type GuestyPropertyData = {
   areaSquareFeet?: number;
   taxMapKey?: string;
   tatLicense?: string;
+  strPermit?: string;
   bedrooms?: number;
   bathrooms?: number;
   listingRooms?: GuestyRoom[];
