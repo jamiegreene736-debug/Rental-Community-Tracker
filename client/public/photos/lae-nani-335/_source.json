@@ -1,0 +1,33 @@
+{
+  "folder": "lae-nani-335",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 24,
+      "address": "410 Papaloa Rd, Kapaa, HI 96746",
+      "unitId": "prop24-ln-3br",
+      "unitNumber": "314",
+      "bedrooms": 3,
+      "bathrooms": "2"
+    },
+    {
+      "propertyId": 24,
+      "address": "410 Papaloa Rd, Kapaa, HI 96746",
+      "unitId": "prop24-ln-2br",
+      "unitNumber": "225",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Folder is shared by 2 units across propertyIds [24, 24]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "2"
+}

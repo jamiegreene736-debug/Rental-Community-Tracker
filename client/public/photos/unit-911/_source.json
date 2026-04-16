@@ -1,0 +1,41 @@
+{
+  "folder": "unit-911",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 1,
+      "address": "1831 Poipu Rd, Bldg 8, Koloa, HI 96756",
+      "unitId": "unit-911",
+      "unitNumber": "911",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    },
+    {
+      "propertyId": 7,
+      "address": "1831 Poipu Rd, Bldg 3, Koloa, HI 96756",
+      "unitId": "unit-811",
+      "unitNumber": "811",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    },
+    {
+      "propertyId": 27,
+      "address": "1831 Poipu Rd, Koloa, HI 96756",
+      "unitId": "prop27-unit-b",
+      "unitNumber": "B",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Folder is shared by 3 units across propertyIds [1, 7, 27]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 2,
+  "bathrooms": "2"
+}

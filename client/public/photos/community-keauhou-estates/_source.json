@@ -1,0 +1,23 @@
+{
+  "folder": "community-keauhou-estates",
+  "type": "community",
+  "referencedBy": [
+    {
+      "propertyId": 14,
+      "address": "78-6855 Ali'i Dr, Kailua-Kona, HI 96740"
+    },
+    {
+      "propertyId": 26,
+      "address": "78-6920 Ali'i Dr, Kailua-Kona, HI 96740"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+}

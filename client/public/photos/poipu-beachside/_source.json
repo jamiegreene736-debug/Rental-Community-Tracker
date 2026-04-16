@@ -1,0 +1,15 @@
+{
+  "folder": "poipu-beachside",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 28,
+      "address": "2298 Ho'one Rd, Koloa, HI 96756"
+    }
+  ],
+  "verificationStatus": "broken",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "BROKEN: All 16 photos in this folder are byte-identical to client/public/photos/poipu-oceanfront/. They cannot legitimately represent both 2298 Ho'one Rd (poipu-beachside) AND 2350 Ho'one Rd (poipu-oceanfront). Re-source distinct photos for 2298 Ho'one Rd from the actual rental listing (Parrish Collection, Poipu Connection, or owner direct site), replace photo_00–photo_15.jpg, then update verificationStatus to 'verified'. Until then the audit script will flag this as CRITICAL."
+}

@@ -1,0 +1,10 @@
+{
+  "folder": "community-kiahuna",
+  "type": "community",
+  "referencedBy": [],
+  "verificationStatus": "unused",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "6 community shots of Kiahuna Plantation. Unused — pair with kiahuna-101/kiahuna-134 if a Kiahuna property is added to unit-builder-data.ts."
+}

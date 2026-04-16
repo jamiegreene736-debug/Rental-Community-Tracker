@@ -1,0 +1,25 @@
+{
+  "folder": "kekaha-main",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 10,
+      "address": "8497 Kekaha Rd, Kekaha, HI 96752",
+      "unitId": "prop10-kimsey-house",
+      "unitNumber": "Kimsey Beach House",
+      "bedrooms": 3,
+      "bathrooms": "2"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "2"
+}

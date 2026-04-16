@@ -1,0 +1,19 @@
+{
+  "folder": "community-kaha-lani",
+  "type": "community",
+  "referencedBy": [
+    {
+      "propertyId": 23,
+      "address": "4460 Nehe Rd, Lihue, HI 96766"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+}

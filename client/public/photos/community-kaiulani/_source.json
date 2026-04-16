@@ -1,0 +1,19 @@
+{
+  "folder": "community-kaiulani",
+  "type": "community",
+  "referencedBy": [
+    {
+      "propertyId": 29,
+      "address": "4100 Queen Emma's Dr, Princeville, HI 96722"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+}

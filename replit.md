@@ -52,6 +52,27 @@ Preferred communication style: Simple, everyday language.
 -   **Legal Disclosure**: All listing `combinedDescription` fields are automatically prepended with the required two-unit disclosure language when rendered in the Lodgify prep page. The `LISTING_DISCLOSURE` constant is exported from `unit-builder-data.ts`.
 -   **Compliance & Registration**: All 22 properties in `unit-builder-data.ts` have `taxMapKey` (Hawaii TMK e.g. `4-2-015-008-0001`) and `tatLicense` (TAT License e.g. `TA-0246301`) sample values. These display in the builder's Descriptions tab under a "Compliance & Registration" section, with copy buttons and a "Push Compliance to Guesty" button (`POST /api/builder/push-compliance`) that saves them to `publicDescription.notes`.
 -   **Community Photo Verification Methodology** (apply to every community): For each `client/public/photos/community-{slug}/` folder, every image must be (1) verifiably from the actual community/resort — never a generic "Hawaii beach" or wrong-island shot; (2) sourced from the rental operator's official site (Parrish Collection, Poipu Condo Pros, Elite Pacific, Mauna Kai Condos, Koloa Kai, Jean & Abbott, HawaiiGaga, etc.) or the developer's marketing site; (3) free of third-party watermarks (TripAdvisor, Vrbo, Booking, Expedia overlays); (4) at least 800px wide. Workflow when adding/auditing a community: search SearchAPI for `"<community name>" <town> kauai/big island/maui pool|aerial|exterior`, download 10–14 candidates to `/tmp/community-cands/{slug}/`, visually verify each, copy 5–6 strongest as `01-community.jpg`–`06-community.jpg`, and update the matching `COMMUNITY_*` array in `client/src/data/unit-builder-data.ts` with accurate `label` text describing what's actually in the shot.
+-   **Unit Photo Verification Methodology + Source Tracking** (apply to every unit folder): Every folder under `client/public/photos/` (both `community-*` and unit folders) must contain a `_source.json` describing where the photos came from and whether they have been verified. Schema:
+    ```json
+    {
+      "folder": "<folder-name>",
+      "type": "unit" | "community" | "unused",
+      "referencedBy": [{ "propertyId": <n>, "unitId": "<id>", "address": "<addr>" }],
+      "verificationStatus": "verified" | "needs-review" | "broken" | "unused",
+      "verifiedDate": "YYYY-MM-DD",
+      "verifiedBy": "<name or 'agent-audit'>",
+      "sourceListing": { "url": "<rental listing URL>", "platform": "airbnb|vrbo|direct", "scrapedDate": "YYYY-MM-DD" },
+      "notes": "<context, especially for broken folders>"
+    }
+    ```
+    Two helper scripts in `scripts/` automate this:
+    -   `node scripts/generate-photo-sources.mjs` — scans `client/src/data/unit-builder-data.ts` and writes `_source.json` stubs (skips files unless `verifiedBy === "auto-generated-stub"`; pass `--force` to overwrite).
+    -   `node scripts/audit-photos.mjs` — hashes every image, flags duplicates (intra-folder + cross-folder), thin folders (<8 unit photos / <5 community photos), tiny/oversized files, missing `_source.json`, folders not referenced in data, folders shared by multiple units, and any folder whose `_source.json` declares `verificationStatus: "broken"`. Exits non-zero when any CRITICAL finding exists.
+    Process for adding/replacing unit photos: download the actual rental listing's photos to `/tmp/unit-cands/{folder}/`, drop them into `client/public/photos/{folder}/`, populate `_source.json` with the listing URL and `verificationStatus: "verified"`, then run `node scripts/audit-photos.mjs` to confirm no critical findings.
+-   **Known photo issues** (currently flagged BROKEN by `scripts/audit-photos.mjs`):
+    -   `poipu-beachside/` — all 16 photos byte-identical to `poipu-oceanfront/`; 2298 Ho'one Rd needs distinct photos sourced from its actual rental listing.
+    -   `keauhou-estate/` — only 5 photos shared across 4 units spanning two distinct properties (78-6855 vs 78-6920 Ali'i Dr) and very different sizes (4000 sqft estate vs 800 sqft casita); split into per-unit folders with ≥10 photos each.
+    Three folders are populated but unused by data (`kekaha-ohana`, `kiahuna-101`, `kiahuna-134`, `community-kiahuna`) — wire them up in `unit-builder-data.ts` if a corresponding property is added, or delete.
 -   **Guesty `publicDescription` fix**: Guesty Open API v1 uses `publicDescription` (singular), NOT `publicDescriptions` (plural). All description pushes (via `updateDescriptions` in `guestyService.ts` and `POST /api/builder/push-descriptions`) now use the correct field name. A GET-after-PUT verification confirms what Guesty actually stored.
 
 ## External Dependencies

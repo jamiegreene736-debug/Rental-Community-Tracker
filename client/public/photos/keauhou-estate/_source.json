@@ -1,0 +1,15 @@
+{
+  "folder": "keauhou-estate",
+  "type": "unit",
+  "referencedBy": [
+    { "propertyId": 14, "unitId": "main-house", "bedrooms": 4, "bathrooms": "4" },
+    { "propertyId": 14, "unitId": "casita", "bedrooms": 2, "bathrooms": "1" },
+    { "propertyId": 26, "unitId": "main-house", "bedrooms": 5, "bathrooms": "5" },
+    { "propertyId": 26, "unitId": "casita", "bedrooms": 2, "bathrooms": "1" }
+  ],
+  "verificationStatus": "broken",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "BROKEN: only 5 photos shared across 4 units spanning two distinct properties (78-6855 and 78-6920 Ali'i Dr) and dramatically different sizes (4000 sqft estate vs 800 sqft casita). Source distinct photo sets per unit (target ≥10 each), or split into keauhou-estate-main-14, keauhou-estate-casita-14, keauhou-estate-main-26, keauhou-estate-casita-26."
+}

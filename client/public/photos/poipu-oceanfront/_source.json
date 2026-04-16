@@ -1,0 +1,15 @@
+{
+  "folder": "poipu-oceanfront",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 31,
+      "address": "2350 Ho'one Rd, Koloa, HI 96756"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "All 16 photos here are also currently sitting in poipu-beachside/. Visually they show one specific oceanfront building near Poipu Beach Park with a drone-marked red arrow. We retained them in this folder under the assumption that 2350 Ho'one Rd is the depicted property; please verify against the actual rental listing for 2350 Ho'one Rd and update verificationStatus to 'verified' (or 'broken' if these are actually 2298 Ho'one Rd photos)."
+}

@@ -1,0 +1,25 @@
+{
+  "folder": "unit-924",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 1,
+      "address": "1831 Poipu Rd, Bldg 8, Koloa, HI 96756",
+      "unitId": "unit-924",
+      "unitNumber": "924",
+      "bedrooms": 3,
+      "bathrooms": "3"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "3"
+}

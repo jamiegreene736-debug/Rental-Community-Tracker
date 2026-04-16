@@ -1,0 +1,35 @@
+{
+  "folder": "community-regency-poipu-kai",
+  "type": "community",
+  "referencedBy": [
+    {
+      "propertyId": 1,
+      "address": "1831 Poipu Rd, Bldg 8, Koloa, HI 96756"
+    },
+    {
+      "propertyId": 4,
+      "address": "1831 Poipu Rd, Koloa, HI 96756"
+    },
+    {
+      "propertyId": 7,
+      "address": "1831 Poipu Rd, Bldg 3, Koloa, HI 96756"
+    },
+    {
+      "propertyId": 9,
+      "address": "1831 Poipu Rd, Bldg 6, Koloa, HI 96756"
+    },
+    {
+      "propertyId": 27,
+      "address": "1831 Poipu Rd, Koloa, HI 96756"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+}

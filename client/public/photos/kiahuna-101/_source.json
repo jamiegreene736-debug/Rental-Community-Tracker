@@ -1,0 +1,10 @@
+{
+  "folder": "kiahuna-101",
+  "type": "unused",
+  "referencedBy": [],
+  "verificationStatus": "unused",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "27 photos of Kiahuna Plantation Resort (Poipu) Unit 101 — appears authentic. NexStay does not currently bundle a Kiahuna Plantation property; either add a new property to unit-builder-data.ts referencing this folder, or delete the folder. See community-kiahuna/ which is also unused."
+}

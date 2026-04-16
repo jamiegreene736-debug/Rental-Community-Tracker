@@ -1,0 +1,33 @@
+{
+  "folder": "mauna-kai-6a",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 19,
+      "address": "3920 Wyllie Rd, Princeville, HI 96722",
+      "unitId": "prop19-mk-9",
+      "unitNumber": "9",
+      "bedrooms": 3,
+      "bathrooms": "2"
+    },
+    {
+      "propertyId": 19,
+      "address": "3920 Wyllie Rd, Princeville, HI 96722",
+      "unitId": "prop19-mk-11",
+      "unitNumber": "11",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Folder is shared by 2 units across propertyIds [19, 19]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "2"
+}

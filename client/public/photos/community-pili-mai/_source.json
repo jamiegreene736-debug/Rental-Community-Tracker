@@ -1,0 +1,23 @@
+{
+  "folder": "community-pili-mai",
+  "type": "community",
+  "referencedBy": [
+    {
+      "propertyId": 32,
+      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756"
+    },
+    {
+      "propertyId": 33,
+      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+}

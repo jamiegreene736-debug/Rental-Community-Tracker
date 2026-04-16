@@ -1,0 +1,10 @@
+{
+  "folder": "kekaha-ohana",
+  "type": "unused",
+  "referencedBy": [],
+  "verificationStatus": "unused",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "agent-audit",
+  "sourceListing": { "url": null, "platform": null, "scrapedDate": null },
+  "notes": "18 photos that look like a third structure at the Kekaha Estate (8497 Kekaha Rd) — the existing data only references kekaha-main and kekaha-cottage. If the estate has a third 'ohana' unit available for buy-in, add it to propertyId 10 in unit-builder-data.ts. Otherwise delete this folder."
+}

@@ -1,0 +1,33 @@
+{
+  "folder": "pili-mai-unit-b",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 32,
+      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756",
+      "unitId": "prop32-kia-2br",
+      "unitNumber": "Building 2",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    },
+    {
+      "propertyId": 33,
+      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756",
+      "unitId": "prop33-kia-3br-b",
+      "unitNumber": "Building 26",
+      "bedrooms": 3,
+      "bathrooms": "3"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Folder is shared by 2 units across propertyIds [32, 33]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 2,
+  "bathrooms": "2"
+}

@@ -1,0 +1,25 @@
+{
+  "folder": "unit-621",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 4,
+      "address": "1831 Poipu Rd, Koloa, HI 96756",
+      "unitId": "unit-621",
+      "unitNumber": "621",
+      "bedrooms": 3,
+      "bathrooms": "3"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "3"
+}

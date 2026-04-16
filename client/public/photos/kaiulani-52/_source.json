@@ -1,0 +1,33 @@
+{
+  "folder": "kaiulani-52",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 29,
+      "address": "4100 Queen Emma's Dr, Princeville, HI 96722",
+      "unitId": "prop29-kai-3br",
+      "unitNumber": "Unit 5",
+      "bedrooms": 3,
+      "bathrooms": "2.5"
+    },
+    {
+      "propertyId": 29,
+      "address": "4100 Queen Emma's Dr, Princeville, HI 96722",
+      "unitId": "prop29-kai-4br",
+      "unitNumber": "Units 6-7",
+      "bedrooms": 4,
+      "bathrooms": "3"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": "2026-04-16",
+  "verifiedBy": "auto-generated-stub",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Folder is shared by 2 units across propertyIds [29, 29]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "bedrooms": 3,
+  "bathrooms": "2.5"
+}
