@@ -71,6 +71,25 @@ type UnitResult = {
   source: string;
 };
 
+type SuggestedPairing = {
+  unit1Beds: number;
+  unit2Beds: number;
+  totalBeds: number;
+  estimatedUnit1Rate: number;
+  estimatedUnit2Rate: number;
+  estimatedSellRate: number;
+  estimatedSellRateHigh: number;
+  rationale: string;
+  isTopPick: boolean;
+  matchScore: number;
+};
+
+type CommunityProfile = {
+  availableTypes: number[];
+  airbnbListingCount: number;
+  ratesByBR: Record<string, { median: number | null; count: number }>;
+};
+
 type PhotoItem = { url: string; label: string };
 
 type PhotoCheckResult = { clean: boolean; matches: Array<{ platform: string; url: string }> };
@@ -93,6 +112,9 @@ export default function AddCommunity() {
 
   // Step 3
   const [unitSearchResults, setUnitSearchResults] = useState<{ units: UnitResult[]; grouped: Record<string, UnitResult[]> } | null>(null);
+  const [communityProfile, setCommunityProfile] = useState<CommunityProfile | null>(null);
+  const [suggestedPairings, setSuggestedPairings] = useState<SuggestedPairing[]>([]);
+  const [selectedPairing, setSelectedPairing] = useState<SuggestedPairing | null>(null);
   const [unitSearchLoading, setUnitSearchLoading] = useState(false);
   const [selectedUnit1, setSelectedUnit1] = useState<UnitResult | null>(null);
   const [selectedUnit2, setSelectedUnit2] = useState<UnitResult | null>(null);
@@ -138,11 +160,14 @@ export default function AddCommunity() {
     }
   }, [selectedState, cityInput, toast]);
 
-  // ── Step 3: Unit search ─────────────────────────────────────
+  // ── Step 3: Pairing suggestions ─────────────────────────────
   const handleSelectCommunity = useCallback(async (community: CommunityResult) => {
     setSelectedCommunity(community);
     setUnitSearchLoading(true);
     setUnitSearchResults(null);
+    setCommunityProfile(null);
+    setSuggestedPairings([]);
+    setSelectedPairing(null);
     setSelectedUnit1(null);
     setSelectedUnit2(null);
     setStep(3);
@@ -151,15 +176,37 @@ export default function AddCommunity() {
         communityName: community.name,
         city: community.city,
         state: community.state,
+        unitTypes: community.unitTypes,
       });
       const data = await res.json();
       setUnitSearchResults(data);
+      if (data.communityProfile) setCommunityProfile(data.communityProfile);
+      if (data.suggestedPairings?.length) setSuggestedPairings(data.suggestedPairings);
     } catch (e: any) {
-      toast({ title: "Unit search failed", description: e.message, variant: "destructive" });
+      toast({ title: "Pairing analysis failed", description: e.message, variant: "destructive" });
     } finally {
       setUnitSearchLoading(false);
     }
   }, [toast]);
+
+  const handleSelectPairing = useCallback((pairing: SuggestedPairing) => {
+    setSelectedPairing(pairing);
+    // Create virtual unit records so downstream steps (Photos, Listing Draft) still work
+    setSelectedUnit1({
+      url: "",
+      title: `Unit A — ${pairing.unit1Beds}BR`,
+      bedrooms: pairing.unit1Beds,
+      price: pairing.estimatedUnit1Rate,
+      source: "Algorithm",
+    });
+    setSelectedUnit2({
+      url: "",
+      title: `Unit B — ${pairing.unit2Beds}BR`,
+      bedrooms: pairing.unit2Beds,
+      price: pairing.estimatedUnit2Rate,
+      source: "Algorithm",
+    });
+  }, []);
 
   // ── Step 4: Fetch photos ────────────────────────────────────
   const handleConfirmUnits = useCallback(async () => {
@@ -499,159 +546,167 @@ export default function AddCommunity() {
           </div>
         )}
 
-        {/* ── STEP 3: Unit pair selection ───────────────────── */}
+        {/* ── STEP 3: Community overview + pairing suggestions ── */}
         {step === 3 && (
           <div id="step-3-content">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <BedDouble className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-semibold" id="step-3-heading">Step 3: Select Unit Pair</h2>
+                <Building2 className="h-5 w-5 text-primary" />
+                <h2 className="text-lg font-semibold" id="step-3-heading">Step 3: Select Unit Combination</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2" id="btn-prev-step" aria-label="Go back to Step 2: Community Research">
+              <Button variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2" id="btn-prev-step" aria-label="Go back to Step 2">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
             </div>
-            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
-              <strong>Community:</strong> {selectedCommunity?.name || "None selected"} in {selectedCommunity ? `${selectedCommunity.city}, ${selectedCommunity.state}` : "—"}.{" "}
-              <strong>Unit 1:</strong> {selectedUnit1?.title || "Not selected"}.{" "}
-              <strong>Unit 2:</strong> {selectedUnit2?.title || "Not selected"}.
-            </div>
 
+            {/* Community header card */}
             {selectedCommunity && (
-              <div className="flex items-center gap-2 mb-4 p-3 rounded-lg bg-muted/50">
-                <Building2 className="h-4 w-4 text-primary shrink-0" />
-                <span className="font-medium">{selectedCommunity.name}</span>
-                <span className="text-muted-foreground text-sm">— {selectedCommunity.city}, {selectedCommunity.state}</span>
+              <div className="mb-6 p-4 rounded-xl border bg-muted/30">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                    <Building2 className="h-5 w-5 text-primary" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-semibold text-base">{selectedCommunity.name}</h3>
+                      <Badge variant="secondary" className="text-xs">Vacation Rental Community</Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      <MapPin className="h-3.5 w-3.5 inline mr-1" />
+                      {selectedCommunity.city}, {selectedCommunity.state} · {selectedCommunity.unitTypes}
+                    </p>
+                    {selectedCommunity.researchSummary && (
+                      <p className="text-sm mt-1">{selectedCommunity.researchSummary}</p>
+                    )}
+                    {communityProfile && (
+                      <div className="flex items-center gap-4 mt-2 text-sm">
+                        {communityProfile.airbnbListingCount > 0 && (
+                          <span className="text-muted-foreground">
+                            <CheckCircle2 className="h-3.5 w-3.5 inline mr-1 text-green-600" />
+                            {communityProfile.airbnbListingCount} active listings found on Airbnb/VRBO
+                          </span>
+                        )}
+                        {communityProfile.availableTypes.length > 0 && (
+                          <span className="text-muted-foreground">
+                            Unit configs: {communityProfile.availableTypes.map(t => `${t}BR`).join(", ")}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
 
             {unitSearchLoading && (
-              <div className="flex items-center gap-3 py-12 justify-center text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" />
-                Searching Zillow and Homes.com for available units…
+              <div className="flex flex-col items-center gap-3 py-16 text-muted-foreground">
+                <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                <p className="text-sm font-medium">Analyzing community listings on Airbnb & VRBO…</p>
+                <p className="text-xs">Generating algorithm-suggested unit combinations</p>
               </div>
             )}
 
-            {!unitSearchLoading && unitSearchResults && (
+            {!unitSearchLoading && suggestedPairings.length > 0 && (
               <>
-                {unitSearchResults.units.length === 0 ? (
-                  <div className="text-center py-10 text-muted-foreground">
-                    <Building2 className="h-10 w-10 mx-auto mb-3 opacity-30" />
-                    <p>No units found automatically.</p>
-                    <p className="text-sm mt-1">Enter the Zillow URLs manually below.</p>
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground mb-4">
-                    Found {unitSearchResults.units.length} unit listings. Select one as Unit 1 and one as Unit 2 to combine.
-                  </p>
-                )}
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                  {/* Unit 1 selection */}
-                  <div>
-                    <h3 className="font-medium text-sm mb-2 flex items-center gap-1">
-                      <span className="w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center">1</span>
-                      Unit 1 {selectedUnit1 && <CheckCircle2 className="h-4 w-4 text-green-600 ml-1" />}
-                    </h3>
-                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                      {unitSearchResults.units.map((u, i) => (
-                        <div
-                          key={i}
-                          onClick={() => selectedUnit1?.url === u.url ? setSelectedUnit1(null) : setSelectedUnit1(u)}
-                          className={`p-3 rounded-lg border cursor-pointer text-sm transition-colors ${
-                            selectedUnit1?.url === u.url ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
-                          } ${selectedUnit2?.url === u.url ? "opacity-40 pointer-events-none" : ""}`}
-                          data-testid={`card-unit1-${i}`}
-                        >
-                          <div className="font-medium truncate">{u.title}</div>
-                          <div className="text-muted-foreground flex items-center gap-3 mt-0.5">
-                            {u.bedrooms && <span><BedDouble className="h-3 w-3 inline mr-0.5" />{u.bedrooms}BR</span>}
-                            {u.price && <span><DollarSign className="h-3 w-3 inline" />${u.price.toLocaleString()}/mo</span>}
-                            <span className="text-xs">{u.source}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Unit 2 selection */}
-                  <div>
-                    <h3 className="font-medium text-sm mb-2 flex items-center gap-1">
-                      <span className="w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center">2</span>
-                      Unit 2 {selectedUnit2 && <CheckCircle2 className="h-4 w-4 text-green-600 ml-1" />}
-                    </h3>
-                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                      {unitSearchResults.units.map((u, i) => (
-                        <div
-                          key={i}
-                          onClick={() => selectedUnit2?.url === u.url ? setSelectedUnit2(null) : setSelectedUnit2(u)}
-                          className={`p-3 rounded-lg border cursor-pointer text-sm transition-colors ${
-                            selectedUnit2?.url === u.url ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
-                          } ${selectedUnit1?.url === u.url ? "opacity-40 pointer-events-none" : ""}`}
-                          data-testid={`card-unit2-${i}`}
-                        >
-                          <div className="font-medium truncate">{u.title}</div>
-                          <div className="text-muted-foreground flex items-center gap-3 mt-0.5">
-                            {u.bedrooms && <span><BedDouble className="h-3 w-3 inline mr-0.5" />{u.bedrooms}BR</span>}
-                            {u.price && <span><DollarSign className="h-3 w-3 inline" />${u.price.toLocaleString()}/mo</span>}
-                            <span className="text-xs">{u.source}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp className="h-4 w-4 text-primary" />
+                  <h3 className="font-semibold text-sm">Algorithm-Suggested Combinations</h3>
+                  <Badge variant="outline" className="text-xs ml-auto">Select one to continue</Badge>
                 </div>
 
-                {/* Manual URL fallback */}
-                {unitSearchResults.units.length === 0 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                    <div>
-                      <label className="text-sm font-medium mb-1.5 block">Unit 1 — Zillow/Homes.com URL</label>
-                      <Input
-                        placeholder="https://www.zillow.com/homedetails/…"
-                        onChange={e => setSelectedUnit1(e.target.value ? { url: e.target.value, title: "Unit 1", bedrooms: null, price: null, source: "Manual" } : null)}
-                        data-testid="input-unit1-url"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm font-medium mb-1.5 block">Unit 2 — Zillow/Homes.com URL</label>
-                      <Input
-                        placeholder="https://www.zillow.com/homedetails/…"
-                        onChange={e => setSelectedUnit2(e.target.value ? { url: e.target.value, title: "Unit 2", bedrooms: null, price: null, source: "Manual" } : null)}
-                        data-testid="input-unit2-url"
-                      />
-                    </div>
-                  </div>
-                )}
+                <div className="space-y-3 mb-6">
+                  {suggestedPairings.map((p, i) => {
+                    const isSelected = selectedPairing?.unit1Beds === p.unit1Beds && selectedPairing?.unit2Beds === p.unit2Beds;
+                    const buyCost = p.estimatedUnit1Rate + p.estimatedUnit2Rate;
+                    const profit = p.estimatedSellRate - buyCost;
+                    return (
+                      <div
+                        key={i}
+                        onClick={() => handleSelectPairing(p)}
+                        className={`relative p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                          isSelected
+                            ? "border-primary bg-primary/5 shadow-sm"
+                            : "border-border hover:border-primary/40 hover:bg-muted/30"
+                        }`}
+                        data-testid={`card-pairing-${i}`}
+                      >
+                        {p.isTopPick && (
+                          <div className="absolute -top-2.5 left-4">
+                            <Badge className="text-xs bg-amber-500 hover:bg-amber-500 text-white border-0 gap-1">
+                              <Star className="h-3 w-3" /> Algorithm Top Pick
+                            </Badge>
+                          </div>
+                        )}
+                        {isSelected && (
+                          <div className="absolute top-3 right-3">
+                            <CheckCircle2 className="h-5 w-5 text-primary" />
+                          </div>
+                        )}
 
-                {/* Combined summary */}
-                {selectedUnit1 && selectedUnit2 && (
-                  <div className="flex items-center gap-4 p-4 rounded-lg bg-primary/5 border border-primary/20 mb-4">
-                    <div className="flex items-center gap-2">
-                      <BedDouble className="h-5 w-5 text-primary" />
-                      <span className="font-semibold text-lg">{combinedBedrooms}BR</span>
-                      <span className="text-muted-foreground text-sm">combined listing</span>
-                    </div>
-                    {suggestedRate > 0 && (
-                      <div className="flex items-center gap-1">
-                        <DollarSign className="h-5 w-5 text-green-600" />
-                        <span className="font-semibold text-lg text-green-600">${suggestedRate}</span>
-                        <span className="text-muted-foreground text-sm">/night (25% markup)</span>
+                        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                          {/* Unit combo */}
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-7 h-7 rounded-md bg-primary/10 text-primary text-xs font-bold flex items-center justify-center">{p.unit1Beds}BR</span>
+                              <Plus className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span className="w-7 h-7 rounded-md bg-primary/10 text-primary text-xs font-bold flex items-center justify-center">{p.unit2Beds}BR</span>
+                              <span className="text-muted-foreground text-xs mx-1">=</span>
+                              <span className="w-9 h-7 rounded-md bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center">{p.totalBeds}BR</span>
+                            </div>
+                            <span className="text-sm text-muted-foreground">combined listing</span>
+                          </div>
+
+                          {/* Estimated sell price */}
+                          <div className="flex flex-col">
+                            <span className="text-xs text-muted-foreground">Est. sell price</span>
+                            <span className="font-semibold text-green-600 text-base">
+                              ${p.estimatedSellRate.toLocaleString()}–${p.estimatedSellRateHigh.toLocaleString()}<span className="text-xs font-normal text-muted-foreground">/night</span>
+                            </span>
+                          </div>
+
+                          {/* Buy-in cost */}
+                          <div className="flex flex-col">
+                            <span className="text-xs text-muted-foreground">Est. buy-in cost</span>
+                            <span className="font-medium text-sm">
+                              ${p.estimatedUnit1Rate.toLocaleString()} + ${p.estimatedUnit2Rate.toLocaleString()}<span className="text-xs font-normal text-muted-foreground">/night</span>
+                            </span>
+                          </div>
+
+                          {/* Margin */}
+                          {profit > 0 && (
+                            <div className="flex flex-col">
+                              <span className="text-xs text-muted-foreground">Est. margin</span>
+                              <span className="font-semibold text-emerald-600 text-sm">+${profit.toLocaleString()}/night</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Rationale */}
+                        <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{p.rationale}</p>
                       </div>
-                    )}
-                  </div>
-                )}
+                    );
+                  })}
+                </div>
 
-                <Button
-                  onClick={handleConfirmUnits}
-                  disabled={!selectedUnit1 || !selectedUnit2}
-                  data-testid="button-confirm-units"
-                  id="btn-next-step"
-                  aria-label="Confirm selected unit pair and proceed to photos"
-                >
-                  Confirm Unit Pair & Fetch Photos <ArrowRight className="h-4 w-4 ml-2" />
-                </Button>
+                {selectedPairing && (
+                  <Button
+                    onClick={handleConfirmUnits}
+                    data-testid="button-confirm-units"
+                    id="btn-next-step"
+                  >
+                    Confirm {selectedPairing.unit1Beds}BR + {selectedPairing.unit2Beds}BR Combination & Continue
+                    <ArrowRight className="h-4 w-4 ml-2" />
+                  </Button>
+                )}
               </>
+            )}
+
+            {!unitSearchLoading && suggestedPairings.length === 0 && unitSearchResults && (
+              <div className="text-center py-12 text-muted-foreground">
+                <Building2 className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                <p className="font-medium">No pairing data available</p>
+                <p className="text-sm mt-1">The algorithm couldn't find enough rate data for this community.</p>
+              </div>
             )}
           </div>
         )}

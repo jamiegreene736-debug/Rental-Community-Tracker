@@ -3628,9 +3628,9 @@ export async function registerRoutes(
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const queries = [
-      `"${city}" "${state}" condo community vacation rental individual owners site:airbnb.com OR site:vrbo.com`,
-      `"${city}" "${state}" resort condo complex multiple units short term rental`,
-      `"${city}" "${state}" townhome community Airbnb VRBO individually owned units`,
+      `"${city}" "${state}" condo complex vacation rental individually owned units airbnb vrbo`,
+      `"${city}" "${state}" townhome cluster short term rental multiple bedrooms airbnb`,
+      `"${city}" "${state}" condominium community individually owned vacation rental nightly`,
     ];
 
     const allResults: Array<{ title: string; link: string; snippet: string }> = [];
@@ -3699,25 +3699,34 @@ export async function registerRoutes(
     }> = [];
 
     if (anthropicKey) {
-      const prompt = `You are evaluating vacation rental communities for a bundled multi-unit listing model (NexStay). We are looking for communities where:
-1. Units are individually owned condos or townhomes (NOT hotel-owned, NOT timeshare, NOT managed by single resort)
-2. The complex has at least 10+ units
-3. Multiple bedroom configurations exist (2BR + 3BR, 3BR + 3BR, etc.) that can be bundled
-4. Active vacation rental presence on Airbnb/VRBO
-5. Premium nightly rates ($500+/night for 3BR units)
+      const prompt = `You are evaluating potential vacation rental communities for NexStay, a platform that bundles two nearby individually-owned vacation rental units into one large-group listing.
+
+STRICT QUALIFYING CRITERIA — a community MUST meet ALL of these:
+1. PROPERTY TYPE: Condos in a single building OR townhomes in a clustered complex (adjacent units, shared amenities). NOT a hotel. NOT a timeshare resort. NOT a mixed-use residential/commercial complex. NOT a golf resort with scattered villas.
+2. OWNERSHIP MODEL: Units are individually owned by different owners (HOA-style), NOT all owned by one company or resort. Guests can find multiple units listed separately on Airbnb/VRBO by different hosts.
+3. PURELY VACATION RENTAL: The community is primarily used as vacation rentals (not long-term residential apartments). Nightly rental listings should dominate.
+4. UNIT CLUSTERING: Units are physically adjacent or in the same building — enabling a guest group to book two units and use them together as one large space.
+5. SIZE: At least 10+ units in the complex, multiple bedroom configurations (2BR, 3BR, etc.)
+
+DISQUALIFY if:
+- It's a hotel, motel, or resort with front-desk check-in
+- Units are scattered across a large resort campus (not adjacent)
+- Single-owner managed property
+- Primarily long-term rentals
+- Timeshare
 
 Here are search results for "${city}, ${state}":
 ${unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")}
 
-For each result that could be a qualifying community, extract:
-- communityName: the name of the condo/resort complex
-- unitTypes: estimated bedroom configurations available (e.g. "2BR, 3BR")
-- confidenceScore: 0-100 how well it fits the bundling model
-- reason: 1-2 sentence explanation
+For each result that qualifies, extract:
+- communityName: the specific name of the condo building or townhome complex
+- unitTypes: bedroom configurations available (e.g. "2BR, 3BR")
+- confidenceScore: 0-100 (score 80+ only if you are certain it is individually-owned vacation rental condos/townhomes)
+- reason: 1-2 sentences why it qualifies and what type of property it is (condo complex, townhome cluster, etc.)
 - sourceUrl: the URL from the result
 
 Return ONLY a JSON array (no markdown, no code fences). Each element: {"communityName":"...","unitTypes":"...","confidenceScore":0,"reason":"...","sourceUrl":"..."}.
-Only include communities with confidenceScore >= 40. Max 8 results.`;
+Only include communities with confidenceScore >= 50. Max 8 results. If nothing qualifies, return [].`;
 
       try {
         const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -3786,73 +3795,146 @@ Only include communities with confidenceScore >= 40. Max 8 results.`;
   });
 
   // ============================================================
-  // Step 3: Search Zillow/Homes.com for units in a community
+  // Step 3: Generate algorithm-based unit pairing suggestions for a community
   // ============================================================
   app.post("/api/community/search-units", async (req, res) => {
-    const { communityName, city, state } = req.body as { communityName: string; city: string; state: string };
+    const { communityName, city, state, unitTypes: rawUnitTypes } = req.body as {
+      communityName: string; city: string; state: string; unitTypes?: string;
+    };
     if (!communityName) return res.status(400).json({ error: "communityName required" });
 
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    const queries = [
-      `site:zillow.com "${communityName}" ${city} ${state}`,
-      `site:homes.com "${communityName}" ${city} ${state}`,
+    // ── 1. Search Airbnb & VRBO for existing listings at this community ──────
+    const ratesByBR: Record<number, number[]> = {};
+    let airbnbListingCount = 0;
+    const searchQueries = [
+      `"${communityName}" ${city} ${state} site:airbnb.com per night`,
+      `"${communityName}" ${city} ${state} site:vrbo.com per night`,
+      `"${communityName}" ${city} ${state} vacation rental nightly rate`,
     ];
 
-    const units: Array<{ url: string; title: string; bedrooms: number | null; price: number | null; source: string }> = [];
-
-    for (const q of queries) {
+    for (const q of searchQueries) {
       try {
         const resp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=8&api_key=${searchApiKey}`,
         );
         if (!resp.ok) continue;
         const data = await resp.json() as any;
         const organic = (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
         for (const r of organic) {
-          const isZillow = r.link?.includes("zillow.com/homedetails");
-          const isHomes = r.link?.includes("homes.com/property");
-          if (!isZillow && !isHomes) continue;
-
-          // Extract bedroom count from title/snippet
-          const bedroomMatch = (r.title + " " + r.snippet).match(/(\d+)\s*(?:bed|br|bedroom)/i);
-          const bedrooms = bedroomMatch ? parseInt(bedroomMatch[1]) : null;
-
-          // Extract price from snippet
-          const priceMatch = r.snippet?.match(/\$[\s]*([\d,]+)/);
-          const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, "")) : null;
-
-          units.push({
-            url: r.link,
-            title: r.title,
-            bedrooms,
-            price,
-            source: isZillow ? "Zillow" : "Homes.com",
-          });
+          if (r.link?.includes("airbnb.com") || r.link?.includes("vrbo.com")) airbnbListingCount++;
+          const text = r.title + " " + r.snippet;
+          // Extract bedroom count
+          const brMatch = text.match(/(\d+)\s*(?:bed|br|bedroom)/i);
+          const br = brMatch ? parseInt(brMatch[1]) : null;
+          // Extract nightly rate
+          const rateMatches = text.match(/\$\s*(\d{2,4})\s*(?:\/\s*night|per night|a night)/gi) || [];
+          for (const m of rateMatches) {
+            const rate = parseInt(m.replace(/[^\d]/g, ""));
+            if (rate >= 80 && rate <= 3000 && br && br >= 1 && br <= 6) {
+              if (!ratesByBR[br]) ratesByBR[br] = [];
+              ratesByBR[br].push(rate);
+            }
+          }
         }
-      } catch (e: any) {
-        console.warn("[community/search-units] error:", e.message);
+      } catch { /* ignore */ }
+    }
+
+    // ── 2. Parse available unit types ─────────────────────────────────────────
+    // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
+    const parsedTypes = new Set<number>();
+    if (rawUnitTypes) {
+      const nums = rawUnitTypes.match(/(\d+)\s*(?:br|bed)/gi) || rawUnitTypes.match(/\d+/g) || [];
+      for (const n of nums) {
+        const br = parseInt(n);
+        if (br >= 1 && br <= 6) parsedTypes.add(br);
+      }
+    }
+    // Also add bedroom types found from Airbnb/VRBO search
+    for (const br of Object.keys(ratesByBR)) parsedTypes.add(parseInt(br));
+    // Default to 2BR + 3BR if nothing found (most common vacation rental config)
+    if (parsedTypes.size === 0) { parsedTypes.add(2); parsedTypes.add(3); }
+
+    const availableTypes = Array.from(parsedTypes).sort((a, b) => a - b);
+
+    // ── 3. Calculate median rate per bedroom type ─────────────────────────────
+    const medianRate = (arr: number[]) => {
+      if (!arr?.length) return null;
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    };
+    // Estimate per-unit nightly rate for each BR type (if not found in search, use location-based estimate)
+    const baseRatePerBR: Record<number, number> = {};
+    const isHawaii = state === "Hawaii" || state === "HI";
+    const isFlorida = state === "Florida" || state === "FL";
+    const basePricePerBR = isHawaii ? 160 : isFlorida ? 120 : 100;
+    for (const br of availableTypes) {
+      const found = medianRate(ratesByBR[br]);
+      baseRatePerBR[br] = found ?? (br * basePricePerBR);
+    }
+
+    // ── 4. Generate pairing combinations ─────────────────────────────────────
+    const MARKUP = 1.38;
+    type Pairing = {
+      unit1Beds: number; unit2Beds: number; totalBeds: number;
+      estimatedUnit1Rate: number; estimatedUnit2Rate: number;
+      estimatedSellRate: number; estimatedSellRateHigh: number;
+      rationale: string; isTopPick: boolean; matchScore: number;
+    };
+    const pairings: Pairing[] = [];
+
+    // Generate all valid combinations (including same type twice)
+    const typeArr = availableTypes;
+    for (let i = 0; i < typeArr.length; i++) {
+      for (let j = i; j < typeArr.length; j++) {
+        const b1 = typeArr[i], b2 = typeArr[j];
+        const total = b1 + b2;
+        if (total < 3 || total > 10) continue;
+        const r1 = baseRatePerBR[b1] ?? b1 * basePricePerBR;
+        const r2 = baseRatePerBR[b2] ?? b2 * basePricePerBR;
+        const buyCost = r1 + r2;
+        const sellLow = Math.round(buyCost * MARKUP / 25) * 25;
+        const sellHigh = Math.round(sellLow * 1.15 / 25) * 25;
+
+        // Score: same-size units are best (guests get symmetric experience), larger is better for demand
+        const matchScore = (b1 === b2 ? 2 : 0) + Math.min(total / 2, 3);
+        const reasons: string[] = [];
+        if (b1 === b2) reasons.push(`Matched unit sizes (${b1}BR + ${b2}BR) — symmetric guest experience`);
+        else reasons.push(`Mixed sizes: ${b1}BR + ${b2}BR`);
+        if (total >= 6) reasons.push("high-demand large group configuration");
+        if (total >= 8) reasons.push("rare 8BR+ inventory");
+        if (b1 === b2 && total >= 6) reasons.push("⭐ algorithm top pick");
+
+        pairings.push({
+          unit1Beds: b1, unit2Beds: b2, totalBeds: total,
+          estimatedUnit1Rate: r1, estimatedUnit2Rate: r2,
+          estimatedSellRate: sellLow, estimatedSellRateHigh: sellHigh,
+          rationale: reasons.join(" · "),
+          isTopPick: b1 === b2 && total >= 6,
+          matchScore,
+        });
       }
     }
 
-    // Deduplicate by URL
-    const seen = new Set<string>();
-    const deduped = units.filter(u => {
-      if (seen.has(u.url)) return false;
-      seen.add(u.url);
-      return true;
+    pairings.sort((a, b) => b.matchScore - a.matchScore);
+
+    console.log(`[search-units] ${communityName}: ${availableTypes.join("BR, ")}BR available, ${pairings.length} pairings, ${airbnbListingCount} listings found`);
+
+    res.json({
+      communityProfile: {
+        availableTypes,
+        airbnbListingCount,
+        ratesByBR: Object.fromEntries(
+          Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length }])
+        ),
+      },
+      suggestedPairings: pairings,
+      // backward compat
+      units: [],
+      grouped: {},
     });
-
-    // Group by bedroom count
-    const grouped: Record<number | string, typeof deduped> = {};
-    for (const u of deduped) {
-      const key = u.bedrooms ?? "unknown";
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(u);
-    }
-
-    res.json({ units: deduped, grouped });
   });
 
   // ============================================================
