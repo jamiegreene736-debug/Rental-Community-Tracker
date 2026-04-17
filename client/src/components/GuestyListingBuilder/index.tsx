@@ -1188,7 +1188,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 });
                                 const data = await res.json();
                                 if (data.success) {
-                                  toast({ title: data.verified ? "Compliance pushed to Guesty" : "Pushed but not verified", description: `Tags: ${(data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ")}` });
+                                  const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ");
+                                  toast({
+                                    title: data.verified ? "Compliance pushed to Guesty" : "Pushed (partially verified)",
+                                    description: `Tags: ${compTags}${data.notesUpdated ? " · Notes updated with GET/TAT/TMK block" : ""}`,
+                                  });
                                 } else {
                                   toast({ title: "Push failed", description: data.error || "Unknown error", variant: "destructive" });
                                 }
@@ -1202,7 +1206,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               background: selectedId ? "#1e40af" : "#94a3b8", color: "#fff",
                             }}
                             data-testid="btn-push-compliance"
-                            title={selectedId ? "Save TMK, TAT, and GET as tags on this Guesty listing" : "Select a Guesty listing first"}
+                            title={selectedId ? "Pushes GET, TAT, and TMK to Guesty as tags (internal) and into publicDescription.notes (channel-facing for VRBO compliance)" : "Select a Guesty listing first"}
                           >
                             ↑ Push Compliance to Guesty
                           </button>
@@ -1272,6 +1276,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               )}
                             </div>
                           </div>
+                        </div>
+                        <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 10, lineHeight: 1.5 }}>
+                          "Push Compliance to Guesty" stores all three IDs as Guesty tags (<code>GET:</code>, <code>TAT:</code>, <code>TMK:</code>) and writes a structured block into the listing's <em>Notes</em> field — the same field VRBO reads for Hawaii license compliance.
                         </div>
                       </div>
                     )}
