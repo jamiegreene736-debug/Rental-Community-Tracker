@@ -326,7 +326,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
   const [savingToGuesty, setSavingToGuesty] = useState(false);
   const [checkpointCount, setCheckpointCount] = useState(0);
-  const [doUpscale, setDoUpscale] = useState(true);
+  const [doUpscale, setDoUpscale] = useState(false);
   const pushAbortRef = useRef<AbortController | null>(null);
 
   // Persisted last-push summary (survives refresh)
@@ -630,7 +630,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                   upscaledCount: event.upscaledCount ?? 0,
                   failed: tot - sc,
                 });
-                refreshGuestyPhotoCount();
+                // Guesty processes uploaded photos asynchronously — wait 3s then poll
+                setTimeout(() => refreshGuestyPhotoCount(), 3000);
+                setTimeout(() => refreshGuestyPhotoCount(), 8000);
               }
             }
           } catch { /* malformed line — skip */ }
