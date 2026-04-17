@@ -384,7 +384,40 @@ function BestBuyInFinder() {
   const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [otherResults, setOtherResults] = useState<OtherPlatformResults | null>(null);
   const [loading, setLoading] = useState(false);
-  const [feePercent, setFeePercent] = useState(15);
+  // Per-platform fee buffers — each tuned to that platform's actual fee structure
+  // Airbnb: ~14% guest service fee + ~14.96% Hawaii TAT/GET ≈ 28% on top of search-result price
+  // VRBO/Google Hotels: ~10% service fee + ~14.96% taxes ≈ 22%
+  // Direct/Suite Paradise: taxes only ≈ 18%
+  // Cleaning fees are almost never in extracted_total_price → add as flat per-unit per-stay
+  const [airbnbFeePercent, setAirbnbFeePercent] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("nexstay_airbnb_fee") || "28", 10) || 28; } catch { return 28; }
+  });
+  const [vrboFeePercent, setVrboFeePercent] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("nexstay_vrbo_fee") || "22", 10) || 22; } catch { return 22; }
+  });
+  const [cleaningFeePerUnit, setCleaningFeePerUnit] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("nexstay_cleaning_fee") || "250", 10) || 250; } catch { return 250; }
+  });
+  // Persist when changed
+  useEffect(() => { try { localStorage.setItem("nexstay_airbnb_fee", String(airbnbFeePercent)); } catch {} }, [airbnbFeePercent]);
+  useEffect(() => { try { localStorage.setItem("nexstay_vrbo_fee", String(vrboFeePercent)); } catch {} }, [vrboFeePercent]);
+  useEffect(() => { try { localStorage.setItem("nexstay_cleaning_fee", String(cleaningFeePerUnit)); } catch {} }, [cleaningFeePerUnit]);
+
+  // Helper: returns the realistic estimated checkout cost for a single listing.
+  // Includes platform-specific service-fee + tax buffer AND a flat cleaning fee.
+  const getEstimatedListingCost = (listing: AirbnbProperty): number => {
+    const base = listing.price?.extracted_total_price ?? 0;
+    if (base <= 0) return 0;
+    const buf = listing.source === "airbnb" ? airbnbFeePercent
+              : listing.source === "vrbo" ? vrboFeePercent
+              : 18; // direct/suite-paradise
+    return Math.round(base * (1 + buf / 100) + cleaningFeePerUnit);
+  };
+  const getBufferPercentForSource = (source: string | undefined): number => {
+    return source === "airbnb" ? airbnbFeePercent
+         : source === "vrbo" ? vrboFeePercent
+         : 18;
+  };
   const [selectedListings, setSelectedListings] = useState<Record<string, AirbnbProperty[]>>({});
   const [recording, setRecording] = useState(false);
   const [activePlatform, setActivePlatform] = useState<"airbnb" | "vrbo" | "suite-paradise">("airbnb");
@@ -469,22 +502,16 @@ function BestBuyInFinder() {
   };
 
   const getSelectedTotalCost = () => {
-    const feeMultiplier = 1 + feePercent / 100;
     let total = 0;
     for (const listings of Object.values(selectedListings)) {
       for (const listing of listings) {
-        if (listing.source === "airbnb") {
-          total += Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier);
-        } else {
-          total += Math.round(listing.price?.extracted_total_price ?? 0);
-        }
+        total += getEstimatedListingCost(listing);
       }
     }
     return total;
   };
 
   const autoSelectCheapest = (airbnbData: AirbnbSearchResults, otherData: OtherPlatformResults | null) => {
-    const fm = 1 + feePercent / 100;
     const newSelections: Record<string, AirbnbProperty[]> = {};
 
     for (const need of airbnbData.unitsNeeded) {
@@ -513,16 +540,10 @@ function BestBuyInFinder() {
         }
       }
 
+      // Sort by realistic estimated cost (includes per-platform buffer + cleaning)
+      // so platforms compete on a level playing field.
       const withPrice = allCandidates.filter(p => p.price?.extracted_total_price);
-      withPrice.sort((a, b) => {
-        const costA = a.source === "airbnb"
-          ? (a.price!.extracted_total_price * fm)
-          : a.price!.extracted_total_price;
-        const costB = b.source === "airbnb"
-          ? (b.price!.extracted_total_price * fm)
-          : b.price!.extracted_total_price;
-        return costA - costB;
-      });
+      withPrice.sort((a, b) => getEstimatedListingCost(a) - getEstimatedListingCost(b));
 
       newSelections[key] = withPrice.slice(0, need.count);
     }
@@ -554,8 +575,6 @@ function BestBuyInFinder() {
     const selectedProp = allProperties.find(p => p.propertyId === propId);
     if (!pricing || !selectedProp) return;
 
-    const feeMultiplier = 1 + feePercent / 100;
-
     setRecording(true);
     try {
       const unitsByBedroom: Record<number, typeof pricing.units> = {};
@@ -576,10 +595,9 @@ function BestBuyInFinder() {
           const assignedUnit = availableUnits[assignIdx] || availableUnits[0];
           unitAssignmentIndex[need.bedrooms] = assignIdx + 1;
 
-          const isAirbnb = listing.source === "airbnb";
-          const estimatedCost = isAirbnb
-            ? Math.round((listing.price?.extracted_total_price ?? 0) * feeMultiplier)
-            : Math.round(listing.price?.extracted_total_price ?? 0);
+          const estimatedCost = getEstimatedListingCost(listing);
+          const buf = getBufferPercentForSource(listing.source);
+          const listedPrice = listing.price?.extracted_total_price ?? 0;
           const sourceName = (listing.source || "airbnb").charAt(0).toUpperCase() + (listing.source || "airbnb").slice(1);
 
           await apiRequest("POST", "/api/buy-ins", {
@@ -592,7 +610,7 @@ function BestBuyInFinder() {
             costPaid: String(estimatedCost),
             airbnbConfirmation: null,
             airbnbListingUrl: listing.bookingLink || listing.link || null,
-            notes: `${sourceName} listing: ${listing.title} (${isAirbnb ? `Listed: $${listing.price?.extracted_total_price ?? 0}, Est. checkout: $${estimatedCost}` : `Total: $${estimatedCost} (fees incl.)`})`,
+            notes: `${sourceName} listing: ${listing.title} — Listed: $${listedPrice}, Est. checkout: $${estimatedCost} (+${buf}% fees & taxes + $${cleaningFeePerUnit} cleaning). VERIFY exact total at checkout before booking.`,
             status: "active",
           });
         }
@@ -760,7 +778,6 @@ function BestBuyInFinder() {
 
       {results !== null && !loading && (() => {
         const propId = parseInt(selectedPropertyId);
-        const feeMultiplier = 1 + feePercent / 100;
 
         // ── Buy-in from live search (all required units) ──────────────────
         const listedBuyInCost = results.unitsNeeded.reduce((total, need) => {
@@ -771,7 +788,14 @@ function BestBuyInFinder() {
           return total + topPicks.reduce((sum, p) => sum + (p.price?.extracted_total_price ?? 0), 0);
         }, 0);
 
-        const estimatedBuyInCost = Math.round(listedBuyInCost * feeMultiplier);
+        // Realistic estimated buy-in: applies Airbnb buffer + cleaning per unit
+        const estimatedBuyInCost = results.unitsNeeded.reduce((total, need) => {
+          const key = `${need.bedrooms}BR`;
+          const searchData = results.searches[key];
+          if (!searchData || searchData.error) return total;
+          const topPicks = searchData.properties.slice(0, need.count);
+          return total + topPicks.reduce((sum, p) => sum + getEstimatedListingCost({ ...p, source: "airbnb" } as AirbnbProperty), 0);
+        }, 0);
 
         const hasAllPrices = results.unitsNeeded.every(need => {
           const key = `${need.bedrooms}BR`;
@@ -843,17 +867,44 @@ function BestBuyInFinder() {
                 <div className="p-3 bg-muted/30 border-b sm:border-b-0 sm:border-r border-border" data-testid="text-buyin-cost">
                   <p className="text-xs text-muted-foreground mb-1">② Your Buy-In Cost</p>
                   <p className="font-bold text-base">{formatCurrency(estimatedBuyInCost)}</p>
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <span className="text-xs text-muted-foreground">+</span>
-                    <Input
-                      type="number"
-                      value={feePercent}
-                      onChange={e => setFeePercent(Math.max(0, Math.min(50, parseInt(e.target.value) || 0)))}
-                      className="w-12 h-5 text-xs text-center px-1"
-                      min={0} max={50}
-                      data-testid="input-fee-percent"
-                    />
-                    <span className="text-xs text-muted-foreground">% Airbnb fees & taxes</span>
+                  <div className="flex flex-col gap-0.5 mt-0.5 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1">
+                      <span>Airbnb +</span>
+                      <Input
+                        type="number"
+                        value={airbnbFeePercent}
+                        onChange={e => setAirbnbFeePercent(Math.max(0, Math.min(50, parseInt(e.target.value) || 0)))}
+                        className="w-11 h-5 text-xs text-center px-1"
+                        min={0} max={50}
+                        data-testid="input-airbnb-fee-percent"
+                        title="Airbnb guest service fee (~14%) + Hawaii TAT/GET (~14.96%) ≈ 28%"
+                      />
+                      <span>%</span>
+                      <span className="ml-2">VRBO +</span>
+                      <Input
+                        type="number"
+                        value={vrboFeePercent}
+                        onChange={e => setVrboFeePercent(Math.max(0, Math.min(50, parseInt(e.target.value) || 0)))}
+                        className="w-11 h-5 text-xs text-center px-1"
+                        min={0} max={50}
+                        data-testid="input-vrbo-fee-percent"
+                        title="VRBO service fee (~10%) + Hawaii taxes (~14.96%) ≈ 22%"
+                      />
+                      <span>%</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span>+ Cleaning $</span>
+                      <Input
+                        type="number"
+                        value={cleaningFeePerUnit}
+                        onChange={e => setCleaningFeePerUnit(Math.max(0, Math.min(1000, parseInt(e.target.value) || 0)))}
+                        className="w-14 h-5 text-xs text-center px-1"
+                        min={0} max={1000} step={25}
+                        data-testid="input-cleaning-fee"
+                        title="Flat cleaning fee per unit per stay (rarely included in search-result prices)"
+                      />
+                      <span>per unit</span>
+                    </div>
                   </div>
                 </div>
                 {/* Step 3: Your sell rate */}
@@ -1086,38 +1137,24 @@ function BestBuyInFinder() {
                             </div>
 
                             <div className="flex items-center gap-4 mt-2 flex-wrap">
-                              {prop.price && (
+                              {prop.price && (() => {
+                                const est = getEstimatedListingCost(prop);
+                                const buf = getBufferPercentForSource(prop.source);
+                                return (
                                 <span data-testid={`text-price-${key}-${idx}`}>
-                                  {prop.source === "airbnb" ? (
-                                    <>
-                                      <span className="font-semibold text-green-600 dark:text-green-400">
-                                        {formatCurrency(Math.round((prop.price.extracted_total_price ?? 0) * feeMultiplier))}
-                                      </span>
-                                      <span className="text-xs font-normal text-muted-foreground ml-1">
-                                        est. checkout
-                                      </span>
-                                      <span className="text-xs text-muted-foreground ml-2 line-through">
-                                        {prop.price.total_price}
-                                      </span>
-                                      <span className="text-xs text-muted-foreground ml-1">listed</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <span className="font-semibold text-green-600 dark:text-green-400">
-                                        {formatCurrency(prop.price.extracted_total_price ?? 0)}
-                                      </span>
-                                      <span className="text-xs font-normal text-muted-foreground ml-1">
-                                        total (all fees incl.)
-                                      </span>
-                                      {(prop.price as any).price_per_night && (
-                                        <span className="text-xs text-muted-foreground ml-2">
-                                          ({formatCurrency((prop.price as any).price_per_night)}/night)
-                                        </span>
-                                      )}
-                                    </>
-                                  )}
+                                  <span className="font-semibold text-green-600 dark:text-green-400">
+                                    {formatCurrency(est)}
+                                  </span>
+                                  <span className="text-xs font-normal text-muted-foreground ml-1">
+                                    est. checkout
+                                  </span>
+                                  <span className="text-xs text-muted-foreground ml-2 line-through">
+                                    {prop.price.total_price ?? formatCurrency(prop.price.extracted_total_price ?? 0)}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground ml-1">listed (+{buf}% fees +${cleaningFeePerUnit} cleaning)</span>
                                 </span>
-                              )}
+                                );
+                              })()}
                               {!prop.price && prop.source !== "airbnb" && (
                                 <span className="text-xs text-muted-foreground italic">Price not available - check listing</span>
                               )}
@@ -1254,6 +1291,16 @@ function BestBuyInFinder() {
                 <p className="text-xs text-muted-foreground mt-2">
                   Select all {getTotalNeededCount()} units needed to record buy-ins
                 </p>
+              )}
+              {allUnitsSelected() && (
+                <div className="mt-3 p-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+                  <p className="text-xs text-amber-800 dark:text-amber-200 font-medium">
+                    ⚠ Before recording: open each selected listing in a new tab and verify the actual checkout total.
+                  </p>
+                  <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                    Estimates above use realistic platform fees ({airbnbFeePercent}% Airbnb, {vrboFeePercent}% VRBO) + ${cleaningFeePerUnit} cleaning per unit, but cleaning fees vary widely and some listings have hidden taxes. If checkout differs, edit the buy-in cost after recording.
+                  </p>
+                </div>
               )}
             </Card>
             );
