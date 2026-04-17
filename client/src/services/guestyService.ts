@@ -68,6 +68,7 @@ export type GuestyPropertyData = {
   areaSquareFeet?: number;
   taxMapKey?: string;
   tatLicense?: string;
+  getLicense?: string;
   strPermit?: string;
   bedrooms?: number;
   bathrooms?: number;
@@ -205,6 +206,10 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, {
       nickname: nickname.slice(0, 40).trimEnd(),
     });
+  }
+
+  async updateSpaceDescription(id: string, space: string) {
+    return this.request("PUT", `/listings/${id}`, { publicDescription: { space } });
   }
 
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {

@@ -1752,24 +1752,26 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/push-descriptions
-  // POST /api/builder/push-compliance — pushes TMK and TAT license to Guesty's internal tags (not synced to Airbnb/VRBO)
+  // POST /api/builder/push-compliance — pushes TMK, TAT, and GET license to Guesty's internal tags (not synced to Airbnb/VRBO)
   app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
-    const { listingId, taxMapKey, tatLicense } = req.body as {
+    const { listingId, taxMapKey, tatLicense, getLicense } = req.body as {
       listingId: string;
       taxMapKey?: string;
       tatLicense?: string;
+      getLicense?: string;
     };
     if (!listingId) return res.status(400).json({ error: "listingId required" });
-    if (!taxMapKey && !tatLicense) return res.status(400).json({ error: "taxMapKey or tatLicense required" });
+    if (!taxMapKey && !tatLicense && !getLicense) return res.status(400).json({ error: "taxMapKey, tatLicense, or getLicense required" });
 
-    console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense}`);
+    console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense} GET:${getLicense}`);
     try {
       // Get current tags, strip out any old compliance tags, then add fresh ones
       const current = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
       const existingTags: string[] = Array.isArray(current.tags) ? current.tags : [];
-      const stripped = existingTags.filter(t => !t.startsWith("TMK:") && !t.startsWith("TAT:"));
+      const stripped = existingTags.filter(t => !t.startsWith("TMK:") && !t.startsWith("TAT:") && !t.startsWith("GET:"));
       if (taxMapKey) stripped.push(`TMK:${taxMapKey}`);
       if (tatLicense) stripped.push(`TAT:${tatLicense}`);
+      if (getLicense) stripped.push(`GET:${getLicense}`);
 
       await guestyRequest("PUT", `/listings/${listingId}`, { tags: stripped });
 
@@ -1778,7 +1780,8 @@ export async function registerRoutes(
       const savedTags: string[] = Array.isArray(fetched.tags) ? fetched.tags : [];
       const verified =
         (!taxMapKey || savedTags.some(t => t.includes(taxMapKey))) &&
-        (!tatLicense || savedTags.some(t => t.includes(tatLicense)));
+        (!tatLicense || savedTags.some(t => t.includes(tatLicense))) &&
+        (!getLicense || savedTags.some(t => t.includes(getLicense)));
       console.log(`[push-compliance] verified=${verified}, tags:`, savedTags);
       return res.json({ success: true, verified, savedTags });
     } catch (err: any) {

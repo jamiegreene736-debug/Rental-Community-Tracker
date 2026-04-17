@@ -354,3 +354,55 @@ export function describeUnitBedding(unit: UnitBeddingConfig): string {
     .join("; ");
   return `${beds.join("; ")}.${sofa} Bathrooms: ${baths}.`;
 }
+
+// ── Space description builder ─────────────────────────────────────────────────
+// Generates a full prose "The Space" description incorporating bedroom names,
+// bed types, ensuite features, bathrooms, and sofa beds. Used in the Bedding
+// tab to populate publicDescription.space in Guesty so bedroom names "stream
+// through" to the actual listing copy.
+
+function bedSentence(br: BedroomDetail): string {
+  const bedParts = br.beds.map(b => {
+    const qty = b.quantity > 1 ? `${b.quantity} ` : "";
+    const name = BED_TYPE_LABELS[b.type];
+    const plural = b.quantity > 1 ? (name.endsWith("s") ? "" : "s") : "";
+    return `${qty}${name}${plural}`;
+  }).join(" and ");
+  const ensuiteParts = br.hasEnsuite && br.ensuiteFeatures.length > 0
+    ? ` with a private ensuite featuring ${br.ensuiteFeatures.map(f => BATH_FEATURE_LABELS[f]).join(" and ").toLowerCase()}`
+    : br.hasEnsuite ? " with private ensuite bathroom" : "";
+  return `The ${br.label} offers a ${bedParts} bed${ensuiteParts}.`;
+}
+
+function bathSentence(baths: BathroomDetail[]): string {
+  const full = baths.filter(b => !b.isHalf);
+  const half = baths.filter(b => b.isHalf);
+  const parts: string[] = full.map(b => {
+    const featureStr = b.features.length > 0
+      ? ` with ${b.features.map(f => BATH_FEATURE_LABELS[f]).join(" and ").toLowerCase()}`
+      : "";
+    return `a ${b.label.toLowerCase()}${featureStr}`;
+  });
+  if (half.length > 0) parts.push(`${half.length} half-bath${half.length > 1 ? "s" : ""}`);
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return `The bathroom includes ${parts[0]}.`;
+  const last = parts.pop()!;
+  return `The bathrooms include ${parts.join(", ")}, and ${last}.`;
+}
+
+export function buildSpaceDescription(config: PropertyBeddingConfig): string {
+  return config.units.map((unit) => {
+    const brCount = unit.bedrooms.length;
+    const bathCount = unit.bathrooms.reduce((s, b) => s + (b.isHalf ? 0.5 : 1), 0);
+    const sleeps = unit.bedrooms.reduce((s, br) =>
+      s + br.beds.reduce((bs, b) => bs + (BED_SLEEPS[b.type] ?? 2) * b.quantity, 0), 0)
+      + (unit.livingRoom.hasSofaBed ? 2 * unit.livingRoom.count : 0);
+    const header = `Unit ${unit.unitLabel} (${brCount}BR/${bathCount}BA · Sleeps ${sleeps})`;
+    const bedroomLines = unit.bedrooms.map(br => bedSentence(br)).join(" ");
+    const sofaLine = unit.livingRoom.hasSofaBed
+      ? ` The living room has ${unit.livingRoom.count > 1 ? `${unit.livingRoom.count} sofa beds` : "a queen sofa bed"} for additional sleeping.`
+      : "";
+    const bathLine = bathSentence(unit.bathrooms);
+    return `${header}\n${bedroomLines}${sofaLine} ${bathLine}`.trim();
+  }).join("\n\n");
+}

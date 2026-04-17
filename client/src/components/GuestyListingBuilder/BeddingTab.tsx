@@ -13,6 +13,7 @@ import {
   saveBeddingConfig,
   resetBeddingConfig,
   buildGuestyListingRooms,
+  buildSpaceDescription,
   totalBedrooms,
   totalBathrooms,
   totalSleeps,
@@ -75,12 +76,21 @@ export function BeddingTab({ propertyId, guestyListingId }: Props) {
   const { toast } = useToast();
   const [config, setConfig] = useState<PropertyBeddingConfig>(() => loadBeddingConfig(propertyId));
   const [pushing, setPushing] = useState(false);
+  const [spaceText, setSpaceText] = useState(() => buildSpaceDescription(loadBeddingConfig(propertyId)));
+  const [pushingSpace, setPushingSpace] = useState(false);
 
   // Reload when property changes
-  useEffect(() => { setConfig(loadBeddingConfig(propertyId)); }, [propertyId]);
+  useEffect(() => {
+    const c = loadBeddingConfig(propertyId);
+    setConfig(c);
+    setSpaceText(buildSpaceDescription(c));
+  }, [propertyId]);
 
-  // Auto-persist on change
-  useEffect(() => { saveBeddingConfig(config); }, [config]);
+  // Auto-persist on change + refresh generated space text
+  useEffect(() => {
+    saveBeddingConfig(config);
+    setSpaceText(buildSpaceDescription(config));
+  }, [config]);
 
   const totals = useMemo(() => ({
     bedrooms: totalBedrooms(config),
@@ -147,6 +157,22 @@ export function BeddingTab({ propertyId, guestyListingId }: Props) {
     if (!confirm("Reset bedding config for this property to defaults? Your edits will be lost.")) return;
     setConfig(resetBeddingConfig(propertyId));
   };
+
+  const handlePushSpace = useCallback(async () => {
+    if (!guestyListingId || pushingSpace || !spaceText.trim()) return;
+    setPushingSpace(true);
+    try {
+      await guestyService.updateSpaceDescription(guestyListingId, spaceText);
+      toast({
+        title: "Space description pushed to Guesty",
+        description: "The bedroom names and configuration are now in your listing's Space field.",
+      });
+    } catch (e) {
+      toast({ title: "Push failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setPushingSpace(false);
+    }
+  }, [guestyListingId, pushingSpace, spaceText, toast]);
 
   return (
     <div data-testid="bedding-tab">
@@ -412,9 +438,51 @@ export function BeddingTab({ propertyId, guestyListingId }: Props) {
         </div>
       ))}
 
+      {/* ── Space Description — streams bedroom names into listing copy ─── */}
+      <div style={{ ...cellStyle, border: "1px solid #c7d2fe", background: "#eef2ff", marginTop: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ ...labelStyle, color: "#3730a3", marginBottom: 2 }}>Space Description (streams bedroom names into your listing)</div>
+            <div style={{ fontSize: 11, color: "#6366f1", lineHeight: 1.4 }}>
+              Guesty's API doesn't store room <em>names</em> — they stream through the Space field of your listing description.
+              Edit below, then push to update the Space field in Guesty so guests see the bedroom names you've set.
+            </div>
+          </div>
+          <button
+            onClick={handlePushSpace}
+            disabled={!guestyListingId || pushingSpace}
+            style={{
+              ...inputStyle, marginLeft: "auto", cursor: guestyListingId ? "pointer" : "not-allowed",
+              background: pushingSpace ? "#94a3b8" : "#4f46e5", color: "#fff",
+              borderColor: "transparent", fontWeight: 600, whiteSpace: "nowrap",
+            }}
+            data-testid="btn-push-space"
+            title={guestyListingId ? "Push this text to the Space field in Guesty" : "Select a Guesty listing first"}
+          >
+            {pushingSpace ? "Pushing…" : "↑ Push Space to Guesty"}
+          </button>
+        </div>
+        <textarea
+          value={spaceText}
+          onChange={e => setSpaceText(e.target.value)}
+          rows={Math.min(20, spaceText.split("\n").length + 2)}
+          style={{
+            width: "100%", padding: "8px 10px", fontSize: 12,
+            border: "1px solid #c7d2fe", borderRadius: 6,
+            background: "#fff", color: "#1e1b4b", lineHeight: 1.6,
+            fontFamily: "inherit", resize: "vertical", boxSizing: "border-box",
+          }}
+          data-testid="textarea-space-description"
+          placeholder="Space description will be generated from your bedding configuration..."
+        />
+        <div style={{ fontSize: 10, color: "#6366f1", marginTop: 4 }}>
+          Auto-regenerated from bedding config on each edit. You can freely edit this text before pushing.
+        </div>
+      </div>
+
       {/* Footer note */}
       <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.5 }}>
-        Edits auto-save locally. Click <b>Push Bedding to Guesty</b> to send the bedroom count, bathroom count (half-baths = 0.5), and the room/bed configuration to your Guesty listing. Bath features (walk-in shower, soaking tub, etc.) aren't structured in Guesty's API — they're surfaced through amenities and the <b>publicDescription.space</b> field.
+        Edits auto-save locally. <b>Push Bedding to Guesty</b> sends bedroom/bathroom counts and room configuration. <b>Push Space to Guesty</b> sends the prose description including bedroom names to the listing's Space field.
       </div>
     </div>
   );

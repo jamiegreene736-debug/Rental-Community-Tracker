@@ -1165,12 +1165,49 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     )}
 
                     {/* Compliance & Registration Section */}
-                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.strPermit) && (
+                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit) && (
                       <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                          <span>🏛</span> Compliance &amp; Registration
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span>🏛</span> Compliance &amp; Registration
+                          </div>
+                          <button
+                            disabled={!selectedId}
+                            onClick={async () => {
+                              if (!selectedId) return;
+                              try {
+                                const res = await fetch("/api/builder/push-compliance", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    listingId: selectedId,
+                                    taxMapKey: effectivePropertyData.taxMapKey,
+                                    tatLicense: effectivePropertyData.tatLicense,
+                                    getLicense: effectivePropertyData.getLicense,
+                                  }),
+                                });
+                                const data = await res.json();
+                                if (data.success) {
+                                  toast({ title: data.verified ? "Compliance pushed to Guesty" : "Pushed but not verified", description: `Tags: ${(data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ")}` });
+                                } else {
+                                  toast({ title: "Push failed", description: data.error || "Unknown error", variant: "destructive" });
+                                }
+                              } catch (e: any) {
+                                toast({ title: "Push failed", description: e.message, variant: "destructive" });
+                              }
+                            }}
+                            style={{
+                              fontSize: 12, fontWeight: 600, padding: "6px 12px", borderRadius: 6,
+                              border: "1px solid transparent", cursor: selectedId ? "pointer" : "not-allowed",
+                              background: selectedId ? "#1e40af" : "#94a3b8", color: "#fff",
+                            }}
+                            data-testid="btn-push-compliance"
+                            title={selectedId ? "Save TMK, TAT, and GET as tags on this Guesty listing" : "Select a Guesty listing first"}
+                          >
+                            ↑ Push Compliance to Guesty
+                          </button>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
                               Tax Map Key (TMK)
@@ -1189,7 +1226,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              TAT License Number
+                              GET License (General Excise Tax)
+                            </div>
+                            <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                              data-testid="text-get-value">
+                              <span>{effectivePropertyData.getLicense ?? "—"}</span>
+                              {effectivePropertyData.getLicense && (
+                                <button
+                                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.getLicense!); toast({ title: "Copied GET License" }); }}
+                                  title="Copy to clipboard"
+                                >📋</button>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                              TAT License (Transient Accom. Tax)
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tat-value">
