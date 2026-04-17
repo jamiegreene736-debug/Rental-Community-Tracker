@@ -325,6 +325,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [upscaleError, setUpscaleError] = useState<string | null>(null);
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
   const [savingToGuesty, setSavingToGuesty] = useState(false);
+  const [checkpointCount, setCheckpointCount] = useState(0);
   const [doUpscale, setDoUpscale] = useState(true);
   const pushAbortRef = useRef<AbortController | null>(null);
 
@@ -529,6 +530,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setUpscaleError(null);
     setPushResults([]);
     setSavingToGuesty(false);
+    setCheckpointCount(0);
 
     const origin = window.location.origin;
 
@@ -579,9 +581,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line) as {
-              type: "photo" | "done";
+              type: "photo" | "checkpoint" | "saving" | "done";
               index?: number;
               total?: number;
+              saved?: number;
               localPath?: string;
               success?: boolean;
               url?: string;
@@ -599,6 +602,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                 success: event.success ?? false,
                 error: event.error,
               }]);
+            } else if (event.type === "checkpoint") {
+              // Intermediate save — update Guesty photo count so user can see progress
+              setCheckpointCount(c => c + 1);
+              refreshGuestyPhotoCount();
             } else if (event.type === "saving") {
               setSavingToGuesty(true);
             } else if (event.type === "done") {
@@ -1674,10 +1681,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               </div>
                               <div style={{ fontSize: 11, color: "#9ca3af" }}>
                                 {savingToGuesty
-                                  ? "Sending all photos to Guesty in one request…"
+                                  ? "Saving final batch to Guesty…"
+                                  : checkpointCount > 0
+                                  ? `✓ ${checkpointCount * 5} photos already saved to Guesty — uploading remainder…`
                                   : doUpscale
-                                  ? "Upscaling + hosting on ImgBB — ~30s per photo, then saving to Guesty"
-                                  : "Hosting on ImgBB — a few seconds per photo, then saving to Guesty"}
+                                  ? "Upscaling + hosting on ImgBB — ~30s per photo. Progress saved to Guesty every 5 photos."
+                                  : "Hosting on ImgBB — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
                               {/* Live per-photo results */}
                               {pushResults.length > 0 && (

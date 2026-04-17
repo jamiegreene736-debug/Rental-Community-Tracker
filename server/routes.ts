@@ -1982,9 +1982,24 @@ export async function registerRoutes(
       perPhotoResults.push({ index, localPath, success: true, url: publicUrl, wasUpscaled });
       emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, pending: true });
       console.log(`[push-photos] ✓ ImgBB ${index}/${photos.length} ${safePath}`);
+
+      // Checkpoint: commit accumulated photos to Guesty every 5 successful uploads.
+      // Each PUT replaces the full pictures array, so we accumulate. This way a server
+      // restart or network drop mid-run still leaves the completed photos in Guesty.
+      const CHECKPOINT_EVERY = 5;
+      if (collected.length > 0 && collected.length % CHECKPOINT_EVERY === 0) {
+        emit({ type: "checkpoint", saved: collected.length, total: photos.length });
+        try {
+          await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
+          console.log(`[push-photos] ✓ Checkpoint Guesty PUT — ${collected.length} photos committed`);
+        } catch (e: any) {
+          console.error(`[push-photos] ✗ Checkpoint Guesty PUT failed: ${e.message}`);
+          // Non-fatal: keep uploading remaining photos, try final PUT at end
+        }
+      }
     }
 
-    // Phase 2: Single PUT to Guesty with all collected pictures.
+    // Final PUT to Guesty with all collected pictures (handles remainder after last checkpoint).
     // Guesty stores pictures via PUT /listings/{id} with pictures[].original (not url).
     // This replaces all existing photos on the listing.
     let successCount = 0;
