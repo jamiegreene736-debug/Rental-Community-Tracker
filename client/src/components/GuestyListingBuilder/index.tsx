@@ -4,6 +4,7 @@ import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import { BeddingTab } from "./BeddingTab";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
 
@@ -195,7 +196,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [selectedId, setSelectedId] = useState("");
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
-  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability">("descriptions");
+  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState(0);
@@ -1039,7 +1040,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
             <div className="glb-section-label">Property Data Preview</div>
             <div className="glb-panel">
               <div className="glb-tabs">
-                {(["descriptions", "amenities", "pricing", "photos", "availability"] as const).map((t) => (
+                {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability"] as const).map((t) => (
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
                     {t === "photos" ? (
                       <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -1222,6 +1223,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                       </div>
                     )}
                   </div>
+                )}
+
+                {activeTab === "bedding" && (
+                  <BeddingTab propertyId={propertyId} guestyListingId={selectedId || null} />
                 )}
 
                 {activeTab === "amenities" && (
