@@ -49,6 +49,7 @@ export type GuestyBookingSettings = {
 
 export type GuestyRoom = {
   roomNumber: number;
+  name?: string;   // e.g. "Master Bedroom", "Bedroom 2", "Living Room"
   beds: { type: string; quantity: number }[];
 };
 

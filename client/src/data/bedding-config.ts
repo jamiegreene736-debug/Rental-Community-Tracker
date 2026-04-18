@@ -304,12 +304,15 @@ export function buildGuestyListingRooms(config: PropertyBeddingConfig): GuestyRo
   for (const u of config.units) {
     for (const br of u.bedrooms) {
       if (br.beds.length > 0) {
-        out.push({ roomNumber: bedroomNum++, beds: br.beds });
+        // Use the editable label from the UI; fall back to "Master Bedroom" / "Bedroom N"
+        const name = br.label?.trim() || (bedroomNum === 1 ? "Master Bedroom" : `Bedroom ${bedroomNum}`);
+        out.push({ roomNumber: bedroomNum++, name, beds: br.beds });
       }
     }
     if (u.livingRoom.hasSofaBed && u.livingRoom.count > 0) {
       out.push({
         roomNumber: 0,
+        name: "Living Room",
         beds: [{ type: "SOFA_BED", quantity: u.livingRoom.count }],
       });
     }

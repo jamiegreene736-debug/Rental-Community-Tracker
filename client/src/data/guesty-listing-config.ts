@@ -4,6 +4,7 @@ export type GuestyBed = { type: GuestyBedType; quantity: number };
 
 export type GuestyRoom = {
   roomNumber: number;
+  name?: string;   // e.g. "Master Bedroom", "Bedroom 2", "Living Room"
   beds: GuestyBed[];
 };
 
