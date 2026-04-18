@@ -105,6 +105,7 @@ export default function Builder() {
       listingRooms: listingRooms.length > 0 ? listingRooms : undefined,
       taxMapKey: property.taxMapKey,
       tatLicense: property.tatLicense,
+      getLicense: property.getLicense,
       strPermit: property.strPermit,
       descriptions: {
         title: property.bookingTitle,
