@@ -45,6 +45,8 @@ export type GuestyBookingSettings = {
   maxNights?: number;
   cancellationPolicy?: string;
   instantBooking?: boolean;
+  advanceNotice?: number;    // days before check-in that booking must be made (0 = same day)
+  preparationTime?: number;  // buffer/cleaning days blocked after checkout
 };
 
 export type GuestyRoom = {
@@ -249,14 +251,21 @@ class GuestyService {
   }
 
   async updateBookingSettings(id: string, settings: GuestyBookingSettings) {
-    return this.request("PUT", `/listings/${id}`, {
-      terms: {
-        minNights: settings.minNights || 1,
-        maxNights: settings.maxNights || 365,
-        cancellationPolicy: settings.cancellationPolicy || "flexible",
-        instantBooking: settings.instantBooking !== undefined ? settings.instantBooking : true,
-      },
-    });
+    const terms: Record<string, unknown> = {
+      minNights:          settings.minNights          ?? 3,
+      maxNights:          settings.maxNights          ?? 365,
+      cancellationPolicy: settings.cancellationPolicy ?? "flexible",
+      instantBooking:     settings.instantBooking     ?? true,
+    };
+    // Guesty stores advanceNotice in hours (0 = same day, 24 = 1 day, 48 = 2 days…)
+    if (settings.advanceNotice !== undefined) {
+      terms.advanceNotice = settings.advanceNotice * 24;
+    }
+    // preparationTime is in days (0 = no gap, 1 = 1 day cleaning buffer, etc.)
+    if (settings.preparationTime !== undefined) {
+      terms.preparationTime = settings.preparationTime;
+    }
+    return this.request("PUT", `/listings/${id}`, { terms });
   }
 
   async blockCalendarDates(listingId: string, startDate: string, endDate: string) {

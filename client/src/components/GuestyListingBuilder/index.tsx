@@ -212,6 +212,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     new Set(propertyId ? getGuestyAmenities(propertyId) : [])
   );
 
+  // ── Booking rules state ────────────────────────────────────────────────────
+  const [bookingRules, setBookingRules] = useState({
+    minNights: 3,
+    maxNights: 365,
+    advanceNotice: 1,   // days
+    preparationTime: 1, // days (cleaning buffer)
+    instantBooking: true,
+    cancellationPolicy: "flexible",
+  });
+  const [pushingBooking, setPushingBooking] = useState(false);
+
   useEffect(() => {
     setEditableTitle(propertyData?.descriptions?.title ?? "");
   }, [propertyData?.descriptions?.title]);
@@ -1492,6 +1503,158 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         )}
                       </div>
                     : <div className="glb-empty">No pricing data</div>
+                )}
+
+                {/* ── Booking Rules card (always shown in Pricing tab) ───── */}
+                {activeTab === "pricing" && (
+                  <div style={{ marginTop: 20, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>📋 Booking Rules</div>
+                      <button
+                        disabled={!selectedId || pushingBooking}
+                        onClick={async () => {
+                          if (!selectedId) return;
+                          setPushingBooking(true);
+                          try {
+                            await guestyService.updateBookingSettings(selectedId, {
+                              minNights: bookingRules.minNights,
+                              maxNights: bookingRules.maxNights,
+                              advanceNotice: bookingRules.advanceNotice,
+                              preparationTime: bookingRules.preparationTime,
+                              instantBooking: bookingRules.instantBooking,
+                              cancellationPolicy: bookingRules.cancellationPolicy,
+                            });
+                            toast({
+                              title: "Booking rules pushed to Guesty",
+                              description: `Min ${bookingRules.minNights} nights · ${bookingRules.advanceNotice}d advance notice · ${bookingRules.preparationTime}d prep time`,
+                            });
+                          } catch (e: any) {
+                            toast({ title: "Push failed", description: e.message, variant: "destructive" });
+                          } finally {
+                            setPushingBooking(false);
+                          }
+                        }}
+                        style={{
+                          fontSize: 12, fontWeight: 600, padding: "6px 14px", borderRadius: 6,
+                          border: "none", cursor: selectedId ? "pointer" : "not-allowed",
+                          background: pushingBooking ? "#94a3b8" : selectedId ? "#0f766e" : "#94a3b8",
+                          color: "#fff",
+                        }}
+                        data-testid="btn-push-booking-rules"
+                        title={selectedId ? "Push booking rules to Guesty" : "Select a Guesty listing first"}
+                      >
+                        {pushingBooking ? "Pushing…" : "↑ Push to Guesty"}
+                      </button>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+                      {/* Min nights */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Min Nights Stay
+                        </span>
+                        <input
+                          type="number" min={1} max={90}
+                          value={bookingRules.minNights}
+                          onChange={e => setBookingRules(r => ({ ...r, minNights: Math.max(1, parseInt(e.target.value) || 1) }))}
+                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 14, fontWeight: 700, width: "100%", background: "var(--background)" }}
+                          data-testid="input-min-nights"
+                        />
+                        <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>1 = any length · 3+ recommended for group rentals</span>
+                      </label>
+
+                      {/* Advance notice */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Advance Notice (days)
+                        </span>
+                        <input
+                          type="number" min={0} max={90}
+                          value={bookingRules.advanceNotice}
+                          onChange={e => setBookingRules(r => ({ ...r, advanceNotice: Math.max(0, parseInt(e.target.value) || 0) }))}
+                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 14, fontWeight: 700, width: "100%", background: "var(--background)" }}
+                          data-testid="input-advance-notice"
+                        />
+                        <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>0 = same day · 1 = 24h before check-in · 2 = 48h, etc.</span>
+                      </label>
+
+                      {/* Preparation time */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Prep / Cleaning Days
+                        </span>
+                        <input
+                          type="number" min={0} max={14}
+                          value={bookingRules.preparationTime}
+                          onChange={e => setBookingRules(r => ({ ...r, preparationTime: Math.max(0, parseInt(e.target.value) || 0) }))}
+                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 14, fontWeight: 700, width: "100%", background: "var(--background)" }}
+                          data-testid="input-prep-time"
+                        />
+                        <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Days blocked after checkout for cleaning/turnover</span>
+                      </label>
+
+                      {/* Max nights */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Max Nights Stay
+                        </span>
+                        <input
+                          type="number" min={1} max={730}
+                          value={bookingRules.maxNights}
+                          onChange={e => setBookingRules(r => ({ ...r, maxNights: Math.max(1, parseInt(e.target.value) || 365) }))}
+                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 14, fontWeight: 700, width: "100%", background: "var(--background)" }}
+                          data-testid="input-max-nights"
+                        />
+                        <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>365 = no cap</span>
+                      </label>
+
+                      {/* Cancellation policy */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Cancellation Policy
+                        </span>
+                        <select
+                          value={bookingRules.cancellationPolicy}
+                          onChange={e => setBookingRules(r => ({ ...r, cancellationPolicy: e.target.value }))}
+                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 13, background: "var(--background)", width: "100%" }}
+                          data-testid="select-cancellation-policy"
+                        >
+                          <option value="flexible">Flexible (full refund 24h before)</option>
+                          <option value="moderate">Moderate (full refund 5 days before)</option>
+                          <option value="strict">Strict (50% refund up to 1 week)</option>
+                          <option value="super_strict_30">Super Strict 30 days</option>
+                          <option value="super_strict_60">Super Strict 60 days</option>
+                          <option value="non_refundable">Non-refundable</option>
+                        </select>
+                      </label>
+
+                      {/* Instant booking toggle */}
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
+                          Instant Booking
+                        </span>
+                        <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                          {[true, false].map(v => (
+                            <button
+                              key={String(v)}
+                              onClick={() => setBookingRules(r => ({ ...r, instantBooking: v }))}
+                              style={{
+                                flex: 1, padding: "6px 0", borderRadius: 6, border: "1px solid",
+                                fontSize: 13, fontWeight: 600, cursor: "pointer",
+                                borderColor: bookingRules.instantBooking === v ? "#0f766e" : "var(--border)",
+                                background: bookingRules.instantBooking === v ? "#0f766e" : "var(--background)",
+                                color: bookingRules.instantBooking === v ? "#fff" : "var(--foreground)",
+                              }}
+                              data-testid={`btn-instant-${v}`}
+                            >
+                              {v ? "On" : "Off (Request)"}
+                            </button>
+                          ))}
+                        </div>
+                        <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Off = guests must request, you approve</span>
+                      </label>
+                    </div>
+                  </div>
                 )}
 
                 {activeTab === "availability" && (() => {
