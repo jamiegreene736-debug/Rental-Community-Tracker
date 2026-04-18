@@ -1812,6 +1812,30 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/builder/push-amenities — sets amenities array on an existing Guesty listing
+  app.post("/api/builder/push-amenities", async (req: Request, res: Response) => {
+    const { listingId, amenities } = req.body as { listingId?: string; amenities?: string[] };
+    if (!listingId) return res.status(400).json({ success: false, error: "listingId required" });
+    if (!Array.isArray(amenities)) return res.status(400).json({ success: false, error: "amenities must be an array" });
+
+    console.log(`[push-amenities] listing ${listingId} — ${amenities.length} amenities`);
+    try {
+      await guestyRequest("PUT", `/listings/${listingId}`, { amenities });
+
+      // GET-after-PUT to confirm what was actually saved
+      await new Promise(r => setTimeout(r, 600));
+      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const savedAmenities: string[] = Array.isArray(fetched.amenities) ? fetched.amenities : [];
+      const missing = amenities.filter(a => !savedAmenities.includes(a));
+
+      console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length}`);
+      res.json({ success: true, sent: amenities.length, saved: savedAmenities.length, savedAmenities, missing });
+    } catch (err: any) {
+      console.error(`[push-amenities] error:`, err.message);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // GET /api/builder/inspect-listing?listingId=xxx  — returns raw Guesty listing JSON
   app.get("/api/builder/inspect-listing", async (req: Request, res: Response) => {
     const { listingId } = req.query as { listingId?: string };

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
-import { GUESTY_AMENITY_CATALOG } from "@/data/guesty-amenities";
+import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -205,6 +205,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  const [amenityPushState, setAmenityPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
+  const [amenityPushResult, setAmenityPushResult] = useState<{ sent: number; saved: number; missing: string[] } | null>(null);
+  // pendingAmenities = set of keys the user has selected for the next push
+  const [pendingAmenities, setPendingAmenities] = useState<Set<string>>(() =>
+    new Set(propertyId ? getGuestyAmenities(propertyId) : [])
+  );
 
   useEffect(() => {
     setEditableTitle(propertyData?.descriptions?.title ?? "");
@@ -832,6 +838,37 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     }
   }, [selectedId, propertyId, syncingDetails, building, toast]);
 
+  const pushAmenities = useCallback(async () => {
+    if (!selectedId || amenityPushState === "pushing") return;
+    setAmenityPushState("pushing");
+    setAmenityPushResult(null);
+    try {
+      const res = await fetch("/api/builder/push-amenities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: selectedId, amenities: [...pendingAmenities] }),
+      });
+      const data = await res.json() as { success: boolean; sent?: number; saved?: number; missing?: string[]; error?: string };
+      if (!res.ok || !data.success) {
+        setAmenityPushState("error");
+        toast({ title: "Amenities push failed", description: data.error ?? `HTTP ${res.status}`, variant: "destructive" });
+      } else {
+        setAmenityPushState("success");
+        setAmenityPushResult({ sent: data.sent ?? 0, saved: data.saved ?? 0, missing: data.missing ?? [] });
+        toast({
+          title: `Amenities pushed to Guesty`,
+          description: data.missing && data.missing.length > 0
+            ? `${data.saved}/${data.sent} saved. Guesty ignored: ${data.missing.slice(0, 5).join(", ")}`
+            : `${data.saved} amenities confirmed in Guesty.`,
+          duration: 8000,
+        });
+      }
+    } catch (e) {
+      setAmenityPushState("error");
+      toast({ title: "Amenities push failed", description: (e as Error).message, variant: "destructive" });
+    }
+  }, [selectedId, pendingAmenities, amenityPushState, toast]);
+
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
   const amenities = propertyData?.amenities || [];
@@ -1056,7 +1093,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         )}
                       </span>
                     ) :
-                     t === "amenities" ? `Amenities (${amenities.length})` :
+                     t === "amenities" ? `Amenities (${pendingAmenities.size})` :
                      t === "availability" ? "Availability" :
                      t.charAt(0).toUpperCase() + t.slice(1)}
                   </button>
@@ -1289,43 +1326,110 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                   <BeddingTab propertyId={propertyId} guestyListingId={selectedId || null} />
                 )}
 
-                {activeTab === "amenities" && (
-                  amenities.length > 0
-                    ? (() => {
-                        const amenitySet = new Set(amenities);
-                        const groups: Record<string, { key: string; label: string }[]> = {};
-                        for (const entry of GUESTY_AMENITY_CATALOG) {
-                          if (!amenitySet.has(entry.key)) continue;
-                          if (!groups[entry.category]) groups[entry.category] = [];
-                          groups[entry.category].push({ key: entry.key, label: entry.label });
-                        }
-                        const ungrouped = amenities.filter(a => !GUESTY_AMENITY_CATALOG.find(e => e.key === a));
-                        if (ungrouped.length) {
-                          if (!groups["Other"]) groups["Other"] = [];
-                          ungrouped.forEach(a => groups["Other"].push({ key: a, label: a.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()) }));
-                        }
-                        return (
-                          <div>
-                            {Object.entries(groups).map(([cat, items]) => (
-                              <div key={cat} style={{ marginBottom: 16 }}>
-                                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.07em", padding: "6px 0 5px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
-                                  {cat} — {items.length}
-                                </div>
-                                <div className="glb-amenity-grid">
-                                  {items.map(({ key, label }) => (
-                                    <div key={key} className="glb-amenity">
-                                      <span className="glb-amenity-check">✓</span>
-                                      {label}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            ))}
+                {activeTab === "amenities" && (() => {
+                  // Build category groups from full catalog
+                  const groups: Record<string, AmenityEntry[]> = {};
+                  for (const entry of GUESTY_AMENITY_CATALOG) {
+                    if (!groups[entry.category]) groups[entry.category] = [];
+                    groups[entry.category].push(entry);
+                  }
+                  const selectedCount = pendingAmenities.size;
+
+                  return (
+                    <div>
+                      {/* Push header */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, padding: "10px 12px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>{selectedCount} amenities selected</div>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                            Check/uncheck below. Uncheck Air Conditioning for units without A/C before pushing.
                           </div>
-                        );
-                      })()
-                    : <div className="glb-empty">No amenities listed</div>
-                )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <button
+                            onClick={() => setPendingAmenities(new Set(propertyId ? getGuestyAmenities(propertyId) : []))}
+                            style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: "pointer", color: "var(--muted)" }}
+                          >
+                            Reset to profile
+                          </button>
+                          <button
+                            onClick={pushAmenities}
+                            disabled={amenityPushState === "pushing" || !selectedId}
+                            style={{
+                              padding: "7px 14px", fontSize: 12, fontWeight: 600, borderRadius: 6, cursor: selectedId ? "pointer" : "not-allowed",
+                              background: amenityPushState === "success" ? "var(--green)" : amenityPushState === "error" ? "var(--red)" : "var(--blue)",
+                              color: "white", border: "none", opacity: amenityPushState === "pushing" ? 0.7 : 1,
+                            }}
+                            data-testid="button-push-amenities"
+                          >
+                            {amenityPushState === "pushing" ? "Pushing…" : amenityPushState === "success" ? "✓ Pushed!" : amenityPushState === "error" ? "✗ Failed" : "Push Amenities to Guesty"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Verification result */}
+                      {amenityPushResult && amenityPushResult.missing.length > 0 && (
+                        <div style={{ padding: "8px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
+                          <strong style={{ color: "#d97706" }}>⚠ Guesty didn't save {amenityPushResult.missing.length} keys</strong>
+                          <div style={{ color: "#92400e", marginTop: 2 }}>
+                            {amenityPushResult.missing.join(" · ")}
+                          </div>
+                          <div style={{ color: "#78350f", marginTop: 2 }}>These may not be valid Guesty API identifiers. Contact Guesty support or remove them from your profile.</div>
+                        </div>
+                      )}
+                      {amenityPushResult && amenityPushResult.missing.length === 0 && amenityPushState === "success" && (
+                        <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--green-bg)", border: "1px solid var(--green-border)", borderRadius: 6, fontSize: 11, color: "var(--green)" }}>
+                          ✓ All {amenityPushResult.saved} amenities confirmed in Guesty.
+                        </div>
+                      )}
+
+                      {/* No listing selected warning */}
+                      {!selectedId && (
+                        <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--amber-bg)", border: "1px solid var(--amber-border)", borderRadius: 6, fontSize: 11, color: "var(--amber)" }}>
+                          Select a Guesty listing above to push amenities.
+                        </div>
+                      )}
+
+                      {/* Category groups with checkboxes */}
+                      {Object.entries(groups).map(([cat, items]) => (
+                        <div key={cat} style={{ marginBottom: 16 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.07em", padding: "6px 0 5px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
+                            <span>{cat}</span>
+                            <span style={{ fontWeight: 400, color: "#9ca3af" }}>
+                              {items.filter(i => pendingAmenities.has(i.key)).length}/{items.length}
+                            </span>
+                          </div>
+                          <div className="glb-amenity-grid">
+                            {items.map(({ key, label }) => {
+                              const checked = pendingAmenities.has(key);
+                              return (
+                                <label
+                                  key={key}
+                                  style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", userSelect: "none", background: checked ? "#f0fdf4" : "transparent", border: `1px solid ${checked ? "#bbf7d0" : "transparent"}`, transition: "all 0.1s" }}
+                                  data-testid={`amenity-${key}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={(e) => {
+                                      const next = new Set(pendingAmenities);
+                                      if (e.target.checked) next.add(key);
+                                      else next.delete(key);
+                                      setPendingAmenities(next);
+                                      if (amenityPushState !== "idle") setAmenityPushState("idle");
+                                    }}
+                                    style={{ accentColor: "var(--green)", width: 13, height: 13, flexShrink: 0 }}
+                                  />
+                                  <span style={{ fontSize: 12, color: checked ? "#15803d" : "#6b7280" }}>{label}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 {activeTab === "pricing" && (
                   pricing

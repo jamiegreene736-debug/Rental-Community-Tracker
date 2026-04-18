@@ -12,7 +12,9 @@ export type AmenityEntry = {
 
 export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   // ── Essentials ────────────────────────────────────────────────────────────
-  { key: "WIFI",                        label: "WiFi / Wireless Internet",      category: "Essentials" },
+  { key: "WIFI",                        label: "WiFi",                          category: "Essentials" },
+  { key: "WIRELESS_INTERNET",           label: "Wireless Internet",             category: "Essentials" },
+  { key: "INTERNET",                    label: "Internet (Ethernet)",           category: "Essentials" },
   { key: "ESSENTIALS",                  label: "Essentials (towels, soap, TP)", category: "Essentials" },
   { key: "HANGERS",                     label: "Hangers",                       category: "Essentials" },
   { key: "AIR_CONDITIONING",            label: "Air Conditioning",              category: "Essentials" },
@@ -62,6 +64,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   // ── Bedrooms & Sleeping ───────────────────────────────────────────────────
   { key: "BED_LINENS",                  label: "Bed Linens Provided",           category: "Bedrooms" },
   { key: "EXTRA_PILLOWS_AND_BLANKETS",  label: "Extra Pillows & Blankets",      category: "Bedrooms" },
+  { key: "CLOTHING_STORAGE",            label: "Clothing Storage (closet/wardrobe)", category: "Bedrooms" },
   { key: "BLACKOUT_SHADES",             label: "Blackout Curtains",             category: "Bedrooms" },
   { key: "LOCK_ON_BEDROOM_DOOR",        label: "Lock on Bedroom Door",          category: "Bedrooms" },
 
@@ -162,9 +165,11 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
 const HAWAII_BASE = [
   // Essentials
   "WIFI",
+  "WIRELESS_INTERNET",   // Guesty/Airbnb "Wireless Internet" — distinct from WIFI in some OTA mappings
+  "INTERNET",            // Guesty/Airbnb "Internet" (general/ethernet)
   "ESSENTIALS",
   "HANGERS",
-  "AIR_CONDITIONING",
+  "AIR_CONDITIONING",    // Not every Hawaii unit has A/C — deselect in the builder if needed
   "CEILING_FAN",
   "WASHER",
   "DRYER",
@@ -197,6 +202,7 @@ const HAWAII_BASE = [
   // Bedrooms
   "BED_LINENS",
   "EXTRA_PILLOWS_AND_BLANKETS",
+  "CLOTHING_STORAGE",    // Guesty/Airbnb "Clothing storage" (closet/wardrobe)
   // Bathroom
   "SHAMPOO",
   "TOWELS_PROVIDED",

@@ -212,6 +212,10 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, { publicDescription: { space } });
   }
 
+  async updateAmenities(id: string, amenities: string[]) {
+    return this.request("PUT", `/listings/${id}`, { amenities });
+  }
+
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {
     return this.request("PUT", `/listings/${id}`, {
       title: descriptions.title,
