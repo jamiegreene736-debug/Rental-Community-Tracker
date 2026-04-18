@@ -94,6 +94,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "BBQ_GRILL",                   label: "BBQ / Grill",                   category: "Outdoor" },
   { key: "FIRE_PIT",                    label: "Fire Pit",                      category: "Outdoor" },
   { key: "OUTDOOR_FURNITURE",           label: "Outdoor Furniture",             category: "Outdoor" },
+  { key: "OUTDOOR_SEATING",             label: "Outdoor Seating / Dining",      category: "Outdoor" },
   { key: "OUTDOOR_KITCHEN",             label: "Outdoor Kitchen",               category: "Outdoor" },
   { key: "GARDEN",                      label: "Garden / Yard",                 category: "Outdoor" },
   { key: "TENNIS_COURT",                label: "Tennis Court",                  category: "Outdoor" },
@@ -111,6 +112,8 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "SNORKELING",                  label: "Snorkeling Nearby",             category: "Activities" },
   { key: "GOLF",                        label: "Golf Nearby",                   category: "Activities" },
   { key: "SHOPPING",                    label: "Shopping Nearby",               category: "Activities" },
+  { key: "WATER_PARK",                  label: "Water Park Nearby",             category: "Activities" },
+  { key: "THEME_PARK",                  label: "Theme Park Nearby",             category: "Activities" },
 
   // ── Beach & Water Access ──────────────────────────────────────────────────
   { key: "BEACH_ESSENTIALS",            label: "Beach Essentials (gear/towels)",category: "Beach" },
@@ -126,6 +129,10 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "WATERFRONT",                  label: "Waterfront",                    category: "Location & Views" },
   { key: "LAKE_FRONT",                  label: "Lakefront",                     category: "Location & Views" },
   { key: "NEAR_BEACH",                  label: "Near Beach (walking distance)", category: "Location & Views" },
+  { key: "BEACH_VIEW",                  label: "Beach View",                    category: "Location & Views" },
+  { key: "BEACH_ACCESS",                label: "Beach Access (direct)",         category: "Location & Views" },
+  { key: "SEA_VIEW",                    label: "Sea View",                      category: "Location & Views" },
+  { key: "WATER_VIEW",                  label: "Water View",                    category: "Location & Views" },
   { key: "MOUNTAIN_VIEW",               label: "Mountain / Valley View",        category: "Location & Views" },
   { key: "GARDEN_VIEW",                 label: "Garden / Tropical View",        category: "Location & Views" },
   { key: "POOL_VIEW",                   label: "Pool View",                     category: "Location & Views" },
@@ -140,6 +147,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "FREE_PARKING_ON_PREMISES",    label: "Free Parking",                  category: "Parking" },
   { key: "COVERED_PARKING",             label: "Covered Parking",               category: "Parking" },
   { key: "GARAGE",                      label: "Garage",                        category: "Parking" },
+  { key: "EV_CHARGER",                  label: "EV Charger",                    category: "Parking" },
 
   // ── Wellness ──────────────────────────────────────────────────────────────
   { key: "GYM",                         label: "Fitness Center / Gym",          category: "Wellness" },
@@ -152,11 +160,12 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "BOARD_GAMES_KIDS",            label: "Children's Toys & Games",       category: "Family" },
 
   // ── Safety ────────────────────────────────────────────────────────────────
-  { key: "SMOKE_ALARM",                 label: "Smoke Detector",                category: "Safety" },
-  { key: "CARBON_MONOXIDE_ALARM",       label: "Carbon Monoxide Alarm",         category: "Safety" },
-  { key: "FIRE_EXTINGUISHER",           label: "Fire Extinguisher",             category: "Safety" },
-  { key: "FIRST_AID_KIT",               label: "First Aid Kit",                 category: "Safety" },
-  { key: "SECURITY_CAMERA",             label: "Security Camera (exterior)",    category: "Safety" },
+  { key: "SMOKE_ALARM",                        label: "Smoke Detector",                    category: "Safety" },
+  { key: "CARBON_MONOXIDE_ALARM",              label: "Carbon Monoxide Alarm",             category: "Safety" },
+  { key: "FIRE_EXTINGUISHER",                  label: "Fire Extinguisher",                 category: "Safety" },
+  { key: "FIRST_AID_KIT",                      label: "First Aid Kit",                     category: "Safety" },
+  { key: "SECURITY_CAMERA",                    label: "Security Camera (exterior)",        category: "Safety" },
+  { key: "HIGH_TOUCH_SURFACES_DISINFECTED",    label: "High-Touch Surfaces Disinfected",   category: "Safety" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +191,7 @@ const HAWAII_BASE = [
   "KITCHEN",
   "REFRIGERATOR",
   "FREEZER",
+  "ICE_MAKER",
   "MICROWAVE",
   "DISHWASHER",
   "STOVE",
@@ -224,6 +234,24 @@ const HAWAII_BASE = [
   "CARBON_MONOXIDE_ALARM",
   "FIRE_EXTINGUISHER",
   "FIRST_AID_KIT",
+  "HIGH_TOUCH_SURFACES_DISINFECTED",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Beach-location bonus amenities — added to any community with direct beach /
+// ocean-front / waterfront access.  Near-beach (walking distance only) gets
+// just NEAR_BEACH from HAWAII_BASE, not the full BEACH_EXTRAS block.
+// ─────────────────────────────────────────────────────────────────────────────
+const BEACH_EXTRAS = [
+  "BEACHFRONT",
+  "OCEAN_FRONT",
+  "OCEAN_VIEW",
+  "WATERFRONT",
+  "NEAR_BEACH",
+  "BEACH_VIEW",
+  "BEACH_ACCESS",
+  "SEA_VIEW",
+  "WATER_VIEW",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,10 +292,7 @@ const REGENCY_POIPU_KAI = [
 // Nearby: Kekaha Beach cycling path, Polihale State Park, deep-sea fishing charters
 const KEKAHA_ESTATE = [
   ...HAWAII_BASE,
-  "BEACHFRONT",
-  "OCEAN_FRONT",
-  "OCEAN_VIEW",
-  "WATERFRONT",
+  ...BEACH_EXTRAS,
   "PRIVATE_POOL",
   "OUTDOOR_POOL",
   "BBQ_GRILL",
@@ -336,15 +361,11 @@ const MAUNA_KAI = [
 // Nearby: Kapaa Bike Path (famous 8-mile coastal path), Kapaa Town shopping, snorkeling, fishing
 const KAHA_LANI = [
   ...HAWAII_BASE,
+  ...BEACH_EXTRAS,
   "ELEVATOR",
   "POOL",
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
-  "BEACHFRONT",
-  "OCEAN_FRONT",
-  "OCEAN_VIEW",
-  "WATERFRONT",
-  "NEAR_BEACH",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   // Nearby activities
@@ -360,15 +381,12 @@ const KAHA_LANI = [
 // Nearby: Kapaa Bike Path, Lydgate Beach Park (snorkeling lagoon), Kapaa shopping, fishing
 const LAE_NANI = [
   ...HAWAII_BASE,
+  ...BEACH_EXTRAS,
   "ELEVATOR",
   "POOL",
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
   "HOT_TUB",
-  "BEACHFRONT",
-  "OCEAN_VIEW",
-  "WATERFRONT",
-  "NEAR_BEACH",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   "GARDEN_VIEW",
@@ -385,15 +403,13 @@ const LAE_NANI = [
 // Nearby: Brenneckes Beach (bodyboarding/surfing), Poipu Beach snorkeling, Poipu Bay Golf, Kukuiula shopping
 const POIPU_BEACHSIDE = [
   ...HAWAII_BASE,
+  ...BEACH_EXTRAS,
   "ELEVATOR",
   "POOL",
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
   "HOT_TUB",
   "BBQ_GRILL",
-  "NEAR_BEACH",
-  "OCEAN_VIEW",
-  "WATERFRONT",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   // Nearby activities
@@ -411,16 +427,13 @@ const POIPU_BEACHSIDE = [
 // Nearby: Brenneckes Beach (bodyboarding/surfing), Poipu Beach snorkeling, Poipu Bay Golf, Kukuiula shopping
 const POIPU_OCEANFRONT = [
   ...HAWAII_BASE,
+  ...BEACH_EXTRAS,
   "ELEVATOR",
   "POOL",
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
   "HOT_TUB",
   "BBQ_GRILL",
-  "BEACHFRONT",
-  "OCEAN_FRONT",
-  "OCEAN_VIEW",
-  "WATERFRONT",
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   // Nearby activities
