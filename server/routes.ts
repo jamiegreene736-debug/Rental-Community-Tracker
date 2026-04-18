@@ -1765,8 +1765,9 @@ export async function registerRoutes(
 
     console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense} GET:${getLicense}`);
     try {
-      // ── Step 1: Push to Guesty tags (internal reference) ───────────────────
       const current = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+
+      // ── Step 1: Guesty tags (internal reference) ────────────────────────────
       const existingTags: string[] = Array.isArray(current.tags) ? current.tags : [];
       const stripped = existingTags.filter(t => !t.startsWith("TMK:") && !t.startsWith("TAT:") && !t.startsWith("GET:"));
       if (taxMapKey) stripped.push(`TMK:${taxMapKey}`);
@@ -1774,38 +1775,90 @@ export async function registerRoutes(
       if (getLicense) stripped.push(`GET:${getLicense}`);
       await guestyRequest("PUT", `/listings/${listingId}`, { tags: stripped });
 
-      // ── Step 2: Push to publicDescription.notes (VRBO / channel-facing) ────
-      // Build a structured compliance block. Preserve any non-compliance notes.
+      // ── Step 2: licenseNumber field — Guesty's top-level "Registration/License
+      //            Number" field. TAT is the STR permit so it's the primary value.
+      //            taxId is Guesty's GET/General Excise Tax field.
+      const licenseNumValue = tatLicense || getLicense || null;
+      const taxIdValue = getLicense || null;
+      const licPayload: Record<string, string> = {};
+      if (licenseNumValue) licPayload.licenseNumber = licenseNumValue;
+      if (taxIdValue) licPayload.taxId = taxIdValue;
+      if (Object.keys(licPayload).length > 0) {
+        await guestyRequest("PUT", `/listings/${listingId}`, licPayload);
+      }
+
+      // ── Step 3: VRBO channel compliance fields ───────────────────────────────
+      // Guesty exposes these under channels.homeaway only once VRBO OAuth is
+      // active for the listing. We attempt a best-effort push and verify.
+      const vrboPayload: Record<string, unknown> = {};
+      if (tatLicense || getLicense || taxMapKey) {
+        vrboPayload["channels"] = {
+          homeaway: {
+            ...(tatLicense  ? { licenseNumber: tatLicense } : {}),
+            ...(getLicense  ? { taxId:         getLicense } : {}),
+            ...(taxMapKey   ? { parcelNumber:   taxMapKey  } : {}),
+          },
+        };
+        try {
+          await guestyRequest("PUT", `/listings/${listingId}`, vrboPayload);
+        } catch { /* silently swallow — VRBO fields are optional */ }
+      }
+
+      // ── Step 4: publicDescription.notes (OTA-facing compliance block) ────────
       const COMPLIANCE_MARKER = "=== Hawaii Tax Compliance ===";
       const pubDesc = (current.publicDescription || {}) as Record<string, string>;
       const existingNotes: string = pubDesc.notes || "";
-      const notesWithoutOldBlock = existingNotes
-        .split(COMPLIANCE_MARKER)[0]
-        .trimEnd();
-
+      const notesWithoutOldBlock = existingNotes.split(COMPLIANCE_MARKER)[0].trimEnd();
       const complianceLines: string[] = [COMPLIANCE_MARKER];
       if (getLicense) complianceLines.push(`General Excise Tax ID (GET): ${getLicense}`);
       if (tatLicense) complianceLines.push(`Transient Accommodations Tax ID (TAT): ${tatLicense}`);
-      if (taxMapKey) complianceLines.push(`Parcel Number (Tax Map Key): ${taxMapKey}`);
-      const newNotes = [notesWithoutOldBlock, complianceLines.join("\n")]
-        .filter(Boolean)
-        .join("\n\n");
+      if (taxMapKey)  complianceLines.push(`Parcel Number (Tax Map Key): ${taxMapKey}`);
+      const newNotes = [notesWithoutOldBlock, complianceLines.join("\n")].filter(Boolean).join("\n\n");
+      await guestyRequest("PUT", `/listings/${listingId}`, { publicDescription: { notes: newNotes } });
 
-      await guestyRequest("PUT", `/listings/${listingId}`, {
-        publicDescription: { notes: newNotes },
-      });
-
-      // ── Step 3: Verify ───────────────────────────────────────────────────────
+      // ── Step 5: Verify everything via GET ────────────────────────────────────
+      await new Promise(r => setTimeout(r, 500));
       const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+
       const savedTags: string[] = Array.isArray(fetched.tags) ? fetched.tags : [];
       const savedNotes: string = ((fetched.publicDescription as Record<string, string> | undefined)?.notes) || "";
+      const savedLicenseNumber: string = (fetched.licenseNumber as string) || "";
+      const savedTaxId: string = (fetched.taxId as string) || "";
+      const vrboChannel = ((fetched.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string>;
+      const savedVrboLicense  = vrboChannel.licenseNumber  || "";
+      const savedVrboTaxId    = vrboChannel.taxId          || "";
+      const savedVrboParcel   = vrboChannel.parcelNumber   || "";
+
       const tagsVerified =
-        (!taxMapKey || savedTags.some(t => t.includes(taxMapKey))) &&
+        (!taxMapKey  || savedTags.some(t => t.includes(taxMapKey)))  &&
         (!tatLicense || savedTags.some(t => t.includes(tatLicense))) &&
         (!getLicense || savedTags.some(t => t.includes(getLicense)));
       const notesVerified = savedNotes.includes(COMPLIANCE_MARKER);
-      console.log(`[push-compliance] tags verified=${tagsVerified}, notes verified=${notesVerified}`);
-      return res.json({ success: true, verified: tagsVerified && notesVerified, savedTags, notesUpdated: notesVerified });
+      const licenseNumberSaved = licenseNumValue ? savedLicenseNumber === licenseNumValue : null;
+      const taxIdSaved = taxIdValue ? savedTaxId === taxIdValue : null;
+      const vrboActive = !!(savedVrboLicense || savedVrboTaxId || savedVrboParcel);
+
+      console.log(`[push-compliance] tags=${tagsVerified} notes=${notesVerified} licenseNumber=${licenseNumberSaved} taxId=${taxIdSaved} vrbo=${vrboActive}`);
+
+      return res.json({
+        success: true,
+        verified: tagsVerified && notesVerified,
+        savedTags,
+        notesUpdated: notesVerified,
+        // New fields
+        licenseNumber: { sent: licenseNumValue, saved: savedLicenseNumber, ok: licenseNumberSaved },
+        taxId:         { sent: taxIdValue,       saved: savedTaxId,         ok: taxIdSaved },
+        vrbo: {
+          attempted: Object.keys(vrboPayload).length > 0,
+          saved: vrboActive,
+          licenseNumber:  savedVrboLicense,
+          taxId:          savedVrboTaxId,
+          parcelNumber:   savedVrboParcel,
+          note: vrboActive
+            ? "VRBO channel compliance fields saved."
+            : "VRBO fields not saved — listing needs an active VRBO channel (OAuth) in Guesty UI first.",
+        },
+      });
     } catch (err: any) {
       console.error(`[push-compliance] error:`, err.message);
       return res.status(500).json({ success: false, error: err.message });

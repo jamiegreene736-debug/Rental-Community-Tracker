@@ -1226,9 +1226,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 const data = await res.json();
                                 if (data.success) {
                                   const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ");
+                                  const licLine = data.licenseNumber?.ok === true
+                                    ? `· License# field: ✓`
+                                    : data.licenseNumber?.ok === false
+                                    ? `· License# field: ✗ (not accepted by Guesty)`
+                                    : "";
+                                  const taxLine = data.taxId?.ok === true ? `· Tax ID field: ✓` : "";
+                                  const vrboLine = data.vrbo?.saved
+                                    ? `· VRBO channel fields: ✓`
+                                    : `· VRBO channel fields: requires VRBO OAuth in Guesty`;
                                   toast({
                                     title: data.verified ? "Compliance pushed to Guesty" : "Pushed (partially verified)",
-                                    description: `Tags: ${compTags}${data.notesUpdated ? " · Notes updated with GET/TAT/TMK block" : ""}`,
+                                    description: [
+                                      `Tags: ${compTags}`,
+                                      data.notesUpdated ? "Notes: ✓" : "",
+                                      licLine, taxLine, vrboLine,
+                                    ].filter(Boolean).join("  "),
                                   });
                                 } else {
                                   toast({ title: "Push failed", description: data.error || "Unknown error", variant: "destructive" });
@@ -1243,7 +1256,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               background: selectedId ? "#1e40af" : "#94a3b8", color: "#fff",
                             }}
                             data-testid="btn-push-compliance"
-                            title={selectedId ? "Pushes GET, TAT, and TMK to Guesty as tags (internal) and into publicDescription.notes (channel-facing for VRBO compliance)" : "Select a Guesty listing first"}
+                            title={selectedId ? "Pushes to: Guesty tags (internal) · publicDescription.notes (OTA-facing) · licenseNumber field · taxId field · VRBO channel fields (requires VRBO OAuth in Guesty)" : "Select a Guesty listing first"}
                           >
                             ↑ Push Compliance to Guesty
                           </button>
@@ -1314,8 +1327,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             </div>
                           </div>
                         </div>
-                        <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 10, lineHeight: 1.5 }}>
-                          "Push Compliance to Guesty" stores all three IDs as Guesty tags (<code>GET:</code>, <code>TAT:</code>, <code>TMK:</code>) and writes a structured block into the listing's <em>Notes</em> field — the same field VRBO reads for Hawaii license compliance.
+                        <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 10, lineHeight: 1.6 }}>
+                          Push writes to <strong>4 destinations</strong>: (1) Guesty internal tags <code>GET:</code> / <code>TAT:</code> / <code>TMK:</code> — (2) <code>licenseNumber</code> field (TAT number → Guesty's "Registration Number") — (3) <code>taxId</code> field (GET number) — (4) <em>Notes</em> field with a structured Hawaii Tax Compliance block (the field VRBO reads for license compliance). VRBO channel compliance fields (<code>channels.homeaway</code>) are also attempted but only save once you connect VRBO OAuth in Guesty's channel settings. After pushing, the toast shows exactly what was accepted.
                         </div>
                       </div>
                     )}
