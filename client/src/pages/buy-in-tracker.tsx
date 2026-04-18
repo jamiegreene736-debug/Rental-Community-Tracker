@@ -69,7 +69,7 @@ import {
   type PropertyPricing,
   type UnitPricing,
 } from "@/data/pricing-data";
-import { getAllMultiUnitProperties } from "@/data/unit-builder-data";
+import { getAllMultiUnitProperties, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 
 type ReportSummary = {
   totalBuyInCost: number;
@@ -420,6 +420,13 @@ function BestBuyInFinder() {
   };
   const [selectedListings, setSelectedListings] = useState<Record<string, AirbnbProperty[]>>({});
   const [recording, setRecording] = useState(false);
+  const [platformCheckState, setPlatformCheckState] = useState<"idle" | "checking" | "done">("idle");
+  const [platformCheckResults, setPlatformCheckResults] = useState<Array<{
+    unitNumber: string;
+    airbnb: { listed: boolean; url: string | null; snippet: string | null };
+    vrbo: { listed: boolean; url: string | null; snippet: string | null };
+    booking: { listed: boolean; url: string | null; snippet: string | null };
+  }>>([]);
   const [activePlatform, setActivePlatform] = useState<"airbnb" | "vrbo" | "suite-paradise">("airbnb");
   const { toast } = useToast();
   const autoSearchFired = useRef(false);
@@ -451,6 +458,8 @@ function BestBuyInFinder() {
     setResults(null);
     setOtherResults(null);
     setSelectedListings({});
+    setPlatformCheckState("idle");
+    setPlatformCheckResults([]);
     setActivePlatform("airbnb");
     try {
       const [airbnbRes, otherRes] = await Promise.all([
@@ -568,6 +577,77 @@ function BestBuyInFinder() {
     });
   };
 
+  // Returns the units that will be rented out, matched to NexStay internal unit numbers
+  const getUnitsForPlatformCheck = () => {
+    if (!results || !selectedPropertyId) return [];
+    const propId = parseInt(selectedPropertyId);
+    const property = getUnitBuilderByPropertyId(propId);
+    const pricing = getPropertyPricing(propId);
+    if (!property || !pricing) return [];
+
+    const unitsByBedroom: Record<number, typeof property.units> = {};
+    for (const unit of property.units) {
+      if (!unitsByBedroom[unit.bedrooms]) unitsByBedroom[unit.bedrooms] = [];
+      unitsByBedroom[unit.bedrooms].push(unit);
+    }
+
+    const checkUnits: { unitNumber: string; address: string; complexName: string }[] = [];
+    const assignmentIndex: Record<number, number> = {};
+    for (const need of results.unitsNeeded) {
+      const key = `${need.bedrooms}BR`;
+      const selected = selectedListings[key] || [];
+      for (let i = 0; i < selected.length; i++) {
+        const idx = assignmentIndex[need.bedrooms] ?? 0;
+        const availableUnits = unitsByBedroom[need.bedrooms] || [];
+        const unit = availableUnits[idx] ?? availableUnits[0];
+        assignmentIndex[need.bedrooms] = idx + 1;
+        if (unit) {
+          checkUnits.push({
+            unitNumber: unit.unitNumber,
+            address: property.address,
+            complexName: property.complexName,
+          });
+        }
+      }
+    }
+    return checkUnits;
+  };
+
+  const runPlatformCheck = async () => {
+    const units = getUnitsForPlatformCheck();
+    if (units.length === 0) return;
+    setPlatformCheckState("checking");
+    setPlatformCheckResults([]);
+    const acc: typeof platformCheckResults = [];
+    for (const unit of units) {
+      try {
+        const params = new URLSearchParams({
+          address: unit.address,
+          unitNumber: unit.unitNumber,
+          complexName: unit.complexName,
+        });
+        const res = await fetch(`/api/platform-check/quick?${params.toString()}`);
+        const data = await res.json();
+        acc.push({
+          unitNumber: unit.unitNumber,
+          airbnb: data.airbnb ?? { listed: false, url: null, snippet: null },
+          vrbo: data.vrbo ?? { listed: false, url: null, snippet: null },
+          booking: data.booking ?? { listed: false, url: null, snippet: null },
+        });
+      } catch {
+        acc.push({
+          unitNumber: unit.unitNumber,
+          airbnb: { listed: false, url: null, snippet: null },
+          vrbo: { listed: false, url: null, snippet: null },
+          booking: { listed: false, url: null, snippet: null },
+        });
+      }
+      setPlatformCheckResults([...acc]);
+      await new Promise(r => setTimeout(r, 400));
+    }
+    setPlatformCheckState("done");
+  };
+
   const recordBuyIns = async () => {
     if (!results || !selectedPropertyId) return;
     const propId = parseInt(selectedPropertyId);
@@ -645,6 +725,8 @@ function BestBuyInFinder() {
     setResults(null);
     setOtherResults(null);
     setSelectedListings({});
+    setPlatformCheckState("idle");
+    setPlatformCheckResults([]);
     setActivePlatform("airbnb");
     try {
       const [airbnbRes, otherRes] = await Promise.all([
@@ -1300,6 +1382,61 @@ function BestBuyInFinder() {
                   <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
                     Estimates above use realistic platform fees ({airbnbFeePercent}% Airbnb, {vrboFeePercent}% VRBO) + ${cleaningFeePerUnit} cleaning per unit, but cleaning fees vary widely and some listings have hidden taxes. If checkout differs, edit the buy-in cost after recording.
                   </p>
+                </div>
+              )}
+              {/* Platform conflict check */}
+              {allUnitsSelected() && (
+                <div className="mt-3 border-t pt-3">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <p className="text-xs font-medium text-gray-700 dark:text-gray-300 flex-1">
+                      Platform check — verify NexStay units aren't already listed independently:
+                    </p>
+                    {platformCheckState === "idle" && (
+                      <Button size="sm" variant="outline" className="text-xs h-7" onClick={runPlatformCheck} data-testid="button-platform-check">
+                        <Search className="h-3 w-3 mr-1" /> Check Platforms
+                      </Button>
+                    )}
+                    {platformCheckState === "checking" && (
+                      <Button size="sm" variant="outline" className="text-xs h-7" disabled>
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" /> Checking {platformCheckResults.length}/{getUnitsForPlatformCheck().length}…
+                      </Button>
+                    )}
+                    {platformCheckState === "done" && (
+                      <Button size="sm" variant="ghost" className="text-xs h-7" onClick={runPlatformCheck} data-testid="button-platform-recheck">
+                        <Search className="h-3 w-3 mr-1" /> Re-check
+                      </Button>
+                    )}
+                  </div>
+                  {platformCheckResults.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {platformCheckResults.map((r, i) => {
+                        const anyListed = r.airbnb.listed || r.vrbo.listed || r.booking.listed;
+                        return (
+                          <div key={i} className={`flex items-start gap-2 p-2 rounded text-xs ${anyListed ? "bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800" : "bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800"}`} data-testid={`platform-check-result-${r.unitNumber}`}>
+                            {anyListed
+                              ? <AlertCircle className="h-3.5 w-3.5 text-red-500 mt-0.5 flex-shrink-0" />
+                              : <CheckCircle2 className="h-3.5 w-3.5 text-green-500 mt-0.5 flex-shrink-0" />
+                            }
+                            <div className="flex-1">
+                              <span className="font-medium">Unit #{r.unitNumber}</span>
+                              {anyListed ? (
+                                <span className="ml-2 text-red-700 dark:text-red-300">
+                                  Found on:{" "}
+                                  {[
+                                    r.airbnb.listed && <a key="airbnb" href={r.airbnb.url ?? "#"} target="_blank" rel="noopener noreferrer" className="underline">Airbnb</a>,
+                                    r.vrbo.listed && <a key="vrbo" href={r.vrbo.url ?? "#"} target="_blank" rel="noopener noreferrer" className="underline">VRBO</a>,
+                                    r.booking.listed && <a key="booking" href={r.booking.url ?? "#"} target="_blank" rel="noopener noreferrer" className="underline">Booking.com</a>,
+                                  ].filter(Boolean).reduce<React.ReactNode[]>((acc, el, j) => (j === 0 ? [el] : [...acc, ", ", el]), [])}
+                                </span>
+                              ) : (
+                                <span className="ml-2 text-green-700 dark:text-green-300">Not found on any platform</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </Card>

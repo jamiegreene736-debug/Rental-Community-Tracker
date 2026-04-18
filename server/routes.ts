@@ -2274,52 +2274,39 @@ export async function registerRoutes(
 
   app.get("/api/photo-audit/check-vrbo", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "SearchAPI.io API key not configured" });
 
     const unitNumber = req.query.unitNumber as string;
     const complexName = req.query.complexName as string;
-    if (!unitNumber || !complexName) {
-      return res.status(400).json({ error: "Missing unitNumber or complexName" });
-    }
+    if (!unitNumber || !complexName) return res.status(400).json({ error: "Missing unitNumber or complexName" });
+
+    const searchPlatform = async (siteQuery: string, sitePattern: string) => {
+      try {
+        const params = new URLSearchParams({ engine: "google", q: siteQuery, api_key: apiKey, num: "5" });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!resp.ok) return [];
+        const data = await resp.json() as any;
+        return (data.organic_results || [])
+          .filter((r: any) => {
+            const url = (r.link || "").toLowerCase();
+            const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
+            return url.includes(sitePattern) && (
+              text.includes(unitNumber.toLowerCase()) || text.includes(`#${unitNumber.toLowerCase()}`)
+            );
+          })
+          .map((r: any) => ({ title: r.title, url: r.link, snippet: r.snippet }));
+      } catch { return []; }
+    };
 
     try {
-      const query = `${complexName} ${unitNumber} VRBO site:vrbo.com`;
-      const params = new URLSearchParams({
-        engine: "google",
-        q: query,
-        api_key: apiKey,
-        num: "5",
-      });
-
-      const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-      if (!response.ok) {
-        return res.status(500).json({ error: `Search failed with status ${response.status}` });
-      }
-
-      const data = await response.json() as any;
-      const organicResults = data.organic_results || [];
-
-      const vrboListings = organicResults
-        .filter((r: any) => {
-          const url = (r.link || "").toLowerCase();
-          const snippet = (r.snippet || "").toLowerCase();
-          const title = (r.title || "").toLowerCase();
-          return url.includes("vrbo.com") && (
-            snippet.includes(unitNumber) ||
-            title.includes(unitNumber) ||
-            title.includes(`#${unitNumber}`)
-          );
-        })
-        .map((r: any) => ({
-          title: r.title,
-          url: r.link,
-          snippet: r.snippet,
-        }));
+      const [vrboListings, airbnbListings, bookingListings] = await Promise.all([
+        searchPlatform(`${complexName} ${unitNumber} site:vrbo.com`, "vrbo.com"),
+        searchPlatform(`${complexName} ${unitNumber} site:airbnb.com`, "airbnb.com"),
+        searchPlatform(`${complexName} ${unitNumber} site:booking.com`, "booking.com"),
+      ]);
 
       const otherCompanies = ["parrish", "kauai exclusive", "cb island", "elite pacific", "gather", "ali'i resorts"];
-      const hasConflict = vrboListings.some((listing: any) => {
+      const hasConflict = [...vrboListings, ...airbnbListings, ...bookingListings].some((listing: any) => {
         const text = `${listing.title} ${listing.snippet}`.toLowerCase();
         return otherCompanies.some(company => text.includes(company));
       });
@@ -2328,12 +2315,75 @@ export async function registerRoutes(
         unitNumber,
         complexName,
         vrboListings,
+        airbnbListings,
+        bookingListings,
         hasConflict,
         isListedOnVrbo: vrboListings.length > 0,
+        isListedOnAirbnb: airbnbListings.length > 0,
+        isListedOnBooking: bookingListings.length > 0,
+        isListedAnywhere: vrboListings.length > 0 || airbnbListings.length > 0 || bookingListings.length > 0,
         checkedAt: new Date().toISOString(),
       });
     } catch (err: any) {
-      res.status(500).json({ error: "VRBO check failed", message: err.message });
+      res.status(500).json({ error: "Platform check failed", message: err.message });
+    }
+  });
+
+  // Quick 3-platform address-based check — used by Buy-In Tracker gate
+  app.get("/api/platform-check/quick", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const address = (req.query.address as string || "").trim();
+    const unitNumber = (req.query.unitNumber as string || "").trim();
+    const complexName = (req.query.complexName as string || "").trim();
+    if (!unitNumber || (!address && !complexName)) {
+      return res.status(400).json({ error: "unitNumber and (address or complexName) required" });
+    }
+
+    // Extract street portion (everything before the first comma)
+    const street = address ? address.split(",")[0].trim() : complexName;
+
+    const checkOnePlatform = async (
+      siteKey: string,
+      sitePattern: string,
+    ): Promise<{ listed: boolean; url: string | null; snippet: string | null }> => {
+      const domain = sitePattern;
+      // Address-based query is the primary (most precise); name-based is fallback
+      const queries = [
+        `site:${domain} "${street}" "${unitNumber}"`,
+        `site:${domain} "${complexName}" "${unitNumber}"`,
+      ].filter((q, i, arr) => arr.indexOf(q) === i); // dedupe if street === complexName
+      try {
+        for (const q of queries) {
+          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+          if (!resp.ok) continue;
+          const data = await resp.json() as any;
+          for (const r of (data.organic_results || []) as any[]) {
+            const url: string = (r.link || "").toLowerCase();
+            const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
+            if (url.includes(sitePattern) && (
+              text.includes(unitNumber.toLowerCase()) || text.includes(`#${unitNumber.toLowerCase()}`)
+            )) {
+              return { listed: true, url: r.link, snippet: `${r.title} — ${r.snippet}`.slice(0, 200) };
+            }
+          }
+          await new Promise(r => setTimeout(r, 300));
+        }
+        return { listed: false, url: null, snippet: null };
+      } catch { return { listed: false, url: null, snippet: null }; }
+    };
+
+    try {
+      const [airbnb, vrbo, booking] = await Promise.all([
+        checkOnePlatform("airbnb", "airbnb.com"),
+        checkOnePlatform("vrbo", "vrbo.com"),
+        checkOnePlatform("booking", "booking.com"),
+      ]);
+      res.json({ unitNumber, address, complexName, airbnb, vrbo, booking, checkedAt: new Date().toISOString() });
+    } catch (err: any) {
+      res.status(500).json({ error: "Quick platform check failed", message: err.message });
     }
   });
 
@@ -3064,45 +3114,51 @@ export async function registerRoutes(
     ];
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
 
-    // ── Helper: fetch listing page, check unit number in title/h1/h2 ──────────
-    const verifyTitle = async (url: string, unitNumber: string): Promise<boolean> => {
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 8000);
-        const resp = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; NexStay/1.0)" },
-          signal: ctrl.signal,
-        });
-        clearTimeout(timer);
-        if (!resp.ok) return false;
-        const html = await resp.text();
-        const combined = [
-          html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
-          html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "",
-          html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i)?.[1] || "",
-        ].join(" ").toLowerCase().replace(/<[^>]+>/g, " ");
-        return combined.includes(unitNumber.toLowerCase());
-      } catch { return false; }
+    // ── Helper: check if a search result snippet/title mentions the unit number ─
+    const snippetMentionsUnit = (r: any, unitNumber: string): boolean => {
+      const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
+      const num = unitNumber.toLowerCase();
+      return text.includes(num) || text.includes(`#${num}`) || text.includes(`unit ${num}`);
     };
 
-    // ── Helper: text search per platform for a unit ────────────────────────────
+    // ── Helper: text search per platform for a unit — address-based + name-based
+    // Uses Google snippet text for verification (no HTML fetch — platforms block bots).
     const textSearch = async (
-      unit: { unitNumber: string },
+      unit: { unitNumber: string; address: string },
       cfg: typeof PLATFORM_CONFIGS[0],
     ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
       const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
-      const q = `site:${domain} "${name}" "${city}" "${unit.unitNumber}"`;
+      // Street portion of address (before first comma) — more precise than complex name
+      const street = (unit.address || "").split(",")[0].trim();
+      // Run address-based query (primary) and name+city query (fallback) in parallel
+      const queries = [
+        street ? `site:${domain} "${street}" "${unit.unitNumber}"` : null,
+        `site:${domain} "${name}" "${city}" "${unit.unitNumber}"`,
+      ].filter(Boolean) as string[];
       try {
-        const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "10" });
-        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
-          headers: { "User-Agent": "NexStay/1.0" },
-        });
-        if (!resp.ok) return { listed: null, url: null, titleMatch: false };
-        const data = await resp.json() as any;
-        for (const r of (data.organic_results || []) as any[]) {
+        const searchResults = await Promise.all(queries.map(async (q) => {
+          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+            headers: { "User-Agent": "NexStay/1.0" },
+          });
+          if (!resp.ok) return [];
+          const data = await resp.json() as any;
+          return (data.organic_results || []) as any[];
+        }));
+        // Merge results from both queries, dedupe by URL
+        const seen = new Set<string>();
+        const allResults: any[] = [];
+        for (const batch of searchResults) {
+          for (const r of batch) {
+            const link: string = r.link || r.url || "";
+            if (!seen.has(link)) { seen.add(link); allResults.push(r); }
+          }
+        }
+        for (const r of allResults) {
           const link: string = r.link || r.url || "";
           if (link.includes(cfg.pattern)) {
-            const titleMatch = await verifyTitle(link, unit.unitNumber);
+            // Snippet-based verification — no HTML fetch needed
+            const titleMatch = snippetMentionsUnit(r, unit.unitNumber);
             return { listed: true, url: link, titleMatch };
           }
         }

@@ -31,8 +31,13 @@ interface VrboCheckResult {
   unitNumber: string;
   complexName: string;
   vrboListings: { title: string; url: string; snippet: string }[];
+  airbnbListings: { title: string; url: string; snippet: string }[];
+  bookingListings: { title: string; url: string; snippet: string }[];
   hasConflict: boolean;
   isListedOnVrbo: boolean;
+  isListedOnAirbnb: boolean;
+  isListedOnBooking: boolean;
+  isListedAnywhere: boolean;
   checkedAt: string;
 }
 
@@ -131,7 +136,7 @@ export default function PhotoAudit() {
 
   const checkedCount = Object.values(vrboResults).filter(v => v !== "loading").length;
   const conflictCount = Object.values(vrboResults).filter(v => typeof v === "object" && v !== null && v.hasConflict).length;
-  const listedCount = Object.values(vrboResults).filter(v => typeof v === "object" && v !== null && v.isListedOnVrbo).length;
+  const listedCount = Object.values(vrboResults).filter(v => typeof v === "object" && v !== null && (v.isListedAnywhere ?? v.isListedOnVrbo)).length;
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -185,11 +190,11 @@ export default function PhotoAudit() {
           <div className="mb-6 flex items-center gap-3">
             <Button onClick={checkAllVrbo} variant="outline" data-testid="button-check-all-vrbo">
               <Search className="h-4 w-4 mr-2" />
-              Check All Units on VRBO ({unitsNeedingCheck} units)
+              Check All Units — Airbnb, VRBO, Booking.com ({unitsNeedingCheck} units)
             </Button>
             {checkedCount > 0 && (
               <span className="text-sm text-gray-500">
-                Checked: {checkedCount} | Found on VRBO: {listedCount} | Conflicts: {conflictCount}
+                Checked: {checkedCount} | Found on any platform: {listedCount} | Conflicts: {conflictCount}
               </span>
             )}
           </div>
@@ -236,7 +241,7 @@ export default function PhotoAudit() {
                         className={`flex items-center justify-between p-3 rounded-lg border ${
                           vrboStatus && typeof vrboStatus === "object" && vrboStatus.hasConflict
                             ? "border-red-300 bg-red-50 dark:bg-red-950/20"
-                            : vrboStatus && typeof vrboStatus === "object" && vrboStatus.isListedOnVrbo
+                            : vrboStatus && typeof vrboStatus === "object" && vrboStatus.isListedAnywhere
                             ? "border-amber-300 bg-amber-50 dark:bg-amber-950/20"
                             : unit.isStockPhoto
                             ? "border-green-200 bg-green-50/50 dark:bg-green-950/10"
@@ -245,7 +250,7 @@ export default function PhotoAudit() {
                         data-testid={`row-unit-${unit.id}`}
                       >
                         <div className="flex-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-medium text-sm">{unit.unitNumber}</span>
                             <span className="text-xs text-gray-400">({unit.photoCount} photos)</span>
                             {unit.isStockPhoto && (
@@ -262,28 +267,33 @@ export default function PhotoAudit() {
                           <div className="text-xs text-gray-500 mt-0.5">
                             Folder: <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">{unit.photoFolder || "(none)"}</code>
                             {unit.extractedUnitNum && (
-                              <span className="ml-2 text-amber-600">
-                                Source unit: #{unit.extractedUnitNum}
-                              </span>
+                              <span className="ml-2 text-amber-600">Source unit: #{unit.extractedUnitNum}</span>
                             )}
                           </div>
-                          {vrboStatus && typeof vrboStatus === "object" && vrboStatus.vrboListings.length > 0 && (
+                          {vrboStatus && typeof vrboStatus === "object" && (
                             <div className="mt-2 space-y-1">
-                              {vrboStatus.vrboListings.map((listing, i) => (
-                                <div key={i} className="text-xs flex items-start gap-1">
-                                  <ShieldAlert className="h-3 w-3 text-red-500 mt-0.5 flex-shrink-0" />
-                                  <div>
-                                    <a href={listing.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                                      {listing.title} <ExternalLink className="h-2.5 w-2.5 inline" />
-                                    </a>
-                                    <p className="text-gray-400 line-clamp-1">{listing.snippet}</p>
+                              {[
+                                { label: "Airbnb", listings: vrboStatus.airbnbListings ?? [] },
+                                { label: "VRBO", listings: vrboStatus.vrboListings ?? [] },
+                                { label: "Booking.com", listings: vrboStatus.bookingListings ?? [] },
+                              ].filter(p => p.listings.length > 0).map(({ label, listings }) =>
+                                listings.map((listing, i) => (
+                                  <div key={`${label}-${i}`} className="text-xs flex items-start gap-1">
+                                    <ShieldAlert className="h-3 w-3 text-amber-500 mt-0.5 flex-shrink-0" />
+                                    <div>
+                                      <span className="font-medium text-amber-700 mr-1">{label}:</span>
+                                      <a href={listing.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                                        {listing.title} <ExternalLink className="h-2.5 w-2.5 inline" />
+                                      </a>
+                                      <p className="text-gray-400 line-clamp-1">{listing.snippet}</p>
+                                    </div>
                                   </div>
-                                </div>
-                              ))}
+                                ))
+                              )}
                             </div>
                           )}
                         </div>
-                        <div className="flex items-center gap-2 ml-4">
+                        <div className="flex items-center gap-2 ml-4 flex-shrink-0">
                           {unit.needsVrboCheck && (
                             <>
                               {vrboStatus === "loading" && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
@@ -291,34 +301,31 @@ export default function PhotoAudit() {
                                 <Button size="sm" variant="outline" className="text-xs h-7" onClick={() => {
                                   setVrboResults(prev => { const n = {...prev}; delete n[`${prop.complexName}-${unit.extractedUnitNum}`]; return n; });
                                   checkVrbo(unit.extractedUnitNum!, prop.complexName);
-                                }}>
-                                  Retry
-                                </Button>
+                                }}>Retry</Button>
                               )}
                               {typeof vrboStatus === "object" && vrboStatus !== null && (
                                 vrboStatus.hasConflict ? (
                                   <Badge variant="destructive" className="text-xs">
                                     <XCircle className="h-3 w-3 mr-1" /> Conflict Found
                                   </Badge>
-                                ) : vrboStatus.isListedOnVrbo ? (
-                                  <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">
-                                    <AlertTriangle className="h-3 w-3 mr-1" /> On VRBO
-                                  </Badge>
+                                ) : vrboStatus.isListedAnywhere ? (
+                                  <div className="flex gap-1 flex-wrap justify-end">
+                                    {vrboStatus.isListedOnAirbnb && <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs"><AlertTriangle className="h-3 w-3 mr-1" />Airbnb</Badge>}
+                                    {vrboStatus.isListedOnVrbo && <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs"><AlertTriangle className="h-3 w-3 mr-1" />VRBO</Badge>}
+                                    {vrboStatus.isListedOnBooking && <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs"><AlertTriangle className="h-3 w-3 mr-1" />Booking</Badge>}
+                                  </div>
                                 ) : (
                                   <Badge variant="outline" className="text-green-700 border-green-300 text-xs">
-                                    <CheckCircle className="h-3 w-3 mr-1" /> Not Found
+                                    <CheckCircle className="h-3 w-3 mr-1" /> All Clear
                                   </Badge>
                                 )
                               )}
                               {!vrboStatus && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="text-xs h-7"
+                                <Button size="sm" variant="outline" className="text-xs h-7"
                                   onClick={() => checkVrbo(unit.extractedUnitNum!, prop.complexName)}
                                   data-testid={`button-check-${unit.id}`}
                                 >
-                                  <Search className="h-3 w-3 mr-1" /> Check VRBO
+                                  <Search className="h-3 w-3 mr-1" /> Check Platforms
                                 </Button>
                               )}
                             </>
