@@ -1974,11 +1974,12 @@ export async function registerRoutes(
         }
       }
       console.log(`[push-amenities] canonical=${translated.length} other=${otherToSend.length}`);
-      if (otherToSend.length) console.log(`[push-amenities] other sample:`, otherToSend.slice(0, 10));
+      if (otherToSend.length) console.log(`[push-amenities] other (not sent, Guesty ignores):`, otherToSend.slice(0, 10));
 
+      // Only send canonical amenities. Guesty's PUT silently ignores otherAmenities
+      // so we stop wasting the slot — unmapped items are reported back to the UI.
       await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, {
         amenities: translated,
-        otherAmenities: otherToSend,
       });
 
       // GET-after-PUT — wait briefly for Guesty's async write to commit
@@ -1989,17 +1990,36 @@ export async function registerRoutes(
       const savedLower = new Set([...savedAmenities, ...savedOther].map(s => s.toLowerCase()));
       const missing = [...translated, ...otherToSend].filter(a => !savedLower.has(a.toLowerCase()));
 
-      console.log(`[push-amenities] saved=${savedAmenities.length} savedOther=${savedOther.length} missing=${missing.length}`);
+      // Build a nearest-match suggestion for each item Guesty couldn't accept,
+      // so the UI can show the user Guesty's closest available name.
+      const suggestFor = (input: string): string | null => {
+        const tokens = norm(input).split(" ").filter(t => t.length >= 3);
+        if (!tokens.length) return null;
+        let best: { name: string; score: number } | null = null;
+        for (const name of canonicalNames) {
+          const nn = norm(name);
+          let score = 0;
+          for (const t of tokens) if (nn.includes(t)) score += t.length;
+          if (score > 0 && (!best || score > best.score)) best = { name, score };
+        }
+        return best?.name ?? null;
+      };
+      const suggestions = otherToSend.map(name => ({ name, suggestion: suggestFor(name) }));
+
+      console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length} rejected=${otherToSend.length}`);
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));
       if (missing.length) console.log(`[push-amenities] missing sample:`, missing.slice(0, 10));
       res.json({
         success: true,
-        sent: translated.length + otherToSend.length,
-        saved: savedAmenities.length + savedOther.length,
+        sent: translated.length,
+        saved: savedAmenities.length,
         savedAmenities,
         otherAmenities: savedOther,
+        rejected: otherToSend,
+        suggestions,
         missing,
         propertyId,
+        guestyCatalogSize: canonicalNames.length,
       });
     } catch (err: any) {
       console.error(`[push-amenities] error:`, err.message);

@@ -207,7 +207,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
   const [amenityPushState, setAmenityPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
-  const [amenityPushResult, setAmenityPushResult] = useState<{ sent: number; saved: number; missing: string[] } | null>(null);
+  const [amenityPushResult, setAmenityPushResult] = useState<{
+    sent: number;
+    saved: number;
+    missing: string[];
+    rejected?: string[];
+    suggestions?: { name: string; suggestion: string | null }[];
+    guestyCatalogSize?: number;
+  } | null>(null);
+  const [showGuestyCatalog, setShowGuestyCatalog] = useState(false);
   // pendingAmenities = set of keys the user has selected for the next push
   const [pendingAmenities, setPendingAmenities] = useState<Set<string>>(() =>
     new Set(propertyId ? getGuestyAmenities(propertyId) : [])
@@ -942,13 +950,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ listingId: selectedId, amenities: amenityPayload }),
       });
-      const data = await res.json() as { success: boolean; sent?: number; saved?: number; savedAmenities?: string[]; otherAmenities?: string[]; missing?: string[]; error?: string };
+      const data = await res.json() as {
+        success: boolean;
+        sent?: number;
+        saved?: number;
+        savedAmenities?: string[];
+        otherAmenities?: string[];
+        missing?: string[];
+        rejected?: string[];
+        suggestions?: { name: string; suggestion: string | null }[];
+        guestyCatalogSize?: number;
+        error?: string;
+      };
       if (!res.ok || !data.success) {
         setAmenityPushState("error");
         toast({ title: "Amenities push failed", description: data.error ?? `HTTP ${res.status}`, variant: "destructive" });
       } else {
         setAmenityPushState("success");
-        setAmenityPushResult({ sent: data.sent ?? 0, saved: data.saved ?? 0, missing: data.missing ?? [] });
+        setAmenityPushResult({
+          sent: data.sent ?? 0,
+          saved: data.saved ?? 0,
+          missing: data.missing ?? [],
+          rejected: data.rejected ?? [],
+          suggestions: data.suggestions ?? [],
+          guestyCatalogSize: data.guestyCatalogSize,
+        });
         // Refresh the diff panel with what Guesty actually confirmed post-push
         if (Array.isArray(data.savedAmenities) || Array.isArray(data.otherAmenities)) {
           const merged = [...(data.savedAmenities ?? []), ...(data.otherAmenities ?? [])];
@@ -1552,16 +1578,51 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         );
                       })()}
 
-                      {/* Verification result */}
-                      {amenityPushResult && amenityPushResult.missing.length > 0 && (
-                        <div style={{ padding: "8px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
-                          <strong style={{ color: "#d97706" }}>⚠ Guesty didn't save {amenityPushResult.missing.length} keys</strong>
-                          <div style={{ color: "#92400e", marginTop: 2 }}>
-                            {amenityPushResult.missing.join(" · ")}
+                      {/* Verification result — rejected items with Guesty suggestions */}
+                      {amenityPushResult && (amenityPushResult.rejected?.length ?? 0) > 0 && (
+                        <div style={{ padding: "10px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
+                          <strong style={{ color: "#d97706" }}>
+                            ⚠ Guesty doesn't recognise {amenityPushResult.rejected!.length} profile amenit{amenityPushResult.rejected!.length === 1 ? "y" : "ies"}
+                          </strong>
+                          <div style={{ color: "#78350f", marginTop: 4, marginBottom: 6 }}>
+                            These names don't map to any of Guesty's {amenityPushResult.guestyCatalogSize ?? "?"} supported amenities. Guesty's closest match is shown — tell me which ones are right and I'll add aliases.
                           </div>
-                          <div style={{ color: "#78350f", marginTop: 2 }}>These may not be valid Guesty API identifiers. Contact Guesty support or remove them from your profile.</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {(amenityPushResult.suggestions ?? []).map(({ name, suggestion }) => (
+                              <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11 }}>
+                                <span style={{ padding: "2px 7px", borderRadius: 10, background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", minWidth: 160 }}>{name}</span>
+                                <span style={{ color: "#9ca3af" }}>→</span>
+                                <span style={{ color: suggestion ? "#065f46" : "#9ca3af", fontStyle: suggestion ? "normal" : "italic" }}>
+                                  {suggestion ? `Guesty: "${suggestion}"` : "no close match — Guesty may not support this"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
+                      {amenityPushResult && amenityPushResult.missing.length > 0 && (amenityPushResult.rejected?.length ?? 0) === 0 && (
+                        <div style={{ padding: "8px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
+                          <strong style={{ color: "#d97706" }}>⚠ Guesty didn't save {amenityPushResult.missing.length} amenit{amenityPushResult.missing.length === 1 ? "y" : "ies"}</strong>
+                          <div style={{ color: "#92400e", marginTop: 2 }}>{amenityPushResult.missing.join(" · ")}</div>
+                        </div>
+                      )}
+
+                      {/* Guesty catalog viewer (collapsible) */}
+                      <details
+                        open={showGuestyCatalog}
+                        onToggle={(e) => setShowGuestyCatalog((e.target as HTMLDetailsElement).open)}
+                        style={{ marginBottom: 12, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "white" }}
+                      >
+                        <summary style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", cursor: "pointer" }}>
+                          🔍 View Guesty's supported amenity catalog ({guesty_amenityCatalog.length})
+                        </summary>
+                        <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+                          {guesty_amenityCatalog.map(a => (
+                            <span key={a.name} style={{ fontSize: 10, padding: "2px 6px", borderRadius: 10, background: "#f3f4f6", border: "1px solid #e5e7eb", color: "#374151" }}>{a.name}</span>
+                          ))}
+                        </div>
+                      </details>
+
                       {amenityPushResult && amenityPushResult.missing.length === 0 && amenityPushState === "success" && (
                         <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--green-bg)", border: "1px solid var(--green-border)", borderRadius: 6, fontSize: 11, color: "var(--green)" }}>
                           ✓ All {amenityPushResult.saved} amenities confirmed in Guesty.
