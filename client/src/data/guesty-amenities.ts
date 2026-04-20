@@ -186,6 +186,7 @@ const HAWAII_BASE = [
   "HAIR_DRYER",
   "DEDICATED_WORKSPACE",
   "LONG_TERM_STAYS_ALLOWED",
+  "KEYPAD",              // Keyless entry — standard for all managed units
   "PRIVATE_ENTRANCE",
   // Kitchen
   "KITCHEN",
@@ -215,11 +216,13 @@ const HAWAII_BASE = [
   "CLOTHING_STORAGE",    // Guesty/Airbnb "Clothing storage" (closet/wardrobe)
   // Bathroom
   "SHAMPOO",
+  "BODY_SOAP",           // Body soap provided in all units
   "TOWELS_PROVIDED",
   "HOT_WATER",
   "BATHTUB",
   // Outdoor
   "PATIO_OR_BALCONY",
+  "COVERED_PATIO",       // All units have a covered lanai/patio
   "OUTDOOR_FURNITURE",
   // Beach
   "BEACH_ESSENTIALS",
@@ -260,6 +263,8 @@ const BEACH_EXTRAS = [
 
 // Regency at Poipu Kai — resort condo complex, pool/spa/tennis, ~10 min walk to Poipu Beach
 // Nearby: Kiahuna & Poipu Bay Golf, Kukuiula Village shopping, cycling paths, Poipu Beach snorkeling
+// Walk-in shower confirmed in unit photos (unit-924: master bath has glass walk-in shower)
+// Tennis court confirmed in community photo 02
 const REGENCY_POIPU_KAI = [
   ...HAWAII_BASE,
   "ELEVATOR",
@@ -270,12 +275,12 @@ const REGENCY_POIPU_KAI = [
   "GYM",
   "TENNIS_COURT",
   "PICKLEBALL_COURT",
+  "WALK_IN_SHOWER",      // confirmed: unit-924 master bath photos
   "BBQ_GRILL",
   "GARDEN",
   "GARDEN_VIEW",
   "NEAR_BEACH",
   "RESORT_ACCESS",
-  "COVERED_PATIO",
   "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
@@ -359,6 +364,8 @@ const MAUNA_KAI = [
 
 // Kaha Lani Resort — Kapaa oceanfront condo resort, beachfront, direct ocean access
 // Nearby: Kapaa Bike Path (famous 8-mile coastal path), Kapaa Town shopping, snorkeling, fishing
+// Walk-in shower confirmed: kaha-lani-109 photo_05 (glass door walk-in shower in master bath)
+// Tennis court confirmed: kaha-lani-109 photo_11 aerial (green court with fence, upper left corner)
 const KAHA_LANI = [
   ...HAWAII_BASE,
   ...BEACH_EXTRAS,
@@ -366,6 +373,8 @@ const KAHA_LANI = [
   "POOL",
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
+  "WALK_IN_SHOWER",      // confirmed: kaha-lani-109 master bath photo
+  "TENNIS_COURT",        // confirmed: kaha-lani-109 aerial photo (upper left)
   "RESORT_ACCESS",
   "SNORKELING_GEAR",
   // Nearby activities
