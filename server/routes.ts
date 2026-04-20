@@ -1876,14 +1876,20 @@ export async function registerRoutes(
 
     console.log(`[push-amenities] listing ${listingId} — ${amenities.length} amenities in`);
     try {
-      // Resolve propertyId from listing — the properties-api requires it, not the listing id.
+      // Resolve propertyId from the listing. Guesty's account schema varies:
+      //  - Newer accounts expose propertyId / property._id as a separate entity.
+      //  - Legacy accounts fold listing and property into one record; the listing _id
+      //    is the property id used by /properties-api/amenities/{propertyId}.
       const listing = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
-      const propertyId = (listing.propertyId ?? (listing as any).property?._id) as string | undefined;
-      if (!propertyId) {
-        console.error(`[push-amenities] listing ${listingId} has no propertyId`);
-        return res.status(400).json({ success: false, error: "listing has no propertyId" });
-      }
-      console.log(`[push-amenities] resolved propertyId=${propertyId}`);
+      const propertyId =
+        (listing.propertyId as string | undefined) ??
+        (listing as any).property?._id ??
+        (listing as any)._id ??
+        listingId;
+      console.log(
+        `[push-amenities] resolved propertyId=${propertyId} ` +
+        `(listing top-level keys: ${Object.keys(listing).slice(0, 25).join(",")})`,
+      );
 
       // Normalize inputs against Guesty's canonical supported-amenities list so
       // both UPPER_SNAKE profile keys ("BBQ_GRILL") and canonical names ("BBQ grill") work.
@@ -1941,8 +1947,11 @@ export async function registerRoutes(
     if (!listingId) return res.status(400).json({ error: "listingId required" });
     try {
       const listing = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
-      const propertyId = (listing.propertyId ?? (listing as any).property?._id) as string | undefined;
-      if (!propertyId) return res.status(400).json({ error: "listing has no propertyId" });
+      const propertyId =
+        (listing.propertyId as string | undefined) ??
+        (listing as any).property?._id ??
+        (listing as any)._id ??
+        listingId;
       const data = await guestyRequest("GET", `/properties-api/amenities/${propertyId}`);
       return res.json({ ...(data as object), propertyId });
     } catch (err: any) {
