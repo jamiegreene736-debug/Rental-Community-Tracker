@@ -1892,6 +1892,16 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/builder/guesty-supported-amenities — returns Guesty's canonical amenity list
+  app.get("/api/builder/guesty-supported-amenities", async (req: Request, res: Response) => {
+    try {
+      const data = await guestyRequest("GET", "/properties-api/amenities/supported");
+      return res.json(data);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // GET /api/builder/inspect-listing?listingId=xxx  — returns raw Guesty listing JSON
   app.get("/api/builder/inspect-listing", async (req: Request, res: Response) => {
     const { listingId } = req.query as { listingId?: string };

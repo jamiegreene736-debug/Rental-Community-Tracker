@@ -214,6 +214,41 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   );
   const [guestyLiveAmenities, setGuestyLiveAmenities] = useState<Set<string> | null>(null);
   const [fetchingLiveAmenities, setFetchingLiveAmenities] = useState(false);
+  // Guesty's canonical amenity catalog: id → displayName mapping
+  const [guesty_amenityCatalog, setGuesty_amenityCatalog] = useState<{ id: string; name: string }[]>([]);
+  // Map from our profile key → Guesty canonical ID (populated once catalog is loaded)
+  const [keyToGuestyId, setKeyToGuestyId] = useState<Record<string, string>>({});
+
+  // Fetch Guesty's canonical amenity catalog once and build label→id map
+  useEffect(() => {
+    fetch("/api/builder/guesty-supported-amenities")
+      .then(r => r.json())
+      .then((data: unknown) => {
+        const raw: { id?: string; name?: string; title?: string; amenityId?: string; displayName?: string }[] =
+          Array.isArray(data) ? data : (data as any)?.results ?? (data as any)?.amenities ?? [];
+        const catalog = raw.map(a => ({
+          id: (a.id ?? a.amenityId ?? "").toString(),
+          name: (a.name ?? a.title ?? a.displayName ?? "").toString(),
+        })).filter(a => a.id && a.name);
+        setGuesty_amenityCatalog(catalog);
+
+        // Build mapping: our UPPER_SNAKE key → Guesty ID
+        // Strategy: normalize both sides to lowercase+spaces and match
+        const normalize = (s: string) => s.toLowerCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+        const guestyByNorm = new Map(catalog.map(a => [normalize(a.name), a.id]));
+        const map: Record<string, string> = {};
+        for (const entry of GUESTY_AMENITY_CATALOG) {
+          // Try matching by label first, then by key
+          const byLabel = guestyByNorm.get(normalize(entry.label));
+          const byKey   = guestyByNorm.get(normalize(entry.key));
+          if (byLabel) map[entry.key] = byLabel;
+          else if (byKey) map[entry.key] = byKey;
+        }
+        setKeyToGuestyId(map);
+        console.log("[amenity-catalog] loaded", catalog.length, "Guesty amenities, mapped", Object.keys(map).length, "of", GUESTY_AMENITY_CATALOG.length);
+      })
+      .catch(() => {}); // non-fatal — falls back to raw key push
+  }, []);
 
   // Keep profile-based checkboxes in sync if propertyId ever changes (navigation edge case)
   const prevPropertyIdRef = useRef<number | undefined>(undefined);
@@ -872,10 +907,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setAmenityPushState("pushing");
     setAmenityPushResult(null);
     try {
+      // Translate our profile keys → Guesty canonical IDs where we have a mapping
+      const amenityPayload = [...pendingAmenities].map(k => keyToGuestyId[k] ?? k);
       const res = await fetch("/api/builder/push-amenities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listingId: selectedId, amenities: [...pendingAmenities] }),
+        body: JSON.stringify({ listingId: selectedId, amenities: amenityPayload }),
       });
       const data = await res.json() as { success: boolean; sent?: number; saved?: number; savedAmenities?: string[]; missing?: string[]; error?: string };
       if (!res.ok || !data.success) {
@@ -1388,7 +1425,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 600, fontSize: 13 }}>{selectedCount} amenities selected</div>
                           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                            Check/uncheck below. Uncheck Air Conditioning for units without A/C before pushing.
+                            {guesty_amenityCatalog.length > 0
+                              ? `Using Guesty canonical IDs (${Object.keys(keyToGuestyId).length}/${GUESTY_AMENITY_CATALOG.length} mapped)`
+                              : "Loading Guesty amenity catalog…"}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
