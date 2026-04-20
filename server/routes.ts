@@ -3193,9 +3193,34 @@ export async function registerRoutes(
 
     // ── Helper: check if a search result snippet/title mentions the unit number ─
     const snippetMentionsUnit = (r: any, unitNumber: string): boolean => {
-      const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-      const num = unitNumber.toLowerCase();
-      return text.includes(num) || text.includes(`#${num}`) || text.includes(`unit ${num}`);
+      const text = `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
+      const num = unitNumber.toLowerCase().replace(/^0+/, ""); // strip leading zeros
+      const patterns = [
+        num,
+        `#${num}`,
+        `unit ${num}`,
+        `unit#${num}`,
+        `apt ${num}`,
+        `apt. ${num}`,
+        `apartment ${num}`,
+        `suite ${num}`,
+        `ste ${num}`,
+        `no. ${num}`,
+        `no ${num}`,
+        `-${num}`,       // URL slug: property-name-101
+        `/${num}`,       // URL path segment
+      ];
+      return patterns.some(p => text.includes(p));
+    };
+
+    // ── Helper: confirm URL is a specific listing page (not a search results page) ─
+    const isListingUrl = (url: string, cfg: typeof PLATFORM_CONFIGS[0]): boolean => {
+      if (!url) return false;
+      const u = url.toLowerCase();
+      if (cfg.key === "airbnb") return u.includes("airbnb.com/rooms/") || u.includes("airbnb.com/h/");
+      if (cfg.key === "vrbo") return /vrbo\.com\/\d+/.test(u) || u.includes("vrbo.com/vacation-rentals/");
+      if (cfg.key === "booking") return u.includes("booking.com/hotel/") || u.includes("booking.com/apartments/");
+      return u.includes(cfg.pattern);
     };
 
     // ── Helper: text search per platform for a unit — address-based + name-based
@@ -3231,14 +3256,20 @@ export async function registerRoutes(
             if (!seen.has(link)) { seen.add(link); allResults.push(r); }
           }
         }
+        // Prefer listing-page URLs over generic domain matches; prefer snippet-confirmed
+        let bestUrl: string | null = null;
+        let bestTitleMatch = false;
         for (const r of allResults) {
           const link: string = r.link || r.url || "";
-          if (link.includes(cfg.pattern)) {
-            // Snippet-based verification — no HTML fetch needed
-            const titleMatch = snippetMentionsUnit(r, unit.unitNumber);
-            return { listed: true, url: link, titleMatch };
-          }
+          if (!link.toLowerCase().includes(cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`)) continue;
+          const listing = isListingUrl(link, cfg);
+          const titleMatch = snippetMentionsUnit(r, unit.unitNumber);
+          // Prioritize: listing URL + title match > listing URL > any domain match
+          if (listing && titleMatch) return { listed: true, url: link, titleMatch: true };
+          if (listing && !bestUrl) { bestUrl = link; bestTitleMatch = titleMatch; }
+          if (!bestUrl && link.includes(cfg.pattern)) { bestUrl = link; bestTitleMatch = titleMatch; }
         }
+        if (bestUrl) return { listed: true, url: bestUrl, titleMatch: bestTitleMatch };
         return { listed: false, url: null, titleMatch: false };
       } catch { return { listed: null, url: null, titleMatch: false }; }
     };
@@ -3252,7 +3283,7 @@ export async function registerRoutes(
       if (!photoFolder || photoFolder.trim() === "") return { signals, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
       if (!fs.existsSync(folderPath)) return { signals, matchCount: 0, totalChecked: 0 };
-      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 3);
+      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
       let matchCount = 0;
       for (const file of files) {
         try {
@@ -3276,9 +3307,16 @@ export async function registerRoutes(
               ...(searchData.visual_matches || []),
               ...(searchData.organic_results || []),
               ...(searchData.pages_with_matching_images || []),
-            ].map((r: any) => (r.link || r.url || r.source_url || "").toLowerCase());
+              ...(searchData.knowledge_graph ? [searchData.knowledge_graph] : []),
+            ].map((r: any) => (r.link || r.url || r.source || r.source_url || "").toLowerCase());
             for (const cfg of PLATFORM_CONFIGS) {
-              if (allLinks.some((l: string) => l.includes(cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`))) {
+              const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
+              // Require it's actually a listing page, not just the platform homepage
+              const found = allLinks.some((l: string) => {
+                if (!l.includes(domain)) return false;
+                return isListingUrl(l, cfg) || l.split(domain)[1]?.length > 5;
+              });
+              if (found && !signals[cfg.key]) {
                 signals[cfg.key] = true;
                 matchCount++;
               }
@@ -3320,14 +3358,22 @@ export async function registerRoutes(
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchCount, totalChecked } = photoResult;
+
+        // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
+        const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
+        const crossConfirmed = textListedCount >= 2;
+
+        const resolveText = (t: typeof airbnbText) =>
+          crossConfirmed && t.listed && !t.titleMatch ? { ...t, titleMatch: true } : t;
+
         return {
           unitId: unit.unitId,
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  combine(airbnbText,  signals.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
-            vrbo:    combine(vrboText,    signals.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
-            booking: combine(bookingText, signals.booking, signals.booking ? matchCount : 0, totalChecked),
+            airbnb:  combine(resolveText(airbnbText),  signals.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
+            vrbo:    combine(resolveText(vrboText),    signals.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
+            booking: combine(resolveText(bookingText), signals.booking, signals.booking ? matchCount : 0, totalChecked),
           },
         };
       }),

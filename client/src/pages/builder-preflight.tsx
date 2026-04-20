@@ -3,6 +3,7 @@ import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import {
   Loader2,
   ArrowRight,
@@ -13,6 +14,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   RefreshCw,
+  Camera,
+  Search,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
@@ -129,6 +132,9 @@ export default function BuilderPreflight() {
   const [platformChecking, setPlatformChecking] = useState(false);
   // Track which unit IDs are still being checked (for per-row spinner)
   const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
+  const [completedCount, setCompletedCount] = useState(0);
+  const [totalUnits, setTotalUnits] = useState(0);
+  const [checkPhase, setCheckPhase] = useState<"text" | "photo" | "done" | null>(null);
   const [results, setResults] = useState<ProgressiveResults>({});
   const [platformDone, setPlatformDone] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
@@ -231,12 +237,19 @@ export default function BuilderPreflight() {
     setPlatformChecking(true);
     setPlatformDone(false);
     setResults({});
+    setCompletedCount(0);
+    setTotalUnits(unitsToCheck.length);
+    setCheckPhase("text");
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
+
+    const hasPhotos = unitsToCheck.some(u => !(u as any)._isReplaced && (u as any).photoFolder);
+    if (hasPhotos) setCheckPhase("text");
 
     await Promise.all(
       unitsToCheck.map(async (unit) => {
         const address = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
+        const hasUnitPhoto = !(unit as any)._isReplaced && (unit as any).photoFolder;
         const unitPayload = [{
           unitId: unit.id,
           unitNumber: unit.unitNumber,
@@ -248,6 +261,7 @@ export default function BuilderPreflight() {
           city,
           units: JSON.stringify(unitPayload),
         });
+        if (hasUnitPhoto) setCheckPhase("photo");
         try {
           const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`);
           if (resp.ok) {
@@ -257,7 +271,6 @@ export default function BuilderPreflight() {
               setResults(prev => ({ ...prev, [unit.id]: unitResult }));
             }
           } else {
-            // Mark as error
             setResults(prev => ({
               ...prev,
               [unit.id]: {
@@ -292,10 +305,12 @@ export default function BuilderPreflight() {
             next.delete(unit.id);
             return next;
           });
+          setCompletedCount(prev => prev + 1);
         }
       })
     );
 
+    setCheckPhase("done");
     setPlatformChecking(false);
     setPlatformDone(true);
   };
@@ -509,11 +524,27 @@ export default function BuilderPreflight() {
             </div>
           )}
 
-          {/* Loading indicator */}
-          {isCheckRunning && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Checking {checkingUnitIds.size} unit{checkingUnitIds.size !== 1 ? "s" : ""} across Airbnb, VRBO, and Booking.com…
+          {/* Progress bar */}
+          {isCheckRunning && totalUnits > 0 && (
+            <div className="mb-5 space-y-2">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span className="flex items-center gap-1.5 font-medium">
+                  {checkPhase === "photo" ? (
+                    <><Camera className="h-3.5 w-3.5 animate-pulse text-primary" /> Running photo reverse-image search…</>
+                  ) : checkPhase === "text" ? (
+                    <><Search className="h-3.5 w-3.5 animate-pulse text-primary" /> Searching Airbnb, VRBO &amp; Booking.com…</>
+                  ) : (
+                    <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking…</>
+                  )}
+                </span>
+                <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done</span>
+              </div>
+              <Progress value={totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0} className="h-2" />
+              <p className="text-xs text-muted-foreground">
+                {checkPhase === "photo"
+                  ? "Uploading photos to run Google Lens reverse image search — this takes 15–30 s per unit."
+                  : "Querying search engines for address and unit number matches across all platforms."}
+              </p>
             </div>
           )}
 
