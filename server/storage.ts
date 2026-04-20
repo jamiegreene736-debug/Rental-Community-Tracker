@@ -25,8 +25,10 @@ export interface IStorage {
   getBuyIn(id: number): Promise<BuyIn | undefined>;
   updateBuyIn(id: number, data: Partial<InsertBuyIn>): Promise<BuyIn | undefined>;
   deleteBuyIn(id: number): Promise<boolean>;
-  getBuyInCandidates(params: { propertyId: number; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
-  getBuyInByReservation(reservationId: string): Promise<BuyIn | undefined>;
+  // Per-unit-slot buy-in matching. Multi-unit properties need one buy-in per unit
+  // so a single reservation can have multiple attached buy-ins (one per unitId).
+  getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
+  getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
 
@@ -125,18 +127,19 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  async getBuyInCandidates(params: { propertyId: number; checkIn: string; checkOut: string }): Promise<BuyIn[]> {
+  async getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]> {
     // A candidate must:
-    //   1. Be for the same property
+    //   1. Be for the same property AND unit slot (multi-unit properties need a buy-in per slot)
     //   2. Fully cover the booking window: buyIn.checkIn <= booking.checkIn AND buyIn.checkOut >= booking.checkOut
     //   3. Be status=active
-    //   4. Not already be attached to another reservation
+    //   4. Not already be attached to any reservation
     const rows = await db
       .select()
       .from(buyIns)
       .where(
         and(
           eq(buyIns.propertyId, params.propertyId),
+          eq(buyIns.unitId, params.unitId),
           lte(buyIns.checkIn, params.checkIn),
           gte(buyIns.checkOut, params.checkOut),
           eq(buyIns.status, "active"),
@@ -146,23 +149,30 @@ export class DatabaseStorage implements IStorage {
     return rows;
   }
 
-  async getBuyInByReservation(reservationId: string): Promise<BuyIn | undefined> {
-    const [row] = await db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId)).limit(1);
-    return row;
+  async getBuyInsByReservation(reservationId: string): Promise<BuyIn[]> {
+    return db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId));
   }
 
   async attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined> {
-    // Refuse if buy-in is already attached to a *different* reservation.
     const existing = await this.getBuyIn(buyInId);
     if (!existing) return undefined;
+
+    // Refuse if this buy-in is already attached to a *different* reservation.
     if (existing.guestyReservationId && existing.guestyReservationId !== reservationId) {
       throw new Error(`Buy-in ${buyInId} is already attached to reservation ${existing.guestyReservationId}`);
     }
-    // Also refuse if this reservation already has a different buy-in attached.
-    const current = await this.getBuyInByReservation(reservationId);
-    if (current && current.id !== buyInId) {
-      throw new Error(`Reservation ${reservationId} already has buy-in ${current.id} attached — detach it first`);
+
+    // Refuse if this reservation already has a buy-in attached for THIS same unit slot.
+    const currentAttachments = await this.getBuyInsByReservation(reservationId);
+    const sameSlot = currentAttachments.find(
+      (b) => b.id !== buyInId && b.propertyId === existing.propertyId && b.unitId === existing.unitId,
+    );
+    if (sameSlot) {
+      throw new Error(
+        `Reservation ${reservationId} already has buy-in ${sameSlot.id} attached for unit "${existing.unitId}" — detach it first`,
+      );
     }
+
     const [row] = await db
       .update(buyIns)
       .set({ guestyReservationId: reservationId, attachedAt: new Date() })

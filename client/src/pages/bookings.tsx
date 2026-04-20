@@ -5,25 +5,27 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "@/components/ui/table";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
-  ArrowLeft, Building2, Calendar, DollarSign, Search, Link2, Unlink, ExternalLink,
-  RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown,
+  ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
+  RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
+  ChevronDown, ChevronRight,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
+import type { UnitConfig } from "@shared/property-units";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+interface SlotInfo extends UnitConfig {
+  buyIn: BuyIn | null;
+}
 
 interface GuestyReservation {
   _id: string;
@@ -36,7 +38,10 @@ interface GuestyReservation {
   source?: string;
   integration?: { platform?: string };
   confirmationCode?: string;
-  attachedBuyIn?: BuyIn | null;
+  slots: SlotInfo[];
+  slotsFilled: number;
+  slotsTotal: number;
+  fullyLinked: boolean;
 }
 
 interface Candidate {
@@ -72,10 +77,12 @@ export default function Bookings() {
   const { toast } = useToast();
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(null);
   const [includePast, setIncludePast] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerReservation, setPickerReservation] = useState<GuestyReservation | null>(null);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [picker, setPicker] = useState<
+    | { reservation: GuestyReservation; slot: SlotInfo }
+    | null
+  >(null);
 
-  // Load Guesty property map so we can present listings by propertyId
   const { data: propertyMap = [] } = useQuery<GuestyPropertyMap[]>({
     queryKey: ["/api/guesty-property-map"],
   });
@@ -83,43 +90,43 @@ export default function Bookings() {
   const selectedMapping = propertyMap.find((m) => m.propertyId === selectedPropertyId);
   const selectedListingId = selectedMapping?.guestyListingId ?? null;
 
-  // Bookings for the selected listing
   const {
     data: bookingsData,
     isLoading: bookingsLoading,
     isError: bookingsError,
     error: bookingsErr,
     refetch: refetchBookings,
-  } = useQuery<{ reservations: GuestyReservation[]; total: number }>({
-    queryKey: ["/api/bookings/listing", selectedListingId, { includePast }],
+  } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
+    queryKey: ["/api/bookings/listing", selectedListingId, selectedPropertyId, { includePast }],
     queryFn: () => {
-      if (!selectedListingId) return Promise.resolve({ reservations: [], total: 0 });
-      const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?includePast=${includePast}`;
+      if (!selectedListingId || !selectedPropertyId) {
+        return Promise.resolve({ reservations: [], total: 0, unitSlots: [] });
+      }
+      const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?propertyId=${selectedPropertyId}&includePast=${includePast}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
-    enabled: !!selectedListingId,
+    enabled: !!selectedListingId && !!selectedPropertyId,
     refetchInterval: 120_000,
   });
 
   const reservations = bookingsData?.reservations ?? [];
+  const unitSlots = bookingsData?.unitSlots ?? [];
 
-  // Attach / detach mutations
   const attachMutation = useMutation({
     mutationFn: ({ reservationId, buyInId }: { reservationId: string; buyInId: number }) =>
       apiRequest("POST", `/api/bookings/${reservationId}/attach-buy-in`, { buyInId }).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      setPickerOpen(false);
-      setPickerReservation(null);
+      setPicker(null);
       toast({ title: "Buy-in attached" });
     },
     onError: (e: any) => toast({ title: "Attach failed", description: e.message, variant: "destructive" }),
   });
 
   const detachMutation = useMutation({
-    mutationFn: (reservationId: string) =>
-      apiRequest("POST", `/api/bookings/${reservationId}/detach-buy-in`).then((r) => r.json()),
+    mutationFn: (buyInId: number) =>
+      apiRequest("POST", `/api/bookings/detach-buy-in/${buyInId}`).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
@@ -128,26 +135,33 @@ export default function Bookings() {
     onError: (e: any) => toast({ title: "Detach failed", description: e.message, variant: "destructive" }),
   });
 
-  const openPicker = (r: GuestyReservation) => {
-    setPickerReservation(r);
-    setPickerOpen(true);
-  };
+  const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
-  // Summary stats for current view
   const stats = useMemo(() => {
     if (!reservations.length) return null;
-    const linked = reservations.filter((r) => r.attachedBuyIn);
+    const fully = reservations.filter((r) => r.fullyLinked).length;
     const totalRevenue = reservations.reduce((s, r) => s + (r.money?.hostPayout ?? 0), 0);
-    const totalBuyInCost = linked.reduce((s, r) => s + parseFloat(String(r.attachedBuyIn?.costPaid ?? 0)), 0);
+    // Only count fully-linked bookings' buy-in costs to keep profit math honest
+    const linkedCost = reservations
+      .filter((r) => r.fullyLinked)
+      .reduce((s, r) => s + r.slots.reduce((ss, sl) => ss + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0), 0);
+    const linkedRevenue = reservations
+      .filter((r) => r.fullyLinked)
+      .reduce((s, r) => s + (r.money?.hostPayout ?? 0), 0);
     return {
       total: reservations.length,
-      linked: linked.length,
-      unlinked: reservations.length - linked.length,
+      fully,
+      partial: reservations.filter((r) => r.slotsFilled > 0 && !r.fullyLinked).length,
       totalRevenue,
-      totalBuyInCost,
-      profit: totalRevenue - totalBuyInCost,
+      linkedCost,
+      profit: linkedRevenue - linkedCost,
     };
   }, [reservations]);
+
+  const totalBedrooms = unitSlots.reduce((s, u) => s + u.bedrooms, 0);
+  const propertyLabel = selectedPropertyId
+    ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
+    : "";
 
   return (
     <div className="min-h-screen bg-background">
@@ -161,7 +175,9 @@ export default function Bookings() {
         <div className="h-5 w-px bg-border" />
         <div>
           <h1 className="font-semibold text-lg leading-tight">Bookings</h1>
-          <p className="text-xs text-muted-foreground">Guesty reservations · attach buy-ins for cost tracking</p>
+          <p className="text-xs text-muted-foreground">
+            Multi-unit listings need one buy-in per physical unit
+          </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Button
@@ -181,11 +197,14 @@ export default function Bookings() {
         <Card>
           <CardContent className="py-4">
             <div className="flex flex-wrap items-end gap-4">
-              <div className="grow min-w-[240px]">
+              <div className="grow min-w-[260px]">
                 <Label className="text-xs mb-1.5 block">Property</Label>
                 <Select
                   value={selectedPropertyId?.toString() ?? ""}
-                  onValueChange={(v) => setSelectedPropertyId(v ? parseInt(v, 10) : null)}
+                  onValueChange={(v) => {
+                    setSelectedPropertyId(v ? parseInt(v, 10) : null);
+                    setExpanded({});
+                  }}
                 >
                   <SelectTrigger data-testid="select-property">
                     <SelectValue placeholder="Select a property..." />
@@ -214,6 +233,12 @@ export default function Bookings() {
                 />
                 <Label htmlFor="include-past" className="text-sm cursor-pointer">Include past stays</Label>
               </div>
+              {selectedPropertyId && unitSlots.length > 0 && (
+                <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
+                  <BedDouble className="h-3.5 w-3.5 inline mr-1 opacity-60" />
+                  {propertyLabel}
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -224,7 +249,7 @@ export default function Bookings() {
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
               <p className="font-medium mb-1">Select a property to view bookings</p>
               <p className="text-sm text-muted-foreground">
-                Bookings are pulled from Guesty for the linked listing.
+                Bookings are pulled live from Guesty.
               </p>
             </CardContent>
           </Card>
@@ -249,7 +274,7 @@ export default function Bookings() {
                 <p className="text-xs text-muted-foreground">Bookings</p>
                 <p className="text-2xl font-semibold mt-1">{stats.total}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {stats.linked} with buy-in · {stats.unlinked} without
+                  {stats.fully} fully linked · {stats.partial} partial
                 </p>
               </CardContent>
             </Card>
@@ -261,13 +286,13 @@ export default function Bookings() {
             </Card>
             <Card>
               <CardContent className="py-4">
-                <p className="text-xs text-muted-foreground">Buy-In Cost (linked)</p>
-                <p className="text-2xl font-semibold mt-1">{fmtMoney(stats.totalBuyInCost)}</p>
+                <p className="text-xs text-muted-foreground">Buy-In Cost (fully linked)</p>
+                <p className="text-2xl font-semibold mt-1">{fmtMoney(stats.linkedCost)}</p>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="py-4">
-                <p className="text-xs text-muted-foreground">Profit (linked)</p>
+                <p className="text-xs text-muted-foreground">Profit (fully linked)</p>
                 <p className={`text-2xl font-semibold mt-1 ${stats.profit >= 0 ? "text-green-600" : "text-red-600"}`}>
                   {stats.profit >= 0 ? <TrendingUp className="h-4 w-4 inline mr-1" /> : <TrendingDown className="h-4 w-4 inline mr-1" />}
                   {fmtMoney(stats.profit)}
@@ -277,7 +302,7 @@ export default function Bookings() {
           </div>
         )}
 
-        {/* Bookings table */}
+        {/* Bookings list — each is expandable to show unit slots */}
         {selectedPropertyId && !bookingsError && (
           <Card>
             <CardHeader className="pb-3">
@@ -286,139 +311,182 @@ export default function Bookings() {
                 {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
               </CardTitle>
               <CardDescription>
-                Attach a buy-in to each reservation to track cost/profit. Only buy-ins whose dates fully cover the guest stay are eligible.
+                Click a booking to expand and attach buy-ins for each physical unit. A buy-in can only cover one reservation; candidates are filtered to matching unit ID + covering dates.
               </CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-2">
               {!bookingsLoading && reservations.length === 0 && (
                 <p className="text-sm text-muted-foreground py-6 text-center">
                   No bookings found for this listing.
                 </p>
               )}
-              {reservations.length > 0 && (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Guest</TableHead>
-                      <TableHead>Dates</TableHead>
-                      <TableHead className="text-center">Nights</TableHead>
-                      <TableHead>Channel</TableHead>
-                      <TableHead className="text-right">Guest Payout</TableHead>
-                      <TableHead>Buy-In</TableHead>
-                      <TableHead className="text-right">Profit</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {reservations.map((r) => {
-                      const nights = r.nightsCount ?? nightsBetween(r.checkIn, r.checkOut);
-                      const payout = r.money?.hostPayout ?? 0;
-                      const buyInCost = r.attachedBuyIn ? parseFloat(String(r.attachedBuyIn.costPaid)) : 0;
-                      const profit = r.attachedBuyIn ? payout - buyInCost : null;
-                      const channel = r.integration?.platform ?? r.source ?? "direct";
-                      return (
-                        <TableRow key={r._id} data-testid={`booking-row-${r._id}`}>
-                          <TableCell>
-                            <div className="min-w-0">
-                              <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
-                              {r.confirmationCode && (
-                                <p className="text-[10px] text-muted-foreground font-mono">{r.confirmationCode}</p>
+              {reservations.map((r) => {
+                const isOpen = !!expanded[r._id];
+                const nights = r.nightsCount ?? nightsBetween(r.checkIn, r.checkOut);
+                const payout = r.money?.hostPayout ?? 0;
+                const totalBuyInCost = r.slots.reduce(
+                  (s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)),
+                  0,
+                );
+                const channel = r.integration?.platform ?? r.source ?? "direct";
+                return (
+                  <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
+                    {/* Summary row */}
+                    <button
+                      onClick={() => toggleExpanded(r._id)}
+                      className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-muted/40 transition-colors rounded-lg"
+                    >
+                      {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                      <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
+                        <div className="min-w-0">
+                          <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
+                          {r.confirmationCode && (
+                            <p className="text-[10px] text-muted-foreground font-mono">{r.confirmationCode}</p>
+                          )}
+                        </div>
+                        <div className="text-sm">
+                          <p>{fmtDate(r.checkIn)} → {fmtDate(r.checkOut)}</p>
+                          <p className="text-xs text-muted-foreground">{nights} nights · <Badge variant="outline" className="text-[10px] capitalize ml-1">{channel}</Badge></p>
+                        </div>
+                        <div className="text-sm text-right">
+                          <p className="font-medium">{fmtMoney(payout)}</p>
+                          <p className="text-[10px] text-muted-foreground">guest payout</p>
+                        </div>
+                        <div className="text-sm text-right">
+                          <p className="font-medium">{fmtMoney(totalBuyInCost)}</p>
+                          <p className="text-[10px] text-muted-foreground">buy-in cost</p>
+                        </div>
+                        <div className="text-sm text-right">
+                          {r.fullyLinked ? (
+                            <span className={`font-medium ${payout - totalBuyInCost >= 0 ? "text-green-600" : "text-red-600"}`}>
+                              {fmtMoney(payout - totalBuyInCost)}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                          <p className="text-[10px] text-muted-foreground">profit</p>
+                        </div>
+                        <div className="shrink-0">
+                          {r.fullyLinked ? (
+                            <Badge className="bg-green-600 text-white text-[10px]">
+                              <CheckCircle2 className="h-2.5 w-2.5 mr-1" /> All slots filled
+                            </Badge>
+                          ) : r.slotsFilled > 0 ? (
+                            <Badge className="bg-amber-500 text-white text-[10px]">
+                              {r.slotsFilled} / {r.slotsTotal} filled
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px]">
+                              0 / {r.slotsTotal} filled
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+
+                    {/* Expanded: per-unit-slot detail */}
+                    {isOpen && (
+                      <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
+                        {r.slots.map((slot) => (
+                          <div
+                            key={slot.unitId}
+                            className="flex items-center gap-3 bg-background rounded border px-3 py-2.5"
+                            data-testid={`slot-${r._id}-${slot.unitId}`}
+                          >
+                            <div className="shrink-0 w-24">
+                              <p className="text-sm font-medium">{slot.unitLabel}</p>
+                              <p className="text-[10px] text-muted-foreground">{slot.bedrooms} BR</p>
+                            </div>
+                            <div className="grow min-w-0">
+                              {slot.buyIn ? (
+                                <div className="flex items-center gap-2">
+                                  <Link2 className="h-3.5 w-3.5 text-green-600 shrink-0" />
+                                  <div className="min-w-0">
+                                    <p className="text-sm truncate">
+                                      {fmtMoney(slot.buyIn.costPaid)}
+                                      {" · "}
+                                      {fmtDate(slot.buyIn.checkIn)} → {fmtDate(slot.buyIn.checkOut)}
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground truncate">
+                                      {slot.buyIn.airbnbConfirmation && (
+                                        <span className="font-mono">#{slot.buyIn.airbnbConfirmation}</span>
+                                      )}
+                                      {slot.buyIn.airbnbListingUrl && (
+                                        <a
+                                          href={slot.buyIn.airbnbListingUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="ml-2 text-primary hover:underline inline-flex items-center gap-0.5"
+                                        >
+                                          view on Airbnb <ExternalLink className="h-2.5 w-2.5" />
+                                        </a>
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-xs text-muted-foreground italic">No buy-in attached for this unit</p>
                               )}
                             </div>
-                          </TableCell>
-                          <TableCell className="text-sm">
-                            <p>{fmtDate(r.checkIn)}</p>
-                            <p className="text-muted-foreground text-xs">→ {fmtDate(r.checkOut)}</p>
-                          </TableCell>
-                          <TableCell className="text-center text-sm">{nights}</TableCell>
-                          <TableCell>
-                            <Badge variant="outline" className="text-[10px] capitalize">{channel}</Badge>
-                          </TableCell>
-                          <TableCell className="text-right font-medium">{fmtMoney(payout)}</TableCell>
-                          <TableCell>
-                            {r.attachedBuyIn ? (
-                              <div>
-                                <p className="text-sm font-medium">{fmtMoney(r.attachedBuyIn.costPaid)}</p>
-                                <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">
-                                  {r.attachedBuyIn.airbnbConfirmation ?? r.attachedBuyIn.unitLabel}
-                                  {r.attachedBuyIn.airbnbListingUrl && (
-                                    <a
-                                      href={r.attachedBuyIn.airbnbListingUrl}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="ml-1 text-primary hover:underline inline-flex items-center"
-                                    >
-                                      <ExternalLink className="h-2.5 w-2.5" />
-                                    </a>
-                                  )}
-                                </p>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground italic">No buy-in</span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {profit !== null ? (
-                              <span className={`font-medium ${profit >= 0 ? "text-green-600" : "text-red-600"}`}>
-                                {fmtMoney(profit)}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {r.attachedBuyIn ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => detachMutation.mutate(r._id)}
-                                disabled={detachMutation.isPending}
-                                data-testid={`button-detach-${r._id}`}
-                              >
-                                <Unlink className="h-3.5 w-3.5 mr-1" /> Detach
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                onClick={() => openPicker(r)}
-                                data-testid={`button-find-buyin-${r._id}`}
-                              >
-                                <Search className="h-3.5 w-3.5 mr-1" /> Find buy-in
-                              </Button>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              )}
+                            <div className="shrink-0">
+                              {slot.buyIn ? (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => slot.buyIn && detachMutation.mutate(slot.buyIn.id)}
+                                  disabled={detachMutation.isPending}
+                                  data-testid={`button-detach-${r._id}-${slot.unitId}`}
+                                >
+                                  <Unlink className="h-3.5 w-3.5 mr-1" /> Detach
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  onClick={() => setPicker({ reservation: r, slot })}
+                                  data-testid={`button-find-buyin-${r._id}-${slot.unitId}`}
+                                >
+                                  <Search className="h-3.5 w-3.5 mr-1" />
+                                  Find {slot.bedrooms}BR buy-in
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </CardContent>
           </Card>
         )}
       </div>
 
-      {/* Candidate picker dialog */}
-      <Dialog open={pickerOpen} onOpenChange={(open) => { if (!open) { setPickerOpen(false); setPickerReservation(null); } }}>
+      {/* Candidate picker dialog — scoped to one slot */}
+      <Dialog open={!!picker} onOpenChange={(open) => { if (!open) setPicker(null); }}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Find a buy-in</DialogTitle>
+            <DialogTitle>
+              Find buy-in for {picker?.slot.unitLabel} <span className="text-muted-foreground font-normal">({picker?.slot.bedrooms} BR)</span>
+            </DialogTitle>
             <DialogDescription>
-              {pickerReservation && (
+              {picker && (
                 <span>
-                  {pickerReservation.guest?.fullName ?? "Guest"} · {fmtDate(pickerReservation.checkIn)} → {fmtDate(pickerReservation.checkOut)}
-                  {" · "}
-                  {pickerReservation.nightsCount ?? nightsBetween(pickerReservation.checkIn, pickerReservation.checkOut)} nights
+                  {picker.reservation.guest?.fullName ?? "Guest"} ·{" "}
+                  {fmtDate(picker.reservation.checkIn)} → {fmtDate(picker.reservation.checkOut)} ·{" "}
+                  {picker.reservation.nightsCount ?? nightsBetween(picker.reservation.checkIn, picker.reservation.checkOut)} nights
                 </span>
               )}
             </DialogDescription>
           </DialogHeader>
-          {pickerReservation && selectedPropertyId && (
+          {picker && selectedPropertyId && (
             <CandidateList
-              reservation={pickerReservation}
+              reservation={picker.reservation}
               propertyId={selectedPropertyId}
+              slot={picker.slot}
               onAttach={(buyInId) =>
-                attachMutation.mutate({ reservationId: pickerReservation._id, buyInId })
+                attachMutation.mutate({ reservationId: picker.reservation._id, buyInId })
               }
               isPending={attachMutation.isPending}
             />
@@ -434,18 +502,27 @@ export default function Bookings() {
 function CandidateList({
   reservation,
   propertyId,
+  slot,
   onAttach,
   isPending,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
+  slot: SlotInfo;
   onAttach: (buyInId: number) => void;
   isPending: boolean;
 }) {
   const { data, isLoading, isError, error } = useQuery<{ candidates: Candidate[]; bookingNights: number; count: number }>({
-    queryKey: ["/api/bookings/candidates", reservation._id, propertyId, reservation.checkIn, reservation.checkOut],
+    queryKey: [
+      "/api/bookings/candidates",
+      reservation._id,
+      propertyId,
+      slot.unitId,
+      reservation.checkIn,
+      reservation.checkOut,
+    ],
     queryFn: () => {
-      const url = `/api/bookings/${reservation._id}/buy-in-candidates?propertyId=${propertyId}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`;
+      const url = `/api/bookings/${reservation._id}/buy-in-candidates?propertyId=${propertyId}&unitId=${encodeURIComponent(slot.unitId)}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
   });
@@ -476,8 +553,8 @@ function CandidateList({
         <Search className="h-8 w-8 mx-auto mb-2 opacity-30" />
         <p className="font-medium mb-1">No eligible buy-ins found</p>
         <p className="text-xs">
-          No active buy-ins for Property {propertyId} cover {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
-          Add a buy-in in the Buy-In Tracker first.
+          No active buy-ins for {slot.unitLabel} ({slot.bedrooms} BR) cover {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
+          Add one in the Buy-In Tracker first.
         </p>
       </div>
     );
