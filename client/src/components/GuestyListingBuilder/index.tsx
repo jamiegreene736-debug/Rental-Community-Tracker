@@ -426,6 +426,106 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [doUpscale, setDoUpscale] = useState(false);
   const pushAbortRef = useRef<AbortController | null>(null);
 
+  // ── Normalize existing Guesty photos (rotate/resize/compress in-place) ──
+  // Fetches each photo currently in Guesty, runs through validateAndFixPhoto
+  // on the server, and PUTs the fixed ones back. Touches only photos that
+  // need fixing — compliant photos are left alone.
+  type NormalizePhase = "idle" | "running" | "done" | "error";
+  const [normalizePhase, setNormalizePhase] = useState<NormalizePhase>("idle");
+  const [normalizeScope, setNormalizeScope] = useState<"this" | "all">("this");
+  const [normalizeCurrent, setNormalizeCurrent] = useState(0);
+  const [normalizeTotal, setNormalizeTotal] = useState(0);
+  const [normalizeListingName, setNormalizeListingName] = useState<string>("");
+  const [normalizeFixed, setNormalizeFixed] = useState(0);
+  const [normalizeSkipped, setNormalizeSkipped] = useState(0);
+  const [normalizeFailed, setNormalizeFailed] = useState(0);
+  const [normalizeListingCount, setNormalizeListingCount] = useState(0);
+  const [normalizeError, setNormalizeError] = useState<string | null>(null);
+  const [normalizeChanges, setNormalizeChanges] = useState<string[]>([]);
+  const normalizeAbortRef = useRef<AbortController | null>(null);
+
+  const runNormalize = useCallback(async (scope: "this" | "all") => {
+    if (scope === "this" && !selectedId) return;
+    setNormalizePhase("running");
+    setNormalizeScope(scope);
+    setNormalizeCurrent(0);
+    setNormalizeTotal(0);
+    setNormalizeListingName("");
+    setNormalizeFixed(0);
+    setNormalizeSkipped(0);
+    setNormalizeFailed(0);
+    setNormalizeListingCount(0);
+    setNormalizeError(null);
+    setNormalizeChanges([]);
+
+    const controller = new AbortController();
+    normalizeAbortRef.current = controller;
+
+    try {
+      const resp = await fetch("/api/builder/normalize-photos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scope === "all" ? { all: true } : { guestyListingId: selectedId }),
+        signal: controller.signal,
+      });
+      if (!resp.ok || !resp.body) {
+        setNormalizeError(`HTTP ${resp.status}`);
+        setNormalizePhase("error");
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt: any;
+          try { evt = JSON.parse(line); } catch { continue; }
+          if (evt.type === "start") {
+            setNormalizeListingCount(evt.listingCount);
+          } else if (evt.type === "listing-start") {
+            setNormalizeListingName(evt.name);
+            setNormalizeTotal(evt.photoCount);
+            setNormalizeCurrent(0);
+          } else if (evt.type === "photo") {
+            setNormalizeCurrent(evt.index);
+            if (evt.success && evt.fixed) {
+              setNormalizeFixed(n => n + 1);
+              if (Array.isArray(evt.changes) && evt.changes.length) {
+                setNormalizeChanges(prev => [`#${evt.index} ${evt.originalWidth}×${evt.originalHeight} → ${evt.finalWidth}×${evt.finalHeight} [${evt.changes.join(", ")}]`, ...prev].slice(0, 40));
+              }
+            } else if (evt.success && evt.skipped) {
+              setNormalizeSkipped(n => n + 1);
+            } else if (!evt.success) {
+              setNormalizeFailed(n => n + 1);
+            }
+          } else if (evt.type === "listing-error") {
+            setNormalizeFailed(n => n + 1);
+          } else if (evt.type === "all-done") {
+            setNormalizePhase("done");
+            refreshGuestyPhotoCount();
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") {
+        setNormalizeError(e.message);
+        setNormalizePhase("error");
+      } else {
+        setNormalizePhase("idle");
+      }
+    } finally {
+      normalizeAbortRef.current = null;
+    }
+  }, [selectedId]);
+
+  const stopNormalize = () => normalizeAbortRef.current?.abort();
+
   // Persisted last-push summary (survives refresh)
   type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
   const [lastPushSummary, setLastPushSummary] = useState<PushSummary | null>(null);
@@ -2151,6 +2251,78 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                   </span>
                                 )}
                               </div>
+
+                              {/* Normalize existing Guesty photos (rotate/resize/compress in-place) */}
+                              {selectedId && (guestyPhotoCount ?? 0) > 0 && (
+                                <div style={{ marginBottom: 10, padding: 10, background: "#fefce8", border: "1px solid #fde68a", borderRadius: 6 }}>
+                                  {normalizePhase === "idle" || normalizePhase === "done" || normalizePhase === "error" ? (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                      <button
+                                        className="glb-btn"
+                                        onClick={() => runNormalize("this")}
+                                        disabled={!selectedId}
+                                        style={{ fontSize: 12, background: "#fef3c7", color: "#92400e", border: "1px solid #fcd34d" }}
+                                        data-testid="btn-normalize-this"
+                                      >
+                                        🔧 Normalize photos already in Guesty
+                                      </button>
+                                      <button
+                                        className="glb-btn"
+                                        onClick={() => {
+                                          if (confirm("Normalize photos across ALL Guesty-mapped listings? This can take a while and may hit Guesty's 100-photo/week sync cap.")) {
+                                            runNormalize("all");
+                                          }
+                                        }}
+                                        style={{ fontSize: 11, background: "transparent", color: "#92400e", border: "1px dashed #fcd34d" }}
+                                        data-testid="btn-normalize-all"
+                                      >
+                                        …or all listings
+                                      </button>
+                                      <span style={{ fontSize: 11, color: "#92400e" }}>
+                                        Rotates portraits, resizes to 1920×1080, compresses to ≤4MB. Fixes Booking.com "still processing" errors.
+                                      </span>
+                                      {normalizePhase === "done" && (
+                                        <div style={{ width: "100%", fontSize: 12, color: "#15803d", marginTop: 4 }}>
+                                          ✓ Done — {normalizeFixed} fixed, {normalizeSkipped} already OK, {normalizeFailed} failed
+                                          {normalizeScope === "all" && normalizeListingCount > 0 && ` across ${normalizeListingCount} listings`}
+                                        </div>
+                                      )}
+                                      {normalizePhase === "error" && (
+                                        <div style={{ width: "100%", fontSize: 12, color: "#b91c1c", marginTop: 4 }}>✗ {normalizeError}</div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: 12, color: "#92400e" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+                                        <span>
+                                          ⏳ {normalizeScope === "all" ? `${normalizeListingName || "starting…"} — ` : ""}
+                                          photo {normalizeCurrent}/{normalizeTotal}
+                                        </span>
+                                        <span style={{ fontSize: 11, color: "#15803d" }}>✓ {normalizeFixed} fixed</span>
+                                        <span style={{ fontSize: 11, color: "#6b7280" }}>○ {normalizeSkipped} ok</span>
+                                        {normalizeFailed > 0 && <span style={{ fontSize: 11, color: "#b91c1c" }}>✗ {normalizeFailed} failed</span>}
+                                        <button
+                                          className="glb-btn"
+                                          onClick={stopNormalize}
+                                          style={{ fontSize: 11, background: "#fee2e2", color: "#b91c1c", border: "1px solid #fecaca", marginLeft: "auto" }}
+                                        >
+                                          Stop
+                                        </button>
+                                      </div>
+                                      {normalizeTotal > 0 && (
+                                        <div style={{ height: 4, background: "#fde68a", borderRadius: 2, overflow: "hidden" }}>
+                                          <div style={{ height: "100%", background: "#d97706", width: `${(normalizeCurrent / Math.max(normalizeTotal, 1)) * 100}%`, transition: "width 0.2s" }} />
+                                        </div>
+                                      )}
+                                      {normalizeChanges.length > 0 && (
+                                        <div style={{ marginTop: 6, maxHeight: 80, overflowY: "auto", fontSize: 10, fontFamily: "ui-monospace, monospace", color: "#6b7280" }}>
+                                          {normalizeChanges.map((c, i) => <div key={i}>{c}</div>)}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
                               {/* Cover collage generator */}
                               {selectedId && (guestyPhotoCount ?? 0) > 0 && (

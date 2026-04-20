@@ -16,7 +16,6 @@ import Builder from "@/pages/builder";
 import BuilderPreflight from "@/pages/builder-preflight";
 import Inbox from "@/pages/inbox";
 import Bookings from "@/pages/bookings";
-import PhotoNormalizer from "@/pages/photo-normalizer";
 
 function Router() {
   return (
@@ -34,7 +33,6 @@ function Router() {
         <Route path="/community-photo-finder" component={CommunityPhotoFinder} />
         <Route path="/inbox" component={Inbox} />
         <Route path="/bookings" component={Bookings} />
-        <Route path="/photo-normalizer" component={PhotoNormalizer} />
         <Route component={NotFound} />
       </Switch>
     </>
