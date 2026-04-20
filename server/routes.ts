@@ -1875,13 +1875,16 @@ export async function registerRoutes(
     try {
       await guestyRequest("PUT", `/listings/${listingId}`, { amenities });
 
-      // GET-after-PUT to confirm what was actually saved
-      await new Promise(r => setTimeout(r, 600));
+      // GET-after-PUT — wait 3s for Guesty's async write to commit
+      await new Promise(r => setTimeout(r, 3000));
       const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
       const savedAmenities: string[] = Array.isArray(fetched.amenities) ? fetched.amenities : [];
-      const missing = amenities.filter(a => !savedAmenities.includes(a));
+      // Case-insensitive comparison to catch Guesty normalising key casing
+      const savedLower = new Set(savedAmenities.map((s: string) => s.toLowerCase()));
+      const missing = amenities.filter(a => !savedLower.has(a.toLowerCase()));
 
       console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length}`);
+      console.log(`[push-amenities] guesty returned keys sample:`, savedAmenities.slice(0, 10));
       res.json({ success: true, sent: amenities.length, saved: savedAmenities.length, savedAmenities, missing });
     } catch (err: any) {
       console.error(`[push-amenities] error:`, err.message);

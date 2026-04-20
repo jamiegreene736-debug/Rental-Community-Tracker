@@ -877,17 +877,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ listingId: selectedId, amenities: [...pendingAmenities] }),
       });
-      const data = await res.json() as { success: boolean; sent?: number; saved?: number; missing?: string[]; error?: string };
+      const data = await res.json() as { success: boolean; sent?: number; saved?: number; savedAmenities?: string[]; missing?: string[]; error?: string };
       if (!res.ok || !data.success) {
         setAmenityPushState("error");
         toast({ title: "Amenities push failed", description: data.error ?? `HTTP ${res.status}`, variant: "destructive" });
       } else {
         setAmenityPushState("success");
         setAmenityPushResult({ sent: data.sent ?? 0, saved: data.saved ?? 0, missing: data.missing ?? [] });
+        // Refresh the diff panel with what Guesty actually confirmed post-push
+        if (Array.isArray(data.savedAmenities)) {
+          setGuestyLiveAmenities(new Set(data.savedAmenities));
+        }
         toast({
           title: `Amenities pushed to Guesty`,
           description: data.missing && data.missing.length > 0
-            ? `${data.saved}/${data.sent} saved. Guesty ignored: ${data.missing.slice(0, 5).join(", ")}`
+            ? `${data.saved}/${data.sent} saved. ${data.missing.length} keys Guesty didn't recognise — check server logs for key format clues.`
             : `${data.saved} amenities confirmed in Guesty.`,
           duration: 8000,
         });
