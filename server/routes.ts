@@ -1907,45 +1907,28 @@ export async function registerRoutes(
       // where Guesty's wording diverges from ours. Values must pre-normalize cleanly
       // to a key present in byNorm.
       const aliasPairs: [string, string][] = [
-        ["WIFI", "wifi"],
-        ["WiFi", "wifi"],
-        ["WIRELESS_INTERNET", "wireless internet"],
-        ["INTERNET", "internet"],
-        ["KEYLESS_ENTRY", "smart lock"],
-        ["Keyless Entry", "smart lock"],
-        ["COOKWARE_UTENSILS", "kitchenware"],
-        ["Cookware & Utensils", "kitchenware"],
-        ["STREAMING_SERVICES", "streaming services"],
-        ["CARBON_MONOXIDE_ALARM", "carbon monoxide detector"],
-        ["Carbon Monoxide Alarm", "carbon monoxide detector"],
-        ["SMOKE_ALARM", "smoke detector"],
-        ["CHILDREN_WELCOME", "suitable for children"],
-        ["Children Welcome", "suitable for children"],
+        // Confirmed from user feedback
         ["COVERED_LANAI_PATIO", "patio or balcony"],
         ["Covered Lanai / Patio", "patio or balcony"],
-        ["OUTDOOR_FURNITURE", "outdoor furniture"],
-        ["BEACHFRONT", "beachfront"],
-        ["Beachfront (on the beach)", "beachfront"],
-        ["OCEAN_VIEW", "ocean view"],
-        ["SWIMMING_POOL_SHARED", "shared pool"],
-        ["Swimming Pool (Shared)", "shared pool"],
-        ["WALK_IN_SHOWER", "walk in shower"],
-        ["TENNIS_COURT", "tennis court"],
-        ["ELEVATOR", "elevator"],
-        ["Elevator Access", "elevator"],
-        ["LONG_TERM_STAYS_ALLOWED", "long term stays allowed"],
-        ["LAPTOP_FRIENDLY_WORKSPACE", "laptop friendly workspace"],
-        ["HAIR_DRYER", "hair dryer"],
-        ["IRON_IRONING_BOARD", "iron"],
-        ["COFFEE_MAKER", "coffee maker"],
-        ["ELECTRIC_KETTLE", "kettle"],
-        ["FULL_KITCHEN", "kitchen"],
-        ["PRIVATE_ENTRANCE", "private entrance"],
-        ["SMART_TV", "tv"],
-        ["CABLE_TV", "cable tv"],
+        ["OUTDOOR_FURNITURE", "outdoor seating furniture"],
+        ["Outdoor Furniture", "outdoor seating furniture"],
+        ["NEAR_SHOPPING", "shopping"],
+        ["Near Shopping", "shopping"],
+        ["NEAR_BEACH", "beach"],
+        ["Near Beach (walking distance)", "beach"],
+        // Previously-working items (keep)
         ["AIR_CONDITIONING", "air conditioning"],
         ["BBQ_GRILL", "bbq grill"],
         ["BBQ / Grill", "bbq grill"],
+        ["ELEVATOR", "elevator"],
+        ["Elevator Access", "elevator"],
+        ["HAIR_DRYER", "hair dryer"],
+        ["IRON_IRONING_BOARD", "iron"],
+        ["COFFEE_MAKER", "coffee maker"],
+        ["CABLE_TV", "cable tv"],
+        ["PRIVATE_ENTRANCE", "private entrance"],
+        ["LAPTOP_FRIENDLY_WORKSPACE", "laptop friendly workspace"],
+        ["LONG_TERM_STAYS_ALLOWED", "long term stays allowed"],
       ];
       const aliasMap = new Map(aliasPairs.map(([k, v]) => [norm(k), v]));
 
@@ -1992,19 +1975,31 @@ export async function registerRoutes(
 
       // Build a nearest-match suggestion for each item Guesty couldn't accept,
       // so the UI can show the user Guesty's closest available name.
-      const suggestFor = (input: string): string | null => {
-        const tokens = norm(input).split(" ").filter(t => t.length >= 3);
-        if (!tokens.length) return null;
-        let best: { name: string; score: number } | null = null;
-        for (const name of canonicalNames) {
-          const nn = norm(name);
+      // Suggestion ranker. Prefer:
+      //  (1) exact token match anywhere in the candidate name (worth more than substring)
+      //  (2) candidates whose token count matches the input's
+      //  (3) shorter candidates when scores tie (less noise)
+      // and return up to 3 candidates per input so the user can pick the right one.
+      const suggestFor = (input: string): string[] => {
+        const inputTokens = norm(input).split(" ").filter(t => t.length >= 2);
+        if (!inputTokens.length) return [];
+        const ranked = canonicalNames.map(name => {
+          const candTokens = norm(name).split(" ").filter(Boolean);
+          const candSet = new Set(candTokens);
           let score = 0;
-          for (const t of tokens) if (nn.includes(t)) score += t.length;
-          if (score > 0 && (!best || score > best.score)) best = { name, score };
-        }
-        return best?.name ?? null;
+          for (const t of inputTokens) {
+            if (candSet.has(t)) score += 10 + t.length;       // exact token match
+            else if (candTokens.some(c => c.startsWith(t) || t.startsWith(c))) score += 5;  // prefix overlap
+            else if (norm(name).includes(t)) score += 1;      // substring fallback
+          }
+          // Penalise candidates that are much longer than the input
+          const lenPenalty = Math.max(0, candTokens.length - inputTokens.length) * 2;
+          return { name, score: score - lenPenalty, len: name.length };
+        }).filter(x => x.score > 0);
+        ranked.sort((a, b) => b.score - a.score || a.len - b.len);
+        return ranked.slice(0, 3).map(r => r.name);
       };
-      const suggestions = otherToSend.map(name => ({ name, suggestion: suggestFor(name) }));
+      const suggestions = otherToSend.map(name => ({ name, suggestion: suggestFor(name)[0] ?? null, alternatives: suggestFor(name).slice(1) }));
 
       console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length} rejected=${otherToSend.length}`);
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));

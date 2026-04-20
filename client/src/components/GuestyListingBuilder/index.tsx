@@ -212,7 +212,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     saved: number;
     missing: string[];
     rejected?: string[];
-    suggestions?: { name: string; suggestion: string | null }[];
+    suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
     guestyCatalogSize?: number;
   } | null>(null);
   const [showGuestyCatalog, setShowGuestyCatalog] = useState(false);
@@ -958,7 +958,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         otherAmenities?: string[];
         missing?: string[];
         rejected?: string[];
-        suggestions?: { name: string; suggestion: string | null }[];
+        suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
         guestyCatalogSize?: number;
         error?: string;
       };
@@ -1588,13 +1588,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             These names don't map to any of Guesty's {amenityPushResult.guestyCatalogSize ?? "?"} supported amenities. Guesty's closest match is shown — tell me which ones are right and I'll add aliases.
                           </div>
                           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            {(amenityPushResult.suggestions ?? []).map(({ name, suggestion }) => (
-                              <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11 }}>
+                            {(amenityPushResult.suggestions ?? []).map(({ name, suggestion, alternatives }) => (
+                              <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, flexWrap: "wrap" }}>
                                 <span style={{ padding: "2px 7px", borderRadius: 10, background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", minWidth: 160 }}>{name}</span>
                                 <span style={{ color: "#9ca3af" }}>→</span>
                                 <span style={{ color: suggestion ? "#065f46" : "#9ca3af", fontStyle: suggestion ? "normal" : "italic" }}>
                                   {suggestion ? `Guesty: "${suggestion}"` : "no close match — Guesty may not support this"}
                                 </span>
+                                {alternatives && alternatives.length > 0 && (
+                                  <span style={{ color: "#6b7280", fontSize: 10 }}>
+                                    other matches: {alternatives.map(a => `"${a}"`).join(", ")}
+                                  </span>
+                                )}
                               </div>
                             ))}
                           </div>
