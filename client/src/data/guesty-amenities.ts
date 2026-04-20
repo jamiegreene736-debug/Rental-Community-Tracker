@@ -97,7 +97,6 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "OUTDOOR_SEATING",             label: "Outdoor Seating / Dining",      category: "Outdoor" },
   { key: "OUTDOOR_KITCHEN",             label: "Outdoor Kitchen",               category: "Outdoor" },
   { key: "GARDEN",                      label: "Garden / Yard",                 category: "Outdoor" },
-  { key: "TENNIS_COURT",                label: "Tennis Court",                  category: "Outdoor" },
   { key: "PICKLEBALL_COURT",            label: "Pickleball Court",              category: "Outdoor" },
   { key: "EXERCISE_EQUIPMENT",          label: "Exercise Equipment",            category: "Outdoor" },
   { key: "BICYCLE",                     label: "Bicycle",                       category: "Outdoor" },
@@ -108,8 +107,6 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
   { key: "CYCLING",                     label: "Cycling / Bike Path Nearby",    category: "Activities" },
   { key: "FISHING",                     label: "Fishing Nearby",                category: "Activities" },
   { key: "HIKING",                      label: "Hiking Trails Nearby",          category: "Activities" },
-  { key: "SURFING",                     label: "Surfing / Bodyboarding",        category: "Activities" },
-  { key: "SNORKELING",                  label: "Snorkeling Nearby",             category: "Activities" },
   { key: "GOLF",                        label: "Golf Nearby",                   category: "Activities" },
   { key: "SHOPPING",                    label: "Shopping Nearby",               category: "Activities" },
   { key: "WATER_PARK",                  label: "Water Park Nearby",             category: "Activities" },
@@ -117,10 +114,7 @@ export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
 
   // ── Beach & Water Access ──────────────────────────────────────────────────
   { key: "BEACH_ESSENTIALS",            label: "Beach Essentials (gear/towels)",category: "Beach" },
-  { key: "BEACH_CHAIR",                 label: "Beach Chairs",                  category: "Beach" },
   { key: "BEACH_UMBRELLA",              label: "Beach Umbrella",                category: "Beach" },
-  { key: "SNORKELING_GEAR",             label: "Snorkeling Gear Provided",      category: "Beach" },
-  { key: "COOLER",                      label: "Cooler / Ice Chest",            category: "Beach" },
 
   // ── Location & Views ──────────────────────────────────────────────────────
   { key: "BEACHFRONT",                  label: "Beachfront (on the beach)",     category: "Location & Views" },
@@ -226,8 +220,6 @@ const HAWAII_BASE = [
   "OUTDOOR_FURNITURE",
   // Beach
   "BEACH_ESSENTIALS",
-  "BEACH_CHAIR",
-  "COOLER",
   // Parking
   "FREE_PARKING_ON_PREMISES",
   // Family
@@ -273,7 +265,6 @@ const REGENCY_POIPU_KAI = [
   "COMMUNAL_POOL",
   "HOT_TUB",
   "GYM",
-  "TENNIS_COURT",
   "PICKLEBALL_COURT",
   "WALK_IN_SHOWER",      // confirmed: unit-924 master bath photos
   "BBQ_GRILL",
@@ -281,14 +272,11 @@ const REGENCY_POIPU_KAI = [
   "GARDEN_VIEW",
   "NEAR_BEACH",
   "RESORT_ACCESS",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
   "SHOPPING",
 ];
@@ -304,14 +292,11 @@ const KEKAHA_ESTATE = [
   "COVERED_PATIO",
   "GARDEN",
   "BICYCLE",
-  "SNORKELING_GEAR",
   "BEACH_UMBRELLA",
   // Nearby activities
   "CYCLING",
   "FISHING",
   "HIKING",
-  "SNORKELING",
-  "SURFING",
 ];
 
 // Keauhou Estates — Big Island ocean-view estate, private pool, near Keauhou Golf Course
@@ -327,14 +312,12 @@ const KEAUHOU_ESTATES = [
   "GARDEN",
   "OUTDOOR_KITCHEN",
   "EXERCISE_EQUIPMENT",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
   "NEAR_BEACH",
   "CYCLING",
   "FISHING",
   "HIKING",
-  "SNORKELING",
   "GOLF",
 ];
 
@@ -357,8 +340,6 @@ const MAUNA_KAI = [
   "CYCLING",
   "FISHING",
   "HIKING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
 ];
 
@@ -374,15 +355,11 @@ const KAHA_LANI = [
   "OUTDOOR_POOL",
   "COMMUNAL_POOL",
   "WALK_IN_SHOWER",      // confirmed: kaha-lani-109 master bath photo
-  "TENNIS_COURT",        // confirmed: kaha-lani-109 aerial photo (upper left)
   "RESORT_ACCESS",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "SHOPPING",
 ];
 
@@ -397,14 +374,11 @@ const LAE_NANI = [
   "COMMUNAL_POOL",
   "HOT_TUB",
   "RESORT_ACCESS",
-  "SNORKELING_GEAR",
   "GARDEN_VIEW",
   // Nearby activities
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "SHOPPING",
 ];
 
@@ -420,14 +394,11 @@ const POIPU_BEACHSIDE = [
   "HOT_TUB",
   "BBQ_GRILL",
   "RESORT_ACCESS",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
   "SHOPPING",
 ];
@@ -444,14 +415,11 @@ const POIPU_OCEANFRONT = [
   "HOT_TUB",
   "BBQ_GRILL",
   "RESORT_ACCESS",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
   "SHOPPING",
 ];
@@ -475,8 +443,6 @@ const KAIULANI = [
   "CYCLING",
   "FISHING",
   "HIKING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
 ];
 
@@ -496,14 +462,11 @@ const PILI_MAI = [
   "GARDEN",
   "RESORT_ACCESS",
   "COVERED_PATIO",
-  "SNORKELING_GEAR",
   // Nearby activities
   "NEAR_GOLF_COURSE",
   "NEAR_SHOPPING",
   "CYCLING",
   "FISHING",
-  "SNORKELING",
-  "SURFING",
   "GOLF",
   "SHOPPING",
 ];
