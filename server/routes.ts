@@ -2478,6 +2478,191 @@ export async function registerRoutes(
     res.end();
   });
 
+  // POST /api/builder/normalize-photos
+  // Fetch a listing's existing Guesty pictures, run each through validateAndFixPhoto,
+  // re-upload the fixed ones to ImgBB, and PUT the listing back.
+  // Body: { guestyListingId: string }  OR  { all: true }  (iterates every mapped listing)
+  // Streams NDJSON events: {type:"listing-start",id,name}, {type:"photo",...},
+  //   {type:"listing-done",id,fixedCount,totalCount}, {type:"all-done",listingCount,...}
+  app.post("/api/builder/normalize-photos", async (req, res) => {
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    if (!imgbbKey) {
+      return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
+    }
+
+    const { guestyListingId, all } = req.body as { guestyListingId?: string; all?: boolean };
+    if (!guestyListingId && !all) {
+      return res.status(400).json({ error: "guestyListingId or all:true required" });
+    }
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const emit = (obj: Record<string, unknown>) => res.write(JSON.stringify(obj) + "\n");
+
+    // Build target list
+    let targets: { guestyListingId: string; propertyId?: number }[] = [];
+    if (all) {
+      const maps = await storage.getGuestyPropertyMap();
+      targets = maps.map((m) => ({ guestyListingId: m.guestyListingId, propertyId: m.propertyId }));
+    } else {
+      targets = [{ guestyListingId: guestyListingId! }];
+    }
+
+    emit({ type: "start", listingCount: targets.length });
+
+    let globalFixed = 0;
+    let globalSkipped = 0;
+    let globalFailed = 0;
+
+    for (const target of targets) {
+      const listingId = target.guestyListingId;
+      let listingName = listingId;
+      let pictures: Array<{ original?: string; _id?: string; caption?: string; url?: string }> = [];
+
+      try {
+        const listing = await guestyRequest("GET", `/listings/${listingId}`) as any;
+        listingName = listing?.title || listing?.nickname || listingId;
+        pictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
+      } catch (e: any) {
+        emit({ type: "listing-error", id: listingId, error: `GET failed: ${e.message}` });
+        globalFailed++;
+        continue;
+      }
+
+      emit({ type: "listing-start", id: listingId, name: listingName, photoCount: pictures.length });
+
+      if (pictures.length === 0) {
+        emit({ type: "listing-done", id: listingId, name: listingName, fixedCount: 0, skippedCount: 0, totalCount: 0 });
+        continue;
+      }
+
+      const normalized: { original: string; caption: string }[] = [];
+      let fixedCount = 0;
+      let skippedCount = 0;
+
+      for (let i = 0; i < pictures.length; i++) {
+        const pic = pictures[i];
+        const url = pic.original || pic.url;
+        const caption = pic.caption || "";
+        const index = i + 1;
+
+        if (!url) {
+          emit({ type: "photo", listingId, index, total: pictures.length, success: false, error: "no URL on picture" });
+          continue;
+        }
+
+        try {
+          // Download current photo
+          const dlResp = await fetch(url);
+          if (!dlResp.ok) {
+            emit({ type: "photo", listingId, index, total: pictures.length, success: false, error: `download ${dlResp.status}` });
+            // Keep original in the array so we don't drop it
+            normalized.push({ original: url, caption });
+            continue;
+          }
+          const inBuf = Buffer.from(await dlResp.arrayBuffer());
+          const contentType = dlResp.headers.get("content-type") || "image/jpeg";
+
+          // Validate + fix
+          const validated = await validateAndFixPhoto(inBuf, contentType);
+
+          if (validated.changes.length === 0) {
+            // Already compliant — keep original URL, no re-upload
+            normalized.push({ original: url, caption });
+            skippedCount++;
+            emit({
+              type: "photo",
+              listingId,
+              index,
+              total: pictures.length,
+              success: true,
+              skipped: true,
+              finalWidth: validated.finalWidth,
+              finalHeight: validated.finalHeight,
+            });
+            continue;
+          }
+
+          // Re-upload the fixed buffer to ImgBB
+          const form = new FormData();
+          form.append("image", validated.buffer.toString("base64"));
+          const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+            method: "POST",
+            body: form,
+          });
+          if (!imgbbResp.ok) {
+            emit({ type: "photo", listingId, index, total: pictures.length, success: false, error: `ImgBB ${imgbbResp.status}` });
+            normalized.push({ original: url, caption }); // fall back to original
+            continue;
+          }
+          const imgbbData = await imgbbResp.json() as any;
+          const newUrl = imgbbData?.data?.url;
+          if (!newUrl) {
+            emit({ type: "photo", listingId, index, total: pictures.length, success: false, error: "ImgBB no URL" });
+            normalized.push({ original: url, caption });
+            continue;
+          }
+
+          normalized.push({ original: newUrl, caption });
+          fixedCount++;
+          emit({
+            type: "photo",
+            listingId,
+            index,
+            total: pictures.length,
+            success: true,
+            fixed: true,
+            changes: validated.changes,
+            originalWidth: validated.originalWidth,
+            originalHeight: validated.originalHeight,
+            finalWidth: validated.finalWidth,
+            finalHeight: validated.finalHeight,
+            url: newUrl,
+          });
+        } catch (e: any) {
+          emit({ type: "photo", listingId, index, total: pictures.length, success: false, error: e.message });
+          // Keep original URL so we don't strip photos from the listing
+          normalized.push({ original: url, caption });
+        }
+      }
+
+      // PUT back only if we actually changed something
+      if (fixedCount > 0) {
+        try {
+          await guestyRequest("PUT", `/listings/${listingId}`, { pictures: normalized });
+          console.log(`[normalize-photos] ✓ ${listingName}: ${fixedCount} fixed, ${skippedCount} ok`);
+        } catch (e: any) {
+          emit({ type: "listing-error", id: listingId, name: listingName, error: `PUT failed: ${e.message}` });
+          globalFailed++;
+          continue;
+        }
+      }
+
+      globalFixed += fixedCount;
+      globalSkipped += skippedCount;
+      emit({
+        type: "listing-done",
+        id: listingId,
+        name: listingName,
+        fixedCount,
+        skippedCount,
+        totalCount: pictures.length,
+      });
+    }
+
+    emit({
+      type: "all-done",
+      listingCount: targets.length,
+      globalFixed,
+      globalSkipped,
+      globalFailed,
+    });
+    res.end();
+  });
+
   // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========
 
   app.get("/api/builder/scan-window", async (req, res) => {

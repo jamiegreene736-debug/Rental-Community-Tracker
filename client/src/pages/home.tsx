@@ -507,6 +507,12 @@ export default function Home() {
                 Buy-In Tracker
               </Button>
             </Link>
+            <Link href="/photo-normalizer">
+              <Button variant="outline" data-testid="button-photo-normalizer">
+                <Images className="h-4 w-4 mr-2" />
+                Photo Normalizer
+              </Button>
+            </Link>
           </div>
         </div>
 
