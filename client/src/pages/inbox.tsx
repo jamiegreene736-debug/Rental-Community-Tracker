@@ -38,7 +38,11 @@ interface GuestyConversation {
   posts?: GuestyPost[];
   lastPost?: GuestyPost;
   status?: string;
+  module?: GuestyModule;      // channel the conversation is on
+  integration?: { platform?: string };
 }
+
+type GuestyModule = { type?: string; [k: string]: unknown };
 
 interface GuestyPost {
   _id: string;
@@ -48,6 +52,7 @@ interface GuestyPost {
   postedAt?: string;
   authorType?: string;
   authorRole?: string;
+  module?: GuestyModule;
 }
 
 interface GuestyReservation {
@@ -297,25 +302,34 @@ export default function InboxPage() {
   const threadRef = useRef<HTMLDivElement>(null);
 
   // ── Conversations ──
-  const { data: convData, isLoading: convLoading } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/conversations"],
-    queryFn: () => apiRequest("GET", "/api/guesty-proxy/conversations?limit=30")
-      .then(r => r.json()).catch(() => ({ results: [] })),
+  // Guesty Open API mounts conversations under /communication/ — see
+  // https://open-api-docs.guesty.com/reference/get_communication-conversations
+  const { data: convData, isLoading: convLoading, error: convError } = useQuery<any>({
+    queryKey: ["/api/guesty-proxy/communication/conversations"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=30");
+      if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
+      return r.json();
+    },
     refetchInterval: 60_000,
   });
-  const conversations: GuestyConversation[] = convData?.results ?? [];
+  // Guesty may return either {results: [...]} (legacy) or {data: [...]} (new).
+  const conversations: GuestyConversation[] = convData?.results ?? convData?.data ?? [];
 
   const selectedConv = conversations.find(c => c._id === selectedConvId) ?? null;
 
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/conversations", selectedConvId],
+    queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId],
     enabled: !!selectedConvId,
-    queryFn: () => apiRequest("GET", `/api/guesty-proxy/conversations/${selectedConvId}`)
-      .then(r => r.json()).catch(() => null),
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/guesty-proxy/communication/conversations/${selectedConvId}`);
+      if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
+      return r.json();
+    },
     refetchInterval: 30_000,
   });
 
-  const posts: GuestyPost[] = threadData?.posts ?? selectedConv?.posts ?? [];
+  const posts: GuestyPost[] = threadData?.posts ?? threadData?.data?.posts ?? selectedConv?.posts ?? [];
 
   useEffect(() => {
     if (threadRef.current) {
@@ -324,12 +338,27 @@ export default function InboxPage() {
   }, [posts.length]);
 
   const sendMessage = useMutation({
-    mutationFn: () =>
-      apiRequest("POST", `/api/guesty-proxy/conversations/${selectedConvId}/posts`, { body: replyText }).then(r => r.json()),
+    // /posts adds a message to the thread but doesn't deliver it to the guest —
+    // /send-message does both. Guesty requires a `module` describing the channel.
+    mutationFn: async () => {
+      if (!selectedConv) throw new Error("No conversation selected");
+      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
+      const mod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+      const r = await apiRequest(
+        "POST",
+        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
+        { body: replyText, module: mod },
+      );
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      }
+      return r.json();
+    },
     onSuccess: () => {
       setReplyText("");
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/conversations", selectedConvId] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/conversations"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       toast({ title: "Message sent!" });
     },
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
@@ -523,7 +552,14 @@ export default function InboxPage() {
                   <span className="text-sm font-medium">Conversations</span>
                   {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />}
                 </div>
-                {conversations.length === 0 && !convLoading && (
+                {convError && !convLoading && (
+                  <div className="p-6 text-center text-sm text-destructive">
+                    <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                    Couldn't load conversations
+                    <div className="mt-1 text-xs font-mono opacity-70">{(convError as Error).message}</div>
+                  </div>
+                )}
+                {!convError && conversations.length === 0 && !convLoading && (
                   <div className="p-6 text-center text-sm text-muted-foreground">
                     <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-30" />
                     No conversations yet
