@@ -1907,7 +1907,7 @@ export async function registerRoutes(
       // where Guesty's wording diverges from ours. Values must pre-normalize cleanly
       // to a key present in byNorm.
       const aliasPairs: [string, string][] = [
-        // Confirmed from user feedback
+        // Confirmed from user feedback (round 1)
         ["COVERED_LANAI_PATIO", "patio or balcony"],
         ["Covered Lanai / Patio", "patio or balcony"],
         ["OUTDOOR_FURNITURE", "outdoor seating furniture"],
@@ -1916,6 +1916,18 @@ export async function registerRoutes(
         ["Near Shopping", "shopping"],
         ["NEAR_BEACH", "beach"],
         ["Near Beach (walking distance)", "beach"],
+        // Confirmed from user feedback (round 2 — suggestion-panel alternatives)
+        ["BEACHFRONT", "beach front"],
+        ["Beachfront (on the beach)", "beach front"],
+        ["OCEAN_VIEW", "sea view"],
+        ["Ocean View", "sea view"],
+        ["CARBON_MONOXIDE_ALARM", "carbon monoxide detector"],
+        ["Carbon Monoxide Alarm", "carbon monoxide detector"],
+        ["SMOKE_ALARM", "smoke detector"],
+        ["SWIMMING_POOL_SHARED", "outdoor pool"],
+        ["Swimming Pool (Shared)", "outdoor pool"],
+        // "Pool" in our profile (if present) also goes to outdoor pool (Hawaii default)
+        ["POOL", "outdoor pool"],
         // Previously-working items (keep)
         ["AIR_CONDITIONING", "air conditioning"],
         ["BBQ_GRILL", "bbq grill"],
