@@ -211,6 +211,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [pendingAmenities, setPendingAmenities] = useState<Set<string>>(() =>
     new Set(propertyId ? getGuestyAmenities(propertyId) : [])
   );
+  const [guestyLiveAmenities, setGuestyLiveAmenities] = useState<Set<string> | null>(null);
+  const [fetchingLiveAmenities, setFetchingLiveAmenities] = useState(false);
 
   // ── Booking rules state ────────────────────────────────────────────────────
   const [bookingRules, setBookingRules] = useState({
@@ -940,7 +942,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
           <select
             className="glb-sel"
             value={selectedId}
-            onChange={(e) => setSelectedId(e.target.value)}
+            onChange={(e) => { setSelectedId(e.target.value); setGuestyLiveAmenities(null); }}
             data-testid="select-guesty-listing"
             disabled={conn !== "connected"}
           >
@@ -1362,7 +1364,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                   return (
                     <div>
                       {/* Push header */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, padding: "10px 12px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, padding: "10px 12px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 600, fontSize: 13 }}>{selectedCount} amenities selected</div>
                           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
@@ -1375,6 +1377,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: "pointer", color: "var(--muted)" }}
                           >
                             Reset to profile
+                          </button>
+                          <button
+                            disabled={fetchingLiveAmenities || !selectedId}
+                            onClick={async () => {
+                              if (!selectedId) return;
+                              setFetchingLiveAmenities(true);
+                              try {
+                                const res = await fetch(`/api/builder/inspect-listing?listingId=${selectedId}`);
+                                const data = await res.json();
+                                const live: string[] = Array.isArray(data.amenities) ? data.amenities : [];
+                                setGuestyLiveAmenities(new Set(live));
+                              } catch {
+                                setGuestyLiveAmenities(new Set());
+                              } finally {
+                                setFetchingLiveAmenities(false);
+                              }
+                            }}
+                            style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: selectedId ? "pointer" : "not-allowed", color: "var(--muted)", opacity: fetchingLiveAmenities ? 0.6 : 1 }}
+                          >
+                            {fetchingLiveAmenities ? "Fetching…" : "↓ Fetch from Guesty"}
                           </button>
                           <button
                             onClick={pushAmenities}
@@ -1390,6 +1412,56 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           </button>
                         </div>
                       </div>
+
+                      {/* Live Guesty diff panel */}
+                      {guestyLiveAmenities !== null && (() => {
+                        const profileKeys = new Set(propertyId ? getGuestyAmenities(propertyId) : []);
+                        const inProfileNotGuesty = [...profileKeys].filter(k => !guestyLiveAmenities.has(k));
+                        const inGuestyNotProfile = [...guestyLiveAmenities].filter(k => !profileKeys.has(k));
+                        const keyToLabel = Object.fromEntries(GUESTY_AMENITY_CATALOG.map(e => [e.key, e.label]));
+                        const allMatch = inProfileNotGuesty.length === 0 && inGuestyNotProfile.length === 0;
+                        return (
+                          <div style={{ marginBottom: 14, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, background: allMatch ? "#f0fdf4" : "#fffbeb" }}>
+                            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: allMatch ? "#15803d" : "#b45309" }}>
+                              {allMatch ? "✓ Guesty matches your profile exactly" : "⚠ Guesty vs Profile mismatch"}
+                            </div>
+                            {inProfileNotGuesty.length > 0 && (
+                              <div style={{ marginBottom: 8 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#b45309", marginBottom: 3 }}>
+                                  In profile but NOT in Guesty — needs push ({inProfileNotGuesty.length}):
+                                </div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                  {inProfileNotGuesty.map(k => (
+                                    <span key={k} style={{ fontSize: 11, padding: "2px 7px", borderRadius: 12, background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e" }}>
+                                      {keyToLabel[k] ?? k}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {inGuestyNotProfile.length > 0 && (
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#1d4ed8", marginBottom: 3 }}>
+                                  In Guesty but NOT in profile — manually added or outdated ({inGuestyNotProfile.length}):
+                                </div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                  {inGuestyNotProfile.map(k => (
+                                    <span key={k} style={{ fontSize: 11, padding: "2px 7px", borderRadius: 12, background: "#eff6ff", border: "1px solid #bfdbfe", color: "#1e40af" }}>
+                                      {keyToLabel[k] ?? k}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {!allMatch && (
+                              <div style={{ fontSize: 10, color: "#78716c", marginTop: 8 }}>
+                                Amber tags = profile says yes but Guesty doesn't have it → click "Push Amenities to Guesty" to sync.
+                                Blue tags = Guesty has it but it's not in your profile → add it to the profile or it will be removed on next push.
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       {/* Verification result */}
                       {amenityPushResult && amenityPushResult.missing.length > 0 && (
