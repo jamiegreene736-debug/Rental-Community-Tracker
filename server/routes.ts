@@ -1928,6 +1928,8 @@ export async function registerRoutes(
         ["Swimming Pool (Shared)", "outdoor pool"],
         // "Pool" in our profile (if present) also goes to outdoor pool (Hawaii default)
         ["POOL", "outdoor pool"],
+        ["CHILDREN_WELCOME", "family kid friendly"],
+        ["Children Welcome", "family kid friendly"],
         // Previously-working items (keep)
         ["AIR_CONDITIONING", "air conditioning"],
         ["BBQ_GRILL", "bbq grill"],
