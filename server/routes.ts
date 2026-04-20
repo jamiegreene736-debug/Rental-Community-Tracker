@@ -1891,47 +1891,114 @@ export async function registerRoutes(
         `(listing top-level keys: ${Object.keys(listing).slice(0, 25).join(",")})`,
       );
 
-      // Normalize inputs against Guesty's canonical supported-amenities list so
-      // both UPPER_SNAKE profile keys ("BBQ_GRILL") and canonical names ("BBQ grill") work.
+      // Normalize inputs against Guesty's canonical supported-amenities list.
+      // Anything that doesn't map to a canonical name is pushed as a free-form
+      // `otherAmenities` entry (Guesty surfaces these in the "Other" section).
       const supportedRaw = await guestyRequest("GET", "/properties-api/amenities/supported") as unknown;
       const supportedList: { name?: string }[] = Array.isArray(supportedRaw)
         ? supportedRaw as { name?: string }[]
         : ((supportedRaw as any)?.results ?? (supportedRaw as any)?.amenities ?? []);
       const canonicalNames = supportedList.map(a => a.name).filter((n): n is string => !!n);
       const norm = (s: string) =>
-        s.toLowerCase().replace(/[_\-/]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+        s.toLowerCase().replace(/[_\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
       const byNorm = new Map(canonicalNames.map(n => [norm(n), n]));
-      const translated: string[] = [];
-      const unmapped: string[] = [];
-      for (const a of amenities) {
-        const hit = byNorm.get(norm(a));
-        if (hit) translated.push(hit);
-        else unmapped.push(a);
-      }
-      if (unmapped.length) console.log(`[push-amenities] unmapped ${unmapped.length}:`, unmapped.slice(0, 10));
-      console.log(`[push-amenities] sending ${translated.length} canonical names`);
 
-      await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, { amenities: translated });
+      // Explicit aliases: our label/key → normalized Guesty name. Added for cases
+      // where Guesty's wording diverges from ours. Values must pre-normalize cleanly
+      // to a key present in byNorm.
+      const aliasPairs: [string, string][] = [
+        ["WIFI", "wifi"],
+        ["WiFi", "wifi"],
+        ["WIRELESS_INTERNET", "wireless internet"],
+        ["INTERNET", "internet"],
+        ["KEYLESS_ENTRY", "smart lock"],
+        ["Keyless Entry", "smart lock"],
+        ["COOKWARE_UTENSILS", "kitchenware"],
+        ["Cookware & Utensils", "kitchenware"],
+        ["STREAMING_SERVICES", "streaming services"],
+        ["CARBON_MONOXIDE_ALARM", "carbon monoxide detector"],
+        ["Carbon Monoxide Alarm", "carbon monoxide detector"],
+        ["SMOKE_ALARM", "smoke detector"],
+        ["CHILDREN_WELCOME", "suitable for children"],
+        ["Children Welcome", "suitable for children"],
+        ["COVERED_LANAI_PATIO", "patio or balcony"],
+        ["Covered Lanai / Patio", "patio or balcony"],
+        ["OUTDOOR_FURNITURE", "outdoor furniture"],
+        ["BEACHFRONT", "beachfront"],
+        ["Beachfront (on the beach)", "beachfront"],
+        ["OCEAN_VIEW", "ocean view"],
+        ["SWIMMING_POOL_SHARED", "shared pool"],
+        ["Swimming Pool (Shared)", "shared pool"],
+        ["WALK_IN_SHOWER", "walk in shower"],
+        ["TENNIS_COURT", "tennis court"],
+        ["ELEVATOR", "elevator"],
+        ["Elevator Access", "elevator"],
+        ["LONG_TERM_STAYS_ALLOWED", "long term stays allowed"],
+        ["LAPTOP_FRIENDLY_WORKSPACE", "laptop friendly workspace"],
+        ["HAIR_DRYER", "hair dryer"],
+        ["IRON_IRONING_BOARD", "iron"],
+        ["COFFEE_MAKER", "coffee maker"],
+        ["ELECTRIC_KETTLE", "kettle"],
+        ["FULL_KITCHEN", "kitchen"],
+        ["PRIVATE_ENTRANCE", "private entrance"],
+        ["SMART_TV", "tv"],
+        ["CABLE_TV", "cable tv"],
+        ["AIR_CONDITIONING", "air conditioning"],
+        ["BBQ_GRILL", "bbq grill"],
+        ["BBQ / Grill", "bbq grill"],
+      ];
+      const aliasMap = new Map(aliasPairs.map(([k, v]) => [norm(k), v]));
+
+      const resolveCanonical = (input: string): string | null => {
+        const n = norm(input);
+        const direct = byNorm.get(n);
+        if (direct) return direct;
+        const aliased = aliasMap.get(n);
+        if (aliased) return byNorm.get(aliased) ?? null;
+        return null;
+      };
+
+      const translated: string[] = [];
+      const otherToSend: string[] = [];
+      const dedupe = new Set<string>();
+      const otherDedupe = new Set<string>();
+      for (const a of amenities) {
+        const hit = resolveCanonical(a);
+        if (hit) {
+          if (!dedupe.has(hit)) { dedupe.add(hit); translated.push(hit); }
+        } else {
+          // Preserve a human-readable form for the "Other" bucket.
+          const pretty = a.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+          const key = pretty.toLowerCase();
+          if (!otherDedupe.has(key)) { otherDedupe.add(key); otherToSend.push(pretty); }
+        }
+      }
+      console.log(`[push-amenities] canonical=${translated.length} other=${otherToSend.length}`);
+      if (otherToSend.length) console.log(`[push-amenities] other sample:`, otherToSend.slice(0, 10));
+
+      await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, {
+        amenities: translated,
+        otherAmenities: otherToSend,
+      });
 
       // GET-after-PUT — wait briefly for Guesty's async write to commit
       await new Promise(r => setTimeout(r, 2000));
       const fetched = await guestyRequest("GET", `/properties-api/amenities/${propertyId}`) as Record<string, unknown>;
       const savedAmenities: string[] = Array.isArray(fetched.amenities) ? fetched.amenities as string[] : [];
-      const otherAmenities: string[] = Array.isArray((fetched as any).otherAmenities) ? (fetched as any).otherAmenities : [];
-      const savedLower = new Set(savedAmenities.map(s => s.toLowerCase()));
-      const missing = translated.filter(a => !savedLower.has(a.toLowerCase()));
+      const savedOther: string[] = Array.isArray((fetched as any).otherAmenities) ? (fetched as any).otherAmenities : [];
+      const savedLower = new Set([...savedAmenities, ...savedOther].map(s => s.toLowerCase()));
+      const missing = [...translated, ...otherToSend].filter(a => !savedLower.has(a.toLowerCase()));
 
-      console.log(`[push-amenities] saved=${savedAmenities.length} other=${otherAmenities.length} missing=${missing.length} unmapped=${unmapped.length}`);
+      console.log(`[push-amenities] saved=${savedAmenities.length} savedOther=${savedOther.length} missing=${missing.length}`);
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));
       if (missing.length) console.log(`[push-amenities] missing sample:`, missing.slice(0, 10));
       res.json({
         success: true,
-        sent: translated.length,
-        saved: savedAmenities.length,
+        sent: translated.length + otherToSend.length,
+        saved: savedAmenities.length + savedOther.length,
         savedAmenities,
-        otherAmenities,
+        otherAmenities: savedOther,
         missing,
-        unmapped,
         propertyId,
       });
     } catch (err: any) {

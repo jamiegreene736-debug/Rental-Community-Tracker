@@ -250,19 +250,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       .catch(() => {}); // non-fatal — falls back to raw key push
   }, []);
 
-  // Reverse lookup: Guesty canonical name → our profile key (case-insensitive).
+  // Reverse lookup: normalized form → our profile key.
+  // Built from (a) canonical Guesty-name mappings we resolved at catalog-load,
+  // plus (b) each catalog entry's own label/key (so free-form otherAmenities
+  // that echo back verbatim — e.g. "Beach Chairs" — still resolve to BEACH_CHAIRS).
   const nameToKey = useMemo(() => {
+    const norm = (s: string) =>
+      s.toLowerCase().replace(/[_\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
     const m: Record<string, string> = {};
-    for (const [k, name] of Object.entries(keyToGuestyId)) m[name.toLowerCase()] = k;
+    for (const [k, name] of Object.entries(keyToGuestyId)) m[norm(name)] = k;
+    for (const entry of GUESTY_AMENITY_CATALOG) {
+      m[norm(entry.label)] = entry.key;
+      m[norm(entry.key)] = entry.key;
+    }
     return m;
   }, [keyToGuestyId]);
 
-  // Convert an array of Guesty canonical names into a Set of our profile keys
-  // (names not present in our catalog are dropped).
-  const guestyNamesToProfileKeys = useCallback(
-    (names: string[]) => new Set(names.map(n => nameToKey[n.toLowerCase()]).filter(Boolean) as string[]),
-    [nameToKey],
-  );
+  // Convert an array of Guesty amenity names (canonical or free-form) into a Set
+  // of our profile keys. Unresolved names are dropped.
+  const guestyNamesToProfileKeys = useCallback((names: string[]) => {
+    const norm = (s: string) =>
+      s.toLowerCase().replace(/[_\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+    return new Set(names.map(n => nameToKey[norm(n)]).filter(Boolean) as string[]);
+  }, [nameToKey]);
 
   // Keep profile-based checkboxes in sync if propertyId ever changes (navigation edge case)
   const prevPropertyIdRef = useRef<number | undefined>(undefined);
@@ -442,8 +452,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     ])
       .then(([listing, amen]) => {
         setGuestyPhotoCount(listing?.pictures?.length ?? 0);
-        const live: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
-        setGuestyLiveAmenities(guestyNamesToProfileKeys(live));
+        const canonical: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
+        const other: string[] = Array.isArray(amen?.otherAmenities) ? amen.otherAmenities : [];
+        setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
       })
       .catch(() => { setGuestyPhotoCount(null); setGuestyLiveAmenities(new Set()); })
       .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
@@ -931,7 +942,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ listingId: selectedId, amenities: amenityPayload }),
       });
-      const data = await res.json() as { success: boolean; sent?: number; saved?: number; savedAmenities?: string[]; missing?: string[]; error?: string };
+      const data = await res.json() as { success: boolean; sent?: number; saved?: number; savedAmenities?: string[]; otherAmenities?: string[]; missing?: string[]; error?: string };
       if (!res.ok || !data.success) {
         setAmenityPushState("error");
         toast({ title: "Amenities push failed", description: data.error ?? `HTTP ${res.status}`, variant: "destructive" });
@@ -939,8 +950,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         setAmenityPushState("success");
         setAmenityPushResult({ sent: data.sent ?? 0, saved: data.saved ?? 0, missing: data.missing ?? [] });
         // Refresh the diff panel with what Guesty actually confirmed post-push
-        if (Array.isArray(data.savedAmenities)) {
-          setGuestyLiveAmenities(guestyNamesToProfileKeys(data.savedAmenities));
+        if (Array.isArray(data.savedAmenities) || Array.isArray(data.otherAmenities)) {
+          const merged = [...(data.savedAmenities ?? []), ...(data.otherAmenities ?? [])];
+          setGuestyLiveAmenities(guestyNamesToProfileKeys(merged));
         }
         toast({
           title: `Amenities pushed to Guesty`,
@@ -1462,8 +1474,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               try {
                                 const res = await fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`);
                                 const data = await res.json();
-                                const live: string[] = Array.isArray(data.amenities) ? data.amenities : [];
-                                setGuestyLiveAmenities(guestyNamesToProfileKeys(live));
+                                const canonical: string[] = Array.isArray(data.amenities) ? data.amenities : [];
+                                const other: string[] = Array.isArray(data.otherAmenities) ? data.otherAmenities : [];
+                                setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
                               } catch {
                                 setGuestyLiveAmenities(new Set());
                               } finally {
