@@ -1,5 +1,6 @@
 [phases.setup]
 nixPkgs = [
+  'nodejs_22',
   'glib',
   'nss',
   'nspr',
