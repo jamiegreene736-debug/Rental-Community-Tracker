@@ -214,6 +214,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [guestyLiveAmenities, setGuestyLiveAmenities] = useState<Set<string> | null>(null);
   const [fetchingLiveAmenities, setFetchingLiveAmenities] = useState(false);
 
+  // Keep profile-based checkboxes in sync if propertyId ever changes (navigation edge case)
+  const prevPropertyIdRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (propertyId !== prevPropertyIdRef.current) {
+      prevPropertyIdRef.current = propertyId;
+      setPendingAmenities(new Set(propertyId ? getGuestyAmenities(propertyId) : []));
+    }
+  }, [propertyId]);
+
   // ── Booking rules state ────────────────────────────────────────────────────
   const [bookingRules, setBookingRules] = useState({
     minNights: 3,
@@ -364,21 +373,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
   // Load persisted summary & fetch live photo count when listing selection changes
   useEffect(() => {
-    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); return; }
+    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyLiveAmenities(null); return; }
     // Restore from localStorage
     try {
       const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
       if (stored) setLastPushSummary(JSON.parse(stored));
       else setLastPushSummary(null);
     } catch { setLastPushSummary(null); }
-    // Fetch live photo count from Guesty
+    // Fetch live listing data — photo count + current amenities
     setGuestyPhotoCount(null);
     setGuestyPhotoCountLoading(true);
+    setGuestyLiveAmenities(null);
+    setFetchingLiveAmenities(true);
     fetch(`/api/guesty-proxy/listings/${selectedId}`)
       .then(r => r.json())
-      .then((d: any) => setGuestyPhotoCount(d?.pictures?.length ?? 0))
-      .catch(() => setGuestyPhotoCount(null))
-      .finally(() => setGuestyPhotoCountLoading(false));
+      .then((d: any) => {
+        setGuestyPhotoCount(d?.pictures?.length ?? 0);
+        const live: string[] = Array.isArray(d?.amenities) ? d.amenities : [];
+        setGuestyLiveAmenities(new Set(live));
+      })
+      .catch(() => { setGuestyPhotoCount(null); setGuestyLiveAmenities(new Set()); })
+      .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
   }, [selectedId]);
 
   // Refresh live count after a successful push
@@ -1384,7 +1399,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               if (!selectedId) return;
                               setFetchingLiveAmenities(true);
                               try {
-                                const res = await fetch(`/api/builder/inspect-listing?listingId=${selectedId}`);
+                                const res = await fetch(`/api/guesty-proxy/listings/${selectedId}`);
                                 const data = await res.json();
                                 const live: string[] = Array.isArray(data.amenities) ? data.amenities : [];
                                 setGuestyLiveAmenities(new Set(live));
@@ -1396,7 +1411,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             }}
                             style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: selectedId ? "pointer" : "not-allowed", color: "var(--muted)", opacity: fetchingLiveAmenities ? 0.6 : 1 }}
                           >
-                            {fetchingLiveAmenities ? "Fetching…" : "↓ Fetch from Guesty"}
+                            {fetchingLiveAmenities ? "Fetching…" : guestyLiveAmenities !== null ? "↺ Refresh from Guesty" : "↓ Fetch from Guesty"}
                           </button>
                           <button
                             onClick={pushAmenities}
