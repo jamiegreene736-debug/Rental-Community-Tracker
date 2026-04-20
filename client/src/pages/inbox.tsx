@@ -20,7 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight,
+  ToggleRight, Bot, Flag, X,
 } from "lucide-react";
 import type { MessageTemplate } from "@shared/schema";
 
@@ -441,6 +441,54 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
+  // ── Auto-Reply Agent ──
+  const { data: autoReplyStatus } = useQuery<any>({
+    queryKey: ["/api/inbox/auto-reply/status"],
+    refetchInterval: 30_000,
+  });
+
+  const { data: autoReplyLogs = [], isLoading: logsLoading } = useQuery<any[]>({
+    queryKey: ["/api/inbox/auto-reply/logs"],
+    refetchInterval: 60_000,
+  });
+
+  const toggleAutoReply = useMutation({
+    mutationFn: (enabled: boolean) =>
+      apiRequest("POST", "/api/inbox/auto-reply/toggle", { enabled }).then(r => r.json()),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] }),
+  });
+
+  const runAutoReply = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/inbox/auto-reply/run").then(r => r.json()),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      toast({ title: data.message ?? "Auto-reply complete" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const sendDraftReply = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`).then(r => r.json()),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      if (data.ok) toast({ title: "Reply sent to guest" });
+      else toast({ title: "Send failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const dismissDraft = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/dismiss`).then(r => r.json()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      toast({ title: "Dismissed" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
   const approveReservation = useMutation({
     mutationFn: (id: string) =>
       apiRequest("PUT", `/api/guesty-proxy/reservations/${id}/confirm`, {}).then(r => r.json()),
@@ -540,6 +588,14 @@ export default function InboxPage() {
             </TabsTrigger>
             <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
               <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
+            </TabsTrigger>
+            <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
+              <Bot className="h-4 w-4 mr-1.5" /> Auto-Reply
+              {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length > 0 && (
+                <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                  {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length}
+                </span>
+              )}
             </TabsTrigger>
           </TabsList>
 
@@ -936,6 +992,163 @@ export default function InboxPage() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+          </TabsContent>
+
+          {/* ── AUTO-REPLY TAB ── */}
+          <TabsContent value="auto-reply" className="space-y-6">
+            <Card>
+              <CardHeader className="pb-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Bot className="h-5 w-5" /> AI Auto-Reply Agent
+                    </CardTitle>
+                    <CardDescription className="mt-1">
+                      Polls Guesty every 5 minutes. Uses Claude with listing/reservation tools to draft and send replies automatically. Risky messages (refund, cancel, damage, medical, legal) are drafted for human review instead of auto-sent.
+                    </CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="auto-reply-toggle"
+                      checked={!!autoReplyStatus?.enabled}
+                      onCheckedChange={(v) => toggleAutoReply.mutate(v)}
+                      data-testid="switch-auto-reply"
+                    />
+                    <Label htmlFor="auto-reply-toggle" className="text-sm cursor-pointer">
+                      {autoReplyStatus?.enabled ? "Enabled" : "Disabled"}
+                    </Label>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runAutoReply.mutate()}
+                    disabled={runAutoReply.isPending}
+                    data-testid="button-run-auto-reply"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${runAutoReply.isPending ? "animate-spin" : ""}`} />
+                    Run Now
+                  </Button>
+                  {autoReplyStatus?.lastRunAt && (
+                    <span className="text-xs text-muted-foreground">
+                      Last run: {new Date(autoReplyStatus.lastRunAt).toLocaleString()}
+                      {autoReplyStatus.lastRunResult?.message && ` — ${autoReplyStatus.lastRunResult.message}`}
+                    </span>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            <div>
+              <h3 className="font-semibold mb-3">Recent Activity</h3>
+              {logsLoading && <p className="text-sm text-muted-foreground">Loading logs…</p>}
+              {!logsLoading && autoReplyLogs.length === 0 && (
+                <div className="border rounded-lg p-8 text-center bg-card">
+                  <Bot className="h-10 w-10 mx-auto mb-3 opacity-20" />
+                  <p className="font-medium mb-1">No activity yet</p>
+                  <p className="text-sm text-muted-foreground">
+                    The agent will log every reply attempt here. Click "Run Now" to trigger a poll.
+                  </p>
+                </div>
+              )}
+              <div className="space-y-3">
+                {autoReplyLogs.map((log: any) => (
+                  <Card key={log.id} data-testid={`auto-reply-log-${log.id}`}>
+                    <CardContent className="py-4">
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium text-sm">{log.guestName ?? "Guest"}</span>
+                            {log.channel && (
+                              <Badge variant="outline" className="text-[10px]">{log.channel}</Badge>
+                            )}
+                            {log.status === "sent" && (
+                              <Badge className="bg-green-600 text-white text-[10px]">
+                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Sent
+                              </Badge>
+                            )}
+                            {log.status === "drafted" && (
+                              <Badge className="bg-blue-600 text-white text-[10px]">
+                                <Pencil className="h-2.5 w-2.5 mr-1" /> Drafted
+                              </Badge>
+                            )}
+                            {log.status === "flagged" && (
+                              <Badge className="bg-amber-500 text-white text-[10px]">
+                                <Flag className="h-2.5 w-2.5 mr-1" /> Flagged
+                              </Badge>
+                            )}
+                            {log.status === "dismissed" && (
+                              <Badge variant="secondary" className="text-[10px]">Dismissed</Badge>
+                            )}
+                            {log.status === "error" && (
+                              <Badge variant="destructive" className="text-[10px]">
+                                <AlertCircle className="h-2.5 w-2.5 mr-1" /> Error
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-0.5">
+                            {log.createdAt ? new Date(log.createdAt).toLocaleString() : ""}
+                            {log.listingId && ` · listing ${log.listingId}`}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 text-sm">
+                        <div>
+                          <p className="text-[11px] font-medium text-muted-foreground mb-0.5">GUEST SAID</p>
+                          <p className="bg-muted/40 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.guestMessage}</p>
+                        </div>
+
+                        {log.replyDraft && (
+                          <div>
+                            <p className="text-[11px] font-medium text-muted-foreground mb-0.5">
+                              {log.replySent ? "REPLY SENT" : "DRAFT"}
+                            </p>
+                            <p className="bg-primary/5 border border-primary/20 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.replyDraft}</p>
+                          </div>
+                        )}
+
+                        {log.flagReason && (
+                          <p className="text-xs text-amber-700 dark:text-amber-400">
+                            <Flag className="h-3 w-3 inline mr-1" /> {log.flagReason}
+                          </p>
+                        )}
+                        {log.errorMessage && (
+                          <p className="text-xs text-red-600 dark:text-red-400">
+                            <AlertCircle className="h-3 w-3 inline mr-1" /> {log.errorMessage}
+                          </p>
+                        )}
+                      </div>
+
+                      {!log.replySent && log.replyDraft && log.status !== "dismissed" && (
+                        <div className="flex gap-2 mt-3 pt-3 border-t">
+                          <Button
+                            size="sm"
+                            onClick={() => sendDraftReply.mutate(log.id)}
+                            disabled={sendDraftReply.isPending}
+                            data-testid={`button-send-draft-${log.id}`}
+                          >
+                            <Send className="h-3.5 w-3.5 mr-1.5" /> Send Reply
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => dismissDraft.mutate(log.id)}
+                            disabled={dismissDraft.isPending}
+                            data-testid={`button-dismiss-draft-${log.id}`}
+                          >
+                            <X className="h-3.5 w-3.5 mr-1.5" /> Dismiss
+                          </Button>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
             </div>
           </TabsContent>
         </Tabs>

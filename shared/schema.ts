@@ -218,3 +218,33 @@ export const insertGuestyPropertyMapSchema = createInsertSchema(guestyPropertyMa
 
 export type InsertGuestyPropertyMap = z.infer<typeof insertGuestyPropertyMapSchema>;
 export type GuestyPropertyMap = typeof guestyPropertyMap.$inferSelect;
+
+// Audit log of every auto-reply attempt. One row per guest post the agent evaluates.
+// status: "sent" (auto-sent to guest), "drafted" (draft saved, awaiting human review),
+//         "flagged" (risky content — human must handle), "dismissed", "error"
+export const autoReplyLog = pgTable("auto_reply_log", {
+  id: serial("id").primaryKey(),
+  conversationId: text("conversation_id").notNull(),
+  triggerPostId: text("trigger_post_id").notNull(),
+  guestName: text("guest_name"),
+  listingId: text("listing_id"),
+  listingNickname: text("listing_nickname"),
+  reservationId: text("reservation_id"),
+  channel: text("channel"),            // airbnb2 | booking | homeaway2 | email | direct
+  guestMessage: text("guest_message").notNull(),
+  replyDraft: text("reply_draft"),     // what Claude generated (null on error)
+  replySent: boolean("reply_sent").notNull().default(false),
+  status: text("status").notNull(),    // sent | drafted | flagged | dismissed | error
+  flagReason: text("flag_reason"),
+  errorMessage: text("error_message"),
+  toolsUsed: text("tools_used"),       // JSON-encoded list of { name, args } for audit
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAutoReplyLogSchema = createInsertSchema(autoReplyLog).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertAutoReplyLog = z.infer<typeof insertAutoReplyLogSchema>;
+export type AutoReplyLog = typeof autoReplyLog.$inferSelect;

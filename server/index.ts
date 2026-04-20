@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startWeeklyScheduler, cleanupStaleRuns } from "./availability-scanner";
 import { startAutoApproveScheduler } from "./auto-approve";
+import { startAutoReplyScheduler } from "./auto-reply";
 
 const app = express();
 const httpServer = createServer(app);
@@ -104,6 +105,7 @@ app.use((req, res, next) => {
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();
+      startAutoReplyScheduler();
     },
   );
 })();

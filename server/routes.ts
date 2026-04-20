@@ -9,6 +9,7 @@ import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
+import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
@@ -4436,6 +4437,59 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Auto-approve run failed", message: err.message });
+    }
+  });
+
+  // ========== INBOX — Auto-Reply Agent ==========
+
+  app.get("/api/inbox/auto-reply/status", (_req, res) => {
+    res.json(getAutoReplyStatus());
+  });
+
+  app.post("/api/inbox/auto-reply/toggle", (req, res) => {
+    const { enabled } = req.body as { enabled: boolean };
+    setAutoReplyEnabled(!!enabled);
+    res.json(getAutoReplyStatus());
+  });
+
+  app.post("/api/inbox/auto-reply/run", async (_req, res) => {
+    try {
+      const result = await runAutoReply();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Auto-reply run failed", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/auto-reply/logs", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "50", 10) || 50, 200);
+      const logs = await storage.getAutoReplyLogs(limit);
+      res.json(logs);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch logs", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/logs/:id/send", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const result = await sendDraftedReply(id);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to send draft", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/logs/:id/dismiss", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const result = await dismissReply(id);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to dismiss", message: err.message });
     }
   });
 

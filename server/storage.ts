@@ -9,7 +9,8 @@ import {
   type UnitSwap, type InsertUnitSwap,
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
   type MessageTemplate, type InsertMessageTemplate,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates,
+  type AutoReplyLog, type InsertAutoReplyLog,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -72,6 +73,12 @@ export interface IStorage {
   createMessageTemplate(t: InsertMessageTemplate): Promise<MessageTemplate>;
   updateMessageTemplate(id: number, data: Partial<InsertMessageTemplate>): Promise<MessageTemplate | undefined>;
   deleteMessageTemplate(id: number): Promise<boolean>;
+
+  createAutoReplyLog(log: InsertAutoReplyLog): Promise<AutoReplyLog>;
+  getAutoReplyLogs(limit?: number): Promise<AutoReplyLog[]>;
+  getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined>;
+  updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined>;
+  getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -363,6 +370,30 @@ export class DatabaseStorage implements IStorage {
   async deleteMessageTemplate(id: number): Promise<boolean> {
     const result = await db.delete(messageTemplates).where(eq(messageTemplates.id, id)).returning();
     return result.length > 0;
+  }
+
+  async createAutoReplyLog(log: InsertAutoReplyLog): Promise<AutoReplyLog> {
+    const [row] = await db.insert(autoReplyLog).values(log).returning();
+    return row;
+  }
+
+  async getAutoReplyLogs(limit = 100): Promise<AutoReplyLog[]> {
+    return db.select().from(autoReplyLog).orderBy(desc(autoReplyLog.createdAt)).limit(limit);
+  }
+
+  async getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined> {
+    const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.id, id));
+    return row;
+  }
+
+  async updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined> {
+    const [row] = await db.update(autoReplyLog).set(data).where(eq(autoReplyLog.id, id)).returning();
+    return row;
+  }
+
+  async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
+    const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
+    return row;
   }
 }
 
