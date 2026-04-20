@@ -175,6 +175,7 @@ const STEP_LABELS: Record<string, string> = {
   photos: "Uploading photos",
   financials: "Setting pricing & fees",
   booking_settings: "Configuring booking rules",
+  amenities: "Syncing amenities",
 };
 
 function fmt(iso: string) {

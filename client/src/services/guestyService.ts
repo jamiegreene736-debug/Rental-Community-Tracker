@@ -494,6 +494,16 @@ class GuestyService {
       }
     }
 
+    if (propertyData.amenities && propertyData.amenities.length > 0) {
+      try {
+        log("amenities", "pending");
+        await this.updateAmenities(listingId, propertyData.amenities);
+        log("amenities", "success", { count: propertyData.amenities.length });
+      } catch (e) {
+        log("amenities", "error", { error: (e as Error).message });
+      }
+    }
+
     return { listingId, steps, errors, success: errors.length === 0 };
   }
 }
