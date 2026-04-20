@@ -11,6 +11,7 @@ import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurre
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
+import { validateAndFixPhoto } from "./photo-validator";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
@@ -2355,6 +2356,7 @@ export async function registerRoutes(
 
       // Optionally upscale with Replicate (skipped if upscale=false or no key)
       let finalBuffer = rawData;
+      let finalMime = mimeType;
       let wasUpscaled = false;
       if (upscale && replicateKey) {
         try {
@@ -2366,6 +2368,40 @@ export async function registerRoutes(
         } catch {
           // upscale failure is non-fatal — push original
         }
+      }
+
+      // Pre-flight validation: normalize to Guesty/Booking.com/Airbnb-compatible spec
+      //   landscape, width=1920, JPEG, <=4MB. Auto-rotates portraits, resizes, recompresses.
+      // Runs AFTER Replicate so AI upscale quality is preserved, then we enforce final spec.
+      let validationChanges: string[] = [];
+      try {
+        const validated = await validateAndFixPhoto(finalBuffer, finalMime);
+        finalBuffer = validated.buffer;
+        finalMime = validated.mimeType;
+        validationChanges = validated.changes;
+        if (validationChanges.length > 0) {
+          console.log(`[push-photos] validate ${index}/${photos.length} ${safePath}: ${validationChanges.join("; ")}`);
+          emit({
+            type: "validation",
+            index,
+            total: photos.length,
+            localPath,
+            changes: validationChanges,
+            finalWidth: validated.finalWidth,
+            finalHeight: validated.finalHeight,
+            finalBytes: validated.finalBytes,
+          });
+        }
+      } catch (e: any) {
+        // Validation failure is non-fatal — push original buffer and flag it
+        console.error(`[push-photos] validation failed ${index}/${photos.length}: ${e.message}`);
+        emit({
+          type: "validation",
+          index,
+          total: photos.length,
+          localPath,
+          warning: `validation failed: ${e.message} — pushing original`,
+        });
       }
 
       // Upload to ImgBB to get a publicly accessible URL
@@ -2400,7 +2436,7 @@ export async function registerRoutes(
       if (wasUpscaled) upscaledCount++;
       collected.push({ original: publicUrl, caption: caption || "" });
       perPhotoResults.push({ index, localPath, success: true, url: publicUrl, wasUpscaled });
-      emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, pending: true });
+      emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, validationChanges, pending: true });
       console.log(`[push-photos] ✓ ImgBB ${index}/${photos.length} ${safePath}`);
 
       // Checkpoint: commit accumulated photos to Guesty every 5 successful uploads.
