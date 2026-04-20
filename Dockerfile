@@ -16,4 +16,4 @@ RUN npm run build
 
 ENV NODE_ENV=production
 
-CMD ["node", "dist/index.cjs"]
+CMD ["sh", "-c", "npm run db:push && node dist/index.cjs"]
