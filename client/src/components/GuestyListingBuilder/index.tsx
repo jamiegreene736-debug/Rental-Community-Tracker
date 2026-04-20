@@ -214,31 +214,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   );
   const [guestyLiveAmenities, setGuestyLiveAmenities] = useState<Set<string> | null>(null);
   const [fetchingLiveAmenities, setFetchingLiveAmenities] = useState(false);
-  // Guesty's canonical amenity catalog: id → displayName mapping
-  const [guesty_amenityCatalog, setGuesty_amenityCatalog] = useState<{ id: string; name: string }[]>([]);
-  // Map from our profile key → Guesty canonical ID (populated once catalog is loaded)
+  // Guesty's canonical amenity catalog: list of { name } strings (Guesty's supported amenities
+  // endpoint returns only a name field — no id — so name is the key we send on PUT).
+  const [guesty_amenityCatalog, setGuesty_amenityCatalog] = useState<{ name: string }[]>([]);
+  // Map from our profile key → Guesty canonical name (populated once catalog is loaded).
   const [keyToGuestyId, setKeyToGuestyId] = useState<Record<string, string>>({});
 
-  // Fetch Guesty's canonical amenity catalog once and build label→id map
+  // Fetch Guesty's canonical amenity catalog once and build profile-key → Guesty-name map.
   useEffect(() => {
     fetch("/api/builder/guesty-supported-amenities")
       .then(r => r.json())
       .then((data: unknown) => {
-        const raw: { id?: string; name?: string; title?: string; amenityId?: string; displayName?: string }[] =
+        const raw: { name?: string; title?: string; displayName?: string }[] =
           Array.isArray(data) ? data : (data as any)?.results ?? (data as any)?.amenities ?? [];
-        const catalog = raw.map(a => ({
-          id: (a.id ?? a.amenityId ?? "").toString(),
-          name: (a.name ?? a.title ?? a.displayName ?? "").toString(),
-        })).filter(a => a.id && a.name);
+        const catalog = raw
+          .map(a => ({ name: (a.name ?? a.title ?? a.displayName ?? "").toString() }))
+          .filter(a => a.name);
         setGuesty_amenityCatalog(catalog);
 
-        // Build mapping: our UPPER_SNAKE key → Guesty ID
-        // Strategy: normalize both sides to lowercase+spaces and match
-        const normalize = (s: string) => s.toLowerCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
-        const guestyByNorm = new Map(catalog.map(a => [normalize(a.name), a.id]));
+        // Build mapping: our UPPER_SNAKE key → Guesty canonical name.
+        // Normalize both sides (lowercase, spaces, strip punctuation) and match.
+        const normalize = (s: string) =>
+          s.toLowerCase().replace(/[_\-/]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+        const guestyByNorm = new Map(catalog.map(a => [normalize(a.name), a.name]));
         const map: Record<string, string> = {};
         for (const entry of GUESTY_AMENITY_CATALOG) {
-          // Try matching by label first, then by key
           const byLabel = guestyByNorm.get(normalize(entry.label));
           const byKey   = guestyByNorm.get(normalize(entry.key));
           if (byLabel) map[entry.key] = byLabel;
@@ -249,6 +249,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       })
       .catch(() => {}); // non-fatal — falls back to raw key push
   }, []);
+
+  // Reverse lookup: Guesty canonical name → our profile key (case-insensitive).
+  const nameToKey = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const [k, name] of Object.entries(keyToGuestyId)) m[name.toLowerCase()] = k;
+    return m;
+  }, [keyToGuestyId]);
+
+  // Convert an array of Guesty canonical names into a Set of our profile keys
+  // (names not present in our catalog are dropped).
+  const guestyNamesToProfileKeys = useCallback(
+    (names: string[]) => new Set(names.map(n => nameToKey[n.toLowerCase()]).filter(Boolean) as string[]),
+    [nameToKey],
+  );
 
   // Keep profile-based checkboxes in sync if propertyId ever changes (navigation edge case)
   const prevPropertyIdRef = useRef<number | undefined>(undefined);
@@ -421,16 +435,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     setGuestyPhotoCountLoading(true);
     setGuestyLiveAmenities(null);
     setFetchingLiveAmenities(true);
-    fetch(`/api/guesty-proxy/listings/${selectedId}`)
-      .then(r => r.json())
-      .then((d: any) => {
-        setGuestyPhotoCount(d?.pictures?.length ?? 0);
-        const live: string[] = Array.isArray(d?.amenities) ? d.amenities : [];
-        setGuestyLiveAmenities(new Set(live));
+    // Photo count comes from the listing; amenities from properties-api (Popular Amenities panel).
+    Promise.all([
+      fetch(`/api/guesty-proxy/listings/${selectedId}`).then(r => r.json()).catch(() => null),
+      fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`).then(r => r.json()).catch(() => null),
+    ])
+      .then(([listing, amen]) => {
+        setGuestyPhotoCount(listing?.pictures?.length ?? 0);
+        const live: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
+        setGuestyLiveAmenities(guestyNamesToProfileKeys(live));
       })
       .catch(() => { setGuestyPhotoCount(null); setGuestyLiveAmenities(new Set()); })
       .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
-  }, [selectedId]);
+  }, [selectedId, guestyNamesToProfileKeys]);
 
   // Refresh live count after a successful push
   const refreshGuestyPhotoCount = useCallback(() => {
@@ -923,13 +940,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         setAmenityPushResult({ sent: data.sent ?? 0, saved: data.saved ?? 0, missing: data.missing ?? [] });
         // Refresh the diff panel with what Guesty actually confirmed post-push
         if (Array.isArray(data.savedAmenities)) {
-          setGuestyLiveAmenities(new Set(data.savedAmenities));
+          setGuestyLiveAmenities(guestyNamesToProfileKeys(data.savedAmenities));
         }
         toast({
           title: `Amenities pushed to Guesty`,
           description: data.missing && data.missing.length > 0
-            ? `${data.saved}/${data.sent} saved. ${data.missing.length} keys Guesty didn't recognise — check server logs for key format clues.`
-            : `${data.saved} amenities confirmed in Guesty.`,
+            ? `${data.saved}/${data.sent} saved. ${data.missing.length} names Guesty didn't recognise — check server logs.`
+            : `${data.saved} amenities confirmed in Guesty's Popular Amenities panel.`,
           duration: 8000,
         });
       }
@@ -937,7 +954,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       setAmenityPushState("error");
       toast({ title: "Amenities push failed", description: (e as Error).message, variant: "destructive" });
     }
-  }, [selectedId, pendingAmenities, amenityPushState, toast]);
+  }, [selectedId, pendingAmenities, amenityPushState, toast, keyToGuestyId, guestyNamesToProfileKeys]);
 
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
@@ -1443,10 +1460,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               if (!selectedId) return;
                               setFetchingLiveAmenities(true);
                               try {
-                                const res = await fetch(`/api/guesty-proxy/listings/${selectedId}`);
+                                const res = await fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`);
                                 const data = await res.json();
                                 const live: string[] = Array.isArray(data.amenities) ? data.amenities : [];
-                                setGuestyLiveAmenities(new Set(live));
+                                setGuestyLiveAmenities(guestyNamesToProfileKeys(live));
                               } catch {
                                 setGuestyLiveAmenities(new Set());
                               } finally {

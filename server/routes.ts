@@ -1865,30 +1865,88 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/builder/push-amenities — sets amenities array on an existing Guesty listing
+  // POST /api/builder/push-amenities — writes canonical amenity names to Guesty's
+  // properties-api, which drives the Popular-Amenities checkboxes in the UI.
+  // Body: { listingId, amenities: string[] } where amenities are Guesty canonical
+  // names (e.g. "Air conditioning", "BBQ grill") from /properties-api/amenities/supported.
   app.post("/api/builder/push-amenities", async (req: Request, res: Response) => {
     const { listingId, amenities } = req.body as { listingId?: string; amenities?: string[] };
     if (!listingId) return res.status(400).json({ success: false, error: "listingId required" });
     if (!Array.isArray(amenities)) return res.status(400).json({ success: false, error: "amenities must be an array" });
 
-    console.log(`[push-amenities] listing ${listingId} — ${amenities.length} amenities`);
+    console.log(`[push-amenities] listing ${listingId} — ${amenities.length} amenities in`);
     try {
-      await guestyRequest("PUT", `/listings/${listingId}`, { amenities });
+      // Resolve propertyId from listing — the properties-api requires it, not the listing id.
+      const listing = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const propertyId = (listing.propertyId ?? (listing as any).property?._id) as string | undefined;
+      if (!propertyId) {
+        console.error(`[push-amenities] listing ${listingId} has no propertyId`);
+        return res.status(400).json({ success: false, error: "listing has no propertyId" });
+      }
+      console.log(`[push-amenities] resolved propertyId=${propertyId}`);
 
-      // GET-after-PUT — wait 3s for Guesty's async write to commit
-      await new Promise(r => setTimeout(r, 3000));
-      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
-      const savedAmenities: string[] = Array.isArray(fetched.amenities) ? fetched.amenities : [];
-      // Case-insensitive comparison to catch Guesty normalising key casing
-      const savedLower = new Set(savedAmenities.map((s: string) => s.toLowerCase()));
-      const missing = amenities.filter(a => !savedLower.has(a.toLowerCase()));
+      // Normalize inputs against Guesty's canonical supported-amenities list so
+      // both UPPER_SNAKE profile keys ("BBQ_GRILL") and canonical names ("BBQ grill") work.
+      const supportedRaw = await guestyRequest("GET", "/properties-api/amenities/supported") as unknown;
+      const supportedList: { name?: string }[] = Array.isArray(supportedRaw)
+        ? supportedRaw as { name?: string }[]
+        : ((supportedRaw as any)?.results ?? (supportedRaw as any)?.amenities ?? []);
+      const canonicalNames = supportedList.map(a => a.name).filter((n): n is string => !!n);
+      const norm = (s: string) =>
+        s.toLowerCase().replace(/[_\-/]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+      const byNorm = new Map(canonicalNames.map(n => [norm(n), n]));
+      const translated: string[] = [];
+      const unmapped: string[] = [];
+      for (const a of amenities) {
+        const hit = byNorm.get(norm(a));
+        if (hit) translated.push(hit);
+        else unmapped.push(a);
+      }
+      if (unmapped.length) console.log(`[push-amenities] unmapped ${unmapped.length}:`, unmapped.slice(0, 10));
+      console.log(`[push-amenities] sending ${translated.length} canonical names`);
 
-      console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length}`);
-      console.log(`[push-amenities] guesty returned keys sample:`, savedAmenities.slice(0, 10));
-      res.json({ success: true, sent: amenities.length, saved: savedAmenities.length, savedAmenities, missing });
+      await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, { amenities: translated });
+
+      // GET-after-PUT — wait briefly for Guesty's async write to commit
+      await new Promise(r => setTimeout(r, 2000));
+      const fetched = await guestyRequest("GET", `/properties-api/amenities/${propertyId}`) as Record<string, unknown>;
+      const savedAmenities: string[] = Array.isArray(fetched.amenities) ? fetched.amenities as string[] : [];
+      const otherAmenities: string[] = Array.isArray((fetched as any).otherAmenities) ? (fetched as any).otherAmenities : [];
+      const savedLower = new Set(savedAmenities.map(s => s.toLowerCase()));
+      const missing = translated.filter(a => !savedLower.has(a.toLowerCase()));
+
+      console.log(`[push-amenities] saved=${savedAmenities.length} other=${otherAmenities.length} missing=${missing.length} unmapped=${unmapped.length}`);
+      console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));
+      if (missing.length) console.log(`[push-amenities] missing sample:`, missing.slice(0, 10));
+      res.json({
+        success: true,
+        sent: translated.length,
+        saved: savedAmenities.length,
+        savedAmenities,
+        otherAmenities,
+        missing,
+        unmapped,
+        propertyId,
+      });
     } catch (err: any) {
       console.error(`[push-amenities] error:`, err.message);
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET /api/builder/guesty-amenities?listingId=xxx — returns {amenities, otherAmenities}
+  // currently set on the property (drives the Popular-Amenities panel in Guesty UI).
+  app.get("/api/builder/guesty-amenities", async (req: Request, res: Response) => {
+    const { listingId } = req.query as { listingId?: string };
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    try {
+      const listing = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+      const propertyId = (listing.propertyId ?? (listing as any).property?._id) as string | undefined;
+      if (!propertyId) return res.status(400).json({ error: "listing has no propertyId" });
+      const data = await guestyRequest("GET", `/properties-api/amenities/${propertyId}`);
+      return res.json({ ...(data as object), propertyId });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

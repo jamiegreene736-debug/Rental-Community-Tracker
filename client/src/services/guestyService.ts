@@ -215,8 +215,19 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, { publicDescription: { space } });
   }
 
-  async updateAmenities(id: string, amenities: string[]) {
-    return this.request("PUT", `/listings/${id}`, { amenities });
+  // Routes through our server which resolves the listing's propertyId and then
+  // hits PUT /properties-api/amenities/{propertyId} — the only endpoint that
+  // drives Guesty's Popular Amenities panel. `amenities` must be the canonical
+  // Guesty `name` strings (see /api/builder/guesty-supported-amenities).
+  async updateAmenities(listingId: string, amenities: string[]) {
+    const res = await fetch("/api/builder/push-amenities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ listingId, amenities }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) throw new Error(data?.error ?? `push-amenities HTTP ${res.status}`);
+    return data;
   }
 
   async updateDescriptions(id: string, descriptions: GuestyDescriptions) {
