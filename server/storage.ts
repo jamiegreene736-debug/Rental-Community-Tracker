@@ -25,6 +25,10 @@ export interface IStorage {
   getBuyIn(id: number): Promise<BuyIn | undefined>;
   updateBuyIn(id: number, data: Partial<InsertBuyIn>): Promise<BuyIn | undefined>;
   deleteBuyIn(id: number): Promise<boolean>;
+  getBuyInCandidates(params: { propertyId: number; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
+  getBuyInByReservation(reservationId: string): Promise<BuyIn | undefined>;
+  attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
+  detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
 
   upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking>;
   getLodgifyBookings(): Promise<LodgifyBooking[]>;
@@ -119,6 +123,61 @@ export class DatabaseStorage implements IStorage {
   async deleteBuyIn(id: number): Promise<boolean> {
     const result = await db.delete(buyIns).where(eq(buyIns.id, id)).returning();
     return result.length > 0;
+  }
+
+  async getBuyInCandidates(params: { propertyId: number; checkIn: string; checkOut: string }): Promise<BuyIn[]> {
+    // A candidate must:
+    //   1. Be for the same property
+    //   2. Fully cover the booking window: buyIn.checkIn <= booking.checkIn AND buyIn.checkOut >= booking.checkOut
+    //   3. Be status=active
+    //   4. Not already be attached to another reservation
+    const rows = await db
+      .select()
+      .from(buyIns)
+      .where(
+        and(
+          eq(buyIns.propertyId, params.propertyId),
+          lte(buyIns.checkIn, params.checkIn),
+          gte(buyIns.checkOut, params.checkOut),
+          eq(buyIns.status, "active"),
+          sql`${buyIns.guestyReservationId} IS NULL`,
+        ),
+      );
+    return rows;
+  }
+
+  async getBuyInByReservation(reservationId: string): Promise<BuyIn | undefined> {
+    const [row] = await db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId)).limit(1);
+    return row;
+  }
+
+  async attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined> {
+    // Refuse if buy-in is already attached to a *different* reservation.
+    const existing = await this.getBuyIn(buyInId);
+    if (!existing) return undefined;
+    if (existing.guestyReservationId && existing.guestyReservationId !== reservationId) {
+      throw new Error(`Buy-in ${buyInId} is already attached to reservation ${existing.guestyReservationId}`);
+    }
+    // Also refuse if this reservation already has a different buy-in attached.
+    const current = await this.getBuyInByReservation(reservationId);
+    if (current && current.id !== buyInId) {
+      throw new Error(`Reservation ${reservationId} already has buy-in ${current.id} attached — detach it first`);
+    }
+    const [row] = await db
+      .update(buyIns)
+      .set({ guestyReservationId: reservationId, attachedAt: new Date() })
+      .where(eq(buyIns.id, buyInId))
+      .returning();
+    return row;
+  }
+
+  async detachBuyIn(buyInId: number): Promise<BuyIn | undefined> {
+    const [row] = await db
+      .update(buyIns)
+      .set({ guestyReservationId: null, attachedAt: null })
+      .where(eq(buyIns.id, buyInId))
+      .returning();
+    return row;
   }
 
   async upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking> {

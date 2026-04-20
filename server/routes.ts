@@ -1266,6 +1266,115 @@ export async function registerRoutes(
     }
   });
 
+  // ========== BOOKINGS ↔ BUY-INS (Layer A: attach existing buy-in to a Guesty reservation) ==========
+
+  // List confirmed reservations for a Guesty listing, enriched with attached buy-in (if any).
+  app.get("/api/bookings/listing/:listingId", async (req, res) => {
+    try {
+      const listingId = req.params.listingId;
+      const includePast = req.query.includePast === "true";
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 200);
+
+      // Fetch confirmed + inquiry reservations for this listing
+      const today = new Date().toISOString().slice(0, 10);
+      const fields = encodeURIComponent("_id status checkIn checkOut nightsCount guest money source integration confirmationCode");
+      let url = `/reservations?listingId=${encodeURIComponent(listingId)}&limit=${limit}&sort=checkIn&fields=${fields}&status[]=confirmed&status[]=inquiry&status[]=awaitingPayment`;
+      if (!includePast) {
+        url += `&checkOutFrom=${today}`;
+      }
+      const data = await guestyRequest("GET", url) as any;
+      const reservations: any[] = data?.results ?? [];
+
+      // Enrich each with attached buy-in
+      const enriched = await Promise.all(
+        reservations.map(async (r) => {
+          const attachedBuyIn = r._id ? await storage.getBuyInByReservation(r._id) : undefined;
+          return { ...r, attachedBuyIn: attachedBuyIn ?? null };
+        }),
+      );
+
+      res.json({ reservations: enriched, total: enriched.length });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch bookings", message: err.message });
+    }
+  });
+
+  // Get buy-in candidates that could cover a given booking.
+  app.get("/api/bookings/:reservationId/buy-in-candidates", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const propertyId = parseInt((req.query.propertyId as string) ?? "", 10);
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+
+      if (!propertyId || !checkIn || !checkOut) {
+        return res.status(400).json({ error: "propertyId, checkIn, checkOut query params required" });
+      }
+
+      const candidates = await storage.getBuyInCandidates({ propertyId, checkIn, checkOut });
+
+      // Compute cost-per-night, waste nights, score. Lower score = better.
+      const bookingNights = Math.max(1, Math.round((+new Date(checkOut) - +new Date(checkIn)) / 86400000));
+
+      const ranked = candidates
+        .map((b) => {
+          const buyInNights = Math.max(1, Math.round((+new Date(b.checkOut) - +new Date(b.checkIn)) / 86400000));
+          const cost = parseFloat(String(b.costPaid)) || 0;
+          const costPerNight = cost / buyInNights;
+          const wastedNights = buyInNights - bookingNights;
+          // Ranking: $1/wasted night penalty is too soft; use costPerNight as primary, waste as tiebreaker.
+          const score = costPerNight * bookingNights + Math.max(0, wastedNights) * costPerNight * 0.5;
+          return {
+            buyIn: b,
+            buyInNights,
+            totalCost: cost,
+            costPerNight: Math.round(costPerNight * 100) / 100,
+            wastedNights,
+            effectiveCost: Math.round(costPerNight * bookingNights * 100) / 100,
+            score: Math.round(score * 100) / 100,
+          };
+        })
+        .sort((a, b) => a.score - b.score);
+
+      res.json({
+        reservationId,
+        bookingNights,
+        candidates: ranked,
+        count: ranked.length,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to find candidates", message: err.message });
+    }
+  });
+
+  // Attach a buy-in to a reservation.
+  app.post("/api/bookings/:reservationId/attach-buy-in", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const { buyInId } = req.body as { buyInId: number };
+      if (!buyInId) return res.status(400).json({ error: "buyInId required" });
+
+      const buyIn = await storage.attachBuyIn(buyInId, reservationId);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      res.json(buyIn);
+    } catch (err: any) {
+      res.status(400).json({ error: "Failed to attach buy-in", message: err.message });
+    }
+  });
+
+  // Detach the currently-attached buy-in from a reservation.
+  app.post("/api/bookings/:reservationId/detach-buy-in", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const current = await storage.getBuyInByReservation(reservationId);
+      if (!current) return res.status(404).json({ error: "No buy-in attached to this reservation" });
+      const buyIn = await storage.detachBuyIn(current.id);
+      res.json(buyIn);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to detach buy-in", message: err.message });
+    }
+  });
+
   // ========== AIRBNB SEARCH VIA SEARCHAPI.IO ==========
 
   const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {

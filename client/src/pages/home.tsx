@@ -495,6 +495,12 @@ export default function Home() {
                 Guest Inbox
               </Button>
             </Link>
+            <Link href="/bookings">
+              <Button variant="outline" data-testid="button-bookings">
+                <CalendarSearch className="h-4 w-4 mr-2" />
+                Bookings
+              </Button>
+            </Link>
             <Link href="/buy-in-tracker">
               <Button variant="outline" data-testid="button-buy-in-tracker">
                 <DollarSign className="h-4 w-4 mr-2" />

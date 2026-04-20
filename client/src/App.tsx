@@ -15,6 +15,7 @@ import AddCommunity from "@/pages/add-community";
 import Builder from "@/pages/builder";
 import BuilderPreflight from "@/pages/builder-preflight";
 import Inbox from "@/pages/inbox";
+import Bookings from "@/pages/bookings";
 
 function Router() {
   return (
@@ -31,6 +32,7 @@ function Router() {
         <Route path="/availability-scanner" component={AvailabilityScanner} />
         <Route path="/community-photo-finder" component={CommunityPhotoFinder} />
         <Route path="/inbox" component={Inbox} />
+        <Route path="/bookings" component={Bookings} />
         <Route component={NotFound} />
       </Switch>
     </>

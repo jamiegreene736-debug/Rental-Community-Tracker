@@ -30,6 +30,8 @@ export const buyIns = pgTable("buy_ins", {
   airbnbListingUrl: text("airbnb_listing_url"),
   notes: text("notes"),
   status: text("status").notNull().default("active"),
+  guestyReservationId: text("guesty_reservation_id"),
+  attachedAt: timestamp("attached_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
