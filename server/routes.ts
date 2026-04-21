@@ -5072,49 +5072,79 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     action: "preapprove" | "decline" | "special-offer",
     body: Record<string, unknown> = {},
   ): Promise<{ success: true; via: string; data: any } | { success: false; error: string; attempts: Array<{ path: string; method: string; status?: number; error: string }> }> {
-    // Guesty's Open API v1 has never officially documented pre-approve —
-    // these paths are reverse-engineered from channel-manager logs, community
-    // threads, and v2 internal-API hints. We try them in rough order of
-    // likelihood. `airbnb2` is the newer integration platform; older accounts
-    // use `airbnb`. Some use a verb-as-body pattern on /update-status.
-    const candidates: Record<typeof action, Array<{ method: "POST" | "PUT"; path: string; body?: Record<string, unknown> }>> = {
+    // Diagnostic on reservation 69e6…1d8c revealed a `preApproveState: false`
+    // field and no POST action endpoints. Guesty tracks pre-approval as a
+    // writable flag on the reservation document — PUT to update.
+    // We keep the POST variants as fallbacks in case any account exposes them.
+    //
+    // Also added: `/reservations/{id}/preapprove` and PATCH variants that
+    // some community threads mention work on specific Guesty tenants.
+    const candidates: Record<typeof action, Array<{ method: "POST" | "PUT" | "PATCH"; path: string; body?: Record<string, unknown> }>> = {
       preapprove: [
-        { method: "POST", path: `/airbnb2/reservations/${reservationId}/preapprove` },
-        { method: "POST", path: `/airbnb/reservations/${reservationId}/preapprove` },
-        { method: "POST", path: `/reservations/${reservationId}/airbnb/preapprove` },
-        { method: "POST", path: `/reservations/${reservationId}/airbnb2/preapprove` },
-        { method: "POST", path: `/reservations/${reservationId}/actions/airbnb/preapprove` },
-        { method: "POST", path: `/reservations/${reservationId}/actions/preapprove` },
-        { method: "PUT",  path: `/reservations/${reservationId}/inquiry/preapprove` },
-        { method: "POST", path: `/reservations/${reservationId}/update-status`, body: { ...body, status: "preApproved" } },
-        { method: "POST", path: `/inquiries/${reservationId}/preapprove` },
+        // Primary: update the preApproveState field directly
+        { method: "PUT",   path: `/reservations/${reservationId}`, body: { preApproveState: true } },
+        { method: "PATCH", path: `/reservations/${reservationId}`, body: { preApproveState: true } },
+        // Bare verb endpoints reported by some tenants
+        { method: "POST",  path: `/reservations/${reservationId}/preapprove` },
+        { method: "POST",  path: `/reservations/${reservationId}/pre-approve` },
+        // Status-transition pattern
+        { method: "PUT",   path: `/reservations/${reservationId}`, body: { status: "preApproved" } },
+        // Channel-prefixed fallbacks (already known-404 on your tenant but kept
+        // so another account's response doesn't regress)
+        { method: "POST",  path: `/airbnb2/reservations/${reservationId}/preapprove` },
+        { method: "POST",  path: `/airbnb/reservations/${reservationId}/preapprove` },
       ],
       decline: [
-        { method: "POST", path: `/airbnb2/reservations/${reservationId}/decline` },
-        { method: "POST", path: `/airbnb/reservations/${reservationId}/decline` },
-        { method: "POST", path: `/reservations/${reservationId}/airbnb/decline` },
-        { method: "POST", path: `/reservations/${reservationId}/actions/decline` },
-        { method: "POST", path: `/inquiries/${reservationId}/decline` },
+        { method: "PUT",   path: `/reservations/${reservationId}`, body: { status: "declined" } },
+        { method: "POST",  path: `/reservations/${reservationId}/decline` },
+        { method: "POST",  path: `/airbnb2/reservations/${reservationId}/decline` },
+        { method: "POST",  path: `/airbnb/reservations/${reservationId}/decline` },
       ],
       "special-offer": [
-        { method: "POST", path: `/airbnb2/reservations/${reservationId}/special-offer` },
-        { method: "POST", path: `/airbnb/reservations/${reservationId}/special-offer` },
-        { method: "POST", path: `/reservations/${reservationId}/airbnb/special-offer` },
+        { method: "POST",  path: `/reservations/${reservationId}/special-offer` },
+        { method: "POST",  path: `/airbnb2/reservations/${reservationId}/special-offer` },
+        { method: "POST",  path: `/airbnb/reservations/${reservationId}/special-offer` },
       ],
     };
 
     const attempts: Array<{ path: string; method: string; status?: number; error: string }> = [];
     let lastError = "";
 
+    // Expected state-change per action — we check this via GET afterward to
+    // confirm Guesty actually applied the change (some endpoints return 200
+    // but ignore the field).
+    const verifyExpectations: Record<typeof action, (r: any) => boolean> = {
+      preapprove: (r) => r?.preApproveState === true || r?.status === "preApproved" || r?.status === "accepted",
+      decline:    (r) => r?.status === "declined" || r?.status === "canceled",
+      "special-offer": () => true, // no reliable field to verify
+    };
+
     for (const c of candidates[action]) {
       try {
         const data = await guestyRequest(c.method, c.path, c.body ?? body);
+        // If this is a PUT/PATCH to /reservations/{id}, verify the state changed.
+        const isUpdateAttempt = (c.method === "PUT" || c.method === "PATCH") && c.path === `/reservations/${reservationId}`;
+        if (isUpdateAttempt) {
+          try {
+            const fetched = await guestyRequest("GET", `/reservations/${reservationId}`) as any;
+            if (!verifyExpectations[action](fetched)) {
+              attempts.push({
+                path: c.path,
+                method: c.method,
+                status: 200,
+                error: `${c.method} returned 200 but state did not change (still preApproveState=${fetched?.preApproveState}, status=${fetched?.status})`,
+              });
+              console.warn(`[airbnb-action] ${action} via ${c.method} ${c.path} 200 but no-op`);
+              continue;
+            }
+          } catch {
+            // Couldn't verify — assume success
+          }
+        }
         console.log(`[airbnb-action] ${action} via ${c.method} ${c.path} OK`);
         return { success: true, via: `${c.method} ${c.path}`, data };
       } catch (err: any) {
         lastError = err.message ?? String(err);
-        // guestyRequest embeds the status code in the error message like
-        // "Guesty 404: /…". Extract it for better reporting.
         const m = /Guesty\s+(\d{3})/.exec(lastError);
         const status = m ? parseInt(m[1], 10) : undefined;
         attempts.push({ path: c.path, method: c.method, status, error: lastError });
