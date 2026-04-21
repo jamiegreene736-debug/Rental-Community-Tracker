@@ -222,10 +222,22 @@ function normalizeConversation(c: any): GuestyConversation & {
   displayPreview: string;
   displayTimestamp: string | undefined;
   isUnread: boolean;
+  reservationId?: string;
 } {
   const meta = c?.meta ?? {};
   const guest = c?.guest ?? meta.guest ?? {};
-  const listing = c?.listing ?? meta.listing ?? {};
+  // Inbox-v2 nests reservation as an array under meta.reservations;
+  // listing info is nested inside the reservation itself.
+  const firstReservation =
+    Array.isArray(meta.reservations) && meta.reservations.length > 0
+      ? meta.reservations[0]
+      : (c?.reservation ?? meta.reservation ?? null);
+  const listing =
+    c?.listing ??
+    meta.listing ??
+    firstReservation?.listing ??
+    firstReservation?.listingObj ??
+    {};
   const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? {};
   const mod = c?.module ?? meta.module ?? meta.lastMessage?.module ?? undefined;
 
@@ -241,6 +253,8 @@ function normalizeConversation(c: any): GuestyConversation & {
     listing.nickname ??
     listing.title ??
     listing.name ??
+    firstReservation?.listingNickname ??
+    firstReservation?.listingTitle ??
     "—";
 
   const preview =
@@ -250,6 +264,8 @@ function normalizeConversation(c: any): GuestyConversation & {
     meta.lastMessagePreview ??
     "";
 
+  // v2 list endpoint doesn't return a last-message timestamp, so fall back to
+  // the conversation's createdAt so rows at least show some date.
   const timestamp =
     c?.lastMessageAt ??
     meta.lastMessageAt ??
@@ -262,12 +278,21 @@ function normalizeConversation(c: any): GuestyConversation & {
     c?.unread === true ||
     meta.unreadCount > 0 ||
     c?.state === "NEW" ||
-    c?.state === "UNREAD";
+    c?.state === "UNREAD" ||
+    c?.state === "UNANSWERED";
+
+  const reservationId =
+    c?.reservationId ??
+    firstReservation?._id ??
+    firstReservation?.id ??
+    undefined;
 
   return {
     ...c,
     guestName,
+    listingId: c?.listingId ?? listing?._id ?? firstReservation?.listingId,
     listingNickname: listingName,
+    reservationId,
     lastMessageAt: timestamp,
     lastPost: lastMsg,
     module: mod,
