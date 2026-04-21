@@ -2098,6 +2098,90 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/push-descriptions
+  // POST /api/builder/push-channel-markups
+  // Sets per-channel price adjustments on a Guesty listing, so the rate the
+  // guest sees on Booking.com / Vrbo / Airbnb is ± X% vs the base rate.
+  // Typically used to offset higher channel host-fees — e.g. +17% on
+  // Booking.com to recover their commission.
+  //
+  // Body: { listingId: string, markups: { airbnb?: number, vrbo?: number, booking?: number, direct?: number } }
+  //   Each markup is a decimal (0.05 = +5%). Negative decreases the rate.
+  //
+  // Guesty's schema for channel markup has drifted — we try a few known paths:
+  //   1. PUT /listings/{id} body { priceMarkup: {airbnb: 0.05, ...} }
+  //   2. PUT /listings/{id} body { integrations: {airbnb2: {priceMarkup: 0.05}, ...} }
+  //   3. PUT /listings/{id} body { channels: {airbnb2: {priceMarkup: 0.05}, ...} }
+  //   4. PUT /listings/{id}/channel-commissions body { channel: "airbnb", markup }
+  // We POST all of them in a single PUT with both shape variants merged so whichever
+  // Guesty cares about gets applied.
+  app.post("/api/builder/push-channel-markups", async (req: Request, res: Response) => {
+    const { listingId, markups } = req.body as {
+      listingId?: string;
+      markups?: Partial<Record<"airbnb" | "vrbo" | "booking" | "direct", number>>;
+    };
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    if (!markups || typeof markups !== "object") return res.status(400).json({ error: "markups object required" });
+
+    // Map our logical channel keys to Guesty's integration platform keys
+    const channelToGuesty: Record<string, string[]> = {
+      airbnb: ["airbnb2", "airbnb"],   // newer accounts use airbnb2
+      vrbo: ["homeaway", "vrbo"],
+      booking: ["bookingCom", "booking"],
+      direct: ["manual", "direct"],
+    };
+
+    // Build PUT body that targets every known shape Guesty might accept
+    const priceMarkupFlat: Record<string, number> = {};
+    const integrationsPatch: Record<string, { priceMarkup?: number; priceAdjustment?: number }> = {};
+    const channelsPatch: Record<string, { priceMarkup?: number }> = {};
+
+    for (const [key, value] of Object.entries(markups)) {
+      if (typeof value !== "number" || isNaN(value)) continue;
+      priceMarkupFlat[key] = value;
+      for (const guestyKey of channelToGuesty[key] ?? [key]) {
+        integrationsPatch[guestyKey] = { priceMarkup: value, priceAdjustment: value };
+        channelsPatch[guestyKey] = { priceMarkup: value };
+      }
+    }
+
+    console.log(`[push-channel-markups] listing ${listingId}`, priceMarkupFlat);
+
+    try {
+      // Single PUT with every variant merged — Guesty keeps the keys it
+      // recognizes and ignores the rest.
+      await guestyRequest("PUT", `/listings/${listingId}`, {
+        priceMarkup: priceMarkupFlat,
+        integrations: integrationsPatch,
+        channels: channelsPatch,
+      });
+
+      // Read back to see which shape stuck
+      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as any;
+      const saved = {
+        priceMarkup: fetched?.priceMarkup ?? null,
+        integrations: Object.fromEntries(
+          Object.entries(fetched?.integrations ?? {})
+            .filter(([k]) => Object.keys(integrationsPatch).includes(k))
+            .map(([k, v]: [string, any]) => [k, { priceMarkup: v?.priceMarkup, priceAdjustment: v?.priceAdjustment }]),
+        ),
+        channels: Object.fromEntries(
+          Object.entries(fetched?.channels ?? {})
+            .filter(([k]) => Object.keys(channelsPatch).includes(k))
+            .map(([k, v]: [string, any]) => [k, { priceMarkup: v?.priceMarkup }]),
+        ),
+      };
+
+      return res.json({
+        success: true,
+        sent: { airbnb: markups.airbnb, vrbo: markups.vrbo, booking: markups.booking, direct: markups.direct },
+        saved,
+        note: "Check the 'saved' block — whichever field populated is the one Guesty honors for your account.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // POST /api/builder/push-compliance — pushes TMK, TAT, and GET license to Guesty's internal tags (not synced to Airbnb/VRBO)
   app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
     const { listingId, taxMapKey, tatLicense, getLicense } = req.body as {

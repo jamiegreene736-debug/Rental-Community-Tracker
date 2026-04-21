@@ -753,22 +753,12 @@ function CandidateList({
 
   const candidates = data?.candidates ?? [];
 
-  if (candidates.length === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground">
-        <Search className="h-8 w-8 mx-auto mb-2 opacity-30" />
-        <p className="font-medium mb-1">No eligible buy-ins found</p>
-        <p className="text-xs">
-          No active buy-ins for {slot.unitLabel} ({slot.bedrooms} BR) cover {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
-          Add one in the Buy-In Tracker first.
-        </p>
-      </div>
-    );
-  }
+  // Skip the "no eligible buy-ins" dead-end — we go straight to live search
+  // instead of asking the user to maintain their own buy-in portfolio.
 
   return (
     <div className="space-y-4 max-h-[60vh] overflow-y-auto">
-      {/* ── Existing buy-ins from DB ─────────────────────────────────── */}
+      {/* ── Existing buy-ins from DB (hidden if none — no need to nag) ─── */}
       {candidates.length > 0 && (
         <div className="space-y-2">
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -817,14 +807,7 @@ function CandidateList({
         </div>
       )}
 
-      {candidates.length === 0 && (
-        <div className="py-4 text-center text-sm text-muted-foreground border rounded-lg bg-muted/30">
-          <Search className="h-5 w-5 mx-auto mb-1 opacity-40" />
-          No existing buy-ins cover these dates — shop live below.
-        </div>
-      )}
-
-      {/* ── Live multi-source search ─────────────────────────────────── */}
+      {/* ── Live multi-source search (auto-runs) ─────────────────────── */}
       <LiveSearchSection
         reservation={reservation}
         propertyId={propertyId}
@@ -880,9 +863,11 @@ function LiveSearchSection({
   propertyId: number;
   slot: SlotInfo;
 }) {
-  const [enabled, setEnabled] = useState(false);
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
 
+  // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
+  // No gating button — the whole point of the workflow is to see cheap live
+  // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isError, error, refetch } = useQuery<FindBuyInResponse>({
     queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, reservation.checkIn, reservation.checkOut],
     queryFn: () =>
@@ -890,11 +875,12 @@ function LiveSearchSection({
         "GET",
         `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`,
       ).then((r) => r.json()),
-    enabled,
+    enabled: true,
     staleTime: 5 * 60 * 1000,
   });
 
-  if (!enabled) {
+  // Dead-code preserved for reference — used to gate on a button click
+  if (false as boolean) {
     return (
       <div className="border rounded-lg p-4 bg-blue-50 dark:bg-blue-950/20">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -919,7 +905,7 @@ function LiveSearchSection({
     return (
       <div className="border rounded-lg p-6 text-center text-sm text-muted-foreground">
         <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-        Searching Airbnb, Vrbo, Booking.com, and PM companies…
+        Searching Airbnb, Vrbo, Booking.com, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
       </div>
     );
   }
