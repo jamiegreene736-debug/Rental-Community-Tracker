@@ -1508,16 +1508,92 @@ export async function registerRoutes(
       }
     };
 
-    // ── Airbnb via site: search (more reliable than SearchAPI's Airbnb
-    //    engine for resort-specific queries, which silently ignores the
-    //    geo-bounded quoted resort name) ─────────────────────────────────
+    // ── Airbnb: TWO fetches run in parallel, then merged.
+    //    1) site: Google search — great at resort-specific matches via
+    //       quoted-name, but Google organic never carries live prices.
+    //    2) SearchAPI airbnb engine — returns listings with real prices
+    //       (price.extracted_total_price), filtered by location bounds.
+    //    The engine sometimes returns listings outside the target resort
+    //    so we post-filter to require the resort name in title/desc.
+    //    This is what lets auto-fill actually pick a priced candidate.
     let airbnbRawCount = 0;
     let airbnbDropped = { noResort: 0, wrongBedrooms: 0 };
+    let airbnbPricedCount = 0;
     const airbnbPromise: Promise<Candidate[]> = (async () => {
-      const { candidates, raw, dropped } = await siteSearch("airbnb.com", "airbnb", "Airbnb");
-      airbnbRawCount = raw;
-      airbnbDropped = dropped;
-      return candidates;
+      const [site, priced] = await Promise.all([
+        siteSearch("airbnb.com", "airbnb", "Airbnb"),
+        (async (): Promise<Candidate[]> => {
+          try {
+            const sp: Record<string, string> = {
+              engine: "airbnb",
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              adults: "2",
+              bedrooms: String(bedrooms),
+              type_of_place: "entire_home",
+              currency: "USD",
+              api_key: apiKey,
+              q: searchLocation,
+            };
+            if (bounds) {
+              sp.sw_lat = String(bounds.sw_lat);
+              sp.sw_lng = String(bounds.sw_lng);
+              sp.ne_lat = String(bounds.ne_lat);
+              sp.ne_lng = String(bounds.ne_lng);
+            }
+            const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+            if (!r.ok) return [];
+            const data = await r.json() as any;
+            let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+            airbnbPricedCount = properties.length;
+            // Require resort mention in title/desc — the engine's geo
+            // bounds aren't tight enough to guarantee it alone.
+            if (resortName) {
+              properties = properties.filter((p: any) => {
+                const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
+                return mentionsResort(hay);
+              });
+            }
+            return properties
+              .filter((p: any) => p?.price?.extracted_total_price > 0 && p?.link)
+              .map((p: any): Candidate => {
+                const total = Number(p.price.extracted_total_price);
+                const url = withStayDates("airbnb", String(p.link));
+                return {
+                  source: "airbnb",
+                  sourceLabel: "Airbnb",
+                  title: String(p?.name ?? p?.title ?? "Airbnb listing"),
+                  url,
+                  nightlyPrice: Math.round(total / Math.max(1, nights)),
+                  totalPrice: total,
+                  bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
+                  image: Array.isArray(p?.images) ? p.images[0] : undefined,
+                  snippet: String(p?.description ?? "").slice(0, 160),
+                };
+              });
+          } catch (e: any) {
+            console.error(`[find-buy-in] airbnb engine error:`, e.message);
+            return [];
+          }
+        })(),
+      ]);
+      airbnbRawCount = site.raw;
+      airbnbDropped = site.dropped;
+      // Dedupe by listing id in path, preferring the priced version.
+      const roomId = (u: string): string | null => {
+        const m = u.match(/\/rooms\/(?:plus\/)?(\d+)/);
+        return m ? m[1] : null;
+      };
+      const byId = new Map<string, Candidate>();
+      for (const c of priced) {
+        const id = roomId(c.url);
+        if (id) byId.set(id, c);
+      }
+      const unpriced = site.candidates.filter((c) => {
+        const id = roomId(c.url);
+        return !id || !byId.has(id);
+      });
+      return [...priced, ...unpriced];
     })();
 
     // ── Vrbo + Booking via site: search ───────────────────────────────────
@@ -1666,10 +1742,11 @@ export async function registerRoutes(
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
-      + `airbnb=${airbnb.length}/${airbnbRawCount} (dropped noResort=${airbnbDropped.noResort}, wrongBR=${airbnbDropped.wrongBedrooms}) `
+      + `airbnb=${airbnb.length}/${airbnbRawCount} (site, dropped noResort=${airbnbDropped.noResort}, wrongBR=${airbnbDropped.wrongBedrooms}) `
+      + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${hotels.vrbo.length}/${vrboRawCount} (noResort=${vrboDropped.noResort}, wrongBR=${vrboDropped.wrongBedrooms}) `
       + `booking=${hotels.booking.length}/${bookingRawCount} (noResort=${bookingDropped.noResort}, wrongBR=${bookingDropped.wrongBedrooms}) `
-      + `pm=${pm.length}/${pmRawCount}`
+      + `pm=${pm.length}/${pmRawCount} · priced=${priced.length}`
     );
 
     return res.json({
