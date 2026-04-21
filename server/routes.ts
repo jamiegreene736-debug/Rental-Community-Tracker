@@ -1390,31 +1390,34 @@ export async function registerRoutes(
           return /^\/hotel\/[a-z]{2}\/.+\.html$/i.test(path)
               && !/searchresults/i.test(path);
         case "pm": {
-          // PM sites vary wildly and "deeper than /" isn't strict enough —
-          // e.g. castleresorts.com/kauai/kaha-lani-resort/ is a resort
-          // landing, not a specific unit. Require stronger signals.
-          if (path.length <= 1 || path === "/") return false;
-          const segments = path.split("/").filter(Boolean);
-          const last = (segments[segments.length - 1] ?? "").toLowerCase();
-          // Reject if the last segment looks like a resort landing — either
-          // matches the target resort's slug, or is a generic category.
-          const resortSlug = resortName
-            ? resortName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-            : "";
-          if (resortSlug && (last === resortSlug
-                          || last === `${resortSlug}-resort`
-                          || last.replace(/-resort$/, "") === resortSlug)) {
-            return false;
-          }
-          if (/^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|kauai|oahu|maui|hawaii)$/.test(last)) {
-            return false;
-          }
-          // Positive signals that the URL points to a specific unit or room.
-          const hasNumericId = /\/\d{3,}(?:[\/-]|$)/.test(path);
-          const hasUnitKeyword = /\b(unit|room|rooms|condo|villa|listing|property|rental|book|bookings|reservation|details?)\b/.test(path.toLowerCase());
-          return hasNumericId || hasUnitKeyword || segments.length >= 4;
+          // PM sites vary wildly — an over-strict path heuristic kills the
+          // only source with live prices (OTA organic results never carry
+          // price). Accept anything deeper than the bare homepage; callers
+          // can use `isLandingUrl` to rank landing pages lower.
+          return path.length > 1 && path !== "/";
         }
       }
+    };
+
+    // Secondary signal: does this PM URL look like a resort-landing page
+    // rather than a specific unit? Used for ranking, NOT for filtering —
+    // we still surface landing pages if that's all the PM offers, but
+    // unit-specific URLs bubble to the top.
+    const isLandingUrl = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): boolean => {
+      if (source !== "pm") return false;
+      let u: URL;
+      try { u = new URL(rawUrl); } catch { return false; }
+      const segments = u.pathname.split("/").filter(Boolean);
+      if (segments.length === 0) return true;
+      const last = segments[segments.length - 1].toLowerCase();
+      const resortSlug = resortName
+        ? resortName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+        : "";
+      if (resortSlug && (last === resortSlug
+                      || last === `${resortSlug}-resort`
+                      || last.replace(/-resort$/, "") === resortSlug)) return true;
+      if (/^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|kauai|oahu|maui|hawaii)$/.test(last)) return true;
+      return false;
     };
 
     // Append the reservation's check-in/out to the URL so the landing page
@@ -1440,8 +1443,16 @@ export async function registerRoutes(
           set("group_adults", "2");
           break;
         case "pm":
-          // No universal convention across PM sites — leave URL alone.
-          return u.toString();
+          // No universal convention across PM sites — sprinkle every common
+          // param name. Sites that use one of these will pre-fill dates;
+          // sites that don't will ignore unknown params.
+          set("checkin", checkIn);
+          set("checkout", checkOut);
+          set("check_in", checkIn);
+          set("check_out", checkOut);
+          set("arrival", checkIn);
+          set("departure", checkOut);
+          break;
       }
       return u.toString();
     };
