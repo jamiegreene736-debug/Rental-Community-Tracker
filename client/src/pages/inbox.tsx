@@ -172,10 +172,22 @@ function formatDate(d?: string) {
 
 function platformBadge(res: GuestyReservation) {
   const src = (res.integration?.platform ?? res.source ?? "").toLowerCase();
-  if (src.includes("airbnb")) return <Badge className="bg-[#FF5A5F] text-white text-[10px]">Airbnb</Badge>;
-  if (src.includes("vrbo") || src.includes("homeaway")) return <Badge className="bg-blue-600 text-white text-[10px]">VRBO</Badge>;
-  if (src.includes("booking")) return <Badge className="bg-blue-800 text-white text-[10px]">Booking</Badge>;
-  return <Badge variant="outline" className="text-[10px]">{src || "Direct"}</Badge>;
+  return channelBadge(src);
+}
+
+// Small inline channel pill used in message timestamps and reservation cards.
+// Accepts any of the raw Guesty channel strings (airbnb, airbnb2, homeaway, vrbo,
+// booking, booking.com, email, sms, whatsapp, direct, manual).
+function channelBadge(raw: string) {
+  const src = (raw || "").toLowerCase();
+  if (src.includes("airbnb")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-[#FF5A5F] text-white">Airbnb</span>;
+  if (src.includes("vrbo") || src.includes("homeaway")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-blue-600 text-white">VRBO</span>;
+  if (src.includes("booking")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-blue-800 text-white">Booking</span>;
+  if (src.includes("email")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-600 text-white">Email</span>;
+  if (src.includes("sms")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-emerald-600 text-white">SMS</span>;
+  if (src.includes("whatsapp")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-green-600 text-white">WhatsApp</span>;
+  if (!src) return null;
+  return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-400 text-white">{src}</span>;
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -768,7 +780,7 @@ export default function InboxPage() {
 
           {/* ── MESSAGES TAB ── */}
           <TabsContent value="messages">
-            <div className="grid grid-cols-[320px_1fr] gap-4 h-[calc(100vh-240px)] min-h-[500px]">
+            <div className="grid grid-cols-[280px_1fr_300px] gap-4 h-[calc(100vh-220px)] min-h-[600px]">
               {/* Conversation List */}
               <div className="border rounded-lg bg-card overflow-y-auto">
                 <div className="px-4 py-3 border-b flex items-center justify-between">
@@ -835,45 +847,78 @@ export default function InboxPage() {
                 ) : (
                   <>
                     {/* Thread header */}
-                    <div className="px-5 py-3 border-b">
-                      <p className="font-medium">{selectedConv?.displayGuestName ?? "Guest"}</p>
-                      <p className="text-xs text-muted-foreground">{selectedConv?.displayListingName ?? "—"}</p>
+                    <div className="px-5 py-3 border-b flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{selectedConv?.displayGuestName ?? "Guest"}</p>
+                        <p className="text-xs text-muted-foreground truncate">{selectedConv?.displayListingName ?? "—"}</p>
+                      </div>
+                      {(() => {
+                        const res = (selectedConv as any)?.meta?.reservations?.[0];
+                        if (!res) return null;
+                        return (
+                          <div className="text-right text-xs text-muted-foreground shrink-0">
+                            <div className="font-mono">{res.confirmationCode ?? ""}</div>
+                            {res.checkIn && res.checkOut && (
+                              <div>
+                                {new Date(res.checkIn).toLocaleDateString([], { month: "short", day: "numeric" })}
+                                {" → "}
+                                {new Date(res.checkOut).toLocaleDateString([], { month: "short", day: "numeric" })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
-                    {/* Messages */}
+                    {/* Messages — sorted oldest → newest, each with channel badge + full timestamp */}
                     <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
                       {(threadLoading || postsLoading) && posts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
-                      {posts.map((p: any) => {
-                        // Tolerate v1 + v2 field names.
-                        const bodyText = p.body ?? p.text ?? p.message ?? "";
-                        const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
-                        const isHost =
-                          p.authorType === "host" ||
-                          p.authorRole === "host" ||
-                          p.senderType === "host" ||
-                          p.direction === "outbound" ||
-                          p.direction === "out" ||
-                          p.isIncoming === false;
-                        return (
-                          <div key={p._id} className={`flex ${isHost ? "justify-end" : "justify-start"}`}>
-                            <div
-                              className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
-                                isHost
-                                  ? "bg-primary text-primary-foreground rounded-br-sm"
-                                  : "bg-muted text-foreground rounded-bl-sm"
-                              }`}
-                              data-testid={`message-${p._id}`}
-                            >
-                              {bodyText}
-                              <div className={`text-[10px] mt-1 ${isHost ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
-                                {when ? new Date(when).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
+                      {[...posts]
+                        .sort((a: any, b: any) => {
+                          const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
+                          const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
+                          return ta - tb; // ascending: oldest at top, newest at bottom
+                        })
+                        .map((p: any) => {
+                          const bodyText = p.body ?? p.text ?? p.message ?? "";
+                          const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
+                          const isHost =
+                            p.authorType === "host" ||
+                            p.authorRole === "host" ||
+                            p.senderType === "host" ||
+                            p.direction === "outbound" ||
+                            p.direction === "out" ||
+                            p.isIncoming === false;
+                          const channel = p.module?.type ?? p.type ?? p.integration?.platform ?? "";
+                          return (
+                            <div key={p._id} className={`flex flex-col ${isHost ? "items-end" : "items-start"}`}>
+                              <div
+                                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
+                                  isHost
+                                    ? "bg-primary text-primary-foreground rounded-br-sm"
+                                    : "bg-muted text-foreground rounded-bl-sm"
+                                }`}
+                                data-testid={`message-${p._id}`}
+                              >
+                                {bodyText}
+                              </div>
+                              {/* Timestamp + channel row, mirrors Guesty's portal */}
+                              <div className="flex items-center gap-1.5 mt-1 text-[10px] text-muted-foreground px-1">
+                                <span>{isHost ? "You" : (selectedConv?.displayGuestName ?? "Guest")}</span>
+                                <span>·</span>
+                                <span>{when ? new Date(when).toLocaleString([], { month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</span>
+                                {channel && (
+                                  <>
+                                    <span>·</span>
+                                    {channelBadge(channel)}
+                                  </>
+                                )}
                               </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
                       {/* Thread debug: only shown when both queries settled and still no posts */}
                       {!threadLoading && !postsLoading && posts.length === 0 && (threadData || postsData) && (
                         <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
@@ -938,6 +983,103 @@ export default function InboxPage() {
                     </div>
                   </>
                 )}
+              </div>
+
+              {/* Reservation detail panel (right column) */}
+              <div className="border rounded-lg bg-card overflow-y-auto">
+                {!selectedConv ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    <Calendar className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                    Select a conversation to see reservation details
+                  </div>
+                ) : (() => {
+                  const meta = (selectedConv as any)?.meta ?? {};
+                  const res = meta.reservations?.[0] ?? null;
+                  const integration = meta.integration ?? {};
+                  const guest = meta.guest ?? {};
+                  const listing = res?.listing ?? {};
+                  const channelRaw = integration.platform ?? res?.source ?? "";
+                  const nights = res?.checkIn && res?.checkOut
+                    ? Math.max(1, Math.round((new Date(res.checkOut).getTime() - new Date(res.checkIn).getTime()) / 86_400_000))
+                    : null;
+                  return (
+                    <div className="p-4 space-y-4 text-sm">
+                      {/* Status / Channel row */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Status</div>
+                          <div className={`mt-0.5 font-medium capitalize ${res?.status === "confirmed" ? "text-green-700" : "text-foreground"}`}>
+                            {res?.status ?? "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Channel</div>
+                          <div className="mt-0.5">{channelBadge(channelRaw) ?? <span className="text-muted-foreground">—</span>}</div>
+                        </div>
+                      </div>
+
+                      {/* Guest */}
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Guest</div>
+                        <div className="mt-0.5 font-medium">{guest.fullName ?? selectedConv.displayGuestName}</div>
+                        {guest.phone && <div className="text-xs text-muted-foreground">{guest.phone}</div>}
+                        {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
+                      </div>
+
+                      {/* Listing */}
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Listing</div>
+                        <div className="mt-0.5 flex gap-2">
+                          {listing.picture?.thumbnail && (
+                            <img src={listing.picture.thumbnail} alt="" className="h-12 w-12 rounded object-cover border" />
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-medium text-xs leading-tight">{listing.title ?? listing.nickname ?? "—"}</div>
+                            {listing.address?.full && (
+                              <div className="text-[11px] text-muted-foreground leading-tight mt-0.5">{listing.address.full}</div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Dates */}
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Check-in</div>
+                          <div className="mt-0.5 font-medium text-xs">
+                            {res?.checkIn ? new Date(res.checkIn).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Check-out</div>
+                          <div className="mt-0.5 font-medium text-xs">
+                            {res?.checkOut ? new Date(res.checkOut).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Nights</div>
+                          <div className="mt-0.5 font-medium text-xs">{nights ?? "—"}</div>
+                        </div>
+                      </div>
+
+                      {/* Confirmation code + reservation link */}
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Confirmation</div>
+                        <div className="mt-0.5 font-mono text-xs">{res?.confirmationCode ?? "—"}</div>
+                        {res?._id && (
+                          <a
+                            href={`https://app.guesty.com/reservations/${res._id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] text-primary hover:underline mt-1 inline-block"
+                          >
+                            Open in Guesty ↗
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </TabsContent>
