@@ -608,6 +608,40 @@ export default function InboxPage() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-6">
+        {/* DEBUG PANEL — shows the raw Guesty response shape so we can tell
+            whether the API returned 0 conversations, a new response shape,
+            or an auth error. Safe to leave in while diagnosing; remove later. */}
+        <details className="mb-4 rounded border bg-amber-50 border-amber-200 text-xs" open>
+          <summary className="cursor-pointer px-3 py-2 font-mono font-semibold text-amber-800">
+            🐞 Debug: Guesty conversations response
+          </summary>
+          <div className="px-3 pb-3 font-mono space-y-1.5 text-amber-900">
+            <div><b>convLoading:</b> {String(convLoading)}</div>
+            <div><b>convError:</b> {convError ? (convError as Error).message : "none"}</div>
+            <div><b>convData type:</b> {convData == null ? String(convData) : Array.isArray(convData) ? `Array(${convData.length})` : typeof convData}</div>
+            {convData && !Array.isArray(convData) && (
+              <div><b>top-level keys:</b> [{Object.keys(convData as object).join(", ")}]</div>
+            )}
+            <div><b>parsed conversations.length:</b> {conversations.length}</div>
+            <div><b>first 2 keys of each nested obj:</b></div>
+            <ul className="ml-4 list-disc">
+              {convData && typeof convData === "object" && !Array.isArray(convData) &&
+                Object.entries(convData as Record<string, unknown>).slice(0, 5).map(([k, v]) => (
+                  <li key={k}>
+                    {k}: {Array.isArray(v) ? `Array(${v.length})` : v == null ? String(v) : typeof v === "object" ? `{${Object.keys(v as object).slice(0,3).join(",")}...}` : JSON.stringify(v).slice(0, 60)}
+                  </li>
+                ))
+              }
+            </ul>
+            <details>
+              <summary className="cursor-pointer text-amber-700">Raw JSON (truncated)</summary>
+              <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] leading-tight whitespace-pre-wrap">
+                {JSON.stringify(convData, null, 2)?.slice(0, 3000) ?? "null"}
+              </pre>
+            </details>
+          </div>
+        </details>
+
         <Tabs defaultValue="messages">
           <TabsList className="mb-6" data-testid="tabs-inbox">
             <TabsTrigger value="messages" data-testid="tab-messages">
