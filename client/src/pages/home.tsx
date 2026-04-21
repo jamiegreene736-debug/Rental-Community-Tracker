@@ -483,28 +483,19 @@ export default function Home() {
                 Community Photos
               </Button>
             </Link>
-            <Link href="/availability-scanner">
-              <Button variant="outline" data-testid="button-availability-scanner">
-                <CalendarSearch className="h-4 w-4 mr-2" />
-                Availability Scanner
-              </Button>
-            </Link>
             <Link href="/inbox">
               <Button variant="outline" data-testid="button-inbox">
                 <MessageSquare className="h-4 w-4 mr-2" />
                 Guest Inbox
               </Button>
             </Link>
+            {/* Operations = consolidated Bookings + Buy-In Tracker + Availability Scanner.
+                The individual pages remain accessible by URL for power users, but the
+                everyday workflow (see booking → find buy-in → record it) lives here. */}
             <Link href="/bookings">
-              <Button variant="outline" data-testid="button-bookings">
+              <Button variant="outline" data-testid="button-operations">
                 <CalendarSearch className="h-4 w-4 mr-2" />
-                Bookings
-              </Button>
-            </Link>
-            <Link href="/buy-in-tracker">
-              <Button variant="outline" data-testid="button-buy-in-tracker">
-                <DollarSign className="h-4 w-4 mr-2" />
-                Buy-In Tracker
+                Operations
               </Button>
             </Link>
           </div>

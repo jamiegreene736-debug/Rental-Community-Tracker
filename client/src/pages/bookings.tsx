@@ -6,17 +6,19 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
-  ChevronDown, ChevronRight,
+  ChevronDown, ChevronRight, Globe, ShoppingCart,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -174,9 +176,9 @@ export default function Bookings() {
         </Link>
         <div className="h-5 w-px bg-border" />
         <div>
-          <h1 className="font-semibold text-lg leading-tight">Bookings</h1>
+          <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
-            Multi-unit listings need one buy-in per physical unit
+            Bookings · Buy-in tracking · Live search across Airbnb, Vrbo, Booking.com, and PM companies
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -561,51 +563,412 @@ function CandidateList({
   }
 
   return (
-    <div className="space-y-2 max-h-[400px] overflow-y-auto">
-      <p className="text-xs text-muted-foreground mb-2">
-        <CheckCircle2 className="h-3.5 w-3.5 inline mr-1 text-green-600" />
-        {candidates.length} eligible — sorted cheapest first
-      </p>
-      {candidates.map((c, idx) => (
-        <div
-          key={c.buyIn.id}
-          className={`border rounded-lg p-3 flex items-center gap-3 ${idx === 0 ? "border-green-500 bg-green-50/50 dark:bg-green-950/20" : ""}`}
-          data-testid={`candidate-${c.buyIn.id}`}
-        >
-          <div className="grow min-w-0">
-            <div className="flex items-center gap-2 mb-0.5">
-              <p className="font-medium text-sm truncate">{c.buyIn.unitLabel}</p>
-              {idx === 0 && <Badge className="bg-green-600 text-white text-[10px]">Cheapest</Badge>}
-              {c.wastedNights > 0 && (
-                <Badge variant="outline" className="text-[10px]">{c.wastedNights} unused nights</Badge>
-              )}
+    <div className="space-y-4 max-h-[60vh] overflow-y-auto">
+      {/* ── Existing buy-ins from DB ─────────────────────────────────── */}
+      {candidates.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Existing buy-ins ({candidates.length})
+          </p>
+          {candidates.map((c, idx) => (
+            <div
+              key={c.buyIn.id}
+              className={`border rounded-lg p-3 flex items-center gap-3 ${idx === 0 ? "border-green-500 bg-green-50/50 dark:bg-green-950/20" : ""}`}
+              data-testid={`candidate-${c.buyIn.id}`}
+            >
+              <div className="grow min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <p className="font-medium text-sm truncate">{c.buyIn.unitLabel}</p>
+                  {idx === 0 && <Badge className="bg-green-600 text-white text-[10px]">Cheapest</Badge>}
+                  {c.wastedNights > 0 && (
+                    <Badge variant="outline" className="text-[10px]">{c.wastedNights} unused nights</Badge>
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground flex items-center gap-3">
+                  <span>
+                    <Calendar className="h-3 w-3 inline mr-0.5" />
+                    {fmtDate(c.buyIn.checkIn)} → {fmtDate(c.buyIn.checkOut)} · {c.buyInNights}n
+                  </span>
+                  {c.buyIn.airbnbConfirmation && (
+                    <span className="font-mono">#{c.buyIn.airbnbConfirmation}</span>
+                  )}
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <p className="font-semibold text-sm">{fmtMoney(c.totalCost)}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {fmtMoney(c.costPerNight)}/night
+                </p>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => onAttach(c.buyIn.id)}
+                disabled={isPending}
+                data-testid={`button-attach-${c.buyIn.id}`}
+              >
+                <Link2 className="h-3.5 w-3.5 mr-1" /> Attach
+              </Button>
             </div>
-            <div className="text-xs text-muted-foreground flex items-center gap-3">
-              <span>
-                <Calendar className="h-3 w-3 inline mr-0.5" />
-                {fmtDate(c.buyIn.checkIn)} → {fmtDate(c.buyIn.checkOut)} · {c.buyInNights}n
-              </span>
-              {c.buyIn.airbnbConfirmation && (
-                <span className="font-mono">#{c.buyIn.airbnbConfirmation}</span>
-              )}
-            </div>
-          </div>
-          <div className="text-right shrink-0">
-            <p className="font-semibold text-sm">{fmtMoney(c.totalCost)}</p>
-            <p className="text-[10px] text-muted-foreground">
-              {fmtMoney(c.costPerNight)}/night
+          ))}
+        </div>
+      )}
+
+      {candidates.length === 0 && (
+        <div className="py-4 text-center text-sm text-muted-foreground border rounded-lg bg-muted/30">
+          <Search className="h-5 w-5 mx-auto mb-1 opacity-40" />
+          No existing buy-ins cover these dates — shop live below.
+        </div>
+      )}
+
+      {/* ── Live multi-source search ─────────────────────────────────── */}
+      <LiveSearchSection
+        reservation={reservation}
+        propertyId={propertyId}
+        slot={slot}
+      />
+    </div>
+  );
+}
+
+// ─── Live search across Airbnb, Vrbo, Booking.com, and PM companies ─────────
+
+type LiveCandidate = {
+  source: "airbnb" | "vrbo" | "booking" | "pm";
+  sourceLabel: string;
+  title: string;
+  url: string;
+  nightlyPrice: number;
+  totalPrice: number;
+  bedrooms?: number;
+  image?: string;
+  snippet?: string;
+};
+
+type FindBuyInResponse = {
+  community: string;
+  bedrooms: number;
+  nights: number;
+  sources: {
+    airbnb: LiveCandidate[];
+    vrbo: LiveCandidate[];
+    booking: LiveCandidate[];
+    pm: LiveCandidate[];
+  };
+  cheapest: LiveCandidate[];
+};
+
+function sourceBadgeClass(src: string) {
+  switch (src) {
+    case "airbnb":  return "bg-[#FF5A5F] text-white";
+    case "vrbo":    return "bg-blue-600 text-white";
+    case "booking": return "bg-blue-800 text-white";
+    case "pm":      return "bg-slate-600 text-white";
+    default:        return "bg-muted";
+  }
+}
+
+function LiveSearchSection({
+  reservation,
+  propertyId,
+  slot,
+}: {
+  reservation: GuestyReservation;
+  propertyId: number;
+  slot: SlotInfo;
+}) {
+  const [enabled, setEnabled] = useState(false);
+  const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
+
+  const { data, isLoading, isError, error, refetch } = useQuery<FindBuyInResponse>({
+    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, reservation.checkIn, reservation.checkOut],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`,
+      ).then((r) => r.json()),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  if (!enabled) {
+    return (
+      <div className="border rounded-lg p-4 bg-blue-50 dark:bg-blue-950/20">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="font-medium text-sm flex items-center gap-1.5">
+              <Globe className="h-4 w-4" /> Live search
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Searches Airbnb, Vrbo, Booking.com, and Google for {slot.bedrooms}BR rentals in the area
+              covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
-          <Button
-            size="sm"
-            onClick={() => onAttach(c.buyIn.id)}
-            disabled={isPending}
-            data-testid={`button-attach-${c.buyIn.id}`}
-          >
-            <Link2 className="h-3.5 w-3.5 mr-1" /> Attach
+          <Button size="sm" onClick={() => setEnabled(true)} data-testid="button-run-live-search">
+            <Search className="h-3.5 w-3.5 mr-1.5" /> Search now
           </Button>
         </div>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="border rounded-lg p-6 text-center text-sm text-muted-foreground">
+        <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
+        Searching Airbnb, Vrbo, Booking.com, and PM companies…
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="border rounded-lg p-4 text-sm text-destructive">
+        <AlertCircle className="h-4 w-4 inline mr-1" /> Search failed: {(error as Error).message}
+        <Button size="sm" variant="outline" className="ml-2" onClick={() => refetch()}>Retry</Button>
+      </div>
+    );
+  }
+
+  const airbnb  = data?.sources.airbnb  ?? [];
+  const vrbo    = data?.sources.vrbo    ?? [];
+  const booking = data?.sources.booking ?? [];
+  const pm      = data?.sources.pm      ?? [];
+  const cheapest = data?.cheapest       ?? [];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Live results — {data?.community} · {slot.bedrooms}BR · {data?.nights} nights
+        </p>
+        <Button size="sm" variant="ghost" onClick={() => refetch()}>
+          <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
+        </Button>
+      </div>
+
+      {/* Cheapest callout */}
+      {cheapest.length > 0 && (
+        <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
+          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">
+            <TrendingDown className="h-3.5 w-3.5 inline mr-1" />
+            Cheapest {cheapest.length} — buy these
+          </p>
+          <div className="space-y-2">
+            {cheapest.map((c, i) => (
+              <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* By-source sections */}
+      {[
+        { key: "airbnb",  label: "Airbnb",        items: airbnb  },
+        { key: "vrbo",    label: "Vrbo",          items: vrbo    },
+        { key: "booking", label: "Booking.com",   items: booking },
+        { key: "pm",      label: "PM Companies (Google)", items: pm },
+      ].map((s) => (
+        <details key={s.key} open={s.items.length > 0 && s.items.length <= 3}>
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
+            <Badge className={`text-[10px] ${sourceBadgeClass(s.key)}`}>{s.label}</Badge>
+            <span>{s.items.length} results</span>
+          </summary>
+          {s.items.length === 0 ? (
+            <p className="text-xs text-muted-foreground pl-2 py-2">No results.</p>
+          ) : (
+            <div className="space-y-2 mt-1.5 pl-2">
+              {s.items.map((c, i) => (
+                <LiveRow key={`${s.key}-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} />
+              ))}
+            </div>
+          )}
+        </details>
       ))}
+
+      {recordTarget && (
+        <RecordBuyInDialog
+          candidate={recordTarget}
+          reservation={reservation}
+          propertyId={propertyId}
+          slot={slot}
+          onClose={() => setRecordTarget(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () => void; highlight?: boolean }) {
+  return (
+    <div
+      className={`border rounded-lg p-2.5 flex items-start gap-2.5 ${highlight ? "bg-white dark:bg-background" : ""}`}
+    >
+      {c.image && (
+        <img src={c.image} alt="" className="h-14 w-14 rounded object-cover shrink-0" />
+      )}
+      <div className="grow min-w-0">
+        <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+          <Badge className={`text-[9px] ${sourceBadgeClass(c.source)}`}>{c.sourceLabel}</Badge>
+          <p className="font-medium text-sm truncate">{c.title}</p>
+        </div>
+        {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
+      </div>
+      <div className="text-right shrink-0 min-w-[80px]">
+        {c.nightlyPrice > 0 ? (
+          <>
+            <p className="font-semibold text-sm">{fmtMoney(c.totalPrice)}</p>
+            <p className="text-[10px] text-muted-foreground">{fmtMoney(c.nightlyPrice)}/night</p>
+          </>
+        ) : (
+          <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+        )}
+      </div>
+      <div className="flex flex-col gap-1 shrink-0">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 px-2 text-[11px]"
+          onClick={() => window.open(c.url, "_blank", "noopener,noreferrer")}
+        >
+          <ExternalLink className="h-3 w-3 mr-1" /> Open
+        </Button>
+        {c.nightlyPrice > 0 && (
+          <Button
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            onClick={onRecord}
+          >
+            <ShoppingCart className="h-3 w-3 mr-1" /> Record
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Dialog: pre-fills the buy-in form with the live candidate's data, posts to
+// /api/buy-ins, then attaches the new buy-in to the reservation slot.
+function RecordBuyInDialog({
+  candidate,
+  reservation,
+  propertyId,
+  slot,
+  onClose,
+}: {
+  candidate: LiveCandidate;
+  reservation: GuestyReservation;
+  propertyId: number;
+  slot: SlotInfo;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [costPaid, setCostPaid] = useState(String(candidate.totalPrice || ""));
+  const [confirmation, setConfirmation] = useState("");
+  const [listingUrl, setListingUrl] = useState(candidate.url);
+  const [notes, setNotes] = useState("");
+
+  const createAndAttach = useMutation({
+    mutationFn: async () => {
+      const body = {
+        propertyId,
+        unitId: slot.unitId,
+        unitLabel: slot.unitLabel,
+        bedrooms: slot.bedrooms,
+        checkIn: reservation.checkIn,
+        checkOut: reservation.checkOut,
+        costPaid: Number(costPaid),
+        airbnbConfirmation: confirmation || null,
+        airbnbListingUrl: listingUrl || null,
+        notes: notes || `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
+        status: "active",
+      };
+      const created = await apiRequest("POST", "/api/buy-ins", body).then((r) => r.json());
+      if (!created?.id) throw new Error("Buy-in create failed");
+      const attach = await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+        buyInId: created.id,
+      }).then((r) => r.json());
+      if (!attach?.success) throw new Error(attach?.error || "Attach failed");
+      return created;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      toast({ title: "Buy-in recorded and attached" });
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Record buy-in from {candidate.sourceLabel}</DialogTitle>
+          <DialogDescription>
+            Once you've actually booked it on {candidate.sourceLabel}, fill in the confirmation
+            and save. This creates the buy-in and attaches it to {slot.unitLabel}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="text-xs bg-muted rounded p-2">
+            <p className="font-medium truncate">{candidate.title}</p>
+            <p className="text-muted-foreground">
+              {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)} · {slot.unitLabel} ({slot.bedrooms} BR)
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="costPaid" className="text-xs">Total cost paid (USD)</Label>
+            <Input
+              id="costPaid"
+              type="number"
+              step="0.01"
+              value={costPaid}
+              onChange={(e) => setCostPaid(e.target.value)}
+              data-testid="input-cost-paid"
+            />
+          </div>
+          <div>
+            <Label htmlFor="confirmation" className="text-xs">Confirmation code</Label>
+            <Input
+              id="confirmation"
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              placeholder="HM4TZJTE8P"
+              data-testid="input-confirmation"
+            />
+          </div>
+          <div>
+            <Label htmlFor="listingUrl" className="text-xs">Listing URL</Label>
+            <Input
+              id="listingUrl"
+              value={listingUrl}
+              onChange={(e) => setListingUrl(e.target.value)}
+              data-testid="input-listing-url"
+            />
+          </div>
+          <div>
+            <Label htmlFor="notes" className="text-xs">Notes</Label>
+            <Textarea
+              id="notes"
+              rows={2}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={`Bought via ${candidate.sourceLabel}`}
+              data-testid="input-notes"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button
+            onClick={() => createAndAttach.mutate()}
+            disabled={!costPaid || createAndAttach.isPending}
+            data-testid="button-save-buy-in"
+          >
+            {createAndAttach.isPending ? "Saving…" : "Save & attach"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

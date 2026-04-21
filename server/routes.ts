@@ -1268,6 +1268,216 @@ export async function registerRoutes(
     }
   });
 
+  // ========== OPERATIONS: FIND BUY-IN ACROSS ALL SOURCES ==========
+  //
+  // Fan-out search across Airbnb, Vrbo/Booking.com, and Google-discovered
+  // property-management companies for a given community + date range + bedroom
+  // count. Returns unified, price-sorted candidates so the host can pick the
+  // cheapest option to buy in at.
+  //
+  // GET /api/operations/find-buy-in?propertyId=X&bedrooms=N&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD
+  // Response:
+  //   {
+  //     community, nights, dates,
+  //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
+  //     cheapest: [top 2 cross-source by nightly price]
+  //   }
+  app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const propertyId = parseInt(req.query.propertyId as string, 10);
+    const bedrooms = parseInt(req.query.bedrooms as string, 10);
+    const checkIn = req.query.checkIn as string;
+    const checkOut = req.query.checkOut as string;
+
+    if (!propertyId || isNaN(propertyId)) return res.status(400).json({ error: "propertyId required" });
+    if (!bedrooms || isNaN(bedrooms)) return res.status(400).json({ error: "bedrooms required" });
+    if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+
+    const config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config) return res.status(404).json({ error: "Property not in config" });
+
+    const community = config.community;
+    const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
+    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+    const vrboDestination = COMMUNITY_VRBO_DESTINATIONS[community] || `${community}, Hawaii`;
+    const bounds = COMMUNITY_BOUNDS[community];
+
+    type Candidate = {
+      source: "airbnb" | "vrbo" | "booking" | "pm";
+      sourceLabel: string;
+      title: string;
+      url: string;
+      nightlyPrice: number;
+      totalPrice: number;
+      bedrooms?: number;
+      image?: string;
+      snippet?: string;
+    };
+
+    const asNum = (v: unknown): number => {
+      if (typeof v === "number") return v;
+      if (typeof v === "string") return Number(v.replace(/[^\d.]/g, "")) || 0;
+      return 0;
+    };
+
+    // ── Airbnb via SearchAPI ───────────────────────────────────────────────
+    const airbnbPromise: Promise<Candidate[]> = (async () => {
+      try {
+        const params = new URLSearchParams({
+          engine: "airbnb",
+          q: searchLocation,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          bedrooms: String(bedrooms),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+        });
+        if (bounds) {
+          params.set("sw_lat", String(bounds.sw_lat));
+          params.set("sw_lng", String(bounds.sw_lng));
+          params.set("ne_lat", String(bounds.ne_lat));
+          params.set("ne_lng", String(bounds.ne_lng));
+        }
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!r.ok) return [];
+        const data = await r.json() as any;
+        const props = Array.isArray(data?.properties) ? data.properties : [];
+        return props.slice(0, 8).map((p: any): Candidate => {
+          const total = asNum(p?.price?.total ?? p?.total_price);
+          const nightly = asNum(p?.price?.rate_per_night ?? p?.price?.nightly ?? (total && nights ? total / nights : 0));
+          return {
+            source: "airbnb",
+            sourceLabel: "Airbnb",
+            title: String(p?.name ?? p?.title ?? "Airbnb listing"),
+            url: String(p?.link ?? p?.url ?? ""),
+            nightlyPrice: Math.round(nightly),
+            totalPrice: Math.round(total || nightly * nights),
+            bedrooms: p?.bedrooms,
+            image: p?.images?.[0] ?? p?.image,
+          };
+        }).filter((c: Candidate) => c.url && c.nightlyPrice > 0);
+      } catch (e: any) {
+        console.error("[find-buy-in] airbnb error:", e.message);
+        return [];
+      }
+    })();
+
+    // ── Vrbo + Booking.com via SearchAPI Google Hotels engine ──────────────
+    // Google Hotels returns both platforms mixed together under `properties[].source`.
+    const hotelsPromise: Promise<{ vrbo: Candidate[]; booking: Candidate[] }> = (async () => {
+      try {
+        const params = new URLSearchParams({
+          engine: "google_hotels",
+          q: vrboDestination,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          property_type: "vacation_rental",
+          bedrooms: String(bedrooms),
+          sort_by: "lowest_price",
+          currency: "USD",
+          api_key: apiKey,
+        });
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!r.ok) return { vrbo: [], booking: [] };
+        const data = await r.json() as any;
+        const props = Array.isArray(data?.properties) ? data.properties : [];
+        const vrbo: Candidate[] = [];
+        const booking: Candidate[] = [];
+        for (const p of props) {
+          const nightly = asNum(p?.rate_per_night?.extracted_lowest ?? p?.rate_per_night?.lowest ?? p?.price?.nightly);
+          const total = asNum(p?.total_rate?.extracted_lowest ?? p?.total_rate?.lowest ?? nightly * nights);
+          const url = String(p?.link ?? p?.website ?? "");
+          const src = (p?.source ?? "").toLowerCase();
+          const title = String(p?.name ?? "Listing");
+          const c: Candidate = {
+            source: "vrbo",
+            sourceLabel: "Vrbo",
+            title,
+            url,
+            nightlyPrice: Math.round(nightly),
+            totalPrice: Math.round(total),
+            image: p?.images?.[0]?.thumbnail ?? p?.images?.[0]?.original_image,
+          };
+          if (url.includes("vrbo") || src.includes("vrbo") || src.includes("homeaway")) {
+            vrbo.push({ ...c, source: "vrbo", sourceLabel: "Vrbo" });
+          } else if (url.includes("booking.com") || src.includes("booking")) {
+            booking.push({ ...c, source: "booking", sourceLabel: "Booking.com" });
+          }
+        }
+        return {
+          vrbo: vrbo.filter(c => c.url && c.nightlyPrice > 0).slice(0, 8),
+          booking: booking.filter(c => c.url && c.nightlyPrice > 0).slice(0, 8),
+        };
+      } catch (e: any) {
+        console.error("[find-buy-in] hotels error:", e.message);
+        return { vrbo: [], booking: [] };
+      }
+    })();
+
+    // ── Property-management companies via Google search ────────────────────
+    // No live pricing — we return company sites + their booking page as
+    // starting points so the host can price-check manually if the OTA results
+    // above aren't cheap enough.
+    const pmPromise: Promise<Candidate[]> = (async () => {
+      try {
+        const query = `${community} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`;
+        const params = new URLSearchParams({
+          engine: "google",
+          q: query,
+          num: "10",
+          api_key: apiKey,
+        });
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!r.ok) return [];
+        const data = await r.json() as any;
+        const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
+        return organic.slice(0, 8).map((o: any): Candidate => ({
+          source: "pm",
+          sourceLabel: "PM Company",
+          title: String(o?.title ?? "Property manager"),
+          url: String(o?.link ?? ""),
+          nightlyPrice: 0, // No price data — manual check required
+          totalPrice: 0,
+          snippet: String(o?.snippet ?? "").slice(0, 140),
+        })).filter((c: Candidate) => c.url);
+      } catch (e: any) {
+        console.error("[find-buy-in] pm error:", e.message);
+        return [];
+      }
+    })();
+
+    const [airbnb, hotels, pm] = await Promise.all([airbnbPromise, hotelsPromise, pmPromise]);
+
+    // Combined cheapest (top 2) across sources that have pricing
+    const priced: Candidate[] = [...airbnb, ...hotels.vrbo, ...hotels.booking]
+      .filter(c => c.nightlyPrice > 0)
+      .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
+    const cheapest = priced.slice(0, 2);
+
+    return res.json({
+      community,
+      bedrooms,
+      nights,
+      checkIn,
+      checkOut,
+      sources: {
+        airbnb: airbnb.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
+        vrbo: hotels.vrbo.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
+        booking: hotels.booking.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
+        pm,
+      },
+      cheapest,
+      totalPricedResults: priced.length,
+    });
+  });
+
   // ========== BOOKINGS ↔ BUY-INS (Layer A: per-unit-slot attachment) ==========
   //
   // A multi-unit Guesty listing (e.g. 6-BR = 3-BR Unit 721 + 3-BR Unit 812) requires
