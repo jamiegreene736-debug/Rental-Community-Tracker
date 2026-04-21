@@ -1775,6 +1775,88 @@ export async function registerRoutes(
     });
   });
 
+  // ─── Availability verification ─────────────────────────────────────────
+  // Pre-flight for auto-fill: given a specific listing URL + dates, confirm
+  // the listing is actually bookable for those exact dates (not just that
+  // it appeared in a broad search result). Prevents attaching buy-ins to
+  // listings that have been booked since the initial search, or that
+  // returned a "starting from" price not tied to our specific nights.
+  //
+  // Only Airbnb is verifiable — we re-call the airbnb engine with a narrow
+  // query (resort + bedroom count + dates) and confirm the listing id is
+  // still in the priced results. Vrbo/Booking/PM have no per-listing
+  // verification endpoint in SearchAPI, so they return available=null
+  // (unknown — don't block the attach, just flag to the client).
+  app.get("/api/operations/verify-listing", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const url = req.query.url as string;
+    const checkIn = req.query.checkIn as string;
+    const checkOut = req.query.checkOut as string;
+    const q = (req.query.q as string) || "";
+    const bedroomsRaw = req.query.bedrooms as string | undefined;
+    const bedrooms = bedroomsRaw ? parseInt(bedroomsRaw, 10) : null;
+
+    if (!url) return res.status(400).json({ error: "url required" });
+    if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+
+    // Extract Airbnb listing id — skip verification for other sources.
+    const m = url.match(/airbnb\.com\/rooms\/(?:plus\/)?(\d+)/);
+    if (!m) {
+      return res.json({ available: null, reason: "unsupported-source", listingId: null });
+    }
+    const listingId = m[1];
+
+    try {
+      const sp: Record<string, string> = {
+        engine: "airbnb",
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        adults: "2",
+        currency: "USD",
+        api_key: apiKey,
+        q: q || "Hawaii",
+      };
+      if (bedrooms && !isNaN(bedrooms)) sp.bedrooms = String(bedrooms);
+      const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+      if (!r.ok) {
+        return res.json({ available: null, reason: `engine-${r.status}`, listingId });
+      }
+      const data = await r.json() as any;
+      const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+      const match = properties.find((p: any) => String(p?.id ?? "") === listingId);
+
+      if (!match) {
+        // Listing didn't appear in the re-query. Could mean it's been booked,
+        // dropped out of the top-N for other reasons, or is just further down
+        // the results. Conservative: report available=false only when the
+        // query was narrow enough that absence is meaningful (q present AND
+        // bedrooms present). Otherwise report unknown.
+        if (q && bedrooms) {
+          return res.json({ available: false, reason: "not-in-priced-results", listingId, checkedCount: properties.length });
+        }
+        return res.json({ available: null, reason: "insufficient-query-scope", listingId, checkedCount: properties.length });
+      }
+
+      const total = Number(match?.price?.extracted_total_price ?? 0);
+      if (!(total > 0)) {
+        return res.json({ available: false, reason: "no-price-on-listing", listingId });
+      }
+      return res.json({
+        available: true,
+        listingId,
+        currentTotalPrice: total,
+        title: match?.name ?? match?.title ?? null,
+      });
+    } catch (e: any) {
+      console.error(`[verify-listing] error for ${listingId}:`, e.message);
+      return res.json({ available: null, reason: "network-error", listingId });
+    }
+  });
+
   // ========== BOOKINGS ↔ BUY-INS (Layer A: per-unit-slot attachment) ==========
   //
   // A multi-unit Guesty listing (e.g. 6-BR = 3-BR Unit 721 + 3-BR Unit 812) requires

@@ -309,11 +309,35 @@ export default function Bookings() {
         emptySlots.map(async (slot) => {
           const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${slot.bedrooms}&checkIn=${ci}&checkOut=${co}`;
           const data = (await apiRequest("GET", url).then((r) => r.json())) as FindBuyInResponse;
-          // Cheapest across all sources; skip any without a live price so we
-          // don't create a bogus $0 buy-in that breaks the profit math.
-          const pick = (data.cheapest ?? []).find((c) => c.totalPrice > 0);
-          if (!pick) return { slot, picked: null, created: null };
 
+          // Walk cheapest-first and run an availability pre-flight on each
+          // Airbnb pick. Non-Airbnb sources aren't verifiable via SearchAPI
+          // so they're treated as "unknown" (we don't block). We take the
+          // first candidate that's verified-available or unknown. This
+          // catches races where the listing got booked between initial
+          // search and the attach click.
+          const candidates = (data.cheapest ?? []).filter((c) => c.totalPrice > 0);
+          let pick: LiveCandidate | null = null;
+          let verifiedPrice: number | null = null;
+          let skippedReasons: string[] = [];
+
+          for (const c of candidates.slice(0, 4)) {
+            const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
+            const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
+            if (v?.available === false) {
+              skippedReasons.push(`${c.sourceLabel}: ${v.reason ?? "unavailable"}`);
+              continue;
+            }
+            pick = c;
+            if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
+              verifiedPrice = v.currentTotalPrice;
+            }
+            break;
+          }
+
+          if (!pick) return { slot, picked: null, created: null, skippedReasons };
+
+          const finalCost = verifiedPrice ?? pick.totalPrice;
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
             unitId: slot.unitId,
@@ -321,7 +345,7 @@ export default function Bookings() {
             bedrooms: slot.bedrooms,
             checkIn: ci,
             checkOut: co,
-            costPaid: pick.totalPrice,
+            costPaid: finalCost,
             airbnbConfirmation: null,
             airbnbListingUrl: pick.url,
             notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}`,
@@ -333,7 +357,7 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
-          return { slot, picked: pick, created };
+          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons };
         }),
       );
       return { reservation, results };
