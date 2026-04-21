@@ -1389,10 +1389,31 @@ export async function registerRoutes(
           // Hotel detail pages end in .html under /hotel/
           return /^\/hotel\/[a-z]{2}\/.+\.html$/i.test(path)
               && !/searchresults/i.test(path);
-        case "pm":
-          // PM sites vary wildly — reject bare homepage (path "/" or empty).
-          // Anything deeper is a plausible listing/detail page.
-          return path.length > 1 && path !== "/";
+        case "pm": {
+          // PM sites vary wildly and "deeper than /" isn't strict enough —
+          // e.g. castleresorts.com/kauai/kaha-lani-resort/ is a resort
+          // landing, not a specific unit. Require stronger signals.
+          if (path.length <= 1 || path === "/") return false;
+          const segments = path.split("/").filter(Boolean);
+          const last = (segments[segments.length - 1] ?? "").toLowerCase();
+          // Reject if the last segment looks like a resort landing — either
+          // matches the target resort's slug, or is a generic category.
+          const resortSlug = resortName
+            ? resortName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+            : "";
+          if (resortSlug && (last === resortSlug
+                          || last === `${resortSlug}-resort`
+                          || last.replace(/-resort$/, "") === resortSlug)) {
+            return false;
+          }
+          if (/^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|kauai|oahu|maui|hawaii)$/.test(last)) {
+            return false;
+          }
+          // Positive signals that the URL points to a specific unit or room.
+          const hasNumericId = /\/\d{3,}(?:[\/-]|$)/.test(path);
+          const hasUnitKeyword = /\b(unit|room|rooms|condo|villa|listing|property|rental|book|bookings|reservation|details?)\b/.test(path.toLowerCase());
+          return hasNumericId || hasUnitKeyword || segments.length >= 4;
+        }
       }
     };
 
