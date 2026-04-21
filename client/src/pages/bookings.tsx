@@ -89,6 +89,29 @@ export default function Bookings() {
     queryKey: ["/api/guesty-property-map"],
   });
 
+  // Pull Guesty's listing names so we can show human-readable property names
+  // (e.g. "Poipu Kai - 6BR Villas, Pool - Sleeps 16") instead of internal IDs.
+  const { data: guestyListings } = useQuery<any>({
+    queryKey: ["/api/guesty-proxy/listings?limit=100&fields=_id%20nickname%20title"],
+    staleTime: 5 * 60_000,
+  });
+  const listingNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    const unwrap = (d: any): any[] => {
+      if (Array.isArray(d)) return d;
+      if (Array.isArray(d?.results)) return d.results;
+      if (Array.isArray(d?.data)) return d.data;
+      if (Array.isArray(d?.data?.results)) return d.data.results;
+      return [];
+    };
+    for (const l of unwrap(guestyListings)) {
+      const id = l?._id;
+      const name = l?.nickname ?? l?.title;
+      if (id && name) map.set(id, name);
+    }
+    return map;
+  }, [guestyListings]);
+
   const selectedMapping = propertyMap.find((m) => m.propertyId === selectedPropertyId);
   const selectedListingId = selectedMapping?.guestyListingId ?? null;
 
@@ -214,13 +237,23 @@ export default function Bookings() {
                   <SelectContent>
                     {propertyMap
                       .slice()
-                      .sort((a, b) => a.propertyId - b.propertyId)
-                      .map((m) => (
-                        <SelectItem key={m.propertyId} value={m.propertyId.toString()}>
-                          Property {m.propertyId}{" "}
-                          <span className="text-muted-foreground">· listing {m.guestyListingId.slice(-8)}</span>
-                        </SelectItem>
-                      ))}
+                      .sort((a, b) => {
+                        // Sort by Guesty nickname if we have it, fall back to propertyId
+                        const na = listingNameById.get(a.guestyListingId) ?? `~${a.propertyId}`;
+                        const nb = listingNameById.get(b.guestyListingId) ?? `~${b.propertyId}`;
+                        return na.localeCompare(nb);
+                      })
+                      .map((m) => {
+                        const name = listingNameById.get(m.guestyListingId);
+                        return (
+                          <SelectItem key={m.propertyId} value={m.propertyId.toString()}>
+                            {name ?? `Property ${m.propertyId}`}
+                            <span className="text-muted-foreground text-xs ml-1.5">
+                              · #{m.propertyId}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
                   </SelectContent>
                 </Select>
               </div>
