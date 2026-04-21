@@ -94,33 +94,70 @@ export async function validateAndFixPhoto(
     }
   }
 
-  // Convert to JPEG if not already, and compress under 4MB.
-  // We step quality down from 88 until we fit the budget.
-  let quality = 88;
-  let outBuf = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
+  // Encode with high-quality settings tuned for photographic content:
+  //   - mozjpeg + trellis quantisation → better compression for same visual quality
+  //   - chromaSubsampling "4:4:4" → no chroma downsampling, preserves sharp edges
+  //     (trim details, text, dividers — important for a cover collage)
+  //   - mild post-resize sharpen → counteracts bicubic softening after downscale
+  //   - Lanczos3 is sharp's default kernel, already optimal
+  const needsSharpen = preResizeW > TARGET_WIDTH; // only sharpen when downscaling
+  const buildPipeline = (q: number, subsampling: "4:4:4" | "4:2:0") => {
+    let p = sharp(afterRotateBuf).resize({
+      width: TARGET_WIDTH,
+      fit: "inside",
+      withoutEnlargement: false,
+      kernel: "lanczos3",
+    });
+    if (needsSharpen) p = p.sharpen({ sigma: 0.6, m1: 0.3, m2: 0.8 });
+    return p.jpeg({
+      quality: q,
+      mozjpeg: true,
+      chromaSubsampling: subsampling,
+      trellisQuantisation: true,
+      overshootDeringing: true,
+      optimiseScans: true,
+    }).toBuffer();
+  };
+
+  // Start with top-tier settings
+  let quality = 90;
+  let subsampling: "4:4:4" | "4:2:0" = "4:4:4";
+  let outBuf = await buildPipeline(quality, subsampling);
 
   if (inputMime !== "image/jpeg") {
     changes.push(`converted ${inputMime} → image/jpeg`);
   }
 
-  while (outBuf.length > MAX_FILE_BYTES && quality > 40) {
-    quality -= 8;
-    outBuf = await sharp(afterRotateBuf)
-      .resize({ width: TARGET_WIDTH, fit: "inside", withoutEnlargement: false })
-      .jpeg({ quality, mozjpeg: true })
-      .toBuffer();
+  // If over budget, step 1: drop to 4:2:0 chroma (half the chroma data, minimal perceived loss)
+  if (outBuf.length > MAX_FILE_BYTES) {
+    subsampling = "4:2:0";
+    outBuf = await buildPipeline(quality, subsampling);
+  }
+
+  // Step 2: walk quality down in small increments for graceful degradation
+  while (outBuf.length > MAX_FILE_BYTES && quality > 72) {
+    quality -= 3;
+    outBuf = await buildPipeline(quality, subsampling);
+  }
+
+  // Step 3: larger steps only if still over
+  while (outBuf.length > MAX_FILE_BYTES && quality > 55) {
+    quality -= 5;
+    outBuf = await buildPipeline(quality, subsampling);
   }
 
   if (outBuf.length > MAX_FILE_BYTES) {
-    // Last resort: shrink to 1600 wide at quality 75
+    // Last resort: shrink to 1600 wide at quality 72 — only triggers for pathologically
+    // huge/uncompressible input. Rare in practice.
     outBuf = await sharp(afterRotateBuf)
-      .resize({ width: 1600, fit: "inside", withoutEnlargement: false })
-      .jpeg({ quality: 75, mozjpeg: true })
+      .resize({ width: 1600, fit: "inside", withoutEnlargement: false, kernel: "lanczos3" })
+      .sharpen({ sigma: 0.5, m1: 0.2, m2: 0.7 })
+      .jpeg({ quality: 72, mozjpeg: true, chromaSubsampling: "4:2:0", trellisQuantisation: true })
       .toBuffer();
     const m = await sharp(outBuf).metadata();
     finalWidth = m.width ?? 1600;
     finalHeight = m.height ?? 900;
-    changes.push(`emergency resize to ${finalWidth}×${finalHeight} q75 to fit 4MB budget`);
+    changes.push(`emergency resize to ${finalWidth}×${finalHeight} q72 to fit 4MB budget`);
   }
 
   if (originalBytes !== outBuf.length && !changes.some((c) => c.includes("q75"))) {

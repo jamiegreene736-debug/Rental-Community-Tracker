@@ -2554,6 +2554,15 @@ export async function registerRoutes(
           continue;
         }
 
+        // Preserve the auto-generated cover collage exactly — it's already at spec
+        // (1920×1080 JPEG from canvas) and re-encoding blurs the thin divider line.
+        if (caption === "Cover Collage") {
+          normalized.push({ original: url, caption });
+          skippedCount++;
+          emit({ type: "photo", listingId, index, total: pictures.length, success: true, skipped: true, preservedCollage: true });
+          continue;
+        }
+
         try {
           // Download current photo
           const dlResp = await fetch(url);

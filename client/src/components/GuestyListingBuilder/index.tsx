@@ -2266,20 +2266,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                       >
                                         🔧 Normalize photos already in Guesty
                                       </button>
-                                      <button
-                                        className="glb-btn"
-                                        onClick={() => {
-                                          if (confirm("Normalize photos across ALL Guesty-mapped listings? This can take a while and may hit Guesty's 100-photo/week sync cap.")) {
-                                            runNormalize("all");
-                                          }
-                                        }}
-                                        style={{ fontSize: 11, background: "transparent", color: "#92400e", border: "1px dashed #fcd34d" }}
-                                        data-testid="btn-normalize-all"
-                                      >
-                                        …or all listings
-                                      </button>
                                       <span style={{ fontSize: 11, color: "#92400e" }}>
-                                        Rotates portraits, resizes to 1920×1080, compresses to ≤4MB. Fixes Booking.com "still processing" errors.
+                                        Rotates portraits, resizes to 1920×1080, JPEG q90 4:4:4. Skips the cover collage. Fixes Booking.com "still processing" errors.
                                       </span>
                                       {normalizePhase === "done" && (
                                         <div style={{ width: "100%", fontSize: 12, color: "#15803d", marginTop: 4 }}>
