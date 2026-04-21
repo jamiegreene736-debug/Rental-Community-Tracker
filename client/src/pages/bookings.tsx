@@ -40,7 +40,16 @@ interface GuestyReservation {
   checkOutDateLocalized?: string;
   nightsCount?: number;
   guest?: { fullName?: string; firstName?: string; email?: string };
-  money?: { hostPayout?: number; fareAccommodation?: number; netIncome?: number };
+  money?: {
+    hostPayout?: number;
+    fareAccommodation?: number;
+    netIncome?: number;
+    // Payment status — surfaced in Guesty's Payments tab
+    totalPaid?: number;
+    balanceDue?: number;
+    isFullyPaid?: boolean;
+    totalRefunded?: number;
+  };
   source?: string;
   integration?: { platform?: string };
   confirmationCode?: string;
@@ -473,16 +482,19 @@ export default function Bookings() {
                   No bookings found for this listing.
                 </p>
               )}
-              {/* Sortable column headers — click any to re-sort */}
+              {/* Sortable column headers — mirrors the data row exactly so
+                  every column lines up: chevron-spacer + 6-col grid. */}
               {reservations.length > 0 && (
-                <div className="px-4 py-2 border-b text-[10px] uppercase tracking-wider text-muted-foreground grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
-                  <span className="pl-7" /> {/* spacer for chevron + expand icon */}
-                  <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
-                  <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
-                  <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
-                  <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
-                  <SortHeader label="Profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
-                  <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
+                <div className="px-4 py-2 border-b flex items-center gap-3">
+                  <span className="w-4 h-4 shrink-0" /> {/* matches chevron icon in row */}
+                  <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
+                    <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
+                    <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
+                    <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
+                    <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
+                    <SortHeader label="Profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
+                    <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
+                  </div>
                 </div>
               )}
               {reservations.map((r) => {
@@ -515,7 +527,36 @@ export default function Bookings() {
                         </div>
                         <div className="text-sm text-right">
                           <p className="font-medium">{fmtMoney(payout)}</p>
-                          <p className="text-[10px] text-muted-foreground">guest payout</p>
+                          {(() => {
+                            // Payment status from Guesty's money object (same
+                            // data as the Payments tab in Guesty's reservation
+                            // view). Three states: paid / partial / unpaid.
+                            const totalPaid = r.money?.totalPaid ?? 0;
+                            const balanceDue = r.money?.balanceDue ?? 0;
+                            const fullyPaid = r.money?.isFullyPaid === true || (balanceDue <= 0 && totalPaid > 0);
+                            if (fullyPaid) {
+                              return (
+                                <p className="text-[10px] font-medium text-green-700 flex items-center justify-end gap-0.5">
+                                  <CheckCircle2 className="h-2.5 w-2.5" /> Paid in full
+                                </p>
+                              );
+                            }
+                            if (totalPaid > 0) {
+                              return (
+                                <p className="text-[10px] text-amber-700">
+                                  {fmtMoney(totalPaid)} paid · {fmtMoney(balanceDue)} due
+                                </p>
+                              );
+                            }
+                            if (balanceDue > 0) {
+                              return (
+                                <p className="text-[10px] text-red-700 font-medium">
+                                  {fmtMoney(balanceDue)} unpaid
+                                </p>
+                              );
+                            }
+                            return <p className="text-[10px] text-muted-foreground">guest payout</p>;
+                          })()}
                         </div>
                         <div className="text-sm text-right">
                           <p className="font-medium">{fmtMoney(totalBuyInCost)}</p>
