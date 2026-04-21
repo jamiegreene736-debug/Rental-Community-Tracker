@@ -451,6 +451,7 @@ export default function InboxPage() {
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
 
+  // Conversation metadata (assignee, priority, integration, etc.)
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId],
     enabled: !!selectedConvId,
@@ -462,9 +463,29 @@ export default function InboxPage() {
     refetchInterval: 30_000,
   });
 
+  // Inbox-v2: posts live at a SEPARATE endpoint, not inside the conversation
+  // document. Fetch them independently so the thread actually populates.
+  const { data: postsData, isLoading: postsLoading } = useQuery<any>({
+    queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest(
+        "GET",
+        `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100`,
+      );
+      if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+  });
+
   const posts: GuestyPost[] = (() => {
-    const found = unwrapList<GuestyPost>(threadData, ["posts", "messages"]);
-    if (found.length > 0) return found;
+    // postsData from the /posts endpoint is the authoritative source.
+    const fromPosts = unwrapList<GuestyPost>(postsData, ["posts", "results", "messages"]);
+    if (fromPosts.length > 0) return fromPosts;
+    // Fallback: some older responses stored posts inline on the conversation.
+    const fromThread = unwrapList<GuestyPost>(threadData, ["posts", "messages"]);
+    if (fromThread.length > 0) return fromThread;
     return selectedConv?.posts ?? [];
   })();
 
@@ -495,6 +516,7 @@ export default function InboxPage() {
     onSuccess: () => {
       setReplyText("");
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       toast({ title: "Message sent!" });
     },
@@ -820,32 +842,20 @@ export default function InboxPage() {
 
                     {/* Messages */}
                     <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-                      {threadLoading && (
+                      {(threadLoading || postsLoading) && posts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
-                      {/* DEBUG: show threadData shape while wiring */}
-                      {!threadLoading && posts.length === 0 && threadData && (
-                        <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
-                          <summary className="cursor-pointer font-semibold text-amber-800">🐞 Thread debug (no posts parsed)</summary>
-                          <div className="mt-1 space-y-1 text-amber-900">
-                            <div><b>threadData type:</b> {typeof threadData} {Array.isArray(threadData) ? `Array(${threadData.length})` : ""}</div>
-                            {threadData && typeof threadData === "object" && !Array.isArray(threadData) && (
-                              <div><b>top-level keys:</b> [{Object.keys(threadData).join(", ")}]</div>
-                            )}
-                            {threadData && (threadData as any).data && typeof (threadData as any).data === "object" && (
-                              <div><b>threadData.data keys:</b> [{Object.keys((threadData as any).data).join(", ")}]</div>
-                            )}
-                            <details>
-                              <summary className="cursor-pointer text-amber-700">Raw (truncated)</summary>
-                              <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] whitespace-pre-wrap">
-                                {JSON.stringify(threadData, null, 2)?.slice(0, 2500) ?? "null"}
-                              </pre>
-                            </details>
-                          </div>
-                        </details>
-                      )}
-                      {posts.map(p => {
-                        const isHost = p.authorType === "host" || p.authorRole === "host";
+                      {posts.map((p: any) => {
+                        // Tolerate v1 + v2 field names.
+                        const bodyText = p.body ?? p.text ?? p.message ?? "";
+                        const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
+                        const isHost =
+                          p.authorType === "host" ||
+                          p.authorRole === "host" ||
+                          p.senderType === "host" ||
+                          p.direction === "outbound" ||
+                          p.direction === "out" ||
+                          p.isIncoming === false;
                         return (
                           <div key={p._id} className={`flex ${isHost ? "justify-end" : "justify-start"}`}>
                             <div
@@ -856,14 +866,37 @@ export default function InboxPage() {
                               }`}
                               data-testid={`message-${p._id}`}
                             >
-                              {p.body ?? p.text ?? ""}
+                              {bodyText}
                               <div className={`text-[10px] mt-1 ${isHost ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
-                                {new Date(p.sentAt ?? p.postedAt ?? "").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                {when ? new Date(when).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                               </div>
                             </div>
                           </div>
                         );
                       })}
+                      {/* Thread debug: only shown when both queries settled and still no posts */}
+                      {!threadLoading && !postsLoading && posts.length === 0 && (threadData || postsData) && (
+                        <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
+                          <summary className="cursor-pointer font-semibold text-amber-800">🐞 No posts parsed — debug</summary>
+                          <div className="mt-1 space-y-1 text-amber-900">
+                            <div><b>postsData top-level keys:</b> {postsData ? `[${Object.keys(postsData as object).join(", ")}]` : "null"}</div>
+                            {postsData && (postsData as any).data && typeof (postsData as any).data === "object" && (
+                              <>
+                                <div><b>postsData.data type:</b> {Array.isArray((postsData as any).data) ? `Array(${(postsData as any).data.length})` : typeof (postsData as any).data}</div>
+                                {!Array.isArray((postsData as any).data) && (
+                                  <div><b>postsData.data keys:</b> [{Object.keys((postsData as any).data).join(", ")}]</div>
+                                )}
+                              </>
+                            )}
+                            <details>
+                              <summary className="cursor-pointer text-amber-700">Raw postsData (truncated)</summary>
+                              <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] whitespace-pre-wrap">
+                                {JSON.stringify(postsData, null, 2)?.slice(0, 2500) ?? "null"}
+                              </pre>
+                            </details>
+                          </div>
+                        </details>
+                      )}
                     </div>
 
                     {/* Reply compose */}
