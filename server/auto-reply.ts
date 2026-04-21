@@ -169,7 +169,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
   return { error: `Unknown tool: ${name}` };
 }
 
-const SYSTEM_PROMPT = `You are the Guest Messaging Assistant for NexStay, a premium vacation rental management company in Hawaii.
+const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
 
 Your job: read a guest's incoming message and write a warm, concise, professional reply in the tone of a hospitality host.
 
@@ -178,12 +178,40 @@ RULES:
 - If the guest's question cannot be answered confidently from the fetched context, or if the message contains a complaint, damage claim, refund request, medical/legal/safety issue, or anything ambiguous — call the flag_for_human tool with a reason and stop.
 - Never mention that units are combined. Refer to the property as a single home.
 - Keep replies to 2-4 sentences. Be warm but efficient.
-- Sign off as "The NexStay Team".
+- Sign off EXACTLY as three lines, on their own, after a blank line:
+  John Carpenter
+  Reservationist
+  Magical Island Rentals
 - Do NOT include a subject line, greeting block, or email headers.
 - Do NOT promise refunds, discounts, upgrades, or anything that costs money.
 - Do NOT share guest personal information, credit card info, or internal operational notes.
 
-When you have everything you need, write ONLY the reply body as your final response — no preamble, no explanation.`;
+When you have everything you need, write ONLY the reply body (ending with the sign-off block above) as your final response — no preamble, no explanation.`;
+
+// Canonical sign-off appended to every auto-reply.
+const SIGNOFF = "John Carpenter\nReservationist\nMagical Island Rentals";
+
+/**
+ * Guarantees every reply ends with the fixed sign-off. If the model already
+ * included it (exact or case-variant), leave it alone. Otherwise append it.
+ * Also strips common alternative sign-offs the model sometimes writes.
+ */
+function ensureSignoff(text: string): string {
+  let body = text.trim();
+
+  // Strip any generic sign-offs the model may have added by habit.
+  const stripPatterns = [
+    /\n\s*(best|warm regards|regards|thanks|sincerely|cheers|aloha|mahalo)[,!.]?\s*\n?\s*(the\s+\w+\s+team|nex\s*stay[^\n]*|magical\s+island[^\n]*)?\s*$/i,
+    /\n\s*the\s+\w+\s+team\s*$/i,
+  ];
+  for (const re of stripPatterns) body = body.replace(re, "").trim();
+
+  // If the canonical sign-off is already present (case-insensitive, any whitespace), leave it.
+  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*reservationist\s*[\r\n]+\s*magical\s+island\s+rentals/i.test(body);
+  if (hasSignoff) return body;
+
+  return `${body}\n\n${SIGNOFF}`;
+}
 
 interface DraftResult {
   draft: string | null;
@@ -271,7 +299,10 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
     if (!text) {
       return { draft: null, flagReason: null, toolsUsed, error: "Claude returned empty response" };
     }
-    return { draft: text, flagReason: null, toolsUsed, error: null };
+    // Safety net: ensure the fixed sign-off is present. If the model forgot it,
+    // append the canonical block so every reply is signed consistently.
+    const finalDraft = ensureSignoff(text);
+    return { draft: finalDraft, flagReason: null, toolsUsed, error: null };
   }
 
   return { draft: null, flagReason: null, toolsUsed, error: "Exceeded max tool-use turns" };
