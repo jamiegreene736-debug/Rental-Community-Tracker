@@ -623,16 +623,29 @@ export default function InboxPage() {
               <div><b>top-level keys:</b> [{Object.keys(convData as object).join(", ")}]</div>
             )}
             <div><b>parsed conversations.length:</b> {conversations.length}</div>
-            <div><b>first 2 keys of each nested obj:</b></div>
+            <div><b>ALL top-level entries of convData:</b></div>
             <ul className="ml-4 list-disc">
               {convData && typeof convData === "object" && !Array.isArray(convData) &&
-                Object.entries(convData as Record<string, unknown>).slice(0, 5).map(([k, v]) => (
+                Object.entries(convData as Record<string, unknown>).map(([k, v]) => (
                   <li key={k}>
-                    {k}: {Array.isArray(v) ? `Array(${v.length})` : v == null ? String(v) : typeof v === "object" ? `{${Object.keys(v as object).slice(0,3).join(",")}...}` : JSON.stringify(v).slice(0, 60)}
+                    <b>{k}</b>: {Array.isArray(v) ? `Array(${v.length})` : v == null ? String(v) : typeof v === "object" ? `{${Object.keys(v as object).join(", ")}}` : JSON.stringify(v).slice(0, 80)}
                   </li>
                 ))
               }
             </ul>
+            {/* Drill into convData.data if present */}
+            {convData && typeof convData === "object" && !Array.isArray(convData) && typeof (convData as any).data === "object" && (
+              <>
+                <div className="mt-2"><b>ALL top-level entries of convData.data:</b></div>
+                <ul className="ml-4 list-disc">
+                  {Object.entries((convData as any).data as Record<string, unknown>).map(([k, v]) => (
+                    <li key={k}>
+                      <b>{k}</b>: {Array.isArray(v) ? `Array(${v.length})${v.length ? ` — first item keys: {${Object.keys((v as any[])[0] ?? {}).slice(0, 8).join(", ")}}` : ""}` : v == null ? String(v) : typeof v === "object" ? `{${Object.keys(v as object).join(", ")}}` : JSON.stringify(v).slice(0, 80)}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
             <details>
               <summary className="cursor-pointer text-amber-700">Raw JSON (truncated)</summary>
               <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] leading-tight whitespace-pre-wrap">
