@@ -313,8 +313,21 @@ export default function InboxPage() {
     },
     refetchInterval: 60_000,
   });
-  // Guesty may return either {results: [...]} (legacy) or {data: [...]} (new).
-  const conversations: GuestyConversation[] = convData?.results ?? convData?.data ?? [];
+  // Guesty may return several shapes:
+  //   {results: [...]}          (legacy)
+  //   {data: [...]}             (new, plain array)
+  //   {data: {results: [...]}}  (new, wrapped)
+  //   {error: "..."}            (our proxy on failure)
+  // Normalize to always an array — anything else becomes [] so .find/.map/.filter
+  // never throw and blank the page.
+  const conversations: GuestyConversation[] = (() => {
+    const d = convData;
+    if (Array.isArray(d)) return d;
+    if (Array.isArray(d?.results)) return d.results;
+    if (Array.isArray(d?.data)) return d.data;
+    if (Array.isArray(d?.data?.results)) return d.data.results;
+    return [];
+  })();
 
   const selectedConv = conversations.find(c => c._id === selectedConvId) ?? null;
 
@@ -390,16 +403,27 @@ export default function InboxPage() {
     queryFn: () =>
       apiRequest("GET", "/api/guesty-proxy/reservations?limit=50")
         .then(r => r.json())
-        .then(d => ({
-          ...d,
-          results: (d.results ?? []).filter((r: any) =>
-            r.status === "inquiry" || r.status === "awaitingPayment" || r.status === "pending"
-          ),
-        }))
+        .then(d => {
+          const rows = Array.isArray(d?.results) ? d.results
+            : Array.isArray(d?.data) ? d.data
+            : Array.isArray(d?.data?.results) ? d.data.results
+            : [];
+          return {
+            results: rows.filter((r: any) =>
+              r.status === "inquiry" || r.status === "awaitingPayment" || r.status === "pending"
+            ),
+          };
+        })
         .catch(() => ({ results: [] })),
     refetchInterval: 60_000,
   });
-  const pendingRes: GuestyReservation[] = pendingData?.results ?? [];
+  const pendingRes: GuestyReservation[] = Array.isArray(pendingData?.results)
+    ? pendingData.results
+    : Array.isArray(pendingData?.data)
+      ? pendingData.data
+      : Array.isArray(pendingData?.data?.results)
+        ? pendingData.data.results
+        : [];
 
   const { data: upcomingData } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/upcoming"],
@@ -407,18 +431,29 @@ export default function InboxPage() {
       const today = new Date().toISOString().split("T")[0];
       return apiRequest("GET", `/api/guesty-proxy/reservations?limit=50&sort=checkIn`)
         .then(r => r.json())
-        .then(d => ({
-          ...d,
-          results: (d.results ?? []).filter((r: any) => {
-            const checkIn = r.checkInDateLocalized ?? r.checkIn ?? "";
-            return (r.status === "confirmed" || r.status === "checked_in") && checkIn >= today;
-          }),
-        }))
+        .then(d => {
+          const rows = Array.isArray(d?.results) ? d.results
+            : Array.isArray(d?.data) ? d.data
+            : Array.isArray(d?.data?.results) ? d.data.results
+            : [];
+          return {
+            results: rows.filter((r: any) => {
+              const checkIn = r.checkInDateLocalized ?? r.checkIn ?? "";
+              return (r.status === "confirmed" || r.status === "checked_in") && checkIn >= today;
+            }),
+          };
+        })
         .catch(() => ({ results: [] }));
     },
     refetchInterval: 120_000,
   });
-  const upcomingRes: GuestyReservation[] = upcomingData?.results ?? [];
+  const upcomingRes: GuestyReservation[] = Array.isArray(upcomingData?.results)
+    ? upcomingData.results
+    : Array.isArray(upcomingData?.data)
+      ? upcomingData.data
+      : Array.isArray(upcomingData?.data?.results)
+        ? upcomingData.data.results
+        : [];
 
   const { data: autoApproveStatus, isLoading: autoLoading } = useQuery<any>({
     queryKey: ["/api/inbox/auto-approve/status"],
