@@ -702,7 +702,12 @@ export default function InboxPage() {
   });
 
   // Pre-approve an Airbnb inquiry directly from the inbox. Hits our server
-  // wrapper that tries multiple known Guesty endpoint shapes.
+  // wrapper that PUTs the reservation with preApproveState:true (with fallback
+  // candidate endpoints). On success we:
+  //   1. Optimistically patch the react-query cache so the banner flips green
+  //      immediately, without waiting for the GET round-trip
+  //   2. Invalidate the reservation + conversation queries so the authoritative
+  //      server state is refetched in the background
   const preapproveAirbnb = useMutation({
     mutationFn: async (reservationId: string) => {
       const r = await apiRequest("POST", `/api/inbox/reservations/${reservationId}/airbnb/preapprove`, {});
@@ -712,10 +717,20 @@ export default function InboxPage() {
       }
       return r.json();
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
+    onSuccess: (_data, reservationId) => {
+      // Optimistically flip preApproveState=true on the cached reservation
+      qc.setQueryData(["/api/guesty-proxy/reservations", reservationId], (old: any) => {
+        if (!old) return old;
+        // Response shape is {status, data: {...reservation}}; patch inside data
+        const patched = { ...old };
+        if (patched.data) patched.data = { ...patched.data, preApproveState: true };
+        else patched.preApproveState = true;
+        return patched;
+      });
+      // Refetch authoritative state in the background
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations", reservationId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Pre-approved on Airbnb" });
+      toast({ title: "Pre-approved on Airbnb", description: "Kim can now book without further host action." });
     },
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
   });
@@ -1092,10 +1107,15 @@ export default function InboxPage() {
                   // the host has pre-approved on Airbnb.
                   const statusRaw = String(res?.status ?? "").toLowerCase();
                   const isAirbnb = channelRaw.toLowerCase().includes("airbnb");
+                  // Guesty's actual field is `preApproveState` (boolean). Older
+                  // accounts/docs also reference preApproved / preApprovalStatus,
+                  // so we check all three.
                   const preApproved =
+                    res?.preApproveState === true ||
                     res?.preApproved === true ||
                     String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
-                    statusRaw.includes("preapproved");
+                    statusRaw.includes("preapproved") ||
+                    statusRaw === "accepted";
                   const isInquiry = statusRaw === "inquiry" || statusRaw.includes("inquiry");
                   const isBookingRequest = statusRaw === "request" || statusRaw === "pending" || statusRaw === "awaitingpayment";
                   const isBooked = ["reserved", "confirmed", "accepted", "checked_in", "checkedin", "completed"].includes(statusRaw);
@@ -1161,8 +1181,15 @@ export default function InboxPage() {
                         {isAirbnb && (phase === "inquiry" || phase === "request") && (
                           <div className="mt-2 text-[11px] leading-snug">
                             {preApproved ? (
-                              <div className="text-green-800 font-medium flex items-center gap-1">
-                                <CheckCircle className="h-3 w-3" /> Pre-approved on Airbnb
+                              <div className="flex items-start gap-2 p-2 rounded-md bg-green-100 border border-green-300">
+                                <CheckCircle className="h-4 w-4 text-green-700 shrink-0 mt-0.5" />
+                                <div>
+                                  <div className="text-green-900 font-semibold text-xs">Pre-approved on Airbnb</div>
+                                  <div className="text-green-800 text-[11px] mt-0.5">
+                                    {guest.fullName ?? "Guest"} can book these dates without further host action.
+                                    The amount they'll see is the listed rate.
+                                  </div>
+                                </div>
                               </div>
                             ) : (
                               <div className="text-amber-900 space-y-2">
