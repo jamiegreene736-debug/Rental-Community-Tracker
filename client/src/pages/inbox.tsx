@@ -701,6 +701,43 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed to approve", description: e.message, variant: "destructive" }),
   });
 
+  // Pre-approve an Airbnb inquiry directly from the inbox. Hits our server
+  // wrapper that tries multiple known Guesty endpoint shapes.
+  const preapproveAirbnb = useMutation({
+    mutationFn: async (reservationId: string) => {
+      const r = await apiRequest("POST", `/api/inbox/reservations/${reservationId}/airbnb/preapprove`, {});
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Pre-approved on Airbnb" });
+    },
+    onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
+  });
+
+  // Decline an Airbnb inquiry.
+  const declineAirbnb = useMutation({
+    mutationFn: async ({ reservationId, reason }: { reservationId: string; reason?: string }) => {
+      const r = await apiRequest("POST", `/api/inbox/reservations/${reservationId}/airbnb/decline`, { reason });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Inquiry declined" });
+    },
+    onError: (e: any) => toast({ title: "Decline failed", description: e.message, variant: "destructive" }),
+  });
+
   const declineReservation = useMutation({
     mutationFn: (id: string) =>
       apiRequest("PUT", `/api/guesty-proxy/reservations/${id}`, { status: "declined" }).then(r => r.json()),
@@ -1120,7 +1157,7 @@ export default function InboxPage() {
                           {phase === "other" && <Badge variant="outline" className="text-[10px]">{res?.status ?? "Unknown"}</Badge>}
                         </div>
 
-                        {/* Airbnb pre-approval callout for inquiries/requests */}
+                        {/* Airbnb pre-approval — live action from the inbox */}
                         {isAirbnb && (phase === "inquiry" || phase === "request") && (
                           <div className="mt-2 text-[11px] leading-snug">
                             {preApproved ? (
@@ -1128,21 +1165,53 @@ export default function InboxPage() {
                                 <CheckCircle className="h-3 w-3" /> Pre-approved on Airbnb
                               </div>
                             ) : (
-                              <div className="text-amber-900">
-                                <div className="font-medium mb-1">Not yet pre-approved.</div>
+                              <div className="text-amber-900 space-y-2">
                                 <div>
-                                  Airbnb inquiries should be pre-approved within 24h — respond in Guesty
-                                  and hit "Pre-approve" or send a Special Offer.
+                                  <span className="font-medium">Not yet pre-approved.</span>{" "}
+                                  Airbnb inquiries should be pre-approved within 24h.
                                 </div>
                                 {res?._id && (
-                                  <a
-                                    href={`https://app.guesty.com/reservations/${res._id}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-primary hover:underline mt-1 inline-block"
-                                  >
-                                    Open reservation in Guesty ↗
-                                  </a>
+                                  <div className="flex flex-wrap gap-2">
+                                    <Button
+                                      size="sm"
+                                      className="h-7 px-2.5 text-[11px] bg-green-600 hover:bg-green-700 text-white"
+                                      onClick={() => preapproveAirbnb.mutate(res._id)}
+                                      disabled={preapproveAirbnb.isPending}
+                                      data-testid="button-preapprove-airbnb"
+                                    >
+                                      {preapproveAirbnb.isPending ? (
+                                        <>
+                                          <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Pre-approving…
+                                        </>
+                                      ) : (
+                                        <>
+                                          <CheckCircle className="h-3 w-3 mr-1" /> Pre-approve on Airbnb
+                                        </>
+                                      )}
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 px-2.5 text-[11px]"
+                                      onClick={() => {
+                                        if (confirm(`Decline this Airbnb inquiry from ${guest.fullName ?? "this guest"}? This action cannot be undone.`)) {
+                                          declineAirbnb.mutate({ reservationId: res._id });
+                                        }
+                                      }}
+                                      disabled={declineAirbnb.isPending}
+                                      data-testid="button-decline-airbnb"
+                                    >
+                                      <XCircle className="h-3 w-3 mr-1" /> Decline
+                                    </Button>
+                                    <a
+                                      href={`https://app.guesty.com/reservations/${res._id}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-primary hover:underline text-[11px] self-center"
+                                    >
+                                      Open in Guesty ↗
+                                    </a>
+                                  </div>
                                 )}
                               </div>
                             )}

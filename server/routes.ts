@@ -5053,6 +5053,102 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     }
   });
 
+  // ========== INBOX — Airbnb Pre-Approval / Decline / Special Offer ==========
+  //
+  // Guesty surfaces Airbnb-specific inquiry actions via several paths; their
+  // schema has drifted across API versions so we try known-good URLs in order
+  // until one works. This lets the host pre-approve an Airbnb inquiry directly
+  // from the inbox without clicking over to Guesty's UI.
+  //
+  // POST /api/inbox/reservations/:reservationId/airbnb/preapprove
+  //      body: {} (nothing required)
+  // POST /api/inbox/reservations/:reservationId/airbnb/decline
+  //      body: { reason?: string, message?: string }
+  // POST /api/inbox/reservations/:reservationId/airbnb/special-offer
+  //      body: { price: number, message?: string, expirationDays?: number }
+
+  async function callGuestyAirbnbAction(
+    reservationId: string,
+    action: "preapprove" | "decline" | "special-offer",
+    body: Record<string, unknown> = {},
+  ): Promise<{ success: true; via: string; data: any } | { success: false; error: string; tried: string[] }> {
+    // Candidate paths known across Guesty Open API versions. First one that
+    // returns 2xx wins.
+    const candidates = {
+      preapprove: [
+        `/reservations/${reservationId}/airbnb/preapprove`,
+        `/reservations/${reservationId}/actions/airbnb/preapprove`,
+        `/inquiries/${reservationId}/preapprove`,
+      ],
+      decline: [
+        `/reservations/${reservationId}/airbnb/decline`,
+        `/reservations/${reservationId}/actions/airbnb/decline`,
+        `/inquiries/${reservationId}/decline`,
+      ],
+      "special-offer": [
+        `/reservations/${reservationId}/airbnb/special-offer`,
+        `/reservations/${reservationId}/actions/airbnb/special-offer`,
+      ],
+    } as const;
+
+    const tried: string[] = [];
+    let lastError = "";
+
+    for (const path of candidates[action]) {
+      tried.push(path);
+      try {
+        const data = await guestyRequest("POST", path, body);
+        console.log(`[airbnb-action] ${action} via ${path} OK`);
+        return { success: true, via: path, data };
+      } catch (err: any) {
+        lastError = err.message ?? String(err);
+        // Swallow 404/405 and try the next candidate; anything else (auth, 500, etc.)
+        // we log but still continue so a deprecated path doesn't block a working one.
+        console.warn(`[airbnb-action] ${action} via ${path} failed: ${lastError}`);
+      }
+    }
+
+    return { success: false, error: lastError || "No Guesty endpoint accepted the request", tried };
+  }
+
+  app.post("/api/inbox/reservations/:reservationId/airbnb/preapprove", async (req, res) => {
+    const reservationId = req.params.reservationId;
+    if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+    const result = await callGuestyAirbnbAction(reservationId, "preapprove");
+    if (!result.success) return res.status(502).json(result);
+    return res.json(result);
+  });
+
+  app.post("/api/inbox/reservations/:reservationId/airbnb/decline", async (req, res) => {
+    const reservationId = req.params.reservationId;
+    if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+    const { reason, message } = req.body as { reason?: string; message?: string };
+    const result = await callGuestyAirbnbAction(reservationId, "decline", {
+      ...(reason ? { reason } : {}),
+      ...(message ? { message } : {}),
+    });
+    if (!result.success) return res.status(502).json(result);
+    return res.json(result);
+  });
+
+  app.post("/api/inbox/reservations/:reservationId/airbnb/special-offer", async (req, res) => {
+    const reservationId = req.params.reservationId;
+    if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+    const { price, message, expirationDays } = req.body as {
+      price?: number; message?: string; expirationDays?: number;
+    };
+    if (!price || typeof price !== "number" || price <= 0) {
+      return res.status(400).json({ error: "price (number > 0) required" });
+    }
+    const result = await callGuestyAirbnbAction(reservationId, "special-offer", {
+      price,
+      ...(message ? { message } : {}),
+      ...(expirationDays ? { expirationDays } : {}),
+    });
+    if (!result.success) return res.status(502).json(result);
+    return res.json(result);
+  });
+
   // ========== INBOX — Message Templates ==========
 
   app.get("/api/inbox/templates", async (_req, res) => {
