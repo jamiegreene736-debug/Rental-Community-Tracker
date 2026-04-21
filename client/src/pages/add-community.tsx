@@ -61,6 +61,10 @@ type CommunityResult = {
   confidenceScore: number;
   researchSummary: string;
   sourceUrl: string;
+  bedroomMix?: string;
+  combinedBedroomsTypical?: number;
+  combinabilityScore?: number;
+  fromWorldKnowledge?: boolean;
 };
 
 type UnitResult = {
@@ -457,6 +461,25 @@ export default function AddCommunity() {
                           <Star className="h-3 w-3 mr-1" />
                           {c.confidenceScore}/100 confidence
                         </Badge>
+                        {typeof c.combinabilityScore === "number" && (
+                          <Badge
+                            className={
+                              c.combinabilityScore >= 70 ? "bg-green-600 text-white"
+                              : c.combinabilityScore >= 50 ? "bg-amber-500 text-white"
+                              : "bg-red-500 text-white"
+                            }
+                            data-testid={`badge-combinability-${i}`}
+                          >
+                            <BedDouble className="h-3 w-3 mr-1" />
+                            Combinability {c.combinabilityScore}
+                            {c.combinedBedroomsTypical ? ` · 2×${Math.round(c.combinedBedroomsTypical / 2)}BR=${c.combinedBedroomsTypical}BR` : ""}
+                          </Badge>
+                        )}
+                        {c.fromWorldKnowledge && (
+                          <Badge variant="outline" className="text-[10px] border-blue-300 text-blue-700">
+                            From AI knowledge
+                          </Badge>
+                        )}
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -519,6 +542,7 @@ export default function AddCommunity() {
                       </div>
                       <p className="text-sm text-muted-foreground mb-2">
                         <MapPin className="h-3.5 w-3.5 inline mr-1" />{c.city}, {c.state} · {c.unitTypes}
+                        {c.bedroomMix && <span className="ml-1 italic">({c.bedroomMix})</span>}
                       </p>
                       <p className="text-sm">{c.researchSummary}</p>
                       {(c.estimatedLowRate || c.estimatedHighRate) && (

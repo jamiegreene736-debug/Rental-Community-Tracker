@@ -4727,12 +4727,13 @@ export async function registerRoutes(
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    // CONDO / TOWNHOME ONLY. Explicitly exclude villas, single-family, detached
-    // dwellings from search queries so upstream Google results are pre-filtered.
+    // CONDO / TOWNHOME with 2BR+ units. Explicitly exclude villas, single-family,
+    // efficiencies, studios. The bedroom keywords bias Google toward complexes
+    // that typically list 2BR / 3BR (combinable into 4BR–6BR listings).
     const queries = [
-      `"${city}" "${state}" condo complex vacation rental individually owned units airbnb vrbo -villa -"single family" -"detached home"`,
-      `"${city}" "${state}" townhome cluster short term rental multiple bedrooms airbnb -villa -"single family"`,
-      `"${city}" "${state}" condominium community individually owned vacation rental nightly -villa -"detached"`,
+      `"${city}" "${state}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned -villa -"single family" -efficiency -studio -hotel`,
+      `"${city}" "${state}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned -villa -"single family" -studio`,
+      `"${city}" "${state}" beach condo resort 2BR 3BR individually owned vacation rental -hotel -timeshare -efficiency`,
     ];
 
     const allResults: Array<{ title: string; link: string; snippet: string }> = [];
@@ -4798,39 +4799,74 @@ export async function registerRoutes(
       confidenceScore: number;
       researchSummary: string;
       sourceUrl: string;
+      // New: combinability-focused fields
+      bedroomMix?: string;
+      combinedBedroomsTypical?: number;
+      combinabilityScore?: number;
+      fromWorldKnowledge?: boolean;
     }> = [];
 
     if (anthropicKey) {
-      const prompt = `You are evaluating potential vacation rental communities for Magical Island Rentals, a platform that bundles two nearby individually-owned vacation rental units into one large-group listing.
+      const prompt = `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
+
+THE BUSINESS MODEL:
+  We rent unit A (e.g. 3BR) + unit B (e.g. 3BR) in the same building → list them together as one "6BR sleeps 14" villa-style product.
+  So the VALUE of a community = bedrooms of (typical unit × 2). If a complex is dominated by studios/efficiencies/1BRs, combining them is pointless — 2×studio is still too small.
+
+CONCRETE EXAMPLES of what we want:
+  ✅ Santa Maria Resort (Fort Myers Beach, FL) — condo building, mostly 2BR/3BR units, individually owned, all listed on Airbnb/VRBO. Combining 2×3BR = 6BR. This is the gold standard.
+  ✅ Pili Mai (Poipu Kai, HI) — townhome complex, 2BR/3BR, individually owned.
+  ✅ Poipu Kai Resort condos (Kauai, HI) — condos in stacked buildings.
+  ✅ Kaha Lani (Kauai) — beachfront condo complex, 2BR/3BR.
+  ⚠️ BB&T / Bay Beach & Tennis (Bonita Springs, FL) — mostly efficiency and 1BR units. 2×1BR = 2BR is WEAK. MARK AS LOW COMBINABILITY — rate combinabilityScore 20–35.
+  ❌ Fort Myers Beach "villa" resorts — standalone structures, disqualified.
+  ❌ Marriott / Hilton / Westin timeshares — single-owner, disqualified.
+  ❌ Hotel-run condo-hotels with front desk check-in — disqualified.
 
 STRICT QUALIFYING CRITERIA — a community MUST meet ALL of these:
-1. PROPERTY TYPE: Condos in a single building OR townhomes in a clustered complex (stacked or side-by-side, shared walls, shared amenities). ONLY condos and townhomes qualify. DO NOT qualify villas, detached homes, single-family dwellings, or standalone houses of any kind — even if they are "adjacent" or "in a resort community", standalone structures are DISQUALIFIED.
-2. OWNERSHIP MODEL: Units are individually owned by different owners (HOA-style), NOT all owned by one company or resort. Guests can find multiple units listed separately on Airbnb/VRBO by different hosts.
-3. PURELY VACATION RENTAL: The community is primarily used as vacation rentals (not long-term residential apartments). Nightly rental listings should dominate.
-4. UNIT CLUSTERING: Units share walls and are in the same multi-unit building or contiguous townhome row — enabling a guest group to book two units and use them together as one large space.
-5. SIZE: At least 10+ units in the complex, multiple bedroom configurations (2BR, 3BR, etc.)
+1. PROPERTY TYPE: Condos in a multi-unit building OR townhomes with shared walls. NO villas, detached homes, single-family, standalone structures.
+2. OWNERSHIP MODEL: Individually owned (HOA-style), NOT single-owner or timeshare. Guests see multiple hosts on Airbnb/VRBO.
+3. VACATION RENTAL USAGE: Primarily nightly rentals, not long-term.
+4. UNIT SHARE-WALLS: Same building or contiguous townhome row.
+5. SIZE: 10+ units with 2BR+ options available.
 
-DISQUALIFY if ANY of the following are true:
-- It's a hotel, motel, or resort with front-desk check-in
-- The listings use the words "villa", "cottage", "bungalow", "detached", "single-family", "house", or "home" in a way that implies standalone structures
-- Properties are described as having private yards, private pools per unit, or standalone roofs
-- Units are scattered across a large resort campus (not adjacent/shared-wall)
-- Single-owner managed property
-- Primarily long-term rentals
-- Timeshare
+SCORING — TWO INDEPENDENT SCORES PER COMMUNITY:
+  confidenceScore (0–100): How sure are you this is a legit individually-owned condo/townhome resort?
+    - 90+: household name, well-documented, clear individual ownership (e.g. Santa Maria Resort, Pili Mai)
+    - 70–89: very likely qualifies based on search results
+    - 50–69: probably qualifies but some uncertainty
+    - <50: don't include
 
-Here are search results for "${city}, ${state}":
+  combinabilityScore (0–100): How valuable is combining TWO units here?
+    - 90+: mostly 3BR units available → 2×3BR = 6BR listing (ideal — sleeps 14–16)
+    - 70–89: mix of 2BR and 3BR → combinations yield 4BR–6BR
+    - 50–69: mostly 2BR → 2×2BR = 4BR (decent, sleeps 8–10)
+    - 30–49: mostly 1BR → 2×1BR = 2BR combined (too small, marginal)
+    - <30: mostly studios/efficiencies → skip (2×studio = still tiny)
+
+SOURCES FOR YOUR ANSWER:
+  1. The search results below (may be sparse or noisy).
+  2. Your own knowledge of well-known vacation-rental communities in "${city}, ${state}". If you know of 1–3 communities that CLEARLY fit (e.g. you know Santa Maria Resort is in Fort Myers Beach and is individually-owned condos), add them with "fromWorldKnowledge": true even if they're not in the search results. Cap at 3 world-knowledge additions.
+
+SEARCH RESULTS for "${city}, ${state}":
 ${unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")}
 
-For each result that qualifies, extract:
-- communityName: the specific name of the condo building or townhome complex
-- unitTypes: bedroom configurations available (e.g. "2BR, 3BR")
-- confidenceScore: 0-100 (score 80+ only if you are certain it is individually-owned vacation rental condos/townhomes)
-- reason: 1-2 sentences why it qualifies and what type of property it is (condo complex, townhome cluster, etc.)
-- sourceUrl: the URL from the result
+For each qualifying community, output:
+{
+  "communityName": "exact name of the condo/townhome complex",
+  "bedroomMix": "observed bedroom configs, e.g. '2BR, 3BR' or 'mostly 1BR with some 2BR'",
+  "combinedBedroomsTypical": <number — what a typical TWO-unit combination gives, e.g. 6 for 2×3BR>,
+  "unitTypes": "short description, e.g. 'Condo building, 2–3BR'",
+  "confidenceScore": 0-100,
+  "combinabilityScore": 0-100,
+  "reason": "1–2 sentences explaining qualification AND bedroom-mix rationale",
+  "sourceUrl": "URL from search results, or '' if fromWorldKnowledge",
+  "fromWorldKnowledge": false  // true if you added this from your own knowledge, not the search results
+}
 
-Return ONLY a JSON array (no markdown, no code fences). Each element: {"communityName":"...","unitTypes":"...","confidenceScore":0,"reason":"...","sourceUrl":"..."}.
-Only include communities with confidenceScore >= 50. Max 8 results. If nothing qualifies, return [].`;
+Return ONLY a JSON array (no markdown, no prose). Include ONLY entries where:
+  confidenceScore >= 60 AND combinabilityScore >= 50.
+Max 10 total results. Sort by (combinabilityScore + confidenceScore) descending. If nothing qualifies, return [].`;
 
       try {
         const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -4842,7 +4878,7 @@ Only include communities with confidenceScore >= 50. Max 8 results. If nothing q
           },
           body: JSON.stringify({
             model: "claude-3-5-sonnet-20241022",
-            max_tokens: 2000,
+            max_tokens: 3000,
             messages: [{ role: "user", content: prompt }],
           }),
         });
@@ -4854,13 +4890,17 @@ Only include communities with confidenceScore >= 50. Max 8 results. If nothing q
           if (jsonMatch) {
             const scored = JSON.parse(jsonMatch[0]) as Array<{
               communityName: string;
+              bedroomMix?: string;
+              combinedBedroomsTypical?: number;
               unitTypes: string;
               confidenceScore: number;
+              combinabilityScore?: number;
               reason: string;
               sourceUrl: string;
+              fromWorldKnowledge?: boolean;
             }>;
 
-            for (const s of scored.slice(0, 8)) {
+            for (const s of scored.slice(0, 10)) {
               const rates = await spotCheckRate(s.communityName);
               communities.push({
                 name: s.communityName,
@@ -4871,7 +4911,11 @@ Only include communities with confidenceScore >= 50. Max 8 results. If nothing q
                 unitTypes: s.unitTypes,
                 confidenceScore: s.confidenceScore,
                 researchSummary: s.reason,
-                sourceUrl: s.sourceUrl,
+                sourceUrl: s.sourceUrl || "",
+                bedroomMix: s.bedroomMix,
+                combinedBedroomsTypical: s.combinedBedroomsTypical,
+                combinabilityScore: s.combinabilityScore,
+                fromWorldKnowledge: s.fromWorldKnowledge === true,
               });
             }
           }
@@ -4894,7 +4938,13 @@ Only include communities with confidenceScore >= 50. Max 8 results. If nothing q
       }));
     }
 
-    communities.sort((a, b) => b.confidenceScore - a.confidenceScore);
+    // Sort by combined score: confidence + combinability (combinability weighted equally
+    // so a 2×3BR lead ranks above a certain-but-marginal 2×efficiency lead).
+    communities.sort((a, b) => {
+      const sa = a.confidenceScore + (a.combinabilityScore ?? 50);
+      const sb = b.confidenceScore + (b.combinabilityScore ?? 50);
+      return sb - sa;
+    });
     res.json({ communities });
   });
 
