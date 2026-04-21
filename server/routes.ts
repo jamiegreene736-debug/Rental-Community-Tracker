@@ -5071,45 +5071,74 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     reservationId: string,
     action: "preapprove" | "decline" | "special-offer",
     body: Record<string, unknown> = {},
-  ): Promise<{ success: true; via: string; data: any } | { success: false; error: string; tried: string[] }> {
-    // Candidate paths known across Guesty Open API versions. First one that
-    // returns 2xx wins.
-    const candidates = {
+  ): Promise<{ success: true; via: string; data: any } | { success: false; error: string; attempts: Array<{ path: string; method: string; status?: number; error: string }> }> {
+    // Guesty's Open API v1 has never officially documented pre-approve —
+    // these paths are reverse-engineered from channel-manager logs, community
+    // threads, and v2 internal-API hints. We try them in rough order of
+    // likelihood. `airbnb2` is the newer integration platform; older accounts
+    // use `airbnb`. Some use a verb-as-body pattern on /update-status.
+    const candidates: Record<typeof action, Array<{ method: "POST" | "PUT"; path: string; body?: Record<string, unknown> }>> = {
       preapprove: [
-        `/reservations/${reservationId}/airbnb/preapprove`,
-        `/reservations/${reservationId}/actions/airbnb/preapprove`,
-        `/inquiries/${reservationId}/preapprove`,
+        { method: "POST", path: `/airbnb2/reservations/${reservationId}/preapprove` },
+        { method: "POST", path: `/airbnb/reservations/${reservationId}/preapprove` },
+        { method: "POST", path: `/reservations/${reservationId}/airbnb/preapprove` },
+        { method: "POST", path: `/reservations/${reservationId}/airbnb2/preapprove` },
+        { method: "POST", path: `/reservations/${reservationId}/actions/airbnb/preapprove` },
+        { method: "POST", path: `/reservations/${reservationId}/actions/preapprove` },
+        { method: "PUT",  path: `/reservations/${reservationId}/inquiry/preapprove` },
+        { method: "POST", path: `/reservations/${reservationId}/update-status`, body: { ...body, status: "preApproved" } },
+        { method: "POST", path: `/inquiries/${reservationId}/preapprove` },
       ],
       decline: [
-        `/reservations/${reservationId}/airbnb/decline`,
-        `/reservations/${reservationId}/actions/airbnb/decline`,
-        `/inquiries/${reservationId}/decline`,
+        { method: "POST", path: `/airbnb2/reservations/${reservationId}/decline` },
+        { method: "POST", path: `/airbnb/reservations/${reservationId}/decline` },
+        { method: "POST", path: `/reservations/${reservationId}/airbnb/decline` },
+        { method: "POST", path: `/reservations/${reservationId}/actions/decline` },
+        { method: "POST", path: `/inquiries/${reservationId}/decline` },
       ],
       "special-offer": [
-        `/reservations/${reservationId}/airbnb/special-offer`,
-        `/reservations/${reservationId}/actions/airbnb/special-offer`,
+        { method: "POST", path: `/airbnb2/reservations/${reservationId}/special-offer` },
+        { method: "POST", path: `/airbnb/reservations/${reservationId}/special-offer` },
+        { method: "POST", path: `/reservations/${reservationId}/airbnb/special-offer` },
       ],
-    } as const;
+    };
 
-    const tried: string[] = [];
+    const attempts: Array<{ path: string; method: string; status?: number; error: string }> = [];
     let lastError = "";
 
-    for (const path of candidates[action]) {
-      tried.push(path);
+    for (const c of candidates[action]) {
       try {
-        const data = await guestyRequest("POST", path, body);
-        console.log(`[airbnb-action] ${action} via ${path} OK`);
-        return { success: true, via: path, data };
+        const data = await guestyRequest(c.method, c.path, c.body ?? body);
+        console.log(`[airbnb-action] ${action} via ${c.method} ${c.path} OK`);
+        return { success: true, via: `${c.method} ${c.path}`, data };
       } catch (err: any) {
         lastError = err.message ?? String(err);
-        // Swallow 404/405 and try the next candidate; anything else (auth, 500, etc.)
-        // we log but still continue so a deprecated path doesn't block a working one.
-        console.warn(`[airbnb-action] ${action} via ${path} failed: ${lastError}`);
+        // guestyRequest embeds the status code in the error message like
+        // "Guesty 404: /…". Extract it for better reporting.
+        const m = /Guesty\s+(\d{3})/.exec(lastError);
+        const status = m ? parseInt(m[1], 10) : undefined;
+        attempts.push({ path: c.path, method: c.method, status, error: lastError });
+        console.warn(`[airbnb-action] ${action} via ${c.method} ${c.path} failed (${status ?? "?"}): ${lastError}`);
       }
     }
 
-    return { success: false, error: lastError || "No Guesty endpoint accepted the request", tried };
+    return { success: false, error: lastError || "No Guesty endpoint accepted the request", attempts };
   }
+
+  // Diagnostic — returns the full Guesty reservation object so we can inspect
+  // what actions/URLs/state it exposes. Helpful for figuring out what endpoint
+  // pre-approval lives at for a given Guesty account.
+  app.get("/api/inbox/reservations/:reservationId/debug", async (req, res) => {
+    try {
+      const reservation = await guestyRequest("GET", `/reservations/${req.params.reservationId}`) as any;
+      return res.json({
+        keys: reservation && typeof reservation === "object" ? Object.keys(reservation) : [],
+        reservation,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
 
   app.post("/api/inbox/reservations/:reservationId/airbnb/preapprove", async (req, res) => {
     const reservationId = req.params.reservationId;
