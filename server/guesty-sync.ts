@@ -1,42 +1,6 @@
-import fs from "fs";
-import path from "path";
 import { storage } from "./storage";
 import { log } from "./index";
-
-const GUESTY_TOKEN_FILE = path.join(process.cwd(), ".guesty_token_cache.json");
-let _tokenCache: { token: string; expiry: number } | null = null;
-
-function loadFileToken(): { token: string; expiry: number } | null {
-  try {
-    if (!fs.existsSync(GUESTY_TOKEN_FILE)) return null;
-    const data = JSON.parse(fs.readFileSync(GUESTY_TOKEN_FILE, "utf8")) as { token: string; expiry: number };
-    if (data.token && data.expiry && Date.now() < data.expiry) return data;
-    return null;
-  } catch { return null; }
-}
-
-async function getGuestyToken(): Promise<string> {
-  if (_tokenCache && Date.now() < _tokenCache.expiry) return _tokenCache.token;
-
-  const fileCached = loadFileToken();
-  if (fileCached) { _tokenCache = fileCached; return fileCached.token; }
-
-  const clientId = process.env.GUESTY_CLIENT_ID;
-  const clientSecret = process.env.GUESTY_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error("GUESTY_CLIENT_ID / GUESTY_CLIENT_SECRET not set");
-
-  const res = await fetch("https://open-api.guesty.com/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret, scope: "open-api" }),
-  });
-  if (!res.ok) throw new Error(`Guesty token error: ${res.status}`);
-  const data = await res.json() as { access_token: string; expires_in: number };
-  const expiry = Date.now() + (data.expires_in - 60) * 1000;
-  _tokenCache = { token: data.access_token, expiry };
-  try { fs.writeFileSync(GUESTY_TOKEN_FILE, JSON.stringify({ token: data.access_token, expiry }), "utf8"); } catch { /* non-fatal */ }
-  return data.access_token;
-}
+import { getGuestyToken } from "./guesty-token";
 
 export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
   const token = await getGuestyToken();

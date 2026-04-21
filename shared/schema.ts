@@ -250,3 +250,15 @@ export const insertAutoReplyLogSchema = createInsertSchema(autoReplyLog).omit({
 
 export type InsertAutoReplyLog = z.infer<typeof insertAutoReplyLogSchema>;
 export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
+
+// ── Guesty OAuth token cache ──
+// Guesty's token endpoint is rate-limited to ~5 requests per 24h. Storing
+// the token here (rather than on a Railway-ephemeral filesystem) means
+// server restarts don't chew through the quota. Single-row table, upserted.
+export const guestyTokenCache = pgTable("guesty_token_cache", {
+  id: serial("id").primaryKey(),
+  token: text("token").notNull(),
+  expiry: timestamp("expiry").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type GuestyTokenCache = typeof guestyTokenCache.$inferSelect;

@@ -13,6 +13,7 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
+import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
@@ -1020,26 +1021,10 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ error: "Find replacement failed", message: err.message }); }
   });
 
-  // ── Guesty OAuth token proxy ────────────────────────────────────────────────
-  // Token is cached in-memory AND on disk so server restarts don't exhaust the
-  // Guesty rate limit (~5 token requests per 24 hrs).
-  const GUESTY_TOKEN_FILE = path.join(process.cwd(), ".guesty_token_cache.json");
-
-  function _loadGuestyFileToken(): { token: string; expiry: number } | null {
-    try {
-      if (!fs.existsSync(GUESTY_TOKEN_FILE)) return null;
-      const data = JSON.parse(fs.readFileSync(GUESTY_TOKEN_FILE, "utf8")) as { token: string; expiry: number };
-      if (data.token && data.expiry && Date.now() < data.expiry) return data;
-      return null;
-    } catch { return null; }
-  }
-
-  function _saveGuestyFileToken(token: string, expiry: number) {
-    try { fs.writeFileSync(GUESTY_TOKEN_FILE, JSON.stringify({ token, expiry }), "utf8"); } catch { /* non-fatal */ }
-  }
-
-  // Pre-populate from disk on first load
-  let _guestyTokenCache: { token: string; expiry: number } | null = _loadGuestyFileToken();
+  // ── Guesty OAuth token plumbing ─────────────────────────────────────────────
+  // All token caching now lives in server/guesty-token.ts (DB-backed + file
+  // fallback + in-memory + refresh dedup). This replaces the old per-file
+  // caches that kept getting wiped by Railway's ephemeral filesystem.
 
   app.get("/api/guesty-property-map", async (_req, res) => {
     try {
@@ -1051,52 +1036,42 @@ export async function registerRoutes(
   });
 
   app.post("/api/guesty-token", async (_req, res) => {
-    const clientId = process.env.GUESTY_CLIENT_ID;
-    const clientSecret = process.env.GUESTY_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-      return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET in environment" });
-    }
-
-    // 1. Return in-memory cached token if still valid
-    if (_guestyTokenCache && Date.now() < _guestyTokenCache.expiry) {
-      return res.json({ access_token: _guestyTokenCache.token, expires_in: Math.floor((_guestyTokenCache.expiry - Date.now()) / 1000) });
-    }
-
-    // 2. Try refreshing from Guesty
     try {
-      const response = await fetch("https://open-api.guesty.com/oauth2/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "client_credentials",
-          client_id: clientId,
-          client_secret: clientSecret,
-          scope: "open-api",
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({})) as { error?: string; message?: string; code?: string };
-
-        // 3. On rate-limit (429): try to serve any still-valid file-cached token before giving up
-        if (response.status === 429) {
-          const fileCached = _loadGuestyFileToken();
-          if (fileCached) {
-            _guestyTokenCache = fileCached;
-            return res.json({ access_token: fileCached.token, expires_in: Math.floor((fileCached.expiry - Date.now()) / 1000) });
-          }
-        }
-
-        return res.status(response.status).json({ ...err, _statusCode: response.status });
-      }
-
-      const data = await response.json() as { access_token: string; expires_in: number };
-      const expiry = Date.now() + (data.expires_in - 60) * 1000;
-      _guestyTokenCache = { token: data.access_token, expiry };
-      _saveGuestyFileToken(data.access_token, expiry);
-      return res.json({ access_token: data.access_token, expires_in: data.expires_in });
+      const token = await getGuestyToken();
+      const status = await getGuestyTokenStatus();
+      return res.json({ access_token: token, expires_in: status.expiresInSeconds ?? 86400 });
     } catch (err: any) {
+      if (err instanceof RateLimitedError) {
+        return res.status(429).json({ error: "RATE_LIMITED", message: err.message });
+      }
       return res.status(500).json({ error: "Guesty auth failed", message: err.message });
+    }
+  });
+
+  // Admin: diagnostic + manual override for the token cache.
+  // When Guesty's /oauth2/token is rate-limiting you, grab a fresh token from
+  // Guesty's UI (or any working API call's Authorization header) and POST it
+  // here to unstick the app without redeploying.
+  app.get("/api/admin/guesty-token/status", async (_req, res) => {
+    try {
+      const s = await getGuestyTokenStatus();
+      res.json(s);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+  app.post("/api/admin/guesty-token/set", async (req, res) => {
+    const { token, expiresInSeconds } = req.body as { token?: string; expiresInSeconds?: number };
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({ error: "token (string) required" });
+    }
+    const ttl = Math.max(60, Math.min(86400, Number(expiresInSeconds) || 86400));
+    try {
+      await setGuestyTokenManually(token, ttl);
+      const status = await getGuestyTokenStatus();
+      res.json({ success: true, source: status.source, expiresInSeconds: status.expiresInSeconds });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -1107,54 +1082,15 @@ export async function registerRoutes(
   //        PUT /api/guesty-proxy/listings/:id
   //        etc. — maps 1:1 to https://open-api.guesty.com/v1/*
   app.all("/api/guesty-proxy/*path", async (req: Request, res: Response) => {
-    const clientId = process.env.GUESTY_CLIENT_ID;
-    const clientSecret = process.env.GUESTY_CLIENT_SECRET;
-
-    if (!clientId || !clientSecret) {
-      return res.status(500).json({ error: "Missing GUESTY_CLIENT_ID or GUESTY_CLIENT_SECRET" });
-    }
-
-    // ── Ensure we have a valid token (reuses the same in-memory + file cache) ──
-    let token: string | null = null;
-
-    if (_guestyTokenCache && Date.now() < _guestyTokenCache.expiry) {
-      token = _guestyTokenCache.token;
-    } else {
-      try {
-        const tokenRes = await fetch("https://open-api.guesty.com/oauth2/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "client_credentials",
-            client_id: clientId,
-            client_secret: clientSecret,
-            scope: "open-api",
-          }),
-        });
-
-        if (!tokenRes.ok) {
-          if (tokenRes.status === 429) {
-            const fileCached = _loadGuestyFileToken();
-            if (fileCached) {
-              _guestyTokenCache = fileCached;
-              token = fileCached.token;
-            } else {
-              return res.status(429).json({ error: "RATE_LIMITED", message: "Guesty rate limit hit and no cached token available" });
-            }
-          } else {
-            const err = await tokenRes.json().catch(() => ({})) as Record<string, string>;
-            return res.status(tokenRes.status).json({ error: "Guesty auth failed", ...err });
-          }
-        } else {
-          const data = await tokenRes.json() as { access_token: string; expires_in: number };
-          const expiry = Date.now() + (data.expires_in - 60) * 1000;
-          _guestyTokenCache = { token: data.access_token, expiry };
-          _saveGuestyFileToken(data.access_token, expiry);
-          token = data.access_token;
-        }
-      } catch (err: any) {
-        return res.status(500).json({ error: "Guesty auth error", message: err.message });
+    // Shared token module handles memory/DB/file caching + refresh dedup.
+    let token: string;
+    try {
+      token = await getGuestyToken();
+    } catch (err: any) {
+      if (err instanceof RateLimitedError) {
+        return res.status(429).json({ error: "RATE_LIMITED", message: err.message });
       }
+      return res.status(500).json({ error: "Guesty auth error", message: err.message });
     }
 
     // ── Forward request to Guesty ────────────────────────────────────────────
