@@ -178,6 +178,40 @@ function platformBadge(res: GuestyReservation) {
   return <Badge variant="outline" className="text-[10px]">{src || "Direct"}</Badge>;
 }
 
+// ─── Response-shape normalizer ─────────────────────────────────────────────────
+// Guesty's Open API wraps list responses inconsistently depending on endpoint:
+//   bare:      [...]
+//   legacy:    { results: [...] }
+//   envelope:  { status, data: [...] }
+//   envelope:  { status, data: { conversations: [...] } }   ← communications
+//   envelope:  { status, data: { results: [...] } }         ← reservations
+// unwrapList finds the first array by walking the object shallowly, trying the
+// hint names at each depth before falling back to any array-valued field.
+// Always returns an array — never throws or returns undefined.
+function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
+  const seen = new Set<unknown>();
+  const visit = (node: unknown, depth: number): T[] | null => {
+    if (Array.isArray(node)) return node as T[];
+    if (!node || typeof node !== "object" || depth > 3) return null;
+    if (seen.has(node)) return null;
+    seen.add(node);
+    const obj = node as Record<string, unknown>;
+    // Try hinted keys first at this depth
+    for (const hint of hints) {
+      if (Array.isArray(obj[hint])) return obj[hint] as T[];
+    }
+    // Then recurse into any object-valued child
+    for (const v of Object.values(obj)) {
+      if (v && typeof v === "object") {
+        const found = visit(v, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return visit(raw, 0) ?? [];
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function TemplateEditor({
@@ -313,21 +347,14 @@ export default function InboxPage() {
     },
     refetchInterval: 60_000,
   });
-  // Guesty may return several shapes:
-  //   {results: [...]}          (legacy)
-  //   {data: [...]}             (new, plain array)
-  //   {data: {results: [...]}}  (new, wrapped)
-  //   {error: "..."}            (our proxy on failure)
-  // Normalize to always an array — anything else becomes [] so .find/.map/.filter
-  // never throw and blank the page.
-  const conversations: GuestyConversation[] = (() => {
-    const d = convData;
-    if (Array.isArray(d)) return d;
-    if (Array.isArray(d?.results)) return d.results;
-    if (Array.isArray(d?.data)) return d.data;
-    if (Array.isArray(d?.data?.results)) return d.data.results;
-    return [];
-  })();
+  // Guesty's Open API wraps list responses as:
+  //   { status: 200, data: { count, countUnread, conversations: [...], cursor, ... } }
+  // Older/other endpoints may return:
+  //   { results: [...] } or { data: [...] } or a bare array.
+  // unwrapList() finds the array by checking known list field names at every depth.
+  const conversations: GuestyConversation[] = unwrapList<GuestyConversation>(convData, [
+    "conversations", "results", "data",
+  ]);
 
   const selectedConv = conversations.find(c => c._id === selectedConvId) ?? null;
 
@@ -342,7 +369,11 @@ export default function InboxPage() {
     refetchInterval: 30_000,
   });
 
-  const posts: GuestyPost[] = threadData?.posts ?? threadData?.data?.posts ?? selectedConv?.posts ?? [];
+  const posts: GuestyPost[] = (() => {
+    const found = unwrapList<GuestyPost>(threadData, ["posts", "messages"]);
+    if (found.length > 0) return found;
+    return selectedConv?.posts ?? [];
+  })();
 
   useEffect(() => {
     if (threadRef.current) {
@@ -404,10 +435,7 @@ export default function InboxPage() {
       apiRequest("GET", "/api/guesty-proxy/reservations?limit=50")
         .then(r => r.json())
         .then(d => {
-          const rows = Array.isArray(d?.results) ? d.results
-            : Array.isArray(d?.data) ? d.data
-            : Array.isArray(d?.data?.results) ? d.data.results
-            : [];
+          const rows = unwrapList<any>(d, ["reservations", "results", "data"]);
           return {
             results: rows.filter((r: any) =>
               r.status === "inquiry" || r.status === "awaitingPayment" || r.status === "pending"
@@ -417,13 +445,9 @@ export default function InboxPage() {
         .catch(() => ({ results: [] })),
     refetchInterval: 60_000,
   });
-  const pendingRes: GuestyReservation[] = Array.isArray(pendingData?.results)
-    ? pendingData.results
-    : Array.isArray(pendingData?.data)
-      ? pendingData.data
-      : Array.isArray(pendingData?.data?.results)
-        ? pendingData.data.results
-        : [];
+  const pendingRes: GuestyReservation[] = unwrapList<GuestyReservation>(pendingData, [
+    "reservations", "results", "data",
+  ]);
 
   const { data: upcomingData } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/upcoming"],
@@ -432,10 +456,7 @@ export default function InboxPage() {
       return apiRequest("GET", `/api/guesty-proxy/reservations?limit=50&sort=checkIn`)
         .then(r => r.json())
         .then(d => {
-          const rows = Array.isArray(d?.results) ? d.results
-            : Array.isArray(d?.data) ? d.data
-            : Array.isArray(d?.data?.results) ? d.data.results
-            : [];
+          const rows = unwrapList<any>(d, ["reservations", "results", "data"]);
           return {
             results: rows.filter((r: any) => {
               const checkIn = r.checkInDateLocalized ?? r.checkIn ?? "";
@@ -447,13 +468,9 @@ export default function InboxPage() {
     },
     refetchInterval: 120_000,
   });
-  const upcomingRes: GuestyReservation[] = Array.isArray(upcomingData?.results)
-    ? upcomingData.results
-    : Array.isArray(upcomingData?.data)
-      ? upcomingData.data
-      : Array.isArray(upcomingData?.data?.results)
-        ? upcomingData.data.results
-        : [];
+  const upcomingRes: GuestyReservation[] = unwrapList<GuestyReservation>(upcomingData, [
+    "reservations", "results", "data",
+  ]);
 
   const { data: autoApproveStatus, isLoading: autoLoading } = useQuery<any>({
     queryKey: ["/api/inbox/auto-approve/status"],
