@@ -212,6 +212,73 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
   return visit(raw, 0) ?? [];
 }
 
+// Normalize a conversation object across Guesty API versions.
+// v1 puts guest/listing/last-message data at the top level.
+// v2 (inbox-v2) nests it under `meta`: meta.guest, meta.listing, meta.lastMessage, etc.
+// We flatten both shapes into a consistent view for rendering.
+function normalizeConversation(c: any): GuestyConversation & {
+  displayGuestName: string;
+  displayListingName: string;
+  displayPreview: string;
+  displayTimestamp: string | undefined;
+  isUnread: boolean;
+} {
+  const meta = c?.meta ?? {};
+  const guest = c?.guest ?? meta.guest ?? {};
+  const listing = c?.listing ?? meta.listing ?? {};
+  const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? {};
+  const mod = c?.module ?? meta.module ?? meta.lastMessage?.module ?? undefined;
+
+  const guestName =
+    c?.guestName ??
+    guest.fullName ??
+    guest.name ??
+    [guest.firstName, guest.lastName].filter(Boolean).join(" ") ??
+    "Guest";
+
+  const listingName =
+    c?.listingNickname ??
+    listing.nickname ??
+    listing.title ??
+    listing.name ??
+    "—";
+
+  const preview =
+    lastMsg.body ??
+    lastMsg.text ??
+    lastMsg.message ??
+    meta.lastMessagePreview ??
+    "";
+
+  const timestamp =
+    c?.lastMessageAt ??
+    meta.lastMessageAt ??
+    lastMsg.createdAt ??
+    c?.createdAt ??
+    undefined;
+
+  const unread =
+    (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
+    c?.unread === true ||
+    meta.unreadCount > 0 ||
+    c?.state === "NEW" ||
+    c?.state === "UNREAD";
+
+  return {
+    ...c,
+    guestName,
+    listingNickname: listingName,
+    lastMessageAt: timestamp,
+    lastPost: lastMsg,
+    module: mod,
+    displayGuestName: guestName || "Guest",
+    displayListingName: listingName || "—",
+    displayPreview: typeof preview === "string" ? preview : "",
+    displayTimestamp: timestamp,
+    isUnread: !!unread,
+  };
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function TemplateEditor({
@@ -356,7 +423,8 @@ export default function InboxPage() {
     "conversations", "results", "data",
   ]);
 
-  const selectedConv = conversations.find(c => c._id === selectedConvId) ?? null;
+  const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
+  const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
 
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId],
@@ -663,6 +731,19 @@ export default function InboxPage() {
                 </ul>
               </>
             )}
+            {/* Drill into first conversation's meta */}
+            {conversations.length > 0 && (conversations[0] as any).meta && typeof (conversations[0] as any).meta === "object" && (
+              <>
+                <div className="mt-2"><b>first conversation.meta entries:</b></div>
+                <ul className="ml-4 list-disc">
+                  {Object.entries((conversations[0] as any).meta as Record<string, unknown>).map(([k, v]) => (
+                    <li key={k}>
+                      <b>{k}</b>: {Array.isArray(v) ? `Array(${v.length})` : v == null ? String(v) : typeof v === "object" ? `{${Object.keys(v as object).join(", ")}}` : JSON.stringify(v).slice(0, 120)}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
             <details>
               <summary className="cursor-pointer text-amber-700">Raw JSON (truncated)</summary>
               <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] leading-tight whitespace-pre-wrap">
@@ -720,8 +801,8 @@ export default function InboxPage() {
                     No conversations yet
                   </div>
                 )}
-                {conversations.map(c => {
-                  const preview = c.lastPost?.body ?? c.lastPost?.text ?? "";
+                {conversations.map(rawC => {
+                  const c = normalizeConversation(rawC);
                   const active = c._id === selectedConvId;
                   return (
                     <button
@@ -736,18 +817,18 @@ export default function InboxPage() {
                             <User className="h-3.5 w-3.5 text-primary" />
                           </div>
                           <div className="min-w-0">
-                            <p className="font-medium text-sm truncate">{c.guestName ?? "Guest"}</p>
-                            <p className="text-xs text-muted-foreground truncate">{c.listingNickname ?? "—"}</p>
+                            <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
+                            <p className="text-xs text-muted-foreground truncate">{c.displayListingName}</p>
                           </div>
                         </div>
-                        {c.unread && <div className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1" />}
+                        {c.isUnread && <div className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1" />}
                       </div>
-                      {preview && (
-                        <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2 ml-9">{preview}</p>
+                      {c.displayPreview && (
+                        <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2 ml-9">{c.displayPreview}</p>
                       )}
-                      {c.lastMessageAt && (
+                      {c.displayTimestamp && (
                         <p className="text-[10px] text-muted-foreground mt-1 ml-9">
-                          {new Date(c.lastMessageAt).toLocaleDateString()}
+                          {new Date(c.displayTimestamp).toLocaleDateString()}
                         </p>
                       )}
                     </button>
@@ -768,8 +849,8 @@ export default function InboxPage() {
                   <>
                     {/* Thread header */}
                     <div className="px-5 py-3 border-b">
-                      <p className="font-medium">{selectedConv?.guestName ?? "Guest"}</p>
-                      <p className="text-xs text-muted-foreground">{selectedConv?.listingNickname ?? "—"}</p>
+                      <p className="font-medium">{selectedConv?.displayGuestName ?? "Guest"}</p>
+                      <p className="text-xs text-muted-foreground">{selectedConv?.displayListingName ?? "—"}</p>
                     </div>
 
                     {/* Messages */}
