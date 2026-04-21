@@ -680,8 +680,8 @@ export default function Bookings() {
               {picker && (
                 <span>
                   {picker.reservation.guest?.fullName ?? "Guest"} ·{" "}
-                  {fmtDate(picker.reservation.checkIn)} → {fmtDate(picker.reservation.checkOut)} ·{" "}
-                  {picker.reservation.nightsCount ?? nightsBetween(picker.reservation.checkIn, picker.reservation.checkOut)} nights
+                  {fmtDate(checkInOf(picker.reservation))} → {fmtDate(checkOutOf(picker.reservation))} ·{" "}
+                  {picker.reservation.nightsCount ?? nightsBetween(checkInOf(picker.reservation), checkOutOf(picker.reservation))} nights
                 </span>
               )}
             </DialogDescription>
@@ -718,19 +718,30 @@ function CandidateList({
   onAttach: (buyInId: number) => void;
   isPending: boolean;
 }) {
+  // Server validates YYYY-MM-DD — slice off the time portion of Guesty's ISO
+  // timestamps, or use the already-localized date-only field when available.
+  const toDateOnly = (s: string | undefined): string => {
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    return s.slice(0, 10);
+  };
+  const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+  const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+
   const { data, isLoading, isError, error } = useQuery<{ candidates: Candidate[]; bookingNights: number; count: number }>({
     queryKey: [
       "/api/bookings/candidates",
       reservation._id,
       propertyId,
       slot.unitId,
-      reservation.checkIn,
-      reservation.checkOut,
+      checkInYmd,
+      checkOutYmd,
     ],
     queryFn: () => {
-      const url = `/api/bookings/${reservation._id}/buy-in-candidates?propertyId=${propertyId}&unitId=${encodeURIComponent(slot.unitId)}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`;
+      const url = `/api/bookings/${reservation._id}/buy-in-candidates?propertyId=${propertyId}&unitId=${encodeURIComponent(slot.unitId)}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
+    enabled: !!checkInYmd && !!checkOutYmd,
   });
 
   if (isLoading) {
@@ -865,17 +876,28 @@ function LiveSearchSection({
 }) {
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
 
+  // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
+  // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
+  // field when present, otherwise slice the first 10 chars of the ISO string.
+  const toDateOnly = (s: string | undefined): string => {
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    return s.slice(0, 10);
+  };
+  const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+  const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isError, error, refetch } = useQuery<FindBuyInResponse>({
-    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, reservation.checkIn, reservation.checkOut],
+    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${reservation.checkIn}&checkOut=${reservation.checkOut}`,
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}`,
       ).then((r) => r.json()),
-    enabled: true,
+    enabled: !!checkInYmd && !!checkOutYmd,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -1057,6 +1079,12 @@ function RecordBuyInDialog({
   const [listingUrl, setListingUrl] = useState(candidate.url);
   const [notes, setNotes] = useState("");
 
+  const toDateOnly = (s: string | undefined): string => {
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    return s.slice(0, 10);
+  };
+
   const createAndAttach = useMutation({
     mutationFn: async () => {
       const body = {
@@ -1064,8 +1092,8 @@ function RecordBuyInDialog({
         unitId: slot.unitId,
         unitLabel: slot.unitLabel,
         bedrooms: slot.bedrooms,
-        checkIn: reservation.checkIn,
-        checkOut: reservation.checkOut,
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
         costPaid: Number(costPaid),
         airbnbConfirmation: confirmation || null,
         airbnbListingUrl: listingUrl || null,
