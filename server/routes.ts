@@ -4838,7 +4838,12 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       const logs = await storage.getAutoReplyLogs(limit);
       res.json(logs);
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to fetch logs", message: err.message });
+      // Fail-soft: if the table doesn't exist yet (Postgres 42P01) or any other
+      // storage error, return an empty array so the inbox page still renders.
+      // The real fix is running `npm run db:push` on Railway to create the table.
+      const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err.message || "");
+      console.error(`[auto-reply/logs] ${missingTable ? "table missing — returning []" : err.message}`);
+      res.json([]);
     }
   });
 
