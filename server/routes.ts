@@ -1268,6 +1268,57 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/admin/cleanup-removed-properties
+  // One-shot cleanup after the 2026-04 condo-only pivot. Deletes every DB row
+  // tied to propertyIds that were stripped from PROPERTY_UNIT_CONFIGS.
+  // Idempotent — safe to run multiple times. Returns counts per table.
+  app.post("/api/admin/cleanup-removed-properties", async (_req, res) => {
+    const REMOVED_PROPERTY_IDS = [7, 10, 12, 14, 21, 26, 28, 31, 36];
+    try {
+      // Lazy-import drizzle helpers + tables so we don't pay the import cost
+      // on every request.
+      const { db } = await import("./db");
+      const { inArray } = await import("drizzle-orm");
+      const { buyIns, guestyPropertyMap, availabilityScans, unitSwaps } = await import("@shared/schema");
+
+      const buyInsDeleted = await db
+        .delete(buyIns)
+        .where(inArray(buyIns.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: buyIns.id });
+
+      const mapsDeleted = await db
+        .delete(guestyPropertyMap)
+        .where(inArray(guestyPropertyMap.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: guestyPropertyMap.id });
+
+      const scansDeleted = await db
+        .delete(availabilityScans)
+        .where(inArray(availabilityScans.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: availabilityScans.id });
+
+      let swapsDeleted: { id: number }[] = [];
+      try {
+        swapsDeleted = await db
+          .delete(unitSwaps)
+          .where(inArray(unitSwaps.propertyId, REMOVED_PROPERTY_IDS))
+          .returning({ id: unitSwaps.id });
+      } catch {
+        // unit_swaps may not exist or may not have propertyId — safe to skip
+      }
+
+      return res.json({
+        removedPropertyIds: REMOVED_PROPERTY_IDS,
+        buyIns: buyInsDeleted.length,
+        guestyPropertyMap: mapsDeleted.length,
+        availabilityScans: scansDeleted.length,
+        unitSwaps: swapsDeleted.length,
+      });
+    } catch (err: any) {
+      console.error("[admin/cleanup] error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // ========== OPERATIONS: FIND BUY-IN ACROSS ALL SOURCES ==========
   //
   // Fan-out search across Airbnb, Vrbo/Booking.com, and Google-discovered

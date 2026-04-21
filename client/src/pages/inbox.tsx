@@ -299,6 +299,14 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.id ??
     undefined;
 
+  // Reservation phase for the quick-scan badge in the list row.
+  const resStatus = String(firstReservation?.status ?? "").toLowerCase();
+  let phase: "inquiry" | "request" | "booked" | "cancelled" | "other" = "other";
+  if (resStatus.includes("cancel")) phase = "cancelled";
+  else if (resStatus.includes("inquiry")) phase = "inquiry";
+  else if (resStatus === "request" || resStatus === "pending" || resStatus === "awaitingpayment") phase = "request";
+  else if (["reserved", "confirmed", "accepted", "checked_in", "checkedin", "completed"].includes(resStatus)) phase = "booked";
+
   return {
     ...c,
     guestName,
@@ -313,6 +321,7 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayPreview: typeof preview === "string" ? preview : "",
     displayTimestamp: timestamp,
     isUnread: !!unread,
+    phase,
   };
 }
 
@@ -506,6 +515,20 @@ export default function InboxPage() {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
     }
   }, [posts.length]);
+
+  // Full reservation details (money breakdown, pre-approval status, etc.)
+  // The conversation endpoint only gives us a minimal reservation stub.
+  const reservationId = (selectedConv as any)?.meta?.reservations?.[0]?._id;
+  const { data: reservationFull } = useQuery<any>({
+    queryKey: ["/api/guesty-proxy/reservations", reservationId],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/guesty-proxy/reservations/${reservationId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
 
   const sendMessage = useMutation({
     // /posts adds a message to the thread but doesn't deliver it to the guest —
@@ -818,6 +841,21 @@ export default function InboxPage() {
                           <div className="min-w-0">
                             <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
                             <p className="text-xs text-muted-foreground truncate">{c.displayListingName}</p>
+                            {c.phase && c.phase !== "other" && (
+                              <span
+                                className={`inline-block mt-1 px-1.5 py-[1px] rounded text-[9px] font-medium ${
+                                  c.phase === "inquiry"   ? "bg-amber-100 text-amber-800" :
+                                  c.phase === "request"   ? "bg-blue-100 text-blue-800" :
+                                  c.phase === "booked"    ? "bg-green-100 text-green-800" :
+                                  c.phase === "cancelled" ? "bg-gray-200 text-gray-600" : ""
+                                }`}
+                              >
+                                {c.phase === "inquiry" ? "INQUIRY"
+                                  : c.phase === "request" ? "REQUEST"
+                                  : c.phase === "booked" ? "BOOKED"
+                                  : "CANCELLED"}
+                              </span>
+                            )}
                           </div>
                         </div>
                         {c.isUnread && <div className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1" />}
@@ -994,28 +1032,122 @@ export default function InboxPage() {
                   </div>
                 ) : (() => {
                   const meta = (selectedConv as any)?.meta ?? {};
-                  const res = meta.reservations?.[0] ?? null;
+                  const resStub = meta.reservations?.[0] ?? null;
+                  // Full reservation has money breakdown; stub has just dates/status.
+                  // unwrap Guesty's {status, data} wrapper
+                  const resFull = reservationFull?.data ?? reservationFull ?? null;
+                  const res = resFull ?? resStub;
                   const integration = meta.integration ?? {};
                   const guest = meta.guest ?? {};
-                  const listing = res?.listing ?? {};
+                  const listing = res?.listing ?? resStub?.listing ?? {};
                   const channelRaw = integration.platform ?? res?.source ?? "";
                   const nights = res?.checkIn && res?.checkOut
                     ? Math.max(1, Math.round((new Date(res.checkOut).getTime() - new Date(res.checkIn).getTime()) / 86_400_000))
                     : null;
+
+                  // ── Booking-status classification ──
+                  // Airbnb statuses we might see:
+                  //   inquiry         — guest asked a question, no booking request
+                  //   request         — guest sent booking request, awaits host accept
+                  //   accepted/reserved/confirmed — booked
+                  //   canceled
+                  // `preApproved` / `preApprovalStatus` on the reservation indicates
+                  // the host has pre-approved on Airbnb.
+                  const statusRaw = String(res?.status ?? "").toLowerCase();
+                  const isAirbnb = channelRaw.toLowerCase().includes("airbnb");
+                  const preApproved =
+                    res?.preApproved === true ||
+                    String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
+                    statusRaw.includes("preapproved");
+                  const isInquiry = statusRaw === "inquiry" || statusRaw.includes("inquiry");
+                  const isBookingRequest = statusRaw === "request" || statusRaw === "pending" || statusRaw === "awaitingpayment";
+                  const isBooked = ["reserved", "confirmed", "accepted", "checked_in", "checkedin", "completed"].includes(statusRaw);
+                  const isCancelled = statusRaw.includes("cancel");
+
+                  let phase: "inquiry" | "request" | "booked" | "cancelled" | "other" = "other";
+                  if (isCancelled) phase = "cancelled";
+                  else if (isInquiry) phase = "inquiry";
+                  else if (isBookingRequest) phase = "request";
+                  else if (isBooked) phase = "booked";
+
+                  // ── Money extraction (only meaningful when booked) ──
+                  // Guesty reservation.money field names vary across API versions.
+                  const m = res?.money ?? {};
+                  const asNum = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" ? Number(v) || 0 : 0);
+                  const guestGross   = asNum(m.fareAccommodation) + asNum(m.fareCleaning) + asNum(m.guestServiceFee) + asNum(m.totalTaxes) || asNum(m.totalPaid) || asNum(m.fare?.guestPrice);
+                  const accommodation = asNum(m.fareAccommodation) || asNum(m.fare?.accommodationFare);
+                  const cleaning     = asNum(m.fareCleaning);
+                  const hostFee      = asNum(m.hostServiceFee);
+                  const netPayout    = asNum(m.netIncome) || asNum(m.hostPayout) || Math.max(0, accommodation + cleaning - hostFee);
+                  const hasMoney     = guestGross > 0 || netPayout > 0;
+
                   return (
                     <div className="p-4 space-y-4 text-sm">
-                      {/* Status / Channel row */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Status</div>
-                          <div className={`mt-0.5 font-medium capitalize ${res?.status === "confirmed" ? "text-green-700" : "text-foreground"}`}>
-                            {res?.status ?? "—"}
+                      {/* Booking phase banner */}
+                      <div
+                        className={`rounded-lg p-3 border ${
+                          phase === "inquiry"
+                            ? "bg-amber-50 border-amber-200"
+                            : phase === "request"
+                              ? "bg-blue-50 border-blue-200"
+                              : phase === "booked"
+                                ? "bg-green-50 border-green-200"
+                                : phase === "cancelled"
+                                  ? "bg-gray-100 border-gray-200"
+                                  : "bg-muted border-border"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-0.5">
+                          {phase === "inquiry" && (
+                            <>
+                              <Badge className="bg-amber-500 text-white text-[10px]">Inquiry</Badge>
+                              <span className="text-xs font-medium text-amber-900">Guest is asking a question</span>
+                            </>
+                          )}
+                          {phase === "request" && (
+                            <>
+                              <Badge className="bg-blue-600 text-white text-[10px]">Booking request</Badge>
+                              <span className="text-xs font-medium text-blue-900">Awaiting your response</span>
+                            </>
+                          )}
+                          {phase === "booked" && (
+                            <>
+                              <Badge className="bg-green-600 text-white text-[10px]">Booked · {res?.status}</Badge>
+                              {channelBadge(channelRaw)}
+                            </>
+                          )}
+                          {phase === "cancelled" && <Badge variant="secondary" className="text-[10px]">Cancelled</Badge>}
+                          {phase === "other" && <Badge variant="outline" className="text-[10px]">{res?.status ?? "Unknown"}</Badge>}
+                        </div>
+
+                        {/* Airbnb pre-approval callout for inquiries/requests */}
+                        {isAirbnb && (phase === "inquiry" || phase === "request") && (
+                          <div className="mt-2 text-[11px] leading-snug">
+                            {preApproved ? (
+                              <div className="text-green-800 font-medium flex items-center gap-1">
+                                <CheckCircle className="h-3 w-3" /> Pre-approved on Airbnb
+                              </div>
+                            ) : (
+                              <div className="text-amber-900">
+                                <div className="font-medium mb-1">Not yet pre-approved.</div>
+                                <div>
+                                  Airbnb inquiries should be pre-approved within 24h — respond in Guesty
+                                  and hit "Pre-approve" or send a Special Offer.
+                                </div>
+                                {res?._id && (
+                                  <a
+                                    href={`https://app.guesty.com/reservations/${res._id}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-primary hover:underline mt-1 inline-block"
+                                  >
+                                    Open reservation in Guesty ↗
+                                  </a>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Channel</div>
-                          <div className="mt-0.5">{channelBadge(channelRaw) ?? <span className="text-muted-foreground">—</span>}</div>
-                        </div>
+                        )}
                       </div>
 
                       {/* Guest */}
@@ -1062,7 +1194,56 @@ export default function InboxPage() {
                         </div>
                       </div>
 
-                      {/* Confirmation code + reservation link */}
+                      {/* Financials — only for booked reservations */}
+                      {phase === "booked" && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                            Financials
+                          </div>
+                          {hasMoney ? (
+                            <div className="border rounded-lg divide-y text-xs">
+                              {guestGross > 0 && (
+                                <div className="flex justify-between px-2.5 py-1.5">
+                                  <span className="text-muted-foreground">Guest paid (gross)</span>
+                                  <span className="font-medium">${guestGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                                </div>
+                              )}
+                              {accommodation > 0 && (
+                                <div className="flex justify-between px-2.5 py-1.5">
+                                  <span className="text-muted-foreground pl-2">Accommodation</span>
+                                  <span>${accommodation.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                                </div>
+                              )}
+                              {cleaning > 0 && (
+                                <div className="flex justify-between px-2.5 py-1.5">
+                                  <span className="text-muted-foreground pl-2">Cleaning</span>
+                                  <span>${cleaning.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                                </div>
+                              )}
+                              {hostFee > 0 && (
+                                <div className="flex justify-between px-2.5 py-1.5 text-red-700">
+                                  <span>− {channelRaw.includes("airbnb") ? "Airbnb" : "Channel"} host fee</span>
+                                  <span>−${hostFee.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                                </div>
+                              )}
+                              <div className="flex justify-between px-2.5 py-2 bg-green-50 dark:bg-green-950/20 font-semibold">
+                                <span className="text-green-800">Net to your bank</span>
+                                <span className="text-green-800">${netPayout.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                              </div>
+                              {nights && netPayout > 0 && (
+                                <div className="flex justify-between px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                                  <span>Per night (net)</span>
+                                  <span>${Math.round(netPayout / nights).toLocaleString()}</span>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-muted-foreground italic">Loading money details…</div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Confirmation code + Guesty deep link */}
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Confirmation</div>
                         <div className="mt-0.5 font-mono text-xs">{res?.confirmationCode ?? "—"}</div>
