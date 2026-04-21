@@ -1620,26 +1620,21 @@ export async function registerRoutes(
 
   // ========== AIRBNB SEARCH VIA SEARCHAPI.IO ==========
 
+  // CONDO / TOWNHOME ONLY — mirrors shared/property-units.ts.
+  // Removed villa/single-family entries (7, 10, 12, 14, 21, 26, 28, 31) on
+  // 2026-04 per business-model pivot.
   const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
     1: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
     4: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-    7: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
     8: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     9: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-    10: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-    12: { community: "Kekaha Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-    14: { community: "Keauhou", units: [{ bedrooms: 4 }, { bedrooms: 2 }] },
     18: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     19: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     20: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-    21: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
     23: { community: "Kapaa Beachfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     24: { community: "Poipu Oceanfront", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
-    26: { community: "Keauhou", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
     27: { community: "Poipu Kai", units: [{ bedrooms: 2 }, { bedrooms: 2 }] },
-    28: { community: "Poipu Brenneckes", units: [{ bedrooms: 4 }, { bedrooms: 3 }] },
     29: { community: "Princeville", units: [{ bedrooms: 3 }, { bedrooms: 4 }] },
-    31: { community: "Poipu Brenneckes", units: [{ bedrooms: 5 }, { bedrooms: 2 }] },
     32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
@@ -4681,10 +4676,12 @@ export async function registerRoutes(
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
+    // CONDO / TOWNHOME ONLY. Explicitly exclude villas, single-family, detached
+    // dwellings from search queries so upstream Google results are pre-filtered.
     const queries = [
-      `"${city}" "${state}" condo complex vacation rental individually owned units airbnb vrbo`,
-      `"${city}" "${state}" townhome cluster short term rental multiple bedrooms airbnb`,
-      `"${city}" "${state}" condominium community individually owned vacation rental nightly`,
+      `"${city}" "${state}" condo complex vacation rental individually owned units airbnb vrbo -villa -"single family" -"detached home"`,
+      `"${city}" "${state}" townhome cluster short term rental multiple bedrooms airbnb -villa -"single family"`,
+      `"${city}" "${state}" condominium community individually owned vacation rental nightly -villa -"detached"`,
     ];
 
     const allResults: Array<{ title: string; link: string; snippet: string }> = [];
@@ -4753,18 +4750,20 @@ export async function registerRoutes(
     }> = [];
 
     if (anthropicKey) {
-      const prompt = `You are evaluating potential vacation rental communities for NexStay, a platform that bundles two nearby individually-owned vacation rental units into one large-group listing.
+      const prompt = `You are evaluating potential vacation rental communities for Magical Island Rentals, a platform that bundles two nearby individually-owned vacation rental units into one large-group listing.
 
 STRICT QUALIFYING CRITERIA — a community MUST meet ALL of these:
-1. PROPERTY TYPE: Condos in a single building OR townhomes in a clustered complex (adjacent units, shared amenities). NOT a hotel. NOT a timeshare resort. NOT a mixed-use residential/commercial complex. NOT a golf resort with scattered villas.
+1. PROPERTY TYPE: Condos in a single building OR townhomes in a clustered complex (stacked or side-by-side, shared walls, shared amenities). ONLY condos and townhomes qualify. DO NOT qualify villas, detached homes, single-family dwellings, or standalone houses of any kind — even if they are "adjacent" or "in a resort community", standalone structures are DISQUALIFIED.
 2. OWNERSHIP MODEL: Units are individually owned by different owners (HOA-style), NOT all owned by one company or resort. Guests can find multiple units listed separately on Airbnb/VRBO by different hosts.
 3. PURELY VACATION RENTAL: The community is primarily used as vacation rentals (not long-term residential apartments). Nightly rental listings should dominate.
-4. UNIT CLUSTERING: Units are physically adjacent or in the same building — enabling a guest group to book two units and use them together as one large space.
+4. UNIT CLUSTERING: Units share walls and are in the same multi-unit building or contiguous townhome row — enabling a guest group to book two units and use them together as one large space.
 5. SIZE: At least 10+ units in the complex, multiple bedroom configurations (2BR, 3BR, etc.)
 
-DISQUALIFY if:
+DISQUALIFY if ANY of the following are true:
 - It's a hotel, motel, or resort with front-desk check-in
-- Units are scattered across a large resort campus (not adjacent)
+- The listings use the words "villa", "cottage", "bungalow", "detached", "single-family", "house", or "home" in a way that implies standalone structures
+- Properties are described as having private yards, private pools per unit, or standalone roofs
+- Units are scattered across a large resort campus (not adjacent/shared-wall)
 - Single-owner managed property
 - Primarily long-term rentals
 - Timeshare
