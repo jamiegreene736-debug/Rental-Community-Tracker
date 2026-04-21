@@ -18,7 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
-  ChevronDown, ChevronRight, Globe, ShoppingCart,
+  ChevronDown, ChevronRight, Globe, ShoppingCart, Zap,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -285,6 +285,83 @@ export default function Bookings() {
       toast({ title: "Buy-in detached" });
     },
     onError: (e: any) => toast({ title: "Detach failed", description: e.message, variant: "destructive" }),
+  });
+
+  // Auto-fill: for every empty slot on a reservation, search live sources,
+  // pick the cheapest priced candidate, create the buy-in, and attach it.
+  // Collapses the 6-click flow (expand → Find → scroll → Record → Save → ...)
+  // into a single button per booking.
+  const [autoFilling, setAutoFilling] = useState<string | null>(null);
+  const autoFillMutation = useMutation({
+    mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
+      if (!selectedPropertyId) throw new Error("No property selected");
+      const emptySlots = reservation.slots.filter((s) => !s.buyIn);
+      if (emptySlots.length === 0) throw new Error("All slots already filled");
+
+      const toDateOnly = (s: string | undefined): string => {
+        if (!s) return "";
+        return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+      };
+      const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+      const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+
+      const results = await Promise.all(
+        emptySlots.map(async (slot) => {
+          const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${slot.bedrooms}&checkIn=${ci}&checkOut=${co}`;
+          const data = (await apiRequest("GET", url).then((r) => r.json())) as FindBuyInResponse;
+          // Cheapest across all sources; skip any without a live price so we
+          // don't create a bogus $0 buy-in that breaks the profit math.
+          const pick = (data.cheapest ?? []).find((c) => c.totalPrice > 0);
+          if (!pick) return { slot, picked: null, created: null };
+
+          const created = await apiRequest("POST", "/api/buy-ins", {
+            propertyId: selectedPropertyId,
+            unitId: slot.unitId,
+            unitLabel: slot.unitLabel,
+            bedrooms: slot.bedrooms,
+            checkIn: ci,
+            checkOut: co,
+            costPaid: pick.totalPrice,
+            airbnbConfirmation: null,
+            airbnbListingUrl: pick.url,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}`,
+            status: "active",
+          }).then((r) => r.json());
+          if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
+
+          await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+            buyInId: created.id,
+          }).then((r) => r.json());
+
+          return { slot, picked: pick, created };
+        }),
+      );
+      return { reservation, results };
+    },
+    onSuccess: ({ reservation, results }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      const filled = results.filter((r) => r.picked);
+      const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
+      const payout = reservation.money?.hostPayout ?? 0;
+      const existingCost = reservation.slots.reduce(
+        (s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)),
+        0,
+      );
+      const estProfit = payout - existingCost - totalCost;
+      const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
+      toast({
+        title: `Filled ${filled.length} / ${results.length} units`,
+        description:
+          `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
+          + (skipped.length ? ` · No priced candidate for: ${skipped.join(", ")}` : ""),
+      });
+      setAutoFilling(null);
+    },
+    onError: (e: any) => {
+      toast({ title: "Auto-fill failed", description: e.message, variant: "destructive" });
+      setAutoFilling(null);
+    },
   });
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -593,6 +670,31 @@ export default function Bookings() {
                     {/* Expanded: per-unit-slot detail */}
                     {isOpen && (
                       <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
+                        {/* Auto-fill: one click to search + attach cheapest
+                            priced option for every empty slot on this row. */}
+                        {r.slotsFilled < r.slotsTotal && (
+                          <div className="flex items-center justify-between gap-3 bg-primary/5 border border-primary/20 rounded px-3 py-2">
+                            <div className="text-xs text-muted-foreground">
+                              {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAutoFilling(r._id);
+                                autoFillMutation.mutate({ reservation: r });
+                              }}
+                              disabled={autoFillMutation.isPending && autoFilling === r._id}
+                              data-testid={`button-auto-fill-${r._id}`}
+                            >
+                              {autoFillMutation.isPending && autoFilling === r._id ? (
+                                <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
+                              ) : (
+                                <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
+                              )}
+                            </Button>
+                          </div>
+                        )}
                         {r.slots.map((slot) => (
                           <div
                             key={slot.unitId}
