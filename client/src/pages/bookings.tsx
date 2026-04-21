@@ -853,6 +853,11 @@ type FindBuyInResponse = {
     pm: LiveCandidate[];
   };
   cheapest: LiveCandidate[];
+  debug?: {
+    rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number };
+    searchLocation?: string;
+    vrboDestination?: string;
+  };
 };
 
 function sourceBadgeClass(src: string) {
@@ -949,7 +954,7 @@ function LiveSearchSection({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Live results — {data?.community} · {slot.bedrooms}BR · {data?.nights} nights
         </p>
@@ -957,6 +962,14 @@ function LiveSearchSection({
           <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
         </Button>
       </div>
+      {/* Raw result counts per source — lets us see when a source's API
+          returned nothing (vs our parser dropped everything). */}
+      {data?.debug?.rawCounts && (
+        <div className="text-[11px] text-muted-foreground -mt-1">
+          Raw hits: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+          {data.debug.searchLocation && <span className="ml-2">· query: "{data.debug.searchLocation}"</span>}
+        </div>
+      )}
 
       {/* Cheapest callout */}
       {cheapest.length > 0 && (
@@ -1044,15 +1057,15 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
         >
           <ExternalLink className="h-3 w-3 mr-1" /> Open
         </Button>
-        {c.nightlyPrice > 0 && (
-          <Button
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            onClick={onRecord}
-          >
-            <ShoppingCart className="h-3 w-3 mr-1" /> Record
-          </Button>
-        )}
+        {/* Record is always available — even if price is unknown you can
+            enter it manually in the dialog after you negotiate with the PM. */}
+        <Button
+          size="sm"
+          className="h-7 px-2 text-[11px]"
+          onClick={onRecord}
+        >
+          <ShoppingCart className="h-3 w-3 mr-1" /> Record
+        </Button>
       </div>
     </div>
   );

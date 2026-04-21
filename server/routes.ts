@@ -1313,6 +1313,12 @@ export async function registerRoutes(
     };
 
     // ── Airbnb via SearchAPI ───────────────────────────────────────────────
+    // Previously we filtered out results with nightlyPrice=0, which killed
+    // every listing where SearchAPI didn't extract a price. Now we keep URL-
+    // bearing results even without a price — better to show "contact host"
+    // than to hide the listing entirely.
+    let airbnbRawCount = 0;
+    let airbnbKeptCount = 0;
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
         const params = new URLSearchParams({
@@ -1321,98 +1327,141 @@ export async function registerRoutes(
           check_in_date: checkIn,
           check_out_date: checkOut,
           adults: "2",
-          bedrooms: String(bedrooms),
           type_of_place: "entire_home",
           currency: "USD",
           api_key: apiKey,
         });
-        if (bounds) {
-          params.set("sw_lat", String(bounds.sw_lat));
-          params.set("sw_lng", String(bounds.sw_lng));
-          params.set("ne_lat", String(bounds.ne_lat));
-          params.set("ne_lng", String(bounds.ne_lng));
-        }
+        // Geo-bounds make the search too tight on small communities; skip them
+        // here (PROPERTY_UNIT_NEEDS-level bounds stay on the scan-window path).
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-        if (!r.ok) return [];
+        if (!r.ok) {
+          console.error(`[find-buy-in] airbnb HTTP ${r.status}`);
+          return [];
+        }
         const data = await r.json() as any;
-        const props = Array.isArray(data?.properties) ? data.properties : [];
-        return props.slice(0, 8).map((p: any): Candidate => {
-          const total = asNum(p?.price?.total ?? p?.total_price);
-          const nightly = asNum(p?.price?.rate_per_night ?? p?.price?.nightly ?? (total && nights ? total / nights : 0));
+        const props = Array.isArray(data?.properties) ? data.properties : Array.isArray(data?.results) ? data.results : [];
+        airbnbRawCount = props.length;
+        console.log(`[find-buy-in] airbnb raw=${airbnbRawCount}, first keys=${props[0] ? Object.keys(props[0]).slice(0, 10).join(",") : "n/a"}`);
+        // Post-filter to at-least-target-bedrooms. SearchAPI sometimes returns
+        // bedroom count in different fields — check all known paths.
+        const bedroomOf = (p: any): number =>
+          Number(p?.bedrooms ?? p?.beds ?? p?.info?.bedrooms ?? p?.details?.bedrooms ?? 0);
+        const filtered = props.filter((p: any) => {
+          const bed = bedroomOf(p);
+          return bed === 0 || bed >= bedrooms; // keep unknowns + exact/over
+        });
+        const mapped = filtered.map((p: any): Candidate => {
+          const total = asNum(p?.price?.total ?? p?.total_price ?? p?.price?.total_price);
+          const nightly = asNum(
+            p?.price?.rate_per_night
+            ?? p?.price?.nightly
+            ?? p?.price_per_night
+            ?? p?.rate_per_night
+            ?? (total && nights ? total / nights : 0),
+          );
           return {
             source: "airbnb",
             sourceLabel: "Airbnb",
             title: String(p?.name ?? p?.title ?? "Airbnb listing"),
-            url: String(p?.link ?? p?.url ?? ""),
+            url: String(p?.link ?? p?.url ?? p?.listing_url ?? ""),
             nightlyPrice: Math.round(nightly),
             totalPrice: Math.round(total || nightly * nights),
-            bedrooms: p?.bedrooms,
-            image: p?.images?.[0] ?? p?.image,
+            bedrooms: bedroomOf(p) || undefined,
+            image: p?.images?.[0]?.picture ?? p?.images?.[0] ?? p?.image ?? p?.thumbnail,
           };
-        }).filter((c: Candidate) => c.url && c.nightlyPrice > 0);
+        }).filter((c: Candidate) => !!c.url);
+        airbnbKeptCount = mapped.length;
+        return mapped.slice(0, 10);
       } catch (e: any) {
         console.error("[find-buy-in] airbnb error:", e.message);
         return [];
       }
     })();
 
-    // ── Vrbo + Booking.com via SearchAPI Google Hotels engine ──────────────
-    // Google Hotels returns both platforms mixed together under `properties[].source`.
-    const hotelsPromise: Promise<{ vrbo: Candidate[]; booking: Candidate[] }> = (async () => {
+    // ── Vrbo via Google site: search ──────────────────────────────────────
+    // SearchAPI has no direct Vrbo engine — google_hotels returned 0. Fall
+    // back to a Google search restricted to vrbo.com, which surfaces actual
+    // property listing pages. No date-specific prices, but live links.
+    let vrboRawCount = 0;
+    const vrboPromise: Promise<Candidate[]> = (async () => {
       try {
+        const query = `site:vrbo.com ${searchLocation} ${bedrooms}-bedroom OR ${bedrooms} bedroom`;
         const params = new URLSearchParams({
-          engine: "google_hotels",
-          q: vrboDestination,
-          check_in_date: checkIn,
-          check_out_date: checkOut,
-          adults: "2",
-          property_type: "vacation_rental",
-          bedrooms: String(bedrooms),
-          sort_by: "lowest_price",
-          currency: "USD",
+          engine: "google",
+          q: query,
+          num: "10",
           api_key: apiKey,
         });
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-        if (!r.ok) return { vrbo: [], booking: [] };
+        if (!r.ok) return [];
         const data = await r.json() as any;
-        const props = Array.isArray(data?.properties) ? data.properties : [];
-        const vrbo: Candidate[] = [];
-        const booking: Candidate[] = [];
-        for (const p of props) {
-          const nightly = asNum(p?.rate_per_night?.extracted_lowest ?? p?.rate_per_night?.lowest ?? p?.price?.nightly);
-          const total = asNum(p?.total_rate?.extracted_lowest ?? p?.total_rate?.lowest ?? nightly * nights);
-          const url = String(p?.link ?? p?.website ?? "");
-          const src = (p?.source ?? "").toLowerCase();
-          const title = String(p?.name ?? "Listing");
-          const c: Candidate = {
+        const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
+        vrboRawCount = organic.length;
+        return organic
+          .filter((o: any) => o?.link && o.link.includes("vrbo.com"))
+          .slice(0, 8)
+          .map((o: any): Candidate => ({
             source: "vrbo",
             sourceLabel: "Vrbo",
-            title,
-            url,
-            nightlyPrice: Math.round(nightly),
-            totalPrice: Math.round(total),
-            image: p?.images?.[0]?.thumbnail ?? p?.images?.[0]?.original_image,
-          };
-          if (url.includes("vrbo") || src.includes("vrbo") || src.includes("homeaway")) {
-            vrbo.push({ ...c, source: "vrbo", sourceLabel: "Vrbo" });
-          } else if (url.includes("booking.com") || src.includes("booking")) {
-            booking.push({ ...c, source: "booking", sourceLabel: "Booking.com" });
-          }
-        }
-        return {
-          vrbo: vrbo.filter(c => c.url && c.nightlyPrice > 0).slice(0, 8),
-          booking: booking.filter(c => c.url && c.nightlyPrice > 0).slice(0, 8),
-        };
+            title: String(o?.title ?? "Vrbo listing"),
+            url: String(o?.link ?? ""),
+            nightlyPrice: 0, // Google results don't carry live prices
+            totalPrice: 0,
+            snippet: String(o?.snippet ?? "").slice(0, 160),
+          }));
       } catch (e: any) {
-        console.error("[find-buy-in] hotels error:", e.message);
-        return { vrbo: [], booking: [] };
+        console.error("[find-buy-in] vrbo error:", e.message);
+        return [];
       }
     })();
+
+    // ── Booking.com via Google site: search ───────────────────────────────
+    let bookingRawCount = 0;
+    const bookingPromise: Promise<Candidate[]> = (async () => {
+      try {
+        const query = `site:booking.com ${searchLocation} vacation rental ${bedrooms} bedroom`;
+        const params = new URLSearchParams({
+          engine: "google",
+          q: query,
+          num: "10",
+          api_key: apiKey,
+        });
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        if (!r.ok) return [];
+        const data = await r.json() as any;
+        const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
+        bookingRawCount = organic.length;
+        return organic
+          .filter((o: any) => o?.link && o.link.includes("booking.com"))
+          .slice(0, 8)
+          .map((o: any): Candidate => ({
+            source: "booking",
+            sourceLabel: "Booking.com",
+            title: String(o?.title ?? "Booking.com listing"),
+            url: String(o?.link ?? ""),
+            nightlyPrice: 0,
+            totalPrice: 0,
+            snippet: String(o?.snippet ?? "").slice(0, 160),
+          }));
+      } catch (e: any) {
+        console.error("[find-buy-in] booking error:", e.message);
+        return [];
+      }
+    })();
+
+    const hotelsPromise: Promise<{ vrbo: Candidate[]; booking: Candidate[] }> = Promise.all([vrboPromise, bookingPromise])
+      .then(([v, b]) => ({ vrbo: v, booking: b }));
 
     // ── Property-management companies via Google search ────────────────────
     // No live pricing — we return company sites + their booking page as
     // starting points so the host can price-check manually if the OTA results
     // above aren't cheap enough.
+    // PM companies — Stage 1: find relevant PM companies via Google.
+    // Stage 2: for each PM company, do a secondary `site:` search to surface
+    // specific property listing pages (not just the homepage) for the target
+    // bedroom count. This gives the host actual per-property URLs they can
+    // click through to, rather than a generic PM homepage.
+    let pmRawCount = 0;
     const pmPromise: Promise<Candidate[]> = (async () => {
       try {
         const query = `${community} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`;
@@ -1426,15 +1475,94 @@ export async function registerRoutes(
         if (!r.ok) return [];
         const data = await r.json() as any;
         const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
-        return organic.slice(0, 8).map((o: any): Candidate => ({
-          source: "pm",
-          sourceLabel: "PM Company",
-          title: String(o?.title ?? "Property manager"),
-          url: String(o?.link ?? ""),
-          nightlyPrice: 0, // No price data — manual check required
-          totalPrice: 0,
-          snippet: String(o?.snippet ?? "").slice(0, 140),
-        })).filter((c: Candidate) => c.url);
+        pmRawCount = organic.length;
+
+        // Dedupe by domain and keep the top N candidate PM sites
+        const seenDomains = new Set<string>();
+        const pmSites: Array<{ domain: string; title: string; homepageUrl: string; snippet: string }> = [];
+        for (const o of organic) {
+          const url = String(o?.link ?? "");
+          if (!url) continue;
+          try {
+            const domain = new URL(url).hostname.replace(/^www\./, "");
+            if (/airbnb\.com|vrbo\.com|booking\.com|tripadvisor\.com|google\.com/.test(domain)) continue;
+            if (seenDomains.has(domain)) continue;
+            seenDomains.add(domain);
+            pmSites.push({
+              domain,
+              title: String(o?.title ?? domain),
+              homepageUrl: url,
+              snippet: String(o?.snippet ?? "").slice(0, 140),
+            });
+            if (pmSites.length >= 6) break;
+          } catch { /* skip malformed URLs */ }
+        }
+
+        // Stage 2: per-PM-site deep dive to find SPECIFIC property listing pages
+        // with rates. We do this in parallel — 6 sites × ~1s each.
+        const deepResults = await Promise.all(pmSites.map(async (site): Promise<Candidate[]> => {
+          try {
+            const searchQuery = `site:${site.domain} ${bedrooms} bedroom rental rates`;
+            const pp = new URLSearchParams({
+              engine: "google",
+              q: searchQuery,
+              num: "5",
+              api_key: apiKey,
+            });
+            const rr = await fetch(`https://www.searchapi.io/api/v1/search?${pp.toString()}`);
+            if (!rr.ok) {
+              // Fall back to the homepage if per-site search fails
+              return [{
+                source: "pm",
+                sourceLabel: site.title,
+                title: site.title,
+                url: site.homepageUrl,
+                nightlyPrice: 0,
+                totalPrice: 0,
+                snippet: site.snippet,
+              }];
+            }
+            const dd = await rr.json() as any;
+            const hits = Array.isArray(dd?.organic_results) ? dd.organic_results : [];
+            // Extract nightly price from snippet if the PM published one
+            // ("$450/night", "starting at $525", etc.)
+            const extractPrice = (text: string): number => {
+              const m = text.match(/\$\s*(\d{3,4})\s*(?:\/|per|a\s+)?\s*(?:night|nt|night)/i)
+                ?? text.match(/(?:from|starting(?:\s+at)?)\s+\$\s*(\d{3,4})/i);
+              return m ? parseInt(m[1], 10) : 0;
+            };
+            const candidates: Candidate[] = hits.slice(0, 3).map((h: any) => {
+              const snippetText = String(h?.snippet ?? "");
+              const nightly = extractPrice(snippetText + " " + String(h?.title ?? ""));
+              return {
+                source: "pm" as const,
+                sourceLabel: site.title,
+                title: String(h?.title ?? "Listing").slice(0, 100),
+                url: String(h?.link ?? ""),
+                nightlyPrice: nightly,
+                totalPrice: nightly ? nightly * nights : 0,
+                snippet: snippetText.slice(0, 160),
+              };
+            }).filter((c: Candidate) => c.url);
+            // Always include the homepage as a fallback entry
+            if (candidates.length === 0) {
+              return [{
+                source: "pm",
+                sourceLabel: site.title,
+                title: site.title,
+                url: site.homepageUrl,
+                nightlyPrice: 0,
+                totalPrice: 0,
+                snippet: site.snippet,
+              }];
+            }
+            return candidates;
+          } catch (e: any) {
+            console.error(`[find-buy-in] pm deep-dive ${site.domain} error:`, e.message);
+            return [];
+          }
+        }));
+        return deepResults.flat().slice(0, 20);
       } catch (e: any) {
         console.error("[find-buy-in] pm error:", e.message);
         return [];
@@ -1444,10 +1572,12 @@ export async function registerRoutes(
     const [airbnb, hotels, pm] = await Promise.all([airbnbPromise, hotelsPromise, pmPromise]);
 
     // Combined cheapest (top 2) across sources that have pricing
-    const priced: Candidate[] = [...airbnb, ...hotels.vrbo, ...hotels.booking]
+    const priced: Candidate[] = [...airbnb, ...hotels.vrbo, ...hotels.booking, ...pm]
       .filter(c => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
     const cheapest = priced.slice(0, 2);
+
+    console.log(`[find-buy-in] ${community} ${bedrooms}BR ${checkIn}→${checkOut}: airbnb=${airbnb.length}/${airbnbRawCount} vrbo=${hotels.vrbo.length}/${vrboRawCount} booking=${hotels.booking.length}/${bookingRawCount} pm=${pm.length}/${pmRawCount}`);
 
     return res.json({
       community,
@@ -1456,10 +1586,15 @@ export async function registerRoutes(
       checkIn,
       checkOut,
       sources: {
-        airbnb: airbnb.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
-        vrbo: hotels.vrbo.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
-        booking: hotels.booking.sort((a, b) => a.nightlyPrice - b.nightlyPrice),
-        pm,
+        airbnb: airbnb.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        vrbo: hotels.vrbo.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        booking: hotels.booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        pm: pm.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+      },
+      debug: {
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, pm: pmRawCount },
+        searchLocation,
+        vrboDestination,
       },
       cheapest,
       totalPricedResults: priced.length,
