@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -114,6 +114,22 @@ export default function AddCommunity() {
   const [researchLoading, setResearchLoading] = useState(false);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
 
+  // Top-markets sweep — scans a curated list of US vacation-rental hotspots
+  type MarketResult = {
+    city: string;
+    state: string;
+    tag?: string;
+    status: "pending" | "running" | "done" | "error";
+    count?: number;
+    communities?: CommunityResult[];
+    error?: string;
+  };
+  const [sweepOpen, setSweepOpen] = useState(false);
+  const [sweepMarkets, setSweepMarkets] = useState<MarketResult[]>([]);
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const [sweepDone, setSweepDone] = useState(false);
+  const sweepAbortRef = useRef<AbortController | null>(null);
+
   // Step 3
   const [unitSearchResults, setUnitSearchResults] = useState<{ units: UnitResult[]; grouped: Record<string, UnitResult[]> } | null>(null);
   const [communityProfile, setCommunityProfile] = useState<CommunityProfile | null>(null);
@@ -164,6 +180,91 @@ export default function AddCommunity() {
       setResearchLoading(false);
     }
   }, [selectedState, cityInput, toast]);
+
+  // ── Top-markets sweep: iterate curated list of VR hotspots ─────────────
+  const runTopMarketsSweep = useCallback(async () => {
+    setSweepOpen(true);
+    setSweepRunning(true);
+    setSweepDone(false);
+    setSweepMarkets([]);
+
+    const controller = new AbortController();
+    sweepAbortRef.current = controller;
+
+    try {
+      const resp = await fetch("/api/community/scan-top-markets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal: controller.signal,
+      });
+      if (!resp.ok || !resp.body) {
+        toast({ title: "Sweep failed", description: `HTTP ${resp.status}`, variant: "destructive" });
+        setSweepRunning(false);
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt: any;
+          try { evt = JSON.parse(line); } catch { continue; }
+
+          if (evt.type === "start") {
+            setSweepMarkets((evt.markets as any[]).map((m) => ({
+              city: m.city, state: m.state, tag: m.tag, status: "pending",
+            })));
+          } else if (evt.type === "market-start") {
+            setSweepMarkets((prev) => prev.map((m) =>
+              m.city === evt.city && m.state === evt.state ? { ...m, status: "running" } : m
+            ));
+          } else if (evt.type === "market-done") {
+            setSweepMarkets((prev) => prev.map((m) =>
+              m.city === evt.city && m.state === evt.state
+                ? { ...m, status: "done", count: evt.count, communities: evt.communities }
+                : m
+            ));
+          } else if (evt.type === "market-error") {
+            setSweepMarkets((prev) => prev.map((m) =>
+              m.city === evt.city && m.state === evt.state
+                ? { ...m, status: "error", error: evt.error }
+                : m
+            ));
+          } else if (evt.type === "all-done") {
+            setSweepDone(true);
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") {
+        toast({ title: "Sweep error", description: e.message, variant: "destructive" });
+      }
+    } finally {
+      setSweepRunning(false);
+      sweepAbortRef.current = null;
+    }
+  }, [toast]);
+
+  const stopSweep = () => sweepAbortRef.current?.abort();
+
+  // When a sweep result is chosen, load it into Step 2 as if the user had
+  // searched that city directly, then jump them there.
+  const selectSweepCity = useCallback((market: MarketResult) => {
+    if (!market.communities || market.communities.length === 0) return;
+    setSelectedState(market.state);
+    setCityInput(market.city);
+    setCommunities(market.communities);
+    setSweepOpen(false);
+    setStep(2);
+  }, []);
 
   // ── Step 3: Pairing suggestions ─────────────────────────────
   const handleSelectCommunity = useCallback(async (community: CommunityResult) => {
@@ -400,22 +501,131 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
-            <Button
-              onClick={handleResearch}
-              disabled={researchLoading || !selectedState || !cityInput.trim()}
-              data-testid="button-research"
-              id="btn-next-step"
-              aria-label="Research communities in the selected location"
-            >
-              {researchLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
-              {researchLoading ? "Researching…" : "Research Communities"}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={handleResearch}
+                disabled={researchLoading || !selectedState || !cityInput.trim()}
+                data-testid="button-research"
+                id="btn-next-step"
+                aria-label="Research communities in the selected location"
+              >
+                {researchLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                {researchLoading ? "Researching…" : "Research Communities"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={runTopMarketsSweep}
+                disabled={researchLoading || sweepRunning}
+                data-testid="button-scan-top-markets"
+                aria-label="Scan the curated list of top vacation rental markets"
+              >
+                <TrendingUp className="h-4 w-4 mr-2" />
+                {sweepRunning ? "Sweeping…" : "Scan top markets"}
+              </Button>
+            </div>
             {researchLoading && (
               <p className="text-sm text-muted-foreground mt-3" id="status-message">
                 Searching for communities and scoring with AI — this takes 20–40 seconds…
               </p>
             )}
           </Card>
+        )}
+
+        {/* ── TOP-MARKETS SWEEP MODAL ─────────────────────────── */}
+        {sweepOpen && (
+          <div
+            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            onClick={() => !sweepRunning && setSweepOpen(false)}
+          >
+            <div
+              className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <TrendingUp className="h-5 w-5 text-primary" />
+                    Top Markets Sweep
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Running the finder across curated US vacation-rental hotspots. Takes ~90s per market.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  {sweepRunning && (
+                    <Button variant="destructive" size="sm" onClick={stopSweep}>Stop</Button>
+                  )}
+                  <Button variant="outline" size="sm" onClick={() => setSweepOpen(false)} disabled={sweepRunning}>
+                    Close
+                  </Button>
+                </div>
+              </div>
+
+              {/* Overall progress */}
+              <div className="mb-4 text-xs text-muted-foreground">
+                {sweepMarkets.filter((m) => m.status === "done").length} of {sweepMarkets.length} markets complete
+                {sweepDone && " — finished"}
+              </div>
+
+              {/* Per-market list */}
+              <div className="space-y-2">
+                {sweepMarkets.map((m) => {
+                  const best = m.communities?.[0];
+                  const bestScore = best ? best.confidenceScore + (best.combinabilityScore ?? 50) : 0;
+                  return (
+                    <Card
+                      key={`${m.city}-${m.state}`}
+                      className={`p-3 ${
+                        m.status === "done" && (m.count ?? 0) > 0 ? "border-green-200 bg-green-50/40 hover:border-green-500 cursor-pointer" :
+                        m.status === "error" ? "border-red-200 bg-red-50/30" :
+                        m.status === "running" ? "border-blue-300 bg-blue-50/30" :
+                        "opacity-60"
+                      }`}
+                      onClick={() => m.status === "done" && (m.count ?? 0) > 0 && selectSweepCity(m)}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-semibold text-sm">{m.city}, {m.state}</p>
+                            {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
+                            {m.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />}
+                            {m.status === "done" && (
+                              <Badge className={(m.count ?? 0) > 0 ? "bg-green-600 text-white" : "bg-gray-400 text-white"}>
+                                {m.count ?? 0} qualifying
+                              </Badge>
+                            )}
+                            {m.status === "error" && <Badge variant="destructive">Error</Badge>}
+                          </div>
+                          {best && (
+                            <div className="text-xs text-muted-foreground mt-1 truncate">
+                              Best pick: <span className="font-medium text-foreground">{best.name}</span>
+                              {best.bedroomMix && <span className="italic ml-1">({best.bedroomMix})</span>}
+                              {typeof best.combinabilityScore === "number" && (
+                                <span className="ml-1.5">· combinability {best.combinabilityScore}</span>
+                              )}
+                              <span className="ml-1.5">· score {bestScore}</span>
+                            </div>
+                          )}
+                          {m.error && (
+                            <p className="text-xs text-red-700 mt-1">{m.error}</p>
+                          )}
+                        </div>
+                        {m.status === "done" && (m.count ?? 0) > 0 && (
+                          <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1" />
+                        )}
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+
+              {sweepDone && (
+                <div className="mt-4 text-xs text-muted-foreground">
+                  Click any green market to load its results into Step 2.
+                </div>
+              )}
+            </div>
+          </div>
         )}
 
         {/* ── STEP 2: Research results ──────────────────────── */}
