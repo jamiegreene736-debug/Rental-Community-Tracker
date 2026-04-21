@@ -823,6 +823,27 @@ export default function InboxPage() {
                       {threadLoading && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
+                      {/* DEBUG: show threadData shape while wiring */}
+                      {!threadLoading && posts.length === 0 && threadData && (
+                        <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
+                          <summary className="cursor-pointer font-semibold text-amber-800">🐞 Thread debug (no posts parsed)</summary>
+                          <div className="mt-1 space-y-1 text-amber-900">
+                            <div><b>threadData type:</b> {typeof threadData} {Array.isArray(threadData) ? `Array(${threadData.length})` : ""}</div>
+                            {threadData && typeof threadData === "object" && !Array.isArray(threadData) && (
+                              <div><b>top-level keys:</b> [{Object.keys(threadData).join(", ")}]</div>
+                            )}
+                            {threadData && (threadData as any).data && typeof (threadData as any).data === "object" && (
+                              <div><b>threadData.data keys:</b> [{Object.keys((threadData as any).data).join(", ")}]</div>
+                            )}
+                            <details>
+                              <summary className="cursor-pointer text-amber-700">Raw (truncated)</summary>
+                              <pre className="mt-1 p-2 bg-white rounded border overflow-auto max-h-60 text-[10px] whitespace-pre-wrap">
+                                {JSON.stringify(threadData, null, 2)?.slice(0, 2500) ?? "null"}
+                              </pre>
+                            </details>
+                          </div>
+                        </details>
+                      )}
                       {posts.map(p => {
                         const isHost = p.authorType === "host" || p.authorRole === "host";
                         return (
