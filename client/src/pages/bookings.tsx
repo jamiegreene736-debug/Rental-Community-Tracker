@@ -844,6 +844,8 @@ type LiveCandidate = {
 
 type FindBuyInResponse = {
   community: string;
+  resortName?: string | null;
+  listingTitle?: string | null;
   bedrooms: number;
   nights: number;
   sources: {
@@ -855,8 +857,14 @@ type FindBuyInResponse = {
   cheapest: LiveCandidate[];
   debug?: {
     rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number };
+    dropped?: {
+      airbnb?: { noResort: number; wrongBedrooms: number };
+      vrbo?: { noResort: number; wrongBedrooms: number };
+      booking?: { noResort: number; wrongBedrooms: number };
+    };
     searchLocation?: string;
     vrboDestination?: string;
+    resortName?: string | null;
   };
 };
 
@@ -955,19 +963,35 @@ function LiveSearchSection({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          Live results — {data?.community} · {slot.bedrooms}BR · {data?.nights} nights
-        </p>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Live results — {data?.resortName ?? data?.community} · {slot.bedrooms}BR · {data?.nights} nights
+          </p>
+          {data?.resortName && (
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Only listings within <b>{data.resortName}</b> are shown.
+            </p>
+          )}
+        </div>
         <Button size="sm" variant="ghost" onClick={() => refetch()}>
           <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
         </Button>
       </div>
-      {/* Raw result counts per source — lets us see when a source's API
-          returned nothing (vs our parser dropped everything). */}
+      {/* Raw hit counts + drop counts per source — lets us see why a source
+          returned few results (upstream empty vs resort/bedroom filtered). */}
       {data?.debug?.rawCounts && (
-        <div className="text-[11px] text-muted-foreground -mt-1">
-          Raw hits: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
-          {data.debug.searchLocation && <span className="ml-2">· query: "{data.debug.searchLocation}"</span>}
+        <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
+          <div>
+            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+          </div>
+          {data.debug.dropped && (
+            <div>
+              Dropped (wrong resort / bedrooms):
+              {" "}airbnb {data.debug.dropped.airbnb?.noResort ?? 0}/{data.debug.dropped.airbnb?.wrongBedrooms ?? 0} ·
+              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0} ·
+              {" "}booking {data.debug.dropped.booking?.noResort ?? 0}/{data.debug.dropped.booking?.wrongBedrooms ?? 0}
+            </div>
+          )}
         </div>
       )}
 
