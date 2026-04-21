@@ -34,6 +34,10 @@ interface GuestyReservation {
   status: string;
   checkIn: string;
   checkOut: string;
+  // Guesty exposes timezone-localized date-only versions of check-in/out
+  // that avoid UTC-vs-local off-by-one bugs for Hawaii/Pacific listings.
+  checkInDateLocalized?: string;
+  checkOutDateLocalized?: string;
   nightsCount?: number;
   guest?: { fullName?: string; firstName?: string; email?: string };
   money?: { hostPayout?: number; fareAccommodation?: number; netIncome?: number };
@@ -64,13 +68,63 @@ function fmtMoney(n: number | string | null | undefined): string {
   return `$${v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
+// Accepts both pure date strings ("2026-10-17") and full ISO timestamps
+// ("2026-10-18T01:00:00.000Z"). Guesty returns the former as
+// `checkInDateLocalized` and the latter as `checkIn`.
 function fmtDate(s: string | undefined | null): string {
   if (!s) return "—";
-  return new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // Pure YYYY-MM-DD — force mid-day UTC so timezone doesn't bump us to the
+  // previous calendar day in western time zones.
+  const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T12:00:00` : s;
+  const d = new Date(isoDate);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function nightsBetween(a: string, b: string): number {
-  return Math.max(1, Math.round((+new Date(b) - +new Date(a)) / 86400000));
+function nightsBetween(a: string | undefined | null, b: string | undefined | null): number {
+  if (!a || !b) return 1;
+  const da = new Date(a);
+  const db = new Date(b);
+  if (isNaN(da.getTime()) || isNaN(db.getTime())) return 1;
+  return Math.max(1, Math.round((+db - +da) / 86400000));
+}
+
+// Prefer Guesty's timezone-normalized date field when present, fall back to
+// the UTC timestamp. Avoids off-by-one-day drift for Hawaii listings.
+function checkInOf(r: { checkIn?: string; checkInDateLocalized?: string }): string | undefined {
+  return r.checkInDateLocalized ?? r.checkIn;
+}
+function checkOutOf(r: { checkOut?: string; checkOutDateLocalized?: string }): string | undefined {
+  return r.checkOutDateLocalized ?? r.checkOut;
+}
+
+// Column header that toggles sort when clicked. Shows an up/down caret when
+// the column is the active sort target.
+function SortHeader({
+  label,
+  active,
+  dir,
+  onClick,
+  align = "left",
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  onClick: () => void;
+  align?: "left" | "right";
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`cursor-pointer hover:text-foreground transition-colors text-[10px] uppercase tracking-wider ${
+        active ? "text-foreground font-semibold" : ""
+      } ${align === "right" ? "text-right" : "text-left"}`}
+      data-testid={`sort-header-${label.toLowerCase()}`}
+    >
+      {label}
+      {active && <span className="ml-0.5">{dir === "asc" ? "↑" : "↓"}</span>}
+    </button>
+  );
 }
 
 // ─── Page ────────────────────────────────────────────────────────────────────
@@ -84,6 +138,20 @@ export default function Bookings() {
     | { reservation: GuestyReservation; slot: SlotInfo }
     | null
   >(null);
+
+  // Sort controls: click a column header to sort by that field; click again
+  // to toggle asc/desc. Default = check-in ascending (soonest first).
+  type SortKey = "checkIn" | "guest" | "payout" | "buyIn" | "profit" | "status";
+  const [sortBy, setSortBy] = useState<SortKey>("checkIn");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const toggleSort = (key: SortKey) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortBy(key);
+      setSortDir(key === "checkIn" ? "asc" : "desc");
+    }
+  };
 
   const { data: propertyMap = [] } = useQuery<GuestyPropertyMap[]>({
     queryKey: ["/api/guesty-property-map"],
@@ -134,8 +202,58 @@ export default function Bookings() {
     refetchInterval: 120_000,
   });
 
-  const reservations = bookingsData?.reservations ?? [];
+  const rawReservations = bookingsData?.reservations ?? [];
   const unitSlots = bookingsData?.unitSlots ?? [];
+
+  // Apply the current sort to the reservations before we render. Memoized so
+  // a click on an attach button doesn't re-sort the entire list.
+  const reservations = useMemo(() => {
+    const list = [...rawReservations];
+    const dir = sortDir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      const diff = (() => {
+        switch (sortBy) {
+          case "checkIn": {
+            const ad = new Date(checkInOf(a) ?? 0).getTime() || 0;
+            const bd = new Date(checkInOf(b) ?? 0).getTime() || 0;
+            return ad - bd;
+          }
+          case "guest": {
+            const an = (a.guest?.fullName ?? a.guest?.firstName ?? "").toLowerCase();
+            const bn = (b.guest?.fullName ?? b.guest?.firstName ?? "").toLowerCase();
+            return an.localeCompare(bn);
+          }
+          case "payout": {
+            return (a.money?.hostPayout ?? 0) - (b.money?.hostPayout ?? 0);
+          }
+          case "buyIn": {
+            const ac = a.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            const bc = b.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            return ac - bc;
+          }
+          case "profit": {
+            // Unlinked bookings sort to the bottom regardless of direction
+            if (!a.fullyLinked && !b.fullyLinked) return 0;
+            if (!a.fullyLinked) return 1;
+            if (!b.fullyLinked) return -1;
+            const ap = (a.money?.hostPayout ?? 0) - a.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            const bp = (b.money?.hostPayout ?? 0) - b.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            return ap - bp;
+          }
+          case "status": {
+            // Ordering by fill progress then by status
+            const as = a.fullyLinked ? 2 : a.slotsFilled > 0 ? 1 : 0;
+            const bs = b.fullyLinked ? 2 : b.slotsFilled > 0 ? 1 : 0;
+            return as - bs;
+          }
+          default:
+            return 0;
+        }
+      })();
+      return diff * dir;
+    });
+    return list;
+  }, [rawReservations, sortBy, sortDir]);
 
   const attachMutation = useMutation({
     mutationFn: ({ reservationId, buyInId }: { reservationId: string; buyInId: number }) =>
@@ -355,9 +473,21 @@ export default function Bookings() {
                   No bookings found for this listing.
                 </p>
               )}
+              {/* Sortable column headers — click any to re-sort */}
+              {reservations.length > 0 && (
+                <div className="px-4 py-2 border-b text-[10px] uppercase tracking-wider text-muted-foreground grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
+                  <span className="pl-7" /> {/* spacer for chevron + expand icon */}
+                  <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
+                  <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
+                  <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
+                  <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
+                  <SortHeader label="Profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
+                  <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
+                </div>
+              )}
               {reservations.map((r) => {
                 const isOpen = !!expanded[r._id];
-                const nights = r.nightsCount ?? nightsBetween(r.checkIn, r.checkOut);
+                const nights = r.nightsCount ?? nightsBetween(checkInOf(r), checkOutOf(r));
                 const payout = r.money?.hostPayout ?? 0;
                 const totalBuyInCost = r.slots.reduce(
                   (s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)),
@@ -380,7 +510,7 @@ export default function Bookings() {
                           )}
                         </div>
                         <div className="text-sm">
-                          <p>{fmtDate(r.checkIn)} → {fmtDate(r.checkOut)}</p>
+                          <p>{fmtDate(checkInOf(r))} → {fmtDate(checkOutOf(r))}</p>
                           <p className="text-xs text-muted-foreground">{nights} nights · <Badge variant="outline" className="text-[10px] capitalize ml-1">{channel}</Badge></p>
                         </div>
                         <div className="text-sm text-right">

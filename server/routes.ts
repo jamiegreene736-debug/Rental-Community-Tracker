@@ -1489,13 +1489,23 @@ export async function registerRoutes(
       }
 
       const today = new Date().toISOString().slice(0, 10);
-      const fields = encodeURIComponent("_id status checkIn checkOut nightsCount guest money source integration confirmationCode");
+      const fields = encodeURIComponent("_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money source integration confirmationCode preApproveState");
       let url = `/reservations?listingId=${encodeURIComponent(listingId)}&limit=${limit}&sort=checkIn&fields=${fields}&status[]=confirmed&status[]=inquiry&status[]=awaitingPayment`;
       if (!includePast) {
         url += `&checkOutFrom=${today}`;
       }
       const data = await guestyRequest("GET", url) as any;
-      const reservations: any[] = data?.results ?? [];
+      // Guesty wraps list responses inconsistently across accounts — could be
+      //   { results: [...] }         (legacy)
+      //   { data: [...] }            (new flat)
+      //   { data: { results: [...] } } (new envelope)
+      const reservations: any[] = Array.isArray(data?.results)
+        ? data.results
+        : Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data?.data?.results)
+            ? data.data.results
+            : [];
 
       // For each reservation build per-slot attachment info
       const enriched = await Promise.all(
