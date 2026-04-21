@@ -2478,6 +2478,83 @@ export async function registerRoutes(
     res.end();
   });
 
+  // GET /api/builder/guesty-monthly-rates/:propertyId
+  // Pulls Guesty's daily calendar rate for the given property across the requested
+  // year range, then aggregates to a per-month average. Used by the pricing table
+  // to show "what Guesty is ACTUALLY charging" next to "what our sheet expects".
+  //
+  // Query: ?startYear=2026&months=24  (default 24 months starting this month)
+  // Response: { units: [{ guestyListingId, unitId, unitLabel, months: [{yearMonth,avgRate,minRate,maxRate,days}] }] }
+  app.get("/api/builder/guesty-monthly-rates/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+
+    const months = Math.min(parseInt((req.query.months as string) ?? "24", 10) || 24, 36);
+    const startParam = req.query.start as string | undefined;
+    const start = startParam ? new Date(startParam) : new Date();
+    start.setDate(1); start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + months);
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+    try {
+      // Multi-unit properties have multiple Guesty listings. For now we look up the
+      // property's canonical Guesty listing via guestyPropertyMap. Multi-listing
+      // support is a follow-up (returning one unit per Guesty listing).
+      const listingId = await storage.getGuestyListingId(propertyId);
+      if (!listingId) {
+        return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
+      }
+
+      // Guesty's calendar endpoint — per-day price and availability.
+      // https://open-api-docs.guesty.com/reference/calendarscontroller_getcalendars
+      const url = `/availability-pricing/api/calendar/listings/${listingId}?startDate=${iso(start)}&endDate=${iso(end)}`;
+      const calendarResp = await guestyRequest("GET", url) as any;
+      // Response shape varies — could be array directly, {data: [...]}, or {status, data: [...]}.
+      const days: any[] = Array.isArray(calendarResp)
+        ? calendarResp
+        : Array.isArray(calendarResp?.data) ? calendarResp.data
+        : Array.isArray(calendarResp?.data?.days) ? calendarResp.data.days
+        : Array.isArray(calendarResp?.days) ? calendarResp.days
+        : [];
+
+      // Bucket per-day rates by yearMonth
+      const buckets = new Map<string, number[]>();
+      for (const d of days) {
+        const dateStr: string = d.date ?? d.day ?? "";
+        const rate: number = Number(d.price ?? d.rate ?? d.nightlyPrice ?? 0);
+        if (!dateStr || !rate || isNaN(rate)) continue;
+        const ym = dateStr.slice(0, 7);
+        const arr = buckets.get(ym) ?? [];
+        arr.push(rate);
+        buckets.set(ym, arr);
+      }
+
+      const monthEntries = Array.from(buckets.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([yearMonth, rates]) => {
+          const total = rates.reduce((s, r) => s + r, 0);
+          return {
+            yearMonth,
+            avgRate: Math.round(total / rates.length),
+            minRate: Math.min(...rates),
+            maxRate: Math.max(...rates),
+            days: rates.length,
+          };
+        });
+
+      return res.json({
+        propertyId,
+        guestyListingId: listingId,
+        months: monthEntries,
+        totalDays: days.length,
+      });
+    } catch (err: any) {
+      console.error(`[guesty-monthly-rates] error:`, err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // POST /api/builder/normalize-photos
   // Fetch a listing's existing Guesty pictures, run each through validateAndFixPhoto,
   // re-upload the fixed ones to ImgBB, and PUT the listing back.

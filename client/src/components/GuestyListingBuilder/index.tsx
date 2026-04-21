@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
-import { getPropertyPricing, getSeasonLabel, getSeasonBgClass } from "@/data/pricing-data";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
@@ -1115,6 +1115,45 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     }));
   }, [propertyId]);
 
+  // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
+  // Fetches what Guesty is ACTUALLY charging per month so we can compare
+  // against our pricing sheet at a glance. Also surfaces the minimum rate
+  // needed to hit 20% margin given the selected channel's host fee.
+  const [selectedChannel, setSelectedChannel] = useState<ChannelKey>("airbnb");
+  const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
+  const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
+  const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    setGuestyRatesLoading(true);
+    setGuestyRatesError(null);
+    fetch(`/api/builder/guesty-monthly-rates/${propertyId}?months=24`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${r.status}`);
+        }
+        return r.json();
+      })
+      .then((data: any) => {
+        if (cancelled) return;
+        const byMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }> = {};
+        for (const m of data.months ?? []) {
+          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days };
+        }
+        setGuestyRatesByMonth(byMonth);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setGuestyRatesError(e.message || "Failed to fetch Guesty rates");
+      })
+      .finally(() => {
+        if (!cancelled) setGuestyRatesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
   return (
     <>
       <style>{CSS}</style>
@@ -1799,33 +1838,96 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
                         {seasonalMonths.length > 0 && (
                           <>
-                            <div className="glb-season-hdr">24-Month Rate Schedule</div>
+                            <div className="glb-season-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+                              <span>24-Month Rate Schedule</span>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 11, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+                                <label style={{ color: "#6b7280" }}>
+                                  Channel for profit floor:
+                                  <select
+                                    value={selectedChannel}
+                                    onChange={(e) => setSelectedChannel(e.target.value as ChannelKey)}
+                                    style={{ marginLeft: 6, padding: "2px 8px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 11 }}
+                                    data-testid="select-channel"
+                                  >
+                                    <option value="airbnb">Airbnb ({(CHANNEL_HOST_FEE.airbnb * 100).toFixed(1)}%)</option>
+                                    <option value="vrbo">Vrbo ({(CHANNEL_HOST_FEE.vrbo * 100).toFixed(1)}%)</option>
+                                    <option value="booking">Booking ({(CHANNEL_HOST_FEE.booking * 100).toFixed(1)}%)</option>
+                                    <option value="direct">Direct ({(CHANNEL_HOST_FEE.direct * 100).toFixed(1)}%)</option>
+                                  </select>
+                                </label>
+                                {guestyRatesLoading && <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>}
+                                {guestyRatesError && (
+                                  <span style={{ color: "#dc2626" }} title={guestyRatesError}>
+                                    Guesty rates unavailable
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                             <table className="glb-season-table">
                               <thead>
                                 <tr>
                                   <th>Month</th>
                                   <th>Season</th>
                                   <th>Buy-In / Night</th>
-                                  <th>Guest Charge / Night</th>
-                                  <th>Profit / Night</th>
+                                  <th>Sheet Rate / Night</th>
+                                  <th>Guesty Rate / Night</th>
+                                  <th>Min for {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% Profit</th>
+                                  <th>Status</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                {seasonalMonths.map((row) => (
-                                  <tr key={row.yearMonth}>
-                                    <td style={{ fontWeight: 500 }}>{row.month} {row.year}</td>
-                                    <td>
-                                      <span className={`glb-season-badge ${row.season}`}>
-                                        {getSeasonLabel(row.season)} Season
-                                      </span>
-                                    </td>
-                                    <td>${row.totalBuyIn.toLocaleString()}</td>
-                                    <td style={{ fontWeight: 600 }}>${row.totalSell.toLocaleString()}</td>
-                                    <td style={{ color: "#16a34a" }}>${(row.totalSell - row.totalBuyIn).toLocaleString()}</td>
-                                  </tr>
-                                ))}
+                                {seasonalMonths.map((row) => {
+                                  const guesty = guestyRatesByMonth[row.yearMonth];
+                                  const minRequired = minProfitableRate(row.totalBuyIn, selectedChannel);
+                                  // Match status: compare what Guesty is charging to what our sheet expects.
+                                  const sheet = row.totalSell;
+                                  let status: { label: string; color: string; bg: string };
+                                  if (!guesty) {
+                                    status = { label: "—", color: "#9ca3af", bg: "#f3f4f6" };
+                                  } else if (guesty.avgRate < minRequired) {
+                                    status = { label: "BELOW FLOOR", color: "#991b1b", bg: "#fee2e2" };
+                                  } else if (Math.abs(guesty.avgRate - sheet) <= 15) {
+                                    status = { label: "OK", color: "#166534", bg: "#dcfce7" };
+                                  } else if (guesty.avgRate < sheet) {
+                                    status = { label: `$${(sheet - guesty.avgRate).toLocaleString()} LOW`, color: "#92400e", bg: "#fef3c7" };
+                                  } else {
+                                    status = { label: `$${(guesty.avgRate - sheet).toLocaleString()} HIGH`, color: "#1e40af", bg: "#dbeafe" };
+                                  }
+                                  return (
+                                    <tr key={row.yearMonth}>
+                                      <td style={{ fontWeight: 500 }}>{row.month} {row.year}</td>
+                                      <td>
+                                        <span className={`glb-season-badge ${row.season}`}>
+                                          {getSeasonLabel(row.season)}
+                                        </span>
+                                      </td>
+                                      <td>${row.totalBuyIn.toLocaleString()}</td>
+                                      <td style={{ fontWeight: 600 }}>${sheet.toLocaleString()}</td>
+                                      <td style={{ fontWeight: 600, color: guesty && guesty.avgRate < minRequired ? "#dc2626" : "#111827" }}>
+                                        {guesty ? `$${guesty.avgRate.toLocaleString()}` : <span style={{ color: "#9ca3af" }}>—</span>}
+                                        {guesty && guesty.minRate !== guesty.maxRate && (
+                                          <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>
+                                            ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
+                                          </div>
+                                        )}
+                                      </td>
+                                      <td style={{ color: "#6b7280" }}>${minRequired.toLocaleString()}</td>
+                                      <td>
+                                        <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 600, color: status.color, background: status.bg }}>
+                                          {status.label}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
+                            <div style={{ marginTop: 10, fontSize: 11, color: "#6b7280", lineHeight: 1.5 }}>
+                              <b>Legend.</b> <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3 }}>OK</span> = Guesty within $15 of sheet.
+                              {" "}<span style={{ background: "#fef3c7", color: "#92400e", padding: "0 4px", borderRadius: 3 }}>LOW</span> = Guesty under-charging vs sheet.
+                              {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>BELOW FLOOR</span> = Guesty rate won't hit 20% profit on selected channel — <b>fix this first</b>.
+                              {" "}Min-for-profit assumes {(CHANNEL_HOST_FEE[selectedChannel] * 100).toFixed(1)}% channel fee.
+                            </div>
                           </>
                         )}
                       </div>

@@ -43,6 +43,56 @@ export const BUSINESS_MARKUP = 0.20;   // 20% — your business profit margin
 export const MARKUP = (1 + PLATFORM_FEE) * (1 + BUSINESS_MARKUP); // = 1.38
 
 // ─────────────────────────────────────────────────────────────
+// PER-CHANNEL HOST FEES
+// Each channel takes a cut of the gross guest charge before paying
+// the host. These are the *host-side* fees (what comes off YOUR payout),
+// not the guest service fees that sit on top of the listed price.
+// ─────────────────────────────────────────────────────────────
+
+export type ChannelKey = "airbnb" | "vrbo" | "booking" | "direct";
+
+export const CHANNEL_HOST_FEE: Record<ChannelKey, number> = {
+  airbnb:  0.155,  // Airbnb host service fee: 15.5% on some listings (previously 3% co-host model)
+  vrbo:    0.08,   // Vrbo/HomeAway pay-per-booking: 8% commission
+  booking: 0.17,   // Booking.com: 15–17% depending on market
+  direct:  0.03,   // Stripe/processing for direct bookings
+};
+
+export const MIN_PROFIT_MARGIN = 0.20; // 20% — floor we want after channel fees
+
+/**
+ * Given a buy-in cost and channel, returns the minimum nightly rate
+ * that still yields `MIN_PROFIT_MARGIN` profit after the channel's host fee.
+ *
+ *   minSellRate × (1 - channelFee) - buyIn ≥ MIN_PROFIT_MARGIN × buyIn
+ *   ⇒ minSellRate = (1 + MIN_PROFIT_MARGIN) × buyIn / (1 - channelFee)
+ *
+ * Example: buyIn=$1,172 on Airbnb → 1.20 × 1172 / 0.845 = $1,664.85
+ */
+export function minProfitableRate(buyIn: number, channel: ChannelKey): number {
+  const fee = CHANNEL_HOST_FEE[channel] ?? 0;
+  return Math.ceil(((1 + MIN_PROFIT_MARGIN) * buyIn) / (1 - fee));
+}
+
+/**
+ * Given a gross guest charge and channel, what does the host actually net?
+ * Useful for booking margin checks.
+ */
+export function netPayoutAfterChannelFee(gross: number, channel: ChannelKey): number {
+  return gross * (1 - (CHANNEL_HOST_FEE[channel] ?? 0));
+}
+
+/**
+ * Effective profit margin given a sell rate, buy-in, and channel.
+ * Returns a decimal (0.20 = 20%). Negative if at a loss.
+ */
+export function actualMarginPct(sellRate: number, buyIn: number, channel: ChannelKey): number {
+  const net = netPayoutAfterChannelFee(sellRate, channel);
+  if (buyIn <= 0) return 0;
+  return (net - buyIn) / buyIn;
+}
+
+// ─────────────────────────────────────────────────────────────
 // SEASON MULTIPLIERS — region-specific, 3 tiers
 // ─────────────────────────────────────────────────────────────
 
