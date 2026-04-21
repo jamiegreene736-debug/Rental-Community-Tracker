@@ -1367,6 +1367,85 @@ export async function registerRoutes(
       return 0;
     };
 
+    // ── URL quality: keep only links that lead directly to a specific unit.
+    // Clicking a buy-in link should land on that unit's page, not a search
+    // results page or the PM company's homepage. Patterns below match each
+    // platform's canonical detail-page shape.
+    const isDetailUrl = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): boolean => {
+      let u: URL;
+      try { u = new URL(rawUrl); } catch { return false; }
+      const path = u.pathname;
+      switch (source) {
+        case "airbnb":
+          // /rooms/12345, /rooms/plus/12345, /luxury/listing/12345
+          return /^\/rooms\/(plus\/)?\d+/.test(path)
+              || /^\/luxury\/listing\/\d+/.test(path);
+        case "vrbo":
+          // Property pages: numeric id paths like /1234567, /1234567ha,
+          // or /vacation-rental/p1234567
+          return /^\/\d+[a-z]{0,3}\/?$/.test(path)
+              || /^\/vacation-rental\/p\d+/.test(path);
+        case "booking":
+          // Hotel detail pages end in .html under /hotel/
+          return /^\/hotel\/[a-z]{2}\/.+\.html$/i.test(path)
+              && !/searchresults/i.test(path);
+        case "pm": {
+          // PM sites vary wildly and "deeper than /" isn't strict enough —
+          // e.g. castleresorts.com/kauai/kaha-lani-resort/ is a resort
+          // landing, not a specific unit. Require stronger signals.
+          if (path.length <= 1 || path === "/") return false;
+          const segments = path.split("/").filter(Boolean);
+          const last = (segments[segments.length - 1] ?? "").toLowerCase();
+          // Reject if the last segment looks like a resort landing — either
+          // matches the target resort's slug, or is a generic category.
+          const resortSlug = resortName
+            ? resortName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+            : "";
+          if (resortSlug && (last === resortSlug
+                          || last === `${resortSlug}-resort`
+                          || last.replace(/-resort$/, "") === resortSlug)) {
+            return false;
+          }
+          if (/^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|kauai|oahu|maui|hawaii)$/.test(last)) {
+            return false;
+          }
+          // Positive signals that the URL points to a specific unit or room.
+          const hasNumericId = /\/\d{3,}(?:[\/-]|$)/.test(path);
+          const hasUnitKeyword = /\b(unit|room|rooms|condo|villa|listing|property|rental|book|bookings|reservation|details?)\b/.test(path.toLowerCase());
+          return hasNumericId || hasUnitKeyword || segments.length >= 4;
+        }
+      }
+    };
+
+    // Append the reservation's check-in/out to the URL so the landing page
+    // opens with availability already filtered for those dates. Each platform
+    // uses different query param names.
+    const withStayDates = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): string => {
+      let u: URL;
+      try { u = new URL(rawUrl); } catch { return rawUrl; }
+      const set = (k: string, v: string) => { if (!u.searchParams.has(k)) u.searchParams.set(k, v); };
+      switch (source) {
+        case "airbnb":
+          set("check_in", checkIn);
+          set("check_out", checkOut);
+          set("adults", "2");
+          break;
+        case "vrbo":
+          set("arrival", checkIn);
+          set("departure", checkOut);
+          break;
+        case "booking":
+          set("checkin", checkIn);
+          set("checkout", checkOut);
+          set("group_adults", "2");
+          break;
+        case "pm":
+          // No universal convention across PM sites — leave URL alone.
+          return u.toString();
+      }
+      return u.toString();
+    };
+
     // Helper: run a Google site: search restricted to one OTA and filter
     // aggressively. Requires the resort name to appear in title OR snippet
     // (if we resolved one), and the bedroom count to match.
@@ -1387,6 +1466,9 @@ export async function registerRoutes(
         let wrongBedrooms = 0;
         const kept = organic
           .filter((o: any) => o?.link && o.link.includes(siteDomain))
+          // Skip anything that isn't a real listing page — a search-results
+          // page or region landing is useless as a buy-in link.
+          .filter((o: any) => isDetailUrl(source, String(o.link)))
           .filter((o: any) => {
             const hay = `${o?.title ?? ""} ${o?.snippet ?? ""} ${o?.link ?? ""}`;
             if (!mentionsResort(hay)) { noResort++; return false; }
@@ -1401,7 +1483,7 @@ export async function registerRoutes(
               source,
               sourceLabel,
               title: String(o?.title ?? `${sourceLabel} listing`),
-              url: String(o?.link ?? ""),
+              url: withStayDates(source, String(o?.link ?? "")),
               nightlyPrice: 0, // Google organic results don't carry live prices
               totalPrice: 0,
               bedrooms: inferred ?? undefined,
@@ -1507,18 +1589,10 @@ export async function registerRoutes(
               api_key: apiKey,
             });
             const rr = await fetch(`https://www.searchapi.io/api/v1/search?${pp.toString()}`);
-            if (!rr.ok) {
-              // Fall back to the homepage if per-site search fails
-              return [{
-                source: "pm",
-                sourceLabel: site.title,
-                title: site.title,
-                url: site.homepageUrl,
-                nightlyPrice: 0,
-                totalPrice: 0,
-                snippet: site.snippet,
-              }];
-            }
+            // If the per-site search fails, skip the PM site entirely.
+            // Returning the homepage URL as a fallback (previous behavior) was
+            // misleading — users clicked it expecting a specific listing.
+            if (!rr.ok) return [];
             const dd = await rr.json() as any;
             const hits = Array.isArray(dd?.organic_results) ? dd.organic_results : [];
             // Extract nightly price from snippet if the PM published one
@@ -1535,6 +1609,9 @@ export async function registerRoutes(
                 // with the right bedroom count — same rules as the OTAs.
                 return mentionsResort(hay) && bedroomOk(hay);
               })
+              // Reject bare-homepage URLs — the whole point of the deep-dive
+              // is to land on a specific listing page.
+              .filter((h: any) => h?.link && isDetailUrl("pm", String(h.link)))
               .slice(0, 3)
               .map((h: any) => {
                 const snippetText = String(h?.snippet ?? "");
@@ -1552,22 +1629,9 @@ export async function registerRoutes(
                 };
               })
               .filter((c: Candidate) => c.url);
-            // Only return the PM homepage as a fallback if the homepage result
-            // itself mentioned the target resort — otherwise we'd be listing
-            // unrelated PM companies in other locations.
-            if (candidates.length === 0) {
-              const homepageText = `${site.title} ${site.snippet}`;
-              if (!mentionsResort(homepageText)) return [];
-              return [{
-                source: "pm",
-                sourceLabel: site.title,
-                title: site.title,
-                url: site.homepageUrl,
-                nightlyPrice: 0,
-                totalPrice: 0,
-                snippet: site.snippet,
-              }];
-            }
+            // No homepage fallback: if we can't find a specific listing page,
+            // we'd rather show nothing than a link that opens the PM homepage
+            // and makes the user hunt for the unit and dates manually.
             return candidates;
           } catch (e: any) {
             console.error(`[find-buy-in] pm deep-dive ${site.domain} error:`, e.message);
