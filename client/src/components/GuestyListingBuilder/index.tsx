@@ -3022,8 +3022,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 </div>
                               )}
 
-                              {/* Cover collage generator */}
-                              {selectedId && (guestyPhotoCount ?? 0) > 0 && (
+                              {/* Cover collage generator — picks the best outdoor + indoor photo and sets them as a 2-up cover. */}
+                              {selectedId && photos.length >= 2 && (
                                 <div style={{ marginBottom: 10 }}>
                                   {collagePhase === "idle" || collagePhase === "done" || collagePhase === "error" ? (
                                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
