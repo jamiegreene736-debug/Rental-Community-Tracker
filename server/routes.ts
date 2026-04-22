@@ -54,7 +54,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-poipu-beachside": "2251 Poipu Rd",
   "community-kaiulani": "3970 Wyllie Rd",
   "community-poipu-oceanfront": "2249 Poipu Rd",
-  "community-pili-mai": "2651 Puuholo Rd",
+  "community-pili-mai": "2611 Kiahuna Plantation Dr",
 };
 
 interface ScrapedPhoto {
