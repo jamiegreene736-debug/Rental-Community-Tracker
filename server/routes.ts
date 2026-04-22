@@ -6866,8 +6866,24 @@ export async function registerRoutes(
         }
 
         if (!foundOnAirbnb) {
+          // Extra gate: probe the Zillow listing's photo count via Apify.
+          // If it has < MIN_PHOTOS (typically means the listing is sparse
+          // and lacks bedroom/bathroom shots), skip and try the next
+          // candidate. Each probe costs one Apify run (~$0.005) but
+          // guarantees the confirmed unit has a full photo carousel.
+          const MIN_PHOTOS = 12;
+          let photoCount = 0;
+          try {
+            const scraped = await scrapeListingPhotos(zillowUrl);
+            photoCount = scraped.length;
+          } catch { photoCount = 0; }
+          console.error(`[find-unit] ${zillowUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
+          if (photoCount < MIN_PHOTOS) {
+            console.error(`[find-unit] Too few photos — skipping to next candidate`);
+            continue;
+          }
+
           console.error(`[find-unit] Clean unit found: ${zillowUrl}`);
-          // Provide a placeholder thumbnail if Google didn't return one
           const photos = thumbnail
             ? [{ url: thumbnail, label: `Unit ${unitNumber || "—"} on Zillow` }]
             : [];
@@ -6879,6 +6895,7 @@ export async function registerRoutes(
               bedrooms: requiredBedrooms ?? null,
               source: "Zillow",
               photos,
+              photoCount,
             },
           });
         }
