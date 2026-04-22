@@ -3171,42 +3171,47 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           let globalIdx = 0;
                           return groups.map((g) => {
                             const folder = g.items[0] ? folderFromUrl(g.items[0].url) : null;
-                            const onRescrape = async () => {
-                              if (!folder) {
-                                toast({ title: "Can't rescrape", description: "Couldn't determine photo folder.", variant: "destructive" });
-                                return;
-                              }
-                              let suggested = "";
-                              try {
-                                const r = await fetch(`/api/builder/photo-source/${folder}`);
-                                const j = await r.json();
-                                suggested = j?.source?.sourceListing?.url ?? "";
-                              } catch {}
-                              const sourceUrl = window.prompt(
-                                `Paste the Zillow (or VRBO/homes.com) listing URL for "${g.source}".\nThis will clear the ${folder}/ folder and re-download the photos, then run Claude labels.`,
-                                suggested,
-                              );
-                              if (!sourceUrl) return;
-                              const isValid = /^https?:\/\/(www\.)?(zillow|homes|vrbo|airbnb)\.com\//i.test(sourceUrl);
-                              if (!isValid && !window.confirm(`"${sourceUrl}" isn't a recognized host. Continue anyway?`)) return;
-                              toast({ title: "Rescraping…", description: `Downloading photos from ${new URL(sourceUrl).hostname}. Can take up to a minute.` });
+                            const runRescrape = async (sourceUrl?: string) => {
+                              if (!folder) return;
+                              toast({
+                                title: "Rescraping…",
+                                description: sourceUrl
+                                  ? `Downloading photos from ${new URL(sourceUrl).hostname}. Can take up to a minute.`
+                                  : `Using saved URL for ${folder}. Can take up to a minute.`,
+                              });
                               try {
                                 const resp = await fetch("/api/builder/rescrape-unit-photos", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ folder, sourceUrl }),
+                                  body: JSON.stringify(sourceUrl ? { folder, sourceUrl } : { folder }),
                                 });
                                 const data = await resp.json();
+                                if (resp.status === 409 && data?.needsUrl) {
+                                  const url = window.prompt(
+                                    `No source URL on file for "${g.source}". Paste the Zillow (or VRBO/homes.com) listing URL — I'll save it so future rescrapes are one click.`,
+                                    "",
+                                  );
+                                  if (!url) return;
+                                  return runRescrape(url);
+                                }
                                 if (!resp.ok) throw new Error(data?.error ?? `HTTP ${resp.status}`);
                                 toast({
                                   title: "Photos rescraped",
-                                  description: `${data.savedCount} saved, ${data.failedCount} failed. Labels are regenerating in the background — refresh in ~30s to see new captions.`,
+                                  description:
+                                    `${data.savedCount} saved, ${data.failedCount} failed · source: ${data.urlSource ?? "manual"}. Labels regenerate in the background — refresh in ~30s.`,
                                   duration: 10000,
                                 });
                                 setTimeout(() => window.location.reload(), 1200);
                               } catch (e: any) {
                                 toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
                               }
+                            };
+                            const onRescrape = () => {
+                              if (!folder) {
+                                toast({ title: "Can't rescrape", description: "Couldn't determine photo folder.", variant: "destructive" });
+                                return;
+                              }
+                              runRescrape();
                             };
                             return (
                               <div key={g.source} style={{ marginBottom: 16 }}>

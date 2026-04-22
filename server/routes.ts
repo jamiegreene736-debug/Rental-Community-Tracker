@@ -5464,8 +5464,16 @@ export async function registerRoutes(
   // Rescrape a unit (or community) photo folder from a Zillow listing URL.
   // Clears the folder, downloads the scraped photos as photo_NN.jpg, updates
   // _source.json so future rescrapes are one click, and kicks off Claude labeling.
+  //
+  // sourceUrl resolution order (caller can omit the URL after the first scrape):
+  //   1. body.sourceUrl (explicit override)
+  //   2. _source.json → sourceListing.url (stamped by a previous rescrape)
+  //   3. unit_swaps.newSourceUrl (if this folder was swapped in via pre-flight)
+  //   4. COMMUNITY_SOURCE_URLS[<communityName>] (for community-* folders)
+  // If none are available, responds 409 with { needsUrl: true } so the UI
+  // knows to prompt exactly once.
   app.post("/api/builder/rescrape-unit-photos", async (req, res) => {
-    const { folder, sourceUrl, limit } = req.body as {
+    const { folder, sourceUrl: suppliedUrl, limit } = req.body as {
       folder?: string;
       sourceUrl?: string;
       limit?: number;
@@ -5473,14 +5481,67 @@ export async function registerRoutes(
     if (!folder || !/^[\w-]+$/.test(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
     }
-    if (!sourceUrl || typeof sourceUrl !== "string" || !/^https?:\/\//i.test(sourceUrl)) {
-      return res.status(400).json({ error: "sourceUrl must be a full http(s) URL" });
-    }
     const folderPath = path.join(process.cwd(), "client/public/photos", folder);
     try {
       const stat = await fs.promises.stat(folderPath).catch(() => null);
       if (!stat || !stat.isDirectory()) {
         return res.status(404).json({ error: `Folder not found: ${folder}` });
+      }
+
+      // Resolve the best sourceUrl we can find.
+      let sourceUrl = typeof suppliedUrl === "string" && /^https?:\/\//i.test(suppliedUrl)
+        ? suppliedUrl : null;
+      let urlSource: "supplied" | "_source.json" | "unit_swap" | "community_map" | null =
+        sourceUrl ? "supplied" : null;
+
+      const sourcePath = path.join(folderPath, "_source.json");
+      let sourceDoc: any = {};
+      try {
+        sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+      } catch {}
+
+      if (!sourceUrl) {
+        const prev = sourceDoc?.sourceListing?.url;
+        if (typeof prev === "string" && /^https?:\/\//i.test(prev)) {
+          sourceUrl = prev; urlSource = "_source.json";
+        }
+      }
+
+      // unit_swaps lookup — if pre-flight replaced this unit, the URL is on file.
+      if (!sourceUrl) {
+        try {
+          const refs: Array<{ propertyId: number; unitId?: string }> =
+            (sourceDoc?.referencedBy as any[]) ?? [];
+          for (const ref of refs) {
+            if (!ref.propertyId) continue;
+            const swaps = await storage.getUnitSwaps(ref.propertyId);
+            const match = swaps.find((s: any) =>
+              s.committed && (!ref.unitId || s.oldUnitId === ref.unitId) &&
+              /^https?:\/\//i.test(s.newSourceUrl),
+            );
+            if (match) {
+              sourceUrl = match.newSourceUrl;
+              urlSource = "unit_swap";
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      // Community folder fallback — the hardcoded map at the top of this file.
+      if (!sourceUrl && folder.startsWith("community-")) {
+        const commName = COMMUNITY_FOLDER_TO_NAME[folder];
+        const entry = commName ? COMMUNITY_SOURCE_URLS[commName] : null;
+        if (entry?.primary) {
+          sourceUrl = entry.primary; urlSource = "community_map";
+        }
+      }
+
+      if (!sourceUrl) {
+        return res.status(409).json({
+          needsUrl: true,
+          error: "No source URL on file for this folder. Paste the listing URL and I'll save it for next time.",
+        });
       }
 
       const scraped = await scrapeListingPhotos(sourceUrl);
@@ -5519,12 +5580,8 @@ export async function registerRoutes(
         }
       }
 
-      // Stamp the URL back into _source.json so the next rescrape is one click
-      const sourcePath = path.join(folderPath, "_source.json");
-      let sourceDoc: any = {};
-      try {
-        sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
-      } catch { /* create fresh */ }
+      // Stamp the URL back into _source.json so the next rescrape is one click.
+      // sourceDoc was already loaded above for URL resolution.
       sourceDoc.sourceListing = {
         url: sourceUrl,
         platform: /zillow\.com/i.test(sourceUrl) ? "zillow" : /homes\.com/i.test(sourceUrl) ? "homes.com" : /vrbo\.com/i.test(sourceUrl) ? "vrbo" : /airbnb\.com/i.test(sourceUrl) ? "airbnb" : "other",
@@ -5564,6 +5621,7 @@ export async function registerRoutes(
       res.json({
         folder,
         sourceUrl,
+        urlSource,
         scrapedCount: scraped.length,
         savedCount: saved.length,
         failedCount: failed.length,
