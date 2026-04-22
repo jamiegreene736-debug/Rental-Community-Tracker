@@ -4958,14 +4958,19 @@ export async function registerRoutes(
   });
 
   // Bulk-relabel every photo in every folder under client/public/photos.
-  // Streams NDJSON progress so the client can render a live log. Safe to
-  // re-run: upserts one row per (folder, filename), replacing the prior
-  // label. Skips unlabeled files (bad extensions, files > 5MB, etc.)
+  // Streams NDJSON progress. Throttled to stay under Anthropic's
+  // ~50-req/min Haiku ceiling. Skip-existing mode (default) only labels
+  // photos missing from the DB, so re-runs are cheap and resumable
+  // after a partial failure.
   app.post("/api/admin/relabel-all-photos", async (req, res) => {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
-    const onlyFolder = typeof (req.body as any)?.folder === "string" ? (req.body as any).folder as string : null;
+    const reqBody = (req.body ?? {}) as Record<string, unknown>;
+    const onlyFolder = typeof reqBody.folder === "string" ? reqBody.folder as string : null;
+    // Default: skip files we've already labeled. Pass {force: true} to
+    // wipe + redo every label (the rare case where the prompt changed).
+    const force = reqBody.force === true;
     const photosRoot = path.join(process.cwd(), "client/public/photos");
     if (!fs.existsSync(photosRoot)) return res.status(404).json({ error: "photos directory missing" });
 
@@ -4979,28 +4984,42 @@ export async function registerRoutes(
       const all = await fs.promises.readdir(photosRoot);
       const folders = all.filter((f) => !onlyFolder || f === onlyFolder);
 
-      // Count total photos upfront so the client progress bar is honest.
+      // For skip-existing mode, build a set of (folder|filename) pairs
+      // already labeled so we can drop them from the work queue.
+      const alreadyLabeled = new Set<string>();
+      if (!force) {
+        const existing = await storage.getAllPhotoLabels();
+        for (const r of existing) alreadyLabeled.add(`${r.folder}|${r.filename}`);
+      }
+
       let total = 0;
       const perFolder: Array<{ folder: string; files: string[] }> = [];
       for (const folder of folders) {
         const folderPath = path.join(photosRoot, folder);
         const stat = await fs.promises.stat(folderPath).catch(() => null);
         if (!stat?.isDirectory()) continue;
-        const files = await listPhotoFiles(folderPath);
+        let files = await listPhotoFiles(folderPath);
+        if (!force) {
+          files = files.filter((f) => !alreadyLabeled.has(`${folder}|${f}`));
+        }
         if (files.length === 0) continue;
         perFolder.push({ folder, files });
         total += files.length;
       }
 
-      emit({ type: "start", folders: perFolder.length, total });
+      emit({ type: "start", folders: perFolder.length, total, mode: force ? "force" : "skip-existing" });
+
+      // Throttle: Anthropic Haiku ceiling is 50 req/min for our org. Pace
+      // at 45/min = one request every 1.4s with a small jitter.
+      const sleepMs = 1400;
 
       let done = 0;
       let failed = 0;
       for (const { folder, files } of perFolder) {
         emit({ type: "folder", folder, files: files.length });
-        // Nuke prior labels for this folder so stale entries don't linger
-        // when a folder's photos have been re-saved in a different order.
-        await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+        if (force) {
+          await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+        }
         const kind = inferKindFromFolder(folder);
         for (const filename of files) {
           const abs = path.join(photosRoot, folder, filename);
@@ -5009,15 +5028,17 @@ export async function registerRoutes(
           if (!result) {
             failed++;
             emit({ type: "photo", folder, filename, ok: false, done, total });
-            continue;
+          } else {
+            await storage.upsertPhotoLabel({
+              folder, filename,
+              label: result.label,
+              category: result.category,
+              model: result.model,
+            });
+            emit({ type: "photo", folder, filename, ok: true, label: result.label, category: result.category, done, total });
           }
-          await storage.upsertPhotoLabel({
-            folder, filename,
-            label: result.label,
-            category: result.category,
-            model: result.model,
-          });
-          emit({ type: "photo", folder, filename, ok: true, label: result.label, category: result.category, done, total });
+          // Pace requests to stay under the rate limit.
+          await new Promise((resolve) => setTimeout(resolve, sleepMs));
         }
       }
 
