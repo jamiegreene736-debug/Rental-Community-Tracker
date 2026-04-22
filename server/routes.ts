@@ -2539,15 +2539,51 @@ export async function registerRoutes(
 
     console.log(`[push-channel-markups] listing ${listingId}`, priceMarkupFlat);
 
-    try {
-      // Single PUT with every variant merged — Guesty keeps the keys it
-      // recognizes and ignores the rest.
-      await guestyRequest("PUT", `/listings/${listingId}`, {
-        priceMarkup: priceMarkupFlat,
-        integrations: integrationsPatch,
-        channels: channelsPatch,
-      });
+    // Guesty's listing PUT rejects the merged-everything body shape on some
+    // accounts (returns 500 with no body). Try each shape independently
+    // and capture which one succeeds — then we know what Guesty wants for
+    // this account and can preserve it on subsequent pushes.
+    type ShapeAttempt = {
+      shape: string;
+      body: Record<string, unknown>;
+      ok: boolean;
+      error?: string;
+    };
+    const attempts: ShapeAttempt[] = [];
 
+    const tryShape = async (shape: string, body: Record<string, unknown>) => {
+      try {
+        await guestyRequest("PUT", `/listings/${listingId}`, body);
+        attempts.push({ shape, body, ok: true });
+        return true;
+      } catch (e: any) {
+        attempts.push({ shape, body, ok: false, error: e?.message ?? String(e) });
+        return false;
+      }
+    };
+
+    // Try each variant in order of "most likely to work" → "deprecated".
+    // Stop on first success — Guesty stores it once and the read-back below
+    // will tell us where it landed.
+    let anySucceeded = false;
+    if (!anySucceeded && Object.keys(priceMarkupFlat).length > 0) {
+      anySucceeded = await tryShape("priceMarkup", { priceMarkup: priceMarkupFlat });
+    }
+    if (!anySucceeded && Object.keys(integrationsPatch).length > 0) {
+      anySucceeded = await tryShape("integrations", { integrations: integrationsPatch });
+    }
+    if (!anySucceeded && Object.keys(channelsPatch).length > 0) {
+      anySucceeded = await tryShape("channels", { channels: channelsPatch });
+    }
+
+    // If everything failed, surface the most recent (= deepest-tried) error
+    // so the client toast tells the user what Guesty actually said.
+    if (!anySucceeded) {
+      const lastErr = attempts[attempts.length - 1]?.error ?? "Guesty rejected every payload shape";
+      return res.status(500).json({ success: false, error: lastErr, attempts });
+    }
+
+    try {
       // Read back to see which shape stuck
       const fetched = await guestyRequest("GET", `/listings/${listingId}`) as any;
       const saved = {
@@ -2568,10 +2604,18 @@ export async function registerRoutes(
         success: true,
         sent: { airbnb: markups.airbnb, vrbo: markups.vrbo, booking: markups.booking, direct: markups.direct },
         saved,
+        attempts,
         note: "Check the 'saved' block — whichever field populated is the one Guesty honors for your account.",
       });
     } catch (err: any) {
-      return res.status(500).json({ success: false, error: err.message });
+      return res.json({
+        success: true,
+        sent: { airbnb: markups.airbnb, vrbo: markups.vrbo, booking: markups.booking, direct: markups.direct },
+        saved: null,
+        attempts,
+        verifyError: err.message,
+        note: "Push succeeded but read-back failed — check Guesty UI manually.",
+      });
     }
   });
 
@@ -3288,13 +3332,29 @@ export async function registerRoutes(
 
     console.log(`[push-seasonal-rates] listing ${listingId} · ${ranges.length} ranges · ${days.length} days`);
 
-    try {
-      // Guesty calendar update: PUT /availability-pricing/api/calendar/listings/:id
-      // Body: { days: [{ startDate, endDate, price }] } — accounts vary on the
-      // exact wrapper shape so we also send a flat `data` field as a fallback.
-      const body = { days: ranges, data: ranges };
-      await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${listingId}`, body);
+    // Guesty's calendar PUT validates one range at a time:
+    //   PUT /availability-pricing/api/calendar/listings/:id
+    //   { startDate, endDate, price }
+    // Bulk-array bodies fail with "days is not allowed". We loop and PUT
+    // one range per call. ~13 calls for the typical 24-month seasonal map.
+    let pushedRanges = 0;
+    const failedRanges: Array<{ range: Range; error: string }> = [];
+    for (const range of ranges) {
+      try {
+        await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${listingId}`, {
+          startDate: range.startDate,
+          endDate: range.endDate,
+          price: range.price,
+        });
+        pushedRanges++;
+      } catch (e: any) {
+        failedRanges.push({ range, error: e?.message ?? String(e) });
+        // Keep going — partial success is more useful than aborting the
+        // whole 24-month push because one range glitched.
+      }
+    }
 
+    try {
       // Read back a sample of days to confirm the push stuck.
       const firstDate = days[0].date;
       const lastDate = days[days.length - 1].date;
@@ -3314,15 +3374,25 @@ export async function registerRoutes(
         if (priceByDate.get(dateStr) === Math.round(rate)) matched++;
       }
       return res.json({
-        success: true,
+        success: failedRanges.length === 0,
         pushedDays: days.length,
-        pushedRanges: ranges.length,
+        pushedRanges,
+        totalRanges: ranges.length,
+        failedRanges: failedRanges.slice(0, 5),
         verifiedDays: matched,
         sampleRange: ranges[0],
       });
     } catch (err: any) {
-      console.error(`[push-seasonal-rates] error:`, err.message);
-      return res.status(500).json({ success: false, error: err.message });
+      console.error(`[push-seasonal-rates] verify error:`, err.message);
+      // Push happened (or partially happened); only verification failed.
+      return res.json({
+        success: failedRanges.length === 0,
+        pushedDays: days.length,
+        pushedRanges,
+        totalRanges: ranges.length,
+        failedRanges: failedRanges.slice(0, 5),
+        verifyError: err.message,
+      });
     }
   });
 

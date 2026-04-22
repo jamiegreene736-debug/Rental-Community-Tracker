@@ -10,9 +10,22 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({})) as { message?: string; error?: string | { message?: string } };
-    const msg = err.message || (typeof err.error === "object" ? err.error?.message : err.error) || `Guesty ${res.status}: ${endpoint}`;
-    throw new Error(msg);
+    // Guesty error responses are inconsistent — sometimes JSON with message,
+    // sometimes plain text, sometimes empty. Read once as text so we can
+    // surface the actual body even when JSON parsing fails. Keeps the bubble
+    // up message useful instead of a generic "Guesty 500".
+    const rawText = await res.text().catch(() => "");
+    let parsed: any = null;
+    try { parsed = JSON.parse(rawText); } catch { /* not JSON */ }
+    const message =
+      parsed?.message
+      || parsed?.error?.message
+      || (typeof parsed?.error === "string" ? parsed.error : "")
+      || (parsed && typeof parsed === "object" ? JSON.stringify(parsed).slice(0, 500) : "")
+      || rawText.slice(0, 500)
+      || `(no body)`;
+    log(`[guesty] ${method} ${endpoint} → ${res.status}: ${message.slice(0, 300)}`, "guesty-error");
+    throw new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`);
   }
   if (res.status === 204) return { success: true };
   return res.json();
