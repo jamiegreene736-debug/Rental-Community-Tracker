@@ -4495,47 +4495,111 @@ export async function registerRoutes(
     ];
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
 
-    // ── Helper: check if a search result snippet/title mentions the unit number ─
-    const snippetMentionsUnit = (r: any, unitNumber: string): boolean => {
-      const text = `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
-      const num = unitNumber.toLowerCase().replace(/^0+/, ""); // strip leading zeros
-      const patterns = [
-        num,
-        `#${num}`,
-        `unit ${num}`,
-        `unit#${num}`,
-        `apt ${num}`,
-        `apt. ${num}`,
-        `apartment ${num}`,
-        `suite ${num}`,
-        `ste ${num}`,
-        `no. ${num}`,
-        `no ${num}`,
-        `-${num}`,       // URL slug: property-name-101
-        `/${num}`,       // URL path segment
-      ];
-      return patterns.some(p => text.includes(p));
+    // ── Helper: strip the unit number from an address so queries can target
+    // the street portion cleanly. Input "4460 Nehe Rd 122 Lihue HI" with
+    // unit="122" → "4460 Nehe Rd Lihue HI". Without this, the street query
+    // double-counts the unit number ("4460 Nehe Rd 122" already contains it)
+    // and a villa whose snippet mentions any "122" gets a false positive.
+    const stripUnitFromAddress = (addr: string, unitNumber: string): string => {
+      const n = (unitNumber || "").trim();
+      if (!n || !addr) return addr;
+      // Match unit-number with or without a marker, bounded by space/comma.
+      const re = new RegExp(
+        `(?:[,\\s])(?:unit\\s*#?|apt\\.?\\s*#?|apartment\\s*#?|suite\\s*#?|ste\\.?\\s*#?|no\\.?\\s*|#)?\\s*${n}(?=[,\\s]|$)`,
+        "i",
+      );
+      return addr.replace(re, " ").replace(/\s*,\s*/g, ", ").replace(/\s{2,}/g, " ").trim();
     };
 
-    // ── Helper: confirm URL is a specific listing page (not a search results page) ─
+    // Extract the street portion (before the first comma, or before the city
+    // if no commas) so we can demand the snippet mentions OUR street, not
+    // just the unit number alone.
+    const extractStreet = (cleanedAddr: string): string => {
+      if (cleanedAddr.includes(",")) return cleanedAddr.split(",")[0].trim();
+      // No comma form: "4460 Nehe Rd Lihue HI" — take through the last
+      // street-type token (Rd/St/Ave/Dr/Blvd/Ln/Way/Ct/Pl/Ter/Cir/Pkwy/Hwy).
+      const m = cleanedAddr.match(/^(.*?\b(?:rd|road|st|street|ave|avenue|dr|drive|blvd|boulevard|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|hwy|highway))\b/i);
+      return (m ? m[1] : cleanedAddr).trim();
+    };
+
+    // Build a lowercase "haystack" from a search result for text checks.
+    const resultText = (r: any): string =>
+      `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
+
+    // ── Helper: does the snippet mention the unit number with a marker strong
+    // enough to distinguish it from a random "122" in a price / zip / review
+    // count? We require either an explicit unit marker (Unit 122, #122, Apt
+    // 122 …) OR the number as its own space-bounded word immediately after
+    // the street (e.g. "Nehe Rd 122" or "Rd, 122"). Bare "122" anywhere is
+    // rejected — it was the source of the Unit 122 / VRBO villa false
+    // positive where the snippet mentioned the digits in an unrelated field.
+    const snippetMentionsUnit = (r: any, unitNumber: string, streetTail?: string): boolean => {
+      const text = resultText(r);
+      const num = unitNumber.toLowerCase().replace(/^0+/, ""); // strip leading zeros
+      if (!num) return false;
+      // Strong markers — any of these is sufficient on its own.
+      const markerPatterns = [
+        new RegExp(`\\b(?:unit|apt\\.?|apartment|suite|ste\\.?|no\\.?)\\s*#?\\s*${num}\\b`, "i"),
+        new RegExp(`#\\s*${num}\\b`, "i"),
+        // URL slug form: property-name-122 (dash-prefixed, only in the link portion)
+        new RegExp(`-${num}(?:[\\/\\?\\-]|$)`, "i"),
+      ];
+      if (markerPatterns.some((re) => re.test(text))) return true;
+      // Weaker: number immediately after the street name ("Nehe Rd 122").
+      // Only count when the street is also visible in the same text.
+      if (streetTail) {
+        const tail = streetTail.toLowerCase();
+        const adjacent = new RegExp(`\\b${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*,?\\s*#?\\s*${num}\\b`, "i");
+        if (adjacent.test(text)) return true;
+      }
+      return false;
+    };
+
+    // ── Helper: confirm URL is a specific listing page (not a search/region page) ─
     const isListingUrl = (url: string, cfg: typeof PLATFORM_CONFIGS[0]): boolean => {
       if (!url) return false;
       const u = url.toLowerCase();
       if (cfg.key === "airbnb") return u.includes("airbnb.com/rooms/") || u.includes("airbnb.com/h/");
-      if (cfg.key === "vrbo") return /vrbo\.com\/\d+/.test(u) || u.includes("vrbo.com/vacation-rentals/");
+      if (cfg.key === "vrbo") {
+        // Accept every URL shape that actually resolves to ONE specific
+        // listing. VRBO has several historical variants — the /es-es/p…vb
+        // URL in the bug report is a Spanish-locale listing page, which the
+        // old regex missed entirely.
+        if (/vrbo\.com\/\d+[a-z]{0,3}(?:[\/?#]|$)/.test(u)) return true;       // /1234567, /1234567ha
+        if (/vrbo\.com\/[a-z]{2}-[a-z]{2}\/p\d+/.test(u)) return true;          // /en-us/p12345, /es-es/p12345vb
+        if (/vrbo\.com\/vacation-rental\/p\d+/.test(u)) return true;            // /vacation-rental/p12345
+        // Explicitly reject category/search pages even though they live
+        // under vrbo.com — those aren't a unit someone can have booked.
+        if (/vrbo\.com\/(search|region|destinations?|vacation-rentals\/[a-z])/.test(u)) return false;
+        return false;
+      }
       if (cfg.key === "booking") return u.includes("booking.com/hotel/") || u.includes("booking.com/apartments/");
       return u.includes(cfg.pattern);
     };
 
     // ── Helper: text search per platform for a unit — address-based + name-based
     // Uses Google snippet text for verification (no HTML fetch — platforms block bots).
+    //
+    // Methodology (rev. 2026-04 after villa false-positive on VRBO /es-es/ URL):
+    //   1. Strip the unit number out of the address before building the
+    //      street query so we don't double-count "122" in the source text.
+    //   2. Only trust URLs that match a specific-listing shape per platform.
+    //      No longer fall back to "any URL under vrbo.com" — that accepted
+    //      region/search pages and misdirected listings.
+    //   3. snippetMentionsUnit requires a unit marker (#, Unit 122, -122)
+    //      OR street-adjacent placement (Nehe Rd 122). Bare "122" anywhere
+    //      in the snippet (price, review count, zip) is NOT sufficient.
+    //   4. titleMatch additionally requires the street portion to appear in
+    //      the snippet — otherwise it's a weak match (reported as unconfirmed).
     const textSearch = async (
       unit: { unitNumber: string; address: string },
       cfg: typeof PLATFORM_CONFIGS[0],
     ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
       const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
-      // Street portion of address (before first comma) — more precise than complex name
-      const street = (unit.address || "").split(",")[0].trim();
+      // Pre-clean the address so the unit number only appears in the
+      // dedicated unit-number term of the query, never in the street term.
+      const cleanedAddr = stripUnitFromAddress(unit.address || "", unit.unitNumber);
+      const street = extractStreet(cleanedAddr);
       // Run address-based query (primary) and name+city query (fallback) in parallel
       const queries = [
         street ? `site:${domain} "${street}" "${unit.unitNumber}"` : null,
@@ -4560,18 +4624,39 @@ export async function registerRoutes(
             if (!seen.has(link)) { seen.add(link); allResults.push(r); }
           }
         }
-        // Prefer listing-page URLs over generic domain matches; prefer snippet-confirmed
+        // Extract the street name alone (without the leading number) so we
+        // can demand it appears in the snippet — this is what distinguishes
+        // "Nehe Rd 122" (real match) from a random "122" in a different
+        // listing's description.
+        const streetName = street.replace(/^\d+\s*/, "").trim();
+        const streetTail = streetName; // used for adjacency heuristic in snippetMentionsUnit
+
         let bestUrl: string | null = null;
         let bestTitleMatch = false;
         for (const r of allResults) {
           const link: string = r.link || r.url || "";
           if (!link.toLowerCase().includes(cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`)) continue;
-          const listing = isListingUrl(link, cfg);
-          const titleMatch = snippetMentionsUnit(r, unit.unitNumber);
-          // Prioritize: listing URL + title match > listing URL > any domain match
-          if (listing && titleMatch) return { listed: true, url: link, titleMatch: true };
-          if (listing && !bestUrl) { bestUrl = link; bestTitleMatch = titleMatch; }
-          if (!bestUrl && link.includes(cfg.pattern)) { bestUrl = link; bestTitleMatch = titleMatch; }
+          // Hard requirement: only accept a URL that resolves to one specific
+          // listing. Search/region/category pages and misdirected domain hits
+          // never advance. This removes the old "vrbo.com anything" fallback
+          // that caused the /es-es/p…vb villa to slip through.
+          if (!isListingUrl(link, cfg)) continue;
+          const unitInSnippet = snippetMentionsUnit(r, unit.unitNumber, streetTail);
+          // For titleMatch we also need the STREET to appear in the snippet.
+          // A listing URL + unit-number mention alone is still a "possible
+          // match" (shown yellow in the UI), not a confirmed one.
+          const streetInSnippet = streetName.length >= 3
+            ? resultText(r).includes(streetName.toLowerCase())
+            : false;
+          // Hard gate: if NEITHER the street nor the unit number actually
+          // appears in the snippet, Google's site: search returned a fuzzy
+          // match that's probably a different listing entirely — the
+          // scenario that produced the Unit 122 / villa false positive.
+          // Skip it rather than surface it as a "possible match".
+          if (!unitInSnippet && !streetInSnippet) continue;
+          const titleMatch = unitInSnippet && streetInSnippet;
+          if (titleMatch) return { listed: true, url: link, titleMatch: true };
+          if (!bestUrl) { bestUrl = link; bestTitleMatch = false; }
         }
         if (bestUrl) return { listed: true, url: bestUrl, titleMatch: bestTitleMatch };
         return { listed: false, url: null, titleMatch: false };
