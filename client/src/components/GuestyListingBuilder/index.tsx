@@ -1597,6 +1597,37 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     airbnb: 0, vrbo: 0, booking: 0, direct: 0,
   });
 
+  // Hydrate markupPct from Guesty so saved values survive navigation.
+  useEffect(() => {
+    if (!selectedId) return;
+    let cancelled = false;
+    fetch(`/api/guesty-proxy/listings/${selectedId}`)
+      .then((r) => r.json())
+      .then((data: any) => {
+        if (cancelled) return;
+        const m = (data?.markups ?? {}) as Record<string, any>;
+        const asDecimal = (platformKeys: string[]): number => {
+          for (const k of platformKeys) {
+            const v = m[k];
+            if (!v) continue;
+            if (typeof v === "number" && v > 0) return v <= 1 ? v : v / 100;
+            if (typeof v === "object" && typeof v.percent === "number" && v.percent > 0) {
+              return v.percent / 100;
+            }
+          }
+          return 0;
+        };
+        setMarkupPct({
+          airbnb:  asDecimal(["airbnb2", "airbnb"]),
+          vrbo:    asDecimal(["homeaway2", "homeaway", "vrbo"]),
+          booking: asDecimal(["bookingCom", "booking"]),
+          direct:  asDecimal(["manual", "direct"]),
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedId]);
+
   useEffect(() => {
     if (!propertyId) return;
     let cancelled = false;
