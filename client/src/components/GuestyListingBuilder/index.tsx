@@ -239,8 +239,11 @@ function ChannelMarkupCard({
     for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
       const fee = CHANNEL_HOST_FEE[ch] ?? 0;
       const raw = (1 - feeDirect) / (1 - fee) - 1;
-      // Round to 0.1% for clean display; no snap-up because fees are fixed.
-      result[ch] = Math.max(0, Math.round(raw * 1000) / 1000);
+      // Round UP to the next 0.1% so the resulting margin stays AT or
+      // ABOVE 20% (rounding to nearest occasionally pushed channels
+      // like Vrbo down to ~19.96%, which was enough to flip cells red
+      // even though they mathematically should clear).
+      result[ch] = Math.max(0, Math.ceil(raw * 1000) / 1000);
     }
     return result;
   };
@@ -2520,9 +2523,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                     const mk = markupPct[ch] ?? 0;
                                     const channelRate = guesty.avgRate * (1 + mk);
                                     const netGross = netPayoutAfterChannelFee(channelRate, ch);
-                                    const profit = Math.round(netGross - buyIn);
-                                    const margin = buyIn > 0 ? profit / buyIn : 0;
-                                    const ok = margin >= MIN_PROFIT_MARGIN;
+                                    // Compute margin from the UN-rounded profit, then round
+                                    // profit only for display. Rounding first made cells with
+                                    // a margin of 20.003% render as 19.989% (371/1856 vs
+                                    // 371.25/1856) — they'd go red even though they cleared
+                                    // the floor mathematically.
+                                    const rawProfit = netGross - buyIn;
+                                    const margin = buyIn > 0 ? rawProfit / buyIn : 0;
+                                    const profit = Math.round(rawProfit);
+                                    // 0.5bp tolerance so 19.9995% rounds up to "clears the
+                                    // floor" instead of flipping cells red on dust.
+                                    const ok = margin >= MIN_PROFIT_MARGIN - 0.0005;
                                     return { ch, profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
                                   });
                                   return (
