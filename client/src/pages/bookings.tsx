@@ -338,14 +338,17 @@ export default function Bookings() {
           if (!pick) return { slot, picked: null, created: null, skippedReasons };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
+          const propertyName =
+            (selectedListingId && listingNameById.get(selectedListingId)) ||
+            `Property ${selectedPropertyId}`;
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
+            propertyName,
             unitId: slot.unitId,
             unitLabel: slot.unitLabel,
-            bedrooms: slot.bedrooms,
             checkIn: ci,
             checkOut: co,
-            costPaid: finalCost,
+            costPaid: finalCost.toFixed(2),
             airbnbConfirmation: null,
             airbnbListingUrl: pick.url,
             notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}`,
