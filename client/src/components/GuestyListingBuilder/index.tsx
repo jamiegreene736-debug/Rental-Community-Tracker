@@ -1526,12 +1526,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     p75: number | null;
     p90: number | null;
   };
+  type CompSample = { title: string; url: string; bedrooms: number | null; nightlyRate: number; tier?: string; propertyType?: string };
   type MarketSeason = {
     season: "LOW" | "HIGH" | "HOLIDAY";
     checkIn: string;
     checkOut: string;
-    stats: SeasonStats;
-    sample?: Array<{ title: string; url: string; bedrooms: number | null; nightlyRate: number }>;
+    // Split by property type so the row badge can compare against a real
+    // apples-to-apples peer (condo) and show the villa tier separately
+    // as the premium ceiling.
+    condo: { stats: SeasonStats; sample: CompSample[] };
+    villa: { stats: SeasonStats; sample: CompSample[] };
+    all:   { stats: SeasonStats; sample: CompSample[] };
     error?: string;
     rawCount?: number;
     qualifyingCount?: number;
@@ -2260,15 +2265,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                               </div>
                             </div>
                             {marketComps && (
-                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
-                                <b>Market benchmark</b> — {marketComps.totalBR}BR comparable listings in the area. Your Guesty rate is bucketed against this distribution per season:
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, lineHeight: 1.6 }}>
+                                <div>
+                                  <b>Market benchmark</b> — {marketComps.totalBR}BR comparables in the area, split into <b>Condo tier</b> (direct peers to your bundle — apartments, townhomes, condos) and <b>Villa tier</b> (premium ceiling — detached houses, villas, estates).
+                                </div>
                                 {(["LOW", "HIGH", "HOLIDAY"] as const).map((s) => {
-                                  const st = marketComps.seasons[s]?.stats;
-                                  if (!st?.enough) return null;
+                                  const season = marketComps.seasons[s];
+                                  if (!season) return null;
+                                  const condoOk = season.condo.stats.enough;
+                                  const villaOk = season.villa.stats.enough;
+                                  if (!condoOk && !villaOk) return null;
                                   return (
-                                    <span key={s} style={{ marginLeft: 8 }}>
-                                      <b>{s}:</b> median ${st.median?.toLocaleString()} <span style={{ color: "#9ca3af" }}>(p25 ${st.p25?.toLocaleString()} · p75 ${st.p75?.toLocaleString()} · n={st.n})</span>
-                                    </span>
+                                    <div key={s}>
+                                      <b>{s}:</b>
+                                      {condoOk && (
+                                        <span style={{ marginLeft: 6 }}>
+                                          Condo median <b>${season.condo.stats.median?.toLocaleString()}</b>
+                                          <span style={{ color: "#9ca3af" }}> (p25 ${season.condo.stats.p25?.toLocaleString()} · p75 ${season.condo.stats.p75?.toLocaleString()} · n={season.condo.stats.n})</span>
+                                        </span>
+                                      )}
+                                      {villaOk && (
+                                        <span style={{ marginLeft: 12 }}>
+                                          Villa median <b>${season.villa.stats.median?.toLocaleString()}</b>
+                                          <span style={{ color: "#9ca3af" }}> (p25 ${season.villa.stats.p25?.toLocaleString()} · p75 ${season.villa.stats.p75?.toLocaleString()} · n={season.villa.stats.n})</span>
+                                        </span>
+                                      )}
+                                    </div>
                                   );
                                 })}
                               </div>
@@ -2341,33 +2363,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                           </div>
                                         )}
                                       </td>
-                                      {/* Market positioning — where this month's Guesty
-                                          rate sits in the distribution of equivalent-BR
-                                          area listings for the same season. */}
+                                      {/* Market positioning — compares this month's
+                                          Guesty rate against the CONDO tier (direct
+                                          peers) when we have enough samples, otherwise
+                                          against the VILLA tier adjusted by a 30%
+                                          implied condo-bundle discount. Falls through
+                                          to the combined distribution if both tiers
+                                          are sparse. */}
                                       <td style={{ fontSize: 11 }}>
                                         {(() => {
-                                          const compStats = marketComps?.seasons[row.season]?.stats;
-                                          if (!guesty || !compStats?.enough) {
+                                          const seasonComps = marketComps?.seasons[row.season];
+                                          if (!guesty || !seasonComps) {
                                             if (marketCompsLoading) return <span style={{ color: "#9ca3af" }}>…</span>;
                                             return <span style={{ color: "#9ca3af" }}>—</span>;
                                           }
                                           const rate = guesty.avgRate;
-                                          // Bucket rate against the distribution. p-values
-                                          // are guaranteed non-null because enough=true.
-                                          const { p25, p40, median, p75, p90 } = compStats as {
+                                          // Pick the benchmark tier, in priority order:
+                                          //   1. Condo tier (direct peers — ideal)
+                                          //   2. Villa tier with 30% premium stripped
+                                          //      (villas command a premium over condo
+                                          //      bundles; the ceiling comp isn't a
+                                          //      fair apples-to-apples number)
+                                          //   3. All-comps (last resort)
+                                          const VILLA_PREMIUM = 0.30;
+                                          let benchmark: { stats: SeasonStats; label: string; disclaimer?: string } | null = null;
+                                          if (seasonComps.condo.stats.enough) {
+                                            benchmark = { stats: seasonComps.condo.stats, label: "vs condo peers" };
+                                          } else if (seasonComps.villa.stats.enough) {
+                                            // Scale villa percentiles down by the premium
+                                            // to approximate what a condo-bundle equivalent
+                                            // would fetch in this market.
+                                            const scale = 1 / (1 + VILLA_PREMIUM);
+                                            const v = seasonComps.villa.stats;
+                                            benchmark = {
+                                              stats: {
+                                                n: v.n, enough: true,
+                                                min:    v.min    != null ? Math.round(v.min    * scale) : null,
+                                                max:    v.max    != null ? Math.round(v.max    * scale) : null,
+                                                p25:    v.p25    != null ? Math.round(v.p25    * scale) : null,
+                                                p40:    v.p40    != null ? Math.round(v.p40    * scale) : null,
+                                                median: v.median != null ? Math.round(v.median * scale) : null,
+                                                p75:    v.p75    != null ? Math.round(v.p75    * scale) : null,
+                                                p90:    v.p90    != null ? Math.round(v.p90    * scale) : null,
+                                              },
+                                              label: "vs villas −30% premium",
+                                              disclaimer: "No condo comps found — villa median discounted 30% as a proxy for condo-bundle equivalent.",
+                                            };
+                                          } else if (seasonComps.all.stats.enough) {
+                                            benchmark = { stats: seasonComps.all.stats, label: "vs all comps" };
+                                          }
+                                          if (!benchmark) return <span style={{ color: "#9ca3af" }}>—</span>;
+                                          const { p25, p40, median, p75, p90 } = benchmark.stats as {
                                             p25: number; p40: number; median: number; p75: number; p90: number;
                                           };
-                                          type Verdict = { label: string; bg: string; fg: string; pos: string };
+                                          type Verdict = { label: string; bg: string; fg: string };
                                           let v: Verdict;
-                                          if (rate <= p25)        v = { label: "Very competitive", bg: "#dcfce7", fg: "#166534", pos: `≤ 25th pct` };
-                                          else if (rate <= p40)   v = { label: "Competitive",       bg: "#dcfce7", fg: "#166534", pos: `${Math.round(((rate - p25)/(p40 - p25))*15 + 25)}th pct` };
-                                          else if (rate <= p75)   v = { label: "Realistic",         bg: "#dbeafe", fg: "#1e40af", pos: `${Math.round(((rate - p40)/(p75 - p40))*35 + 40)}th pct` };
-                                          else if (rate <= p90)   v = { label: "Premium — slower",  bg: "#fef3c7", fg: "#92400e", pos: `${Math.round(((rate - p75)/(p90 - p75))*15 + 75)}th pct` };
-                                          else                    v = { label: "Too high",           bg: "#fee2e2", fg: "#991b1b", pos: `> 90th pct` };
+                                          if (rate <= p25)        v = { label: "Very competitive", bg: "#dcfce7", fg: "#166534" };
+                                          else if (rate <= p40)   v = { label: "Competitive",       bg: "#dcfce7", fg: "#166534" };
+                                          else if (rate <= p75)   v = { label: "Realistic",         bg: "#dbeafe", fg: "#1e40af" };
+                                          else if (rate <= p90)   v = { label: "Premium — slower",  bg: "#fef3c7", fg: "#92400e" };
+                                          else                    v = { label: "Too high",           bg: "#fee2e2", fg: "#991b1b" };
                                           const vsMedian = median > 0 ? Math.round(((rate - median) / median) * 100) : 0;
                                           const hoverText =
-                                            `Your rate $${rate.toLocaleString()} vs area ${marketComps?.totalBR}BR median $${median.toLocaleString()}`
-                                            + ` (${vsMedian >= 0 ? "+" : ""}${vsMedian}%). Distribution: p25 $${p25.toLocaleString()} · p75 $${p75.toLocaleString()} · p90 $${p90.toLocaleString()} · n=${compStats.n}.`;
+                                            `Your rate $${rate.toLocaleString()} ${benchmark.label} median $${median.toLocaleString()}`
+                                            + ` (${vsMedian >= 0 ? "+" : ""}${vsMedian}%). p25 $${p25.toLocaleString()} · p75 $${p75.toLocaleString()} · p90 $${p90.toLocaleString()} · n=${benchmark.stats.n}.`
+                                            + (benchmark.disclaimer ? ` ${benchmark.disclaimer}` : "");
                                           return (
                                             <span
                                               title={hoverText}
@@ -2375,7 +2435,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                             >
                                               {v.label}
                                               <span style={{ marginLeft: 4, fontWeight: 400, opacity: 0.75 }}>
-                                                {vsMedian >= 0 ? "+" : ""}{vsMedian}% vs median
+                                                {vsMedian >= 0 ? "+" : ""}{vsMedian}% · {benchmark.label}
                                               </span>
                                             </span>
                                           );

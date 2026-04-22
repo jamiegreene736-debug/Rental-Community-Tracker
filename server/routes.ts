@@ -3430,7 +3430,12 @@ export async function registerRoutes(
         }
         try {
           const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-          if (!r.ok) return { ...w, error: `HTTP ${r.status}`, stats: computeStats([]), sample: [] };
+          if (!r.ok) return {
+            ...w, error: `HTTP ${r.status}`,
+            condo: { stats: computeStats([]), sample: [] },
+            villa: { stats: computeStats([]), sample: [] },
+            all:   { stats: computeStats([]), sample: [] },
+          };
           const data = await r.json() as any;
           const props: any[] = Array.isArray(data?.properties) ? data.properties : [];
           // Post-filter: require actual BR count >= totalBR. The engine's
@@ -3439,25 +3444,68 @@ export async function registerRoutes(
             const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
             return pb == null || pb >= totalBR;
           });
-          const rates = qualifying
-            .map((p: any): number => {
-              const total = Number(p?.price?.extracted_total_price ?? 0);
-              return total / nights;
-            })
-            .filter((r: number) => r > 0);
-          const stats = computeStats(rates);
-          const sample = qualifying
-            .filter((p: any) => (p?.price?.extracted_total_price ?? 0) > 0)
-            .slice(0, 5)
-            .map((p: any) => ({
-              title: String(p?.name ?? p?.title ?? "Listing"),
-              url: String(p?.link ?? ""),
-              bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : null,
-              nightlyRate: Math.round((Number(p?.price?.extracted_total_price ?? 0) || 0) / nights),
-            }));
-          return { ...w, stats, sample, rawCount: props.length, qualifyingCount: qualifying.length };
+
+          // Classify each comp as villa-tier (premium, standalone) or
+          // condo-tier (direct peer to our bundle). We read Airbnb's
+          // `property_type` first — it's the authoritative field — and
+          // fall back to title/description keyword detection when the
+          // engine didn't populate it. Ambiguous entries are excluded
+          // from BOTH buckets so they don't pollute either median.
+          const classify = (p: any): "villa" | "condo" | "ambiguous" => {
+            const pt = String(p?.property_type ?? p?.room_type ?? "").toLowerCase();
+            const hay = `${pt} ${String(p?.name ?? p?.title ?? "").toLowerCase()} ${String(p?.description ?? "").toLowerCase()}`;
+            const villaHit = /\b(villa|estate|mansion|chalet|bungalow|cottage|standalone|single[- ]family|detached|private home|pool home)\b/.test(hay);
+            const condoHit = /\b(condo|condominium|townhome|townhouse|apartment|apt\.?|flat|suite)\b/.test(hay);
+            if (villaHit && !condoHit) return "villa";
+            if (condoHit && !villaHit) return "condo";
+            // `property_type=House` alone typically skews villa for 6BR+
+            // listings — we lean it into the villa tier so the ceiling
+            // isn't under-populated. Condo tier only gets explicit condos.
+            if (!villaHit && !condoHit && /\b(house|home)\b/.test(pt)) return "villa";
+            return "ambiguous";
+          };
+
+          type Tier = "villa" | "condo" | "ambiguous";
+          const bucket: Record<Tier, { rates: number[]; sample: any[] }> = {
+            villa:     { rates: [], sample: [] },
+            condo:     { rates: [], sample: [] },
+            ambiguous: { rates: [], sample: [] },
+          };
+
+          for (const p of qualifying) {
+            const total = Number(p?.price?.extracted_total_price ?? 0);
+            if (!(total > 0)) continue;
+            const nightly = total / nights;
+            const tier = classify(p);
+            bucket[tier].rates.push(nightly);
+            if (bucket[tier].sample.length < 5) {
+              bucket[tier].sample.push({
+                title: String(p?.name ?? p?.title ?? "Listing"),
+                url: String(p?.link ?? ""),
+                bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : null,
+                propertyType: String(p?.property_type ?? ""),
+                nightlyRate: Math.round(nightly),
+                tier,
+              });
+            }
+          }
+
+          const allRates = [...bucket.villa.rates, ...bucket.condo.rates, ...bucket.ambiguous.rates];
+          return {
+            ...w,
+            condo: { stats: computeStats(bucket.condo.rates), sample: bucket.condo.sample },
+            villa: { stats: computeStats(bucket.villa.rates), sample: bucket.villa.sample },
+            all:   { stats: computeStats(allRates),          sample: [...bucket.condo.sample, ...bucket.villa.sample].slice(0, 6) },
+            rawCount: props.length,
+            qualifyingCount: qualifying.length,
+          };
         } catch (e: any) {
-          return { ...w, error: e.message, stats: computeStats([]), sample: [] };
+          return {
+            ...w, error: e.message,
+            condo: { stats: computeStats([]), sample: [] },
+            villa: { stats: computeStats([]), sample: [] },
+            all:   { stats: computeStats([]), sample: [] },
+          };
         }
       }));
 
