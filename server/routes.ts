@@ -3224,15 +3224,26 @@ export async function registerRoutes(
       return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to host photos for Guesty" });
     }
 
-    const { guestyListingId, photos, upscale = true } = req.body as {
+    const { guestyListingId, photos: rawPhotos, upscale = true } = req.body as {
       guestyListingId: string;
       photos: { localPath: string; caption: string }[];
       upscale?: boolean;
     };
 
-    if (!guestyListingId || !Array.isArray(photos) || photos.length === 0) {
+    if (!guestyListingId || !Array.isArray(rawPhotos) || rawPhotos.length === 0) {
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
+
+    // Cap total photos sent to Guesty at 40 so Booking.com (~40 hard
+    // limit) and VRBO (50) don't reject the push. The client already
+    // orders photos as: community-begin → Unit A → Unit B → ... →
+    // community-end, which is the priority we want preserved. Trim
+    // from the end (lowest-priority community-end photos first).
+    const MAX_GUESTY_PHOTOS = 40;
+    const photos = rawPhotos.length > MAX_GUESTY_PHOTOS
+      ? rawPhotos.slice(0, MAX_GUESTY_PHOTOS)
+      : rawPhotos;
+    const trimmedCount = rawPhotos.length - photos.length;
 
     // Stream NDJSON — one JSON line per photo + a final summary line.
     // This keeps the HTTP connection alive for as long as needed (no timeout).
@@ -3394,14 +3405,14 @@ export async function registerRoutes(
         console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}`);
       } catch (e: any) {
         console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
-        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, guestyError: e.message });
+        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, guestyError: e.message });
         res.end();
         return;
       }
     }
 
-    emit({ type: "done", successCount, upscaledCount, total: photos.length });
-    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, ${upscaledCount} upscaled`);
+    emit({ type: "done", successCount, upscaledCount, total: photos.length, trimmed: trimmedCount });
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed to fit Booking/VRBO 40-photo cap` : ""}`);
     res.end();
   });
 
@@ -5706,7 +5717,10 @@ export async function registerRoutes(
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
 
-      const cap = Math.max(1, Math.min(30, limit ?? 20));
+      // Default 25 per unit. Two units × 25 + ~6 community = 56 total,
+      // which the Guesty push step trims to 40 preserving priority order.
+      // Raise this via `limit` param in the request body if you want more.
+      const cap = Math.max(1, Math.min(40, limit ?? 25));
       const picked = scraped.slice(0, cap);
 
       // Clear existing jpg/jpeg/png/webp (leave _source.json and other metadata in place)
@@ -6939,7 +6953,9 @@ export async function registerRoutes(
             console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
             return;
           }
-          const picked = scraped.slice(0, 20);
+          // Per-unit cap 25. The Guesty push step trims the total to 40
+          // to stay under Booking.com (~40) and VRBO (50) limits.
+          const picked = scraped.slice(0, 25);
           const existing = await fs.promises.readdir(folderPath).catch(() => []);
           for (const f of existing) {
             if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {

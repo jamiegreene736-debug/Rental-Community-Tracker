@@ -1231,6 +1231,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
               error?: string;
               successCount?: number;
               upscaledCount?: number;
+              trimmed?: number;
             };
 
             if (event.type === "photo") {
@@ -1252,6 +1253,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
               setUpscaledCount(event.upscaledCount ?? 0);
               const guestyError = (event as any).guestyError as string | undefined;
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
+              const trimmed = event.trimmed ?? 0;
+              if (trimmed > 0) {
+                toast({
+                  title: `Trimmed to 40 photos`,
+                  description: `Kept the first 40 (community + units) and dropped ${trimmed} to stay under Booking.com's 40-photo cap.`,
+                  duration: 10000,
+                });
+              }
               const sc = event.successCount ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
