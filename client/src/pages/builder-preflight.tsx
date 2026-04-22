@@ -724,8 +724,20 @@ export default function BuilderPreflight() {
                 unitNumber: targetUnit.unitNumber,
                 bedrooms: targetUnit.bedrooms,
                 photoFolder: (targetUnit as any).photoFolder,
+                positionLabel: (() => {
+                  const idx = property.units.findIndex(u => u.id === targetUnit.id);
+                  return idx >= 0 ? `Unit ${String.fromCharCode(65 + idx)}` : undefined;
+                })(),
+                replacementLabel: unitOverrides[targetUnit.id]?.unitLabel,
               }}
-              allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms, photoFolder: u.photoFolder }))}
+              allUnits={property.units.map((u, i) => ({
+                id: u.id,
+                unitNumber: u.unitNumber,
+                bedrooms: u.bedrooms,
+                photoFolder: u.photoFolder,
+                positionLabel: `Unit ${String.fromCharCode(65 + i)}`,
+                replacementLabel: unitOverrides[u.id]?.unitLabel,
+              }))}
               communityFolder={property.communityPhotoFolder}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}

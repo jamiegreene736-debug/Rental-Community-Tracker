@@ -20,7 +20,15 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
-export type UnitStub = { id: string; unitNumber: string; bedrooms: number; photoFolder?: string };
+export type UnitStub = {
+  id: string;
+  unitNumber: string;
+  bedrooms: number;
+  photoFolder?: string;
+  // Display metadata — optional, used to disambiguate units in the dropdown.
+  positionLabel?: string;      // e.g. "Unit A", "Unit B" — their position in the property.
+  replacementLabel?: string;   // e.g. "Unit #13D" — set if this unit already has an active swap.
+};
 
 export type ReplacementUnitData = {
   url: string;
@@ -152,11 +160,16 @@ export function UnitReplacementFlow({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {allUnits.map(u => (
-                  <SelectItem key={u.id} value={u.id} className="text-xs">
-                    Unit #{u.unitNumber} — {u.bedrooms} BR
-                  </SelectItem>
-                ))}
+                {allUnits.map(u => {
+                  const prefix = u.positionLabel ?? `Unit #${u.unitNumber}`;
+                  const tail = u.positionLabel ? ` — ${u.bedrooms} BR (${u.unitNumber})` : ` — ${u.bedrooms} BR`;
+                  return (
+                    <SelectItem key={u.id} value={u.id} className="text-xs">
+                      {prefix}{tail}
+                      {u.replacementLabel ? ` · currently: ${u.replacementLabel}` : ""}
+                    </SelectItem>
+                  );
+                })}
               </SelectContent>
             </Select>
           </div>
