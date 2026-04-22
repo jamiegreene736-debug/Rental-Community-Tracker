@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,6 +54,28 @@ export default function Builder() {
   }, [property]);
   const { labelFor } = usePhotoLabels(allFolders);
 
+  // Fetch the actual file list for each unit/community folder instead of
+  // relying on the hardcoded u.photos array. This is what makes rescraped
+  // photos (from the Apify swap path) show up — the static array only ever
+  // had 8 filenames, so a 30-photo rescrape was invisible to the builder.
+  const [folderFiles, setFolderFiles] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const out: Record<string, string[]> = {};
+      await Promise.all(allFolders.map(async (f) => {
+        try {
+          const r = await fetch(`/api/photos/community/${encodeURIComponent(f)}`);
+          if (!r.ok) return;
+          const data = await r.json() as Array<{ filename: string }>;
+          if (Array.isArray(data)) out[f] = data.map((d) => d.filename);
+        } catch {}
+      }));
+      if (!cancelled) setFolderFiles(out);
+    })();
+    return () => { cancelled = true; };
+  }, [allFolders]);
+
   const propertyData = useMemo<GuestyPropertyData | null>(() => {
     if (!property) return null;
 
@@ -68,29 +90,58 @@ export default function Builder() {
     const guestyAmenities = getGuestyAmenities(propertyId);
 
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const photos = [
-      ...property.communityPhotos
-        .filter((p) => p.position === "beginning")
-        .map((p) => ({
-          url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
-          caption: labelFor(property.communityPhotoFolder, p.filename) ?? p.label,
-          source: `Community — ${property.complexName}`,
-        })),
-      ...property.units.flatMap((u, i) =>
-        u.photos.map((p) => ({
-          url: `${origin}/photos/${u.photoFolder}/${p.filename}`,
-          caption: labelFor(u.photoFolder, p.filename) ?? p.label,
+    // Static-label lookup: fall back to hardcoded captions only for photos
+    // that were in the original static list. New rescraped photos rely on
+    // Claude labels via labelFor().
+    const staticLabelFor = (folder: string, filename: string): string | undefined => {
+      const inCommunity = property.communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
+      if (inCommunity) return inCommunity.label;
+      for (const u of property.units) {
+        if (u.photoFolder !== folder) continue;
+        const hit = u.photos.find((p) => p.filename === filename);
+        if (hit) return hit.label;
+      }
+      return undefined;
+    };
+
+    const photos: Array<{ url: string; caption: string; source: string }> = [];
+
+    // Community (beginning)
+    const communityFiles = folderFiles[property.communityPhotoFolder] ?? property.communityPhotos.map((p) => p.filename);
+    // Preserve the "beginning vs end" split the static data defines; for
+    // unknown filenames we treat them as "beginning" by default.
+    const knownComm = new Map(property.communityPhotos.map((p) => [p.filename, p]));
+    const communityBegin = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
+    const communityEnd   = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
+
+    for (const filename of communityBegin) {
+      photos.push({
+        url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
+        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        source: `Community — ${property.complexName}`,
+      });
+    }
+
+    property.units.forEach((u, i) => {
+      // Prefer the live folder listing (what's actually on disk after any
+      // rescrape), fall back to the static u.photos array.
+      const files = folderFiles[u.photoFolder] ?? u.photos.map((p) => p.filename);
+      for (const filename of files) {
+        photos.push({
+          url: `${origin}/photos/${u.photoFolder}/${filename}`,
+          caption: labelFor(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
-        }))
-      ),
-      ...property.communityPhotos
-        .filter((p) => p.position === "end")
-        .map((p) => ({
-          url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
-          caption: labelFor(property.communityPhotoFolder, p.filename) ?? p.label,
-          source: `Community — ${property.complexName}`,
-        })),
-    ];
+        });
+      }
+    });
+
+    for (const filename of communityEnd) {
+      photos.push({
+        url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
+        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        source: `Community — ${property.complexName}`,
+      });
+    }
 
     const parsedAddr = parseAddress(property.address);
 
@@ -143,7 +194,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId, labelFor]);
+  }, [property, pricing, propertyId, labelFor, folderFiles]);
 
   if (!property) {
     return (
