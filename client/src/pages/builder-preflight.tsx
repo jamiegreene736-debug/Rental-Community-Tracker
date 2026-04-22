@@ -500,10 +500,14 @@ export default function BuilderPreflight() {
                         return;
                       }
                       if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                      const saved = Number(data.savedCount ?? 0);
+                      const sparse = saved < 12;
                       toast({
-                        title: "Photos rescraped",
-                        description: `${data.savedCount} saved, ${data.failedCount} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30–60s — hard-refresh the builder page then.`,
-                        duration: 8000,
+                        title: sparse ? `Rescraped but only ${saved} photos found` : "Photos rescraped",
+                        description: sparse
+                          ? `That Zillow listing only has ${saved} photos total (${data.failedCount ?? 0} failed to download) — likely a sparse listing with no bedroom shots. Click "Change" instead to search for a richer replacement unit (the finder now skips anything under 12 photos).`
+                          : `${saved} saved, ${data.failedCount ?? 0} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30–60s — hard-refresh the builder page then.`,
+                        duration: 10000,
                       });
                     } catch (e: any) {
                       toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
