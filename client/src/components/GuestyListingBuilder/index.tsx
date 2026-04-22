@@ -493,6 +493,19 @@ function ChannelMarkupCard({
             <b>{seasonalPushResult.pushedRanges}</b> ranges;{" "}
             <b>{seasonalPushResult.verifiedDays}</b> verified against Guesty read-back.
           </div>
+          {(() => {
+            const plan = (seasonalPushResult as any)?.plan as Array<{ yearMonth: string; price: number }> | undefined;
+            if (!plan || plan.length === 0) return null;
+            const prices = plan.map((p) => p.price);
+            const minP = Math.min(...prices);
+            const maxP = Math.max(...prices);
+            return (
+              <div style={{ fontSize: 11, color: "#166534" }}>
+                New rates: <b>${minP.toLocaleString()}/night</b> (low season) → <b>${maxP.toLocaleString()}/night</b> (high season).
+                {" "}If the table above still shows the old rate, hard-refresh the page (Cmd/Ctrl + Shift + R).
+              </div>
+            );
+          })()}
           {seasonalPushResult.plan && (
             <details>
               <summary style={{ cursor: "pointer", color: "#166534", fontWeight: 600 }}>
