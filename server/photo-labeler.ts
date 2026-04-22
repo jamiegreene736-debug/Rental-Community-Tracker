@@ -12,10 +12,10 @@
 import fs from "fs";
 import path from "path";
 
-// Use the latest Sonnet for accuracy on room/amenity recognition. Cheaper
-// than Opus and much more accurate than Haiku on ambiguous shots (e.g.
-// a blurry pool deck vs a paved walking path).
-const MODEL = "claude-sonnet-4-5-20250929";
+// Haiku 4.5 is plenty for short noun-phrase classification (room type +
+// one feature) at ~5x lower cost than Sonnet — about $0.0005/photo vs
+// $0.003/photo. The earlier Sonnet choice was over-spec for the task.
+const MODEL = "claude-haiku-4-5-20251001";
 
 export type PhotoKind = "community" | "unit";
 

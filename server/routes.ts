@@ -5511,13 +5511,20 @@ export async function registerRoutes(
 
     // ── Helper: photo reverse image search for a unit (caps at 3 photos) ──────
     type PhotoSignals = Record<string, boolean>; // platform key → found
-    const photoSearch = async (photoFolder: string): Promise<{ signals: PhotoSignals; matchCount: number; totalChecked: number }> => {
+    type PhotoMatchedUrls = Record<string, string | null>; // platform key → URL of the FIRST listing-page hit
+    const photoSearch = async (photoFolder: string): Promise<{
+      signals: PhotoSignals;
+      matchedUrls: PhotoMatchedUrls;
+      matchCount: number;
+      totalChecked: number;
+    }> => {
       const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
-      if (!imgbbKey) return { signals, matchCount: 0, totalChecked: 0 };
+      const matchedUrls: PhotoMatchedUrls = { airbnb: null, vrbo: null, booking: null };
+      if (!imgbbKey) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       // Empty photoFolder means no local photos available (e.g. a replacement unit) — skip photo check
-      if (!photoFolder || photoFolder.trim() === "") return { signals, matchCount: 0, totalChecked: 0 };
+      if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
-      if (!fs.existsSync(folderPath)) return { signals, matchCount: 0, totalChecked: 0 };
+      if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
       let matchCount = 0;
       for (const file of files) {
@@ -5538,21 +5545,27 @@ export async function registerRoutes(
           });
           if (searchResp.ok) {
             const searchData = await searchResp.json() as any;
-            const allLinks = [
+            // Keep both the lowercased version (for matching) and the
+            // original URL (for the user to click). We were previously
+            // throwing away the URL — that's the bug the user hit.
+            const sourceLinks = [
               ...(searchData.visual_matches || []),
               ...(searchData.organic_results || []),
               ...(searchData.pages_with_matching_images || []),
               ...(searchData.knowledge_graph ? [searchData.knowledge_graph] : []),
-            ].map((r: any) => (r.link || r.url || r.source || r.source_url || "").toLowerCase());
+            ].map((r: any) => String(r?.link || r?.url || r?.source || r?.source_url || ""))
+              .filter((l) => l);
             for (const cfg of PLATFORM_CONFIGS) {
               const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
-              // Require it's actually a listing page, not just the platform homepage
-              const found = allLinks.some((l: string) => {
-                if (!l.includes(domain)) return false;
-                return isListingUrl(l, cfg) || l.split(domain)[1]?.length > 5;
+              // Find the first link that's an actual listing page on this platform.
+              const matchedLink = sourceLinks.find((l: string) => {
+                const ll = l.toLowerCase();
+                if (!ll.includes(domain)) return false;
+                return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
               });
-              if (found && !signals[cfg.key]) {
+              if (matchedLink && !signals[cfg.key]) {
                 signals[cfg.key] = true;
+                matchedUrls[cfg.key] = matchedLink;
                 matchCount++;
               }
             }
@@ -5560,7 +5573,7 @@ export async function registerRoutes(
         } catch { /* best effort */ }
         await new Promise(r => setTimeout(r, 1000));
       }
-      return { signals, matchCount, totalChecked: files.length };
+      return { signals, matchedUrls, matchCount, totalChecked: files.length };
     };
 
     // ── Combine text + photo signals into a single status per platform ─────────
@@ -5568,15 +5581,22 @@ export async function registerRoutes(
     const combine = (
       text: { listed: boolean | null; url: string | null; titleMatch: boolean },
       photoFound: boolean,
+      photoMatchedUrl: string | null,
       photoMatchCount: number,
       totalPhotos: number,
     ): CombinedResult => {
       if (text.listed && text.titleMatch)
         return { status: "confirmed", url: text.url, detection: "Title match confirmed" };
       if (text.listed && !text.titleMatch && photoFound)
-        return { status: "photo-confirmed", url: text.url, detection: "Text found + photos matched" };
+        // Text + photo both hit — prefer the text URL (the actual listing
+        // we verified) but fall back to the photo-matched one when the
+        // text search couldn't pin a specific listing-page URL.
+        return { status: "photo-confirmed", url: text.url ?? photoMatchedUrl, detection: "Text found + photos matched" };
       if (!text.listed && photoFound)
-        return { status: "photo-only", url: null, detection: `Photos matched (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked) — no text confirmation` };
+        // Photo-only branch — surface the URL where the photo was found
+        // so the user can click through and verify the match instead of
+        // taking our boolean signal on faith.
+        return { status: "photo-only", url: photoMatchedUrl, detection: `Photos matched (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked) — no text confirmation` };
       if (text.listed && !text.titleMatch && !photoFound)
         return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
       if (text.listed === null)
@@ -5589,10 +5609,10 @@ export async function registerRoutes(
       units.map(async (unit) => {
         const [textResults, photoResult] = await Promise.all([
           Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
-          unit.photoFolder ? photoSearch(unit.photoFolder) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchCount: 0, totalChecked: 0 }),
+          unit.photoFolder ? photoSearch(unit.photoFolder) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCount: 0, totalChecked: 0 }),
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
-        const { signals, matchCount, totalChecked } = photoResult;
+        const { signals, matchedUrls, matchCount, totalChecked } = photoResult;
 
         // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
         const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
@@ -5606,9 +5626,9 @@ export async function registerRoutes(
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  combine(resolveText(airbnbText),  signals.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
-            vrbo:    combine(resolveText(vrboText),    signals.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
-            booking: combine(resolveText(bookingText), signals.booking, signals.booking ? matchCount : 0, totalChecked),
+            airbnb:  combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
+            vrbo:    combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
+            booking: combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked),
           },
         };
       }),
