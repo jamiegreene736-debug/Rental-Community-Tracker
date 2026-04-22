@@ -2255,13 +2255,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           <>
                             <div className="glb-season-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
                               <span>24-Month Rate Schedule</span>
-                              <div style={{ fontSize: 11, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
-                                {guestyRatesLoading && <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>}
-                                {guestyRatesError && (
-                                  <span style={{ color: "#dc2626" }} title={guestyRatesError}>
-                                    Guesty rates unavailable
-                                  </span>
-                                )}
+                              <div style={{ fontSize: 11, fontWeight: 400, textTransform: "none", letterSpacing: 0, display: "flex", alignItems: "center", gap: 10 }}>
+                                {/* Sync summary — how many of the visible months
+                                    actually have a live rate in Guesty's calendar.
+                                    Lets the user tell at a glance whether "Push
+                                    seasonal rates" has been run yet. */}
+                                {(() => {
+                                  const total = seasonalMonths.length;
+                                  const synced = seasonalMonths.filter((r) => !!guestyRatesByMonth[r.yearMonth]).length;
+                                  if (guestyRatesLoading) return <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>;
+                                  if (guestyRatesError) return <span style={{ color: "#dc2626" }} title={guestyRatesError}>Guesty rates unavailable</span>;
+                                  if (total === 0) return null;
+                                  const allSynced = synced === total;
+                                  const noneSynced = synced === 0;
+                                  const bg = allSynced ? "#dcfce7" : noneSynced ? "#fee2e2" : "#fef3c7";
+                                  const fg = allSynced ? "#166534" : noneSynced ? "#991b1b" : "#92400e";
+                                  return (
+                                    <span style={{ background: bg, color: fg, padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
+                                      {allSynced ? "✓" : noneSynced ? "✗" : "⚠"} {synced} / {total} months in Guesty
+                                    </span>
+                                  );
+                                })()}
                               </div>
                             </div>
                             {marketComps && (
@@ -2356,11 +2370,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                       <td>${buyIn.toLocaleString()}</td>
                                       <td style={{ fontWeight: 600 }}>${sheet.toLocaleString()}</td>
                                       <td style={{ fontWeight: 600 }}>
-                                        {guesty ? `$${guesty.avgRate.toLocaleString()}` : <span style={{ color: "#9ca3af" }}>—</span>}
-                                        {guesty && guesty.minRate !== guesty.maxRate && (
-                                          <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>
-                                            ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
-                                          </div>
+                                        {guesty ? (
+                                          <>
+                                            ${guesty.avgRate.toLocaleString()}
+                                            {guesty.minRate !== guesty.maxRate && (
+                                              <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>
+                                                ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
+                                              </div>
+                                            )}
+                                            <div
+                                              style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                              title={`Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
+                                            >
+                                              ✓ in Guesty
+                                            </div>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <span style={{ color: "#9ca3af" }}>—</span>
+                                            <div
+                                              style={{ display: "inline-block", marginTop: 2, background: "#fee2e2", color: "#991b1b", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                              title="No rate published to Guesty's calendar for this month. Click 'Push seasonal rates' below to populate."
+                                            >
+                                              ✗ not synced
+                                            </div>
+                                          </>
                                         )}
                                       </td>
                                       {/* Market positioning — compares this month's
