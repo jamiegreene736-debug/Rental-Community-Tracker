@@ -438,14 +438,17 @@ export default function BuilderPreflight() {
             Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search.
           </p>
 
-          {/* Committed swaps summary */}
-          {Object.keys(unitOverrides).length > 0 && swapsCommitted && (
+          {/* Committed swaps summary — renders every unit (swapped OR original)
+              so the user can rescrape any one of them directly. */}
+          {property.units.length > 0 && swapsCommitted && (
             <div className="mb-5 rounded-md border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/40 p-4 space-y-3">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0" />
                   <p className="text-sm font-semibold text-green-800 dark:text-green-300">
-                    Unit replacement{Object.keys(unitOverrides).length > 1 ? "s" : ""} committed
+                    {Object.keys(unitOverrides).length > 0
+                      ? `Unit replacement${Object.keys(unitOverrides).length > 1 ? "s" : ""} committed`
+                      : "Units confirmed — none needed replacement"}
                   </p>
                 </div>
                 <Button
@@ -464,83 +467,124 @@ export default function BuilderPreflight() {
                 </Button>
               </div>
               <div className="space-y-1.5">
-                {Object.entries(unitOverrides).map(([oldUnitId, override]) => {
-                  const origUnit = property.units.find(u => u.id === oldUnitId);
+                {property.units.map((origUnit, idx) => {
+                  const override = unitOverrides[origUnit.id];
+                  const positionLabel = `Unit ${String.fromCharCode(65 + idx)}`;
+                  const rescrapeHandler = async () => {
+                    if (!origUnit.photoFolder) {
+                      toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
+                      return;
+                    }
+                    setRescrapingUnitId(origUnit.id);
+                    try {
+                      const r = await fetch("/api/builder/rescrape-unit-photos", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ folder: origUnit.photoFolder }),
+                      });
+                      const data = await r.json();
+                      if (r.status === 409 && data?.needsUrl) {
+                        const url = window.prompt(
+                          `No source URL on file for ${positionLabel}. Paste the Zillow listing URL — I'll save it for next time.`,
+                          "",
+                        );
+                        if (!url) return;
+                        const r2 = await fetch("/api/builder/rescrape-unit-photos", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ folder: origUnit.photoFolder, sourceUrl: url }),
+                        });
+                        const d2 = await r2.json();
+                        if (!r2.ok) throw new Error(d2?.error ?? `HTTP ${r2.status}`);
+                        toast({ title: "Photos rescraped", description: `${d2.savedCount} saved. Hard-refresh the builder page.`, duration: 8000 });
+                        return;
+                      }
+                      if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                      toast({
+                        title: "Photos rescraped",
+                        description: `${data.savedCount} saved, ${data.failedCount} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30–60s — hard-refresh the builder page then.`,
+                        duration: 8000,
+                      });
+                    } catch (e: any) {
+                      toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
+                    } finally {
+                      setRescrapingUnitId(null);
+                    }
+                  };
                   return (
-                    <div key={oldUnitId} className="flex items-center justify-between gap-2 rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
+                    <div key={origUnit.id} className="flex items-center justify-between gap-2 rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
                       <div className="text-sm flex items-center gap-1.5 flex-wrap min-w-0">
-                        <span className="text-muted-foreground line-through text-xs">Unit {origUnit?.unitNumber ?? oldUnitId}</span>
-                        <span className="text-muted-foreground">→</span>
-                        <span className="font-medium">{override.unitLabel}</span>
-                        <span className="text-xs text-muted-foreground truncate">{override.address}</span>
+                        <span className="text-xs text-muted-foreground font-medium">{positionLabel}</span>
+                        {override ? (
+                          <>
+                            <span className="text-muted-foreground line-through text-xs">Unit {origUnit.unitNumber}</span>
+                            <span className="text-muted-foreground">→</span>
+                            <span className="font-medium">{override.unitLabel}</span>
+                            <span className="text-xs text-muted-foreground truncate">{override.address}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-medium">Unit {origUnit.unitNumber}</span>
+                            <span className="text-xs text-muted-foreground">({origUnit.bedrooms}BR · original, no swap)</span>
+                          </>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 flex-shrink-0">
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-7 px-2 text-xs border-blue-400 dark:border-blue-600 text-blue-800 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/40"
-                          disabled={rescrapingUnitId === oldUnitId}
-                          onClick={async () => {
-                            // Just re-run the Apify scrape for the same Zillow URL —
-                            // no swap change, no re-picking a unit.
-                            const photoFolder = origUnit?.photoFolder;
-                            if (!photoFolder) {
-                              toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
-                              return;
-                            }
-                            setRescrapingUnitId(oldUnitId);
-                            try {
-                              const r = await fetch("/api/builder/rescrape-unit-photos", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ folder: photoFolder }),
-                              });
-                              const data = await r.json();
-                              if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
-                              toast({
-                                title: "Photos rescraped",
-                                description: `${data.savedCount} saved, ${data.failedCount} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30-60s — hard-refresh the builder page then.`,
-                                duration: 8000,
-                              });
-                            } catch (e: any) {
-                              toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
-                            } finally {
-                              setRescrapingUnitId(null);
-                            }
-                          }}
-                          data-testid={`button-rescrape-committed-swap-${oldUnitId}`}
+                          disabled={rescrapingUnitId === origUnit.id}
+                          onClick={rescrapeHandler}
+                          data-testid={`button-rescrape-unit-${origUnit.id}`}
                         >
-                          {rescrapingUnitId === oldUnitId ? (
+                          {rescrapingUnitId === origUnit.id ? (
                             <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Rescraping…</>
                           ) : (
                             <><RefreshCw className="h-3 w-3 mr-1" /> Rescrape photos</>
                           )}
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 px-2 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40"
-                          onClick={async () => {
-                            // Undo the committed swap first so it won't be in skipUrls,
-                            // then open the replacement flow for this specific unit.
-                            setSwapsCommitted(false);
-                            await handleUndoSwap(oldUnitId);
-                            setReplacementTargetId(oldUnitId);
-                            setShowReplacementFlow(true);
-                          }}
-                          data-testid={`button-change-committed-swap-${oldUnitId}`}
-                        >
-                          Change
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                          onClick={() => { setSwapsCommitted(false); handleUndoSwap(oldUnitId); }}
-                          data-testid={`button-undo-committed-swap-${oldUnitId}`}
-                        >
-                          Undo
-                        </Button>
+                        {override ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40"
+                              onClick={async () => {
+                                setSwapsCommitted(false);
+                                await handleUndoSwap(origUnit.id);
+                                setReplacementTargetId(origUnit.id);
+                                setShowReplacementFlow(true);
+                              }}
+                              data-testid={`button-change-committed-swap-${origUnit.id}`}
+                            >
+                              Change
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                              onClick={() => { setSwapsCommitted(false); handleUndoSwap(origUnit.id); }}
+                              data-testid={`button-undo-committed-swap-${origUnit.id}`}
+                            >
+                              Undo
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs border-amber-400 dark:border-amber-600 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                            onClick={() => {
+                              setSwapsCommitted(false);
+                              setReplacementTargetId(origUnit.id);
+                              setShowReplacementFlow(true);
+                            }}
+                            data-testid={`button-find-replacement-${origUnit.id}`}
+                          >
+                            Find replacement
+                          </Button>
+                        )}
                       </div>
                     </div>
                   );
