@@ -2515,10 +2515,16 @@ export async function registerRoutes(
     if (!listingId) return res.status(400).json({ error: "listingId required" });
     if (!markups || typeof markups !== "object") return res.status(400).json({ error: "markups object required" });
 
-    // Map our logical channel keys to Guesty's integration platform keys
+    // Map our logical channel keys to Guesty's integration platform keys.
+    // Confirmed from a real listing read-back on 2026-04-21:
+    //   Airbnb  → airbnb2     (legacy `airbnb` kept as fallback)
+    //   Vrbo    → homeaway2   (Vrbo uses the HomeAway-2 integration slug;
+    //                          `homeaway`/`vrbo` are NOT accepted)
+    //   Booking → bookingCom
+    //   Direct  → no integration record in Guesty — handled via base rate
     const channelToGuesty: Record<string, string[]> = {
-      airbnb: ["airbnb2", "airbnb"],   // newer accounts use airbnb2
-      vrbo: ["homeaway", "vrbo"],
+      airbnb: ["airbnb2", "airbnb"],
+      vrbo: ["homeaway2", "homeaway", "vrbo"],
       booking: ["bookingCom", "booking"],
       direct: ["manual", "direct"],
     };

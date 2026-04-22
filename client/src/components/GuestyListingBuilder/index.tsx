@@ -199,7 +199,7 @@ function ChannelMarkupCard({
   setMarkupPct,
   seasonalMonths,
   guestyRatesByMonth,
-  onRatesPushed,
+  applyPushedRates,
 }: {
   listingId: string | null;
   // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
@@ -207,7 +207,11 @@ function ChannelMarkupCard({
   setMarkupPct: (m: Record<ChannelKey, number>) => void;
   seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
   guestyRatesByMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>;
-  onRatesPushed?: () => void;
+  // Called with the per-month rates we just pushed so the parent table
+  // shows them instantly, without depending on Guesty's calendar GET
+  // catching up (which is eventually-consistent and was returning stale
+  // rates in practice).
+  applyPushedRates?: (rates: Array<{ yearMonth: string; price: number }>) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -289,9 +293,11 @@ function ChannelMarkupCard({
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       setSeasonalPushResult({ ...data, plan });
-      // Bump the parent refetch key so the 24-month table shows the new
-      // Guesty rates + recalculated profit cells without a page reload.
-      onRatesPushed?.();
+      // Apply the pushed plan directly to the parent's Guesty-rates state
+      // so the 24-month table updates immediately. We don't trust a
+      // re-fetch because Guesty's calendar GET was returning stale rates
+      // right after the PUT (eventual consistency on their side).
+      applyPushedRates?.(plan);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -1540,11 +1546,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
-  // Bumping this triggers a refetch of the monthly-rates table — used after
-  // a seasonal-rates push succeeds so the pricing table shows the new
-  // Guesty rates without a manual page refresh.
-  const [guestyRatesRefreshKey, setGuestyRatesRefreshKey] = useState(0);
-  const refreshGuestyRates = () => setGuestyRatesRefreshKey((n) => n + 1);
+  // Merge the per-month rates we just pushed to Guesty directly into the
+  // table's state. Sidesteps Guesty's eventually-consistent calendar GET,
+  // which was returning stale rates immediately after the PUT.
+  const applyPushedRates = (plan: Array<{ yearMonth: string; price: number }>) => {
+    setGuestyRatesByMonth((prev) => {
+      const next = { ...prev };
+      for (const { yearMonth, price } of plan) {
+        const [y, m] = yearMonth.split("-").map(Number);
+        const daysInMonth = new Date(y, m, 0).getDate();
+        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth };
+      }
+      return next;
+    });
+  };
   // Per-channel markup (decimal form: 0.155 = +15.5%). Hoisted from
   // ChannelMarkupCard so the profit columns in the pricing table can
   // reflect the uplift in real time — not just after it's been pushed.
@@ -1580,9 +1595,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         if (!cancelled) setGuestyRatesLoading(false);
       });
     return () => { cancelled = true; };
-    // guestyRatesRefreshKey is included so a seasonal-rates push can
-    // trigger a re-fetch (bump the key) instead of requiring a page reload.
-  }, [propertyId, guestyRatesRefreshKey]);
+  }, [propertyId]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -2670,7 +2683,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     setMarkupPct={setMarkupPct}
                     seasonalMonths={seasonalMonths}
                     guestyRatesByMonth={guestyRatesByMonth}
-                    onRatesPushed={refreshGuestyRates}
+                    applyPushedRates={applyPushedRates}
                   />
                 )}
 
