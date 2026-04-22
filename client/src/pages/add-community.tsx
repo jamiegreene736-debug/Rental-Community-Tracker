@@ -37,6 +37,7 @@ import {
 import { estimateNewCommunityScore, gradeColor, gradeBg } from "@/data/quality-score";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { checkCommunityType } from "@shared/community-type";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -656,17 +657,38 @@ export default function AddCommunity() {
                   unitTypes: c.unitTypes,
                   confidenceScore: c.confidenceScore,
                 });
+                const typeCheck = checkCommunityType(c.unitTypes, c.researchSummary);
                 return (
                 <Card
                   key={i}
-                  className="p-4 cursor-pointer hover:border-primary transition-colors"
-                  onClick={() => handleSelectCommunity(c)}
+                  className={
+                    typeCheck.eligible
+                      ? "p-4 cursor-pointer hover:border-primary transition-colors"
+                      : "p-4 opacity-60 cursor-not-allowed bg-muted/30 border-dashed"
+                  }
+                  onClick={() => {
+                    if (!typeCheck.eligible) {
+                      toast({
+                        title: "Not a supported community type",
+                        description: typeCheck.reason ?? "Only condo or townhome communities can be added.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    handleSelectCommunity(c);
+                  }}
                   data-testid={`card-community-${i}`}
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
                         <h3 className="font-semibold text-base" data-testid={`text-community-name-${i}`}>{c.name}</h3>
+                        {!typeCheck.eligible && (
+                          <Badge variant="outline" className="text-[10px] border-red-400 text-red-700 bg-red-50">
+                            <ShieldX className="h-3 w-3 mr-1" />
+                            Not supported — {typeCheck.matchedDisqualifier ?? "condo/townhome only"}
+                          </Badge>
+                        )}
                         <Badge variant={c.confidenceScore >= 75 ? "default" : c.confidenceScore >= 50 ? "secondary" : "outline"}>
                           <Star className="h-3 w-3 mr-1" />
                           {c.confidenceScore}/100 confidence

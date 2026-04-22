@@ -13,6 +13,7 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
+import { checkCommunityType } from "@shared/community-type";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -5118,6 +5119,17 @@ export async function registerRoutes(
   app.post("/api/community/save", async (req, res) => {
     const result = insertCommunityDraftSchema.safeParse(req.body);
     if (!result.success) return res.status(400).json({ error: result.error.flatten() });
+    // Reject villas / single-family / estates — the business combines two
+    // condos or two townhomes in the same building. A "community" of
+    // detached homes is not the same product.
+    const typeCheck = checkCommunityType(result.data.unitTypes, result.data.researchSummary);
+    if (!typeCheck.eligible) {
+      return res.status(400).json({
+        error: "Community type not supported",
+        reason: typeCheck.reason,
+        matchedDisqualifier: typeCheck.matchedDisqualifier,
+      });
+    }
     const draft = await storage.createCommunityDraft(result.data);
     res.json(draft);
   });

@@ -2,6 +2,8 @@
 // endpoint (/api/community/research) and the multi-city scanner
 // (/api/community/scan-top-markets) can reuse the same Google + Claude pipeline.
 
+import { checkCommunityType } from "@shared/community-type";
+
 export type ResearchedCommunity = {
   name: string;
   city: string;
@@ -145,6 +147,14 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         if (jsonMatch) {
           const scored = JSON.parse(jsonMatch[0]) as Array<any>;
           for (const s of scored.slice(0, 10)) {
+            // Hard post-filter. The prompt warns against villas/SFH, but
+            // Claude occasionally lets one through. Drop anything whose
+            // unitTypes or reason contains a disqualifying term.
+            const check = checkCommunityType(s.unitTypes, s.reason);
+            if (!check.eligible) {
+              console.log(`[research] dropped "${s.communityName}" (${city}, ${state}): ${check.reason}`);
+              continue;
+            }
             const rates = await spotCheckRate(s.communityName);
             results.push({
               name: s.communityName,
