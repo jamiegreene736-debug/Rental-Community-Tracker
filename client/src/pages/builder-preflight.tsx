@@ -134,6 +134,59 @@ export default function BuilderPreflight() {
   // Per-row rescrape state so each row can show its own spinner/result.
   const [rescrapingUnitId, setRescrapingUnitId] = useState<string | null>(null);
 
+  // Sticky rescrape results — persisted to localStorage so the user can
+  // navigate away and come back and still see when they last rescraped a
+  // folder + how many bedrooms/bathrooms came back. Keyed by folder so
+  // multiple swaps for the same property each remember their own state.
+  type RescrapeReceipt = {
+    folder: string;
+    timestamp: number;       // ms epoch
+    savedCount: number;
+    bedroomCount: number;
+    bathroomCount: number;
+    sourceUrl?: string;
+    urlSource?: string;      // "supplied" | "_source.json" | "unit_swap" | "community_map"
+  };
+  const RESCRAPE_RECEIPTS_KEY = "preflight.rescrapeReceipts.v1";
+  const loadReceipts = (): Record<string, RescrapeReceipt> => {
+    try {
+      const raw = localStorage.getItem(RESCRAPE_RECEIPTS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  };
+  const saveReceipts = (next: Record<string, RescrapeReceipt>) => {
+    try { localStorage.setItem(RESCRAPE_RECEIPTS_KEY, JSON.stringify(next)); } catch {}
+  };
+  const [rescrapeReceipts, setRescrapeReceipts] = useState<Record<string, RescrapeReceipt>>(() => loadReceipts());
+  const recordRescrape = (folder: string, data: RescrapeReceipt) => {
+    setRescrapeReceipts((prev) => {
+      const next = { ...prev, [folder]: data };
+      saveReceipts(next);
+      return next;
+    });
+  };
+  const dismissReceipt = (folder: string) => {
+    setRescrapeReceipts((prev) => {
+      const next = { ...prev };
+      delete next[folder];
+      saveReceipts(next);
+      return next;
+    });
+  };
+  // Tick every 30s so the relative timestamps ("2m ago") stay fresh.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const fmtRelative = (ts: number): string => {
+    const diff = nowTick - ts;
+    if (diff < 60_000) return "just now";
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    return `${Math.floor(diff / 86_400_000)}d ago`;
+  };
+
   const [platformChecking, setPlatformChecking] = useState(false);
   // Track which unit IDs are still being checked (for per-row spinner)
   const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
@@ -476,11 +529,12 @@ export default function BuilderPreflight() {
                       return;
                     }
                     setRescrapingUnitId(origUnit.id);
+                    const folder = origUnit.photoFolder;
                     try {
                       const r = await fetch("/api/builder/rescrape-unit-photos", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ folder: origUnit.photoFolder }),
+                        body: JSON.stringify({ folder }),
                       });
                       const data = await r.json();
                       if (r.status === 409 && data?.needsUrl) {
@@ -492,10 +546,19 @@ export default function BuilderPreflight() {
                         const r2 = await fetch("/api/builder/rescrape-unit-photos", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ folder: origUnit.photoFolder, sourceUrl: url }),
+                          body: JSON.stringify({ folder, sourceUrl: url }),
                         });
                         const d2 = await r2.json();
                         if (!r2.ok) throw new Error(d2?.error ?? `HTTP ${r2.status}`);
+                        recordRescrape(folder, {
+                          folder,
+                          timestamp: Date.now(),
+                          savedCount: Number(d2.savedCount ?? 0),
+                          bedroomCount: Number(d2.bedroomCount ?? 0),
+                          bathroomCount: Number(d2.bathroomCount ?? 0),
+                          sourceUrl: d2.sourceUrl,
+                          urlSource: d2.urlSource,
+                        });
                         toast({ title: "Photos rescraped", description: `${d2.savedCount} saved. Hard-refresh the builder page.`, duration: 8000 });
                         return;
                       }
@@ -504,6 +567,15 @@ export default function BuilderPreflight() {
                       const beds = Number(data.bedroomCount ?? 0);
                       const baths = Number(data.bathroomCount ?? 0);
                       const noInteriors = beds === 0 && baths === 0;
+                      recordRescrape(folder, {
+                        folder,
+                        timestamp: Date.now(),
+                        savedCount: saved,
+                        bedroomCount: beds,
+                        bathroomCount: baths,
+                        sourceUrl: data.sourceUrl,
+                        urlSource: data.urlSource,
+                      });
                       toast({
                         title: noInteriors
                           ? `Rescraped ${saved} photos — no bedrooms found`
@@ -519,8 +591,10 @@ export default function BuilderPreflight() {
                       setRescrapingUnitId(null);
                     }
                   };
+                  const receipt = origUnit.photoFolder ? rescrapeReceipts[origUnit.photoFolder] : undefined;
                   return (
-                    <div key={origUnit.id} className="flex items-center justify-between gap-2 rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2">
+                    <div key={origUnit.id} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
                       <div className="text-sm flex items-center gap-1.5 flex-wrap min-w-0">
                         <span className="text-xs text-muted-foreground font-medium">{positionLabel}</span>
                         {override ? (
@@ -594,6 +668,35 @@ export default function BuilderPreflight() {
                           </Button>
                         )}
                       </div>
+                    </div>
+                    {/* Sticky rescrape receipt — survives navigation via
+                        localStorage so the user remembers what they did. */}
+                    {receipt && (
+                      <div
+                        className="flex items-center gap-2 rounded bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-700 px-2 py-1 text-[11px] text-blue-800 dark:text-blue-300"
+                        data-testid={`receipt-rescrape-${origUnit.id}`}
+                      >
+                        <CheckCircle2 className="h-3 w-3 flex-shrink-0" />
+                        <span className="font-medium">
+                          Rescraped {fmtRelative(receipt.timestamp)}
+                        </span>
+                        <span className="text-blue-600 dark:text-blue-400">
+                          · {receipt.savedCount} photo{receipt.savedCount !== 1 ? "s" : ""}
+                          {receipt.bedroomCount > 0 ? ` · ${receipt.bedroomCount} bedroom${receipt.bedroomCount !== 1 ? "s" : ""}` : ""}
+                          {receipt.bathroomCount > 0 ? ` · ${receipt.bathroomCount} bathroom${receipt.bathroomCount !== 1 ? "s" : ""}` : ""}
+                          {receipt.bedroomCount === 0 && receipt.bathroomCount === 0 ? " · ⚠ no interior shots" : ""}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => receipt.folder && dismissReceipt(receipt.folder)}
+                          className="ml-auto text-blue-500 hover:text-blue-700 text-base leading-none px-1"
+                          aria-label="Dismiss confirmation"
+                          title="Dismiss"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
                     </div>
                   );
                 })}
