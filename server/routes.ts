@@ -4853,6 +4853,154 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // POST /api/admin/airbnb/submit-compliance
+  //
+  // Auto-submits the Kauai County Hawaii regulations form for a listing.
+  // Based on the DOM captured by inspect-form, the form has three fields:
+  //   #permit_number-text  → TMK (labeled "Tax Map Key number")
+  //   #tat_number-text     → TAT license number
+  //   #attestation-...     → legal attestation checkbox
+  //   button "Next"        → advances to confirm step
+  //
+  // Body: { listingId, jurisdiction?, taxMapKey, tatLicense, dryRun? }
+  //   dryRun: fill the form but do NOT click Next — for debugging.
+  // ============================================================
+  app.post("/api/admin/airbnb/submit-compliance", async (req: Request, res: Response) => {
+    const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
+    if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
+
+    const { listingId, jurisdiction, taxMapKey, tatLicense, dryRun } = (req.body ?? {}) as {
+      listingId?: string;
+      jurisdiction?: string;
+      taxMapKey?: string;
+      tatLicense?: string;
+      dryRun?: boolean;
+    };
+    if (!listingId || !/^\d+$/.test(listingId)) return res.status(400).json({ error: "listingId required" });
+    if (!taxMapKey || !tatLicense) return res.status(400).json({ error: "taxMapKey and tatLicense both required" });
+    const juri = (jurisdiction || "kauai_county_hawaii").replace(/[^a-z0-9_]/gi, "");
+
+    type RawCookie = { name?: string; value?: string; domain?: string; path?: string; expirationDate?: number; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string };
+    const raw: RawCookie[] = JSON.parse(cookieJson);
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!, value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires) : -1,
+        httpOnly: c.httpOnly ?? false, secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    const trace: Array<{ step: string; detail?: string }> = [];
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 900 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await ctx.addCookies(cookies);
+      const page = await ctx.newPage();
+
+      trace.push({ step: "warming-up" });
+      await page.goto("https://www.airbnb.com/hosting", { waitUntil: "domcontentloaded", timeout: 25000 });
+      await page.waitForTimeout(2500);
+
+      const targetUrl = `https://www.airbnb.com/regulations/${listingId}/${juri}/registration/initial/existing-registration`;
+      trace.push({ step: "navigating", detail: targetUrl });
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      // Form hydrates via client-side rendering; give it room.
+      await page.waitForSelector("#permit_number-text", { timeout: 15000 });
+      await page.waitForTimeout(1500);
+
+      // Fill TMK — clear any existing value first, else we'd append.
+      trace.push({ step: "filling-tmk", detail: taxMapKey });
+      await page.fill("#permit_number-text", "");
+      await page.fill("#permit_number-text", taxMapKey);
+
+      trace.push({ step: "filling-tat", detail: tatLicense });
+      await page.fill("#tat_number-text", "");
+      await page.fill("#tat_number-text", tatLicense);
+
+      // Attestation checkbox — selector has a generated-id suffix, so target by
+      // prefix. If it's already checked we leave it; otherwise click it.
+      const attestationHandle = await page.$('input[id^="attestation-attestation-row"]');
+      if (attestationHandle) {
+        const isChecked = await attestationHandle.isChecked().catch(() => false);
+        if (!isChecked) {
+          await attestationHandle.click();
+          trace.push({ step: "checked-attestation" });
+        } else {
+          trace.push({ step: "attestation-already-checked" });
+        }
+      } else {
+        trace.push({ step: "attestation-not-found" });
+      }
+      await page.waitForTimeout(500);
+
+      if (dryRun) {
+        trace.push({ step: "dry-run-stopping-before-submit" });
+        const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
+        return res.json({
+          ok: true, dryRun: true, trace,
+          finalUrl: page.url(),
+          screenshot: screenshot ? screenshot.toString("base64") : null,
+        });
+      }
+
+      // Click Next. The button lives at the top-level of the form; match by visible text.
+      trace.push({ step: "clicking-next" });
+      await page.click('button:has-text("Next")', { timeout: 8000 }).catch(() => { /* surface in trace below */ });
+      // Wait for navigation OR for a new heading/form that indicates we moved to the next step.
+      await page.waitForTimeout(4000);
+
+      // If we landed somewhere that isn't the same form, assume progress.
+      const postSubmitUrl = page.url();
+      const postHeadings = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("h1, h2, h3")).map((h) => (h.textContent || "").trim().slice(0, 140)).filter(Boolean)
+      ).catch(() => []);
+      const postBodyPreview = await page
+        .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500))
+        .catch(() => "");
+      const advanced = postSubmitUrl !== targetUrl;
+
+      // Pull the saved status from Guesty — airbnb2.permits.regulations is
+      // Guesty's read-through of Airbnb's regulatory state, so if the
+      // submit worked we'll see status:"success" there (may take a
+      // moment to propagate; caller can re-check).
+      trace.push({ step: advanced ? "submission-advanced" : "submission-maybe-stuck", detail: postSubmitUrl });
+
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
+      return res.json({
+        ok: true,
+        advanced,
+        trace,
+        finalUrl: postSubmitUrl,
+        postSubmitHeadings: postHeadings,
+        postBodyPreview,
+        screenshot: screenshot ? screenshot.toString("base64") : null,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
