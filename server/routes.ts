@@ -3924,27 +3924,73 @@ export async function registerRoutes(
     res.json({ deleted: ok });
   });
 
-  // ── Airbnb login probe ──
-  // First diagnostic step of the Playwright-based compliance-push flow.
-  // Launches headless Chromium, navigates to airbnb.com/login, enters the
-  // host email (+ password if a password field appears), and returns a
-  // JSON snapshot of what happened: final URL, page title, a truncated
-  // body-text excerpt, cookie names, and any visible 2FA/magic-link
-  // prompt. No retry / no session persistence yet — we just want to see
-  // what Airbnb shows us so we can decide how to handle the 2FA step.
+  // ── Airbnb session probe (cookie-injection mode) ──
+  // Bypasses Airbnb's bot-detection on the login page entirely by
+  // loading a real authenticated browser session (cookies exported from
+  // the user's normal browser via "EditThisCookie" or DevTools) into a
+  // Playwright context. Then we navigate straight to /hosting and check
+  // whether Airbnb treats the request as authenticated.
+  //
+  // Cookies live in AIRBNB_SESSION_COOKIES env var as a JSON array in
+  // EditThisCookie's export format. They expire ~30 days after issue;
+  // refresh by re-exporting from a logged-in browser.
   app.post("/api/admin/airbnb/test-login", async (_req: Request, res: Response) => {
-    const email = process.env.AIRBNB_HOST_EMAIL;
-    const password = process.env.AIRBNB_HOST_PASSWORD;
-    if (!email) return res.status(500).json({ error: "AIRBNB_HOST_EMAIL not configured" });
+    const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
+    if (!cookieJson) {
+      return res.status(500).json({
+        ok: false,
+        error: "AIRBNB_SESSION_COOKIES env var not set",
+        instructions: [
+          "1) Log into airbnb.com on Chrome (your normal browser).",
+          "2) Install the 'EditThisCookie' Chrome extension (or use DevTools → Application → Storage → Cookies → airbnb.com).",
+          "3) Click EditThisCookie → Export → 'Copy to clipboard' (JSON format).",
+          "4) Paste the JSON array into Railway env var AIRBNB_SESSION_COOKIES. Don't escape it — paste as-is.",
+          "5) Re-trigger this endpoint.",
+        ],
+      });
+    }
+
+    type RawCookie = {
+      name?: string; value?: string;
+      domain?: string; path?: string;
+      expirationDate?: number; expires?: number;
+      httpOnly?: boolean; secure?: boolean;
+      sameSite?: string;
+    };
+    let raw: RawCookie[];
+    try {
+      raw = JSON.parse(cookieJson);
+      if (!Array.isArray(raw)) throw new Error("not an array");
+    } catch (e: any) {
+      return res.status(500).json({
+        ok: false,
+        error: `AIRBNB_SESSION_COOKIES isn't valid JSON: ${e?.message ?? e}`,
+      });
+    }
+
+    // EditThisCookie uses snake_case sameSite values that Playwright
+    // doesn't accept directly. Translate.
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = {
+      strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None",
+    };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!,
+        value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires)
+              : -1,
+        httpOnly: c.httpOnly ?? false,
+        secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
 
     const started = Date.now();
     let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
     try {
-      // Railway's Dockerfile apt-installs /usr/bin/chromium and sets a
-      // misnamed env var (PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH isn't a
-      // documented Playwright var). Pass the executable explicitly
-      // instead so launch() doesn't fall back to the bundled-browser
-      // cache that doesn't exist in this image.
       browser = await chromium.launch({
         headless: true,
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
@@ -3952,7 +3998,7 @@ export async function registerRoutes(
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-blink-features=AutomationControlled", // hides the `webdriver` flag
+          "--disable-blink-features=AutomationControlled",
         ],
       });
       const ctx = await browser.newContext({
@@ -3963,95 +4009,55 @@ export async function registerRoutes(
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
           "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
       });
-      // Small anti-detection: mask the navigator.webdriver flag Airbnb probably checks.
       await ctx.addInitScript(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       });
+      // INJECT THE SESSION COOKIES BEFORE NAVIGATING — this is what
+      // turns Playwright from "bot trying to log in" into "authenticated
+      // returning user".
+      await ctx.addCookies(cookies);
 
       const page = await ctx.newPage();
-      const steps: Array<{ at: number; label: string; url: string; detail?: string }> = [];
-      const snap = async (label: string, detail?: string) => {
-        steps.push({ at: Date.now() - started, label, url: page.url(), detail });
-      };
+      const steps: Array<{ at: number; label: string; url: string }> = [];
+      const snap = (label: string) => steps.push({ at: Date.now() - started, label, url: page.url() });
 
-      await page.goto("https://www.airbnb.com/login", { waitUntil: "domcontentloaded", timeout: 30000 });
-      await snap("loaded-login");
-
-      // Airbnb's login page renders email/phone as a single input, then
-      // switches to a password page OR a magic-link page depending on the
-      // account. Find the first input and type the email.
-      try {
-        const emailInput = page.locator("input[type='email'], input[name='user[email]'], input[autocomplete='email']").first();
-        await emailInput.waitFor({ state: "visible", timeout: 8000 });
-        await emailInput.fill(email);
-        await snap("typed-email");
-      } catch {
-        await snap("no-email-input");
-      }
-
-      // Click Continue. The button text varies ("Continue" most common).
-      try {
-        const continueBtn = page.getByRole("button", { name: /continue/i }).first();
-        await continueBtn.click({ timeout: 5000 });
-        await snap("clicked-continue");
-      } catch {
-        await snap("no-continue-button");
-      }
-
+      await page.goto("https://www.airbnb.com/hosting", { waitUntil: "domcontentloaded", timeout: 30000 });
+      snap("loaded-hosting");
       await page.waitForTimeout(3000);
-      await snap("post-continue");
+      snap("post-wait");
 
-      // If a password field is visible, try filling it. Otherwise this is
-      // the magic-link branch — page will say "Check your email" or similar.
-      let passwordAttempted = false;
-      if (password) {
-        try {
-          const pwd = page.locator("input[type='password'], input[name='user[password]']").first();
-          await pwd.waitFor({ state: "visible", timeout: 4000 });
-          await pwd.fill(password);
-          passwordAttempted = true;
-          await snap("typed-password");
-          const submitBtn = page.getByRole("button", { name: /log\s*in|continue|sign\s*in/i }).first();
-          await submitBtn.click({ timeout: 5000 });
-          await snap("clicked-submit");
-          await page.waitForTimeout(4000);
-          await snap("post-submit");
-        } catch {
-          await snap("no-password-field");
-        }
-      }
-
-      // Capture final state
       const finalUrl = page.url();
       const title = await page.title().catch(() => "");
       const bodyText = await page
         .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 4000))
         .catch(() => "");
-      const cookies = await ctx.cookies();
-      const cookieNames = cookies.map((c) => c.name).sort();
+      const sessionCookies = await ctx.cookies();
       const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
 
-      // Heuristic: are we logged in? Airbnb drops `aat` + `_user_attributes`
-      // cookies on a successful session. Very rough but useful signal.
-      const likelyLoggedIn = cookies.some((c) => c.name === "aat" || c.name === "_user_attributes");
+      // Verdict heuristics
+      const stayedOnHosting = /\/hosting\b/.test(finalUrl) && !/\/login\b/.test(finalUrl);
+      const hasHostCookie = sessionCookies.some((c) =>
+        c.name === "_user_attributes" || c.name === "aat" || c.name === "_aat" || c.name === "_csrf_token");
+      const titleHostHint = /host|hosting|dashboard|listing/i.test(title);
+      const blockedByBotMgr = /503|temporarily unavailable|stay tuned/i.test(title) || /503|temporarily unavailable|stay tuned/i.test(bodyText);
 
-      // Heuristic: did we hit a 2FA prompt?
-      const twoFactorPrompt =
-        /enter the code|verify your identity|check your email|we sent.*code|magic link|confirm your email/i.test(bodyText)
-          ? bodyText.match(/[^.]*?(enter the code|verify your identity|check your email|magic link|confirm your email)[^.]*/i)?.[0]?.slice(0, 240)
-          : null;
+      const verdict =
+        blockedByBotMgr ? "blocked-by-bot-detection" :
+        stayedOnHosting && (hasHostCookie || titleHostHint) ? "logged-in" :
+        /\/login/.test(finalUrl) ? "cookies-expired-or-invalid" :
+        "unknown";
 
       return res.json({
         ok: true,
+        verdict,
         elapsedMs: Date.now() - started,
         finalUrl,
         title,
-        likelyLoggedIn,
-        twoFactorPrompt,
-        passwordAttempted,
+        injectedCookieCount: cookies.length,
+        sessionCookieCount: sessionCookies.length,
+        sessionCookieNames: sessionCookies.map((c) => c.name).sort().slice(0, 30),
+        signals: { stayedOnHosting, hasHostCookie, titleHostHint, blockedByBotMgr },
         steps,
-        cookieCount: cookies.length,
-        cookieNames: cookieNames.slice(0, 30),
         bodyExcerpt: bodyText.slice(0, 1200),
         screenshotBase64: screenshot ? `data:image/jpeg;base64,${screenshot.toString("base64")}` : null,
       });
