@@ -3924,6 +3924,138 @@ export async function registerRoutes(
     res.json({ deleted: ok });
   });
 
+  // ── Airbnb login probe ──
+  // First diagnostic step of the Playwright-based compliance-push flow.
+  // Launches headless Chromium, navigates to airbnb.com/login, enters the
+  // host email (+ password if a password field appears), and returns a
+  // JSON snapshot of what happened: final URL, page title, a truncated
+  // body-text excerpt, cookie names, and any visible 2FA/magic-link
+  // prompt. No retry / no session persistence yet — we just want to see
+  // what Airbnb shows us so we can decide how to handle the 2FA step.
+  app.post("/api/admin/airbnb/test-login", async (_req: Request, res: Response) => {
+    const email = process.env.AIRBNB_HOST_EMAIL;
+    const password = process.env.AIRBNB_HOST_PASSWORD;
+    if (!email) return res.status(500).json({ error: "AIRBNB_HOST_EMAIL not configured" });
+
+    const started = Date.now();
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled", // hides the `webdriver` flag
+        ],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 900 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      // Small anti-detection: mask the navigator.webdriver flag Airbnb probably checks.
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+
+      const page = await ctx.newPage();
+      const steps: Array<{ at: number; label: string; url: string; detail?: string }> = [];
+      const snap = async (label: string, detail?: string) => {
+        steps.push({ at: Date.now() - started, label, url: page.url(), detail });
+      };
+
+      await page.goto("https://www.airbnb.com/login", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await snap("loaded-login");
+
+      // Airbnb's login page renders email/phone as a single input, then
+      // switches to a password page OR a magic-link page depending on the
+      // account. Find the first input and type the email.
+      try {
+        const emailInput = page.locator("input[type='email'], input[name='user[email]'], input[autocomplete='email']").first();
+        await emailInput.waitFor({ state: "visible", timeout: 8000 });
+        await emailInput.fill(email);
+        await snap("typed-email");
+      } catch {
+        await snap("no-email-input");
+      }
+
+      // Click Continue. The button text varies ("Continue" most common).
+      try {
+        const continueBtn = page.getByRole("button", { name: /continue/i }).first();
+        await continueBtn.click({ timeout: 5000 });
+        await snap("clicked-continue");
+      } catch {
+        await snap("no-continue-button");
+      }
+
+      await page.waitForTimeout(3000);
+      await snap("post-continue");
+
+      // If a password field is visible, try filling it. Otherwise this is
+      // the magic-link branch — page will say "Check your email" or similar.
+      let passwordAttempted = false;
+      if (password) {
+        try {
+          const pwd = page.locator("input[type='password'], input[name='user[password]']").first();
+          await pwd.waitFor({ state: "visible", timeout: 4000 });
+          await pwd.fill(password);
+          passwordAttempted = true;
+          await snap("typed-password");
+          const submitBtn = page.getByRole("button", { name: /log\s*in|continue|sign\s*in/i }).first();
+          await submitBtn.click({ timeout: 5000 });
+          await snap("clicked-submit");
+          await page.waitForTimeout(4000);
+          await snap("post-submit");
+        } catch {
+          await snap("no-password-field");
+        }
+      }
+
+      // Capture final state
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => "");
+      const bodyText = await page
+        .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 4000))
+        .catch(() => "");
+      const cookies = await ctx.cookies();
+      const cookieNames = cookies.map((c) => c.name).sort();
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
+
+      // Heuristic: are we logged in? Airbnb drops `aat` + `_user_attributes`
+      // cookies on a successful session. Very rough but useful signal.
+      const likelyLoggedIn = cookies.some((c) => c.name === "aat" || c.name === "_user_attributes");
+
+      // Heuristic: did we hit a 2FA prompt?
+      const twoFactorPrompt =
+        /enter the code|verify your identity|check your email|we sent.*code|magic link|confirm your email/i.test(bodyText)
+          ? bodyText.match(/[^.]*?(enter the code|verify your identity|check your email|magic link|confirm your email)[^.]*/i)?.[0]?.slice(0, 240)
+          : null;
+
+      return res.json({
+        ok: true,
+        elapsedMs: Date.now() - started,
+        finalUrl,
+        title,
+        likelyLoggedIn,
+        twoFactorPrompt,
+        passwordAttempted,
+        steps,
+        cookieCount: cookies.length,
+        cookieNames: cookieNames.slice(0, 30),
+        bodyExcerpt: bodyText.slice(0, 1200),
+        screenshotBase64: screenshot ? `data:image/jpeg;base64,${screenshot.toString("base64")}` : null,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
