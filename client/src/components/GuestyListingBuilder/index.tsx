@@ -2330,6 +2330,58 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                           <span style={{ color: "#9ca3af" }}> (p25 ${season.villa.stats.p25?.toLocaleString()} · p75 ${season.villa.stats.p75?.toLocaleString()} · n={season.villa.stats.n})</span>
                                         </span>
                                       )}
+                                      {/* Clickable sample listings per tier so the
+                                          user can sanity-check whether a comp is
+                                          actually comparable (same area, unit type,
+                                          bed count). If the classifier mis-tagged
+                                          something the link is how you find out. */}
+                                      {(condoOk || villaOk) && (
+                                        <details style={{ marginLeft: 14, display: "inline" }}>
+                                          <summary style={{ cursor: "pointer", color: "#2563eb", display: "inline-block", fontSize: 10 }}>
+                                            see comp listings ({(condoOk ? season.condo.sample.length : 0) + (villaOk ? season.villa.sample.length : 0)})
+                                          </summary>
+                                          <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #e5e7eb" }}>
+                                            {condoOk && season.condo.sample.length > 0 && (
+                                              <div style={{ marginBottom: 4 }}>
+                                                <div style={{ fontWeight: 600, fontSize: 10, color: "#1e40af", marginBottom: 2 }}>
+                                                  Condo tier ({season.condo.sample.length} shown)
+                                                </div>
+                                                {season.condo.sample.map((c, i) => (
+                                                  <div key={`condo-${i}`} style={{ fontSize: 10, lineHeight: 1.5 }}>
+                                                    <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb", textDecoration: "underline" }}>
+                                                      {c.title}
+                                                    </a>
+                                                    <span style={{ color: "#6b7280" }}>
+                                                      {" · "}${c.nightlyRate.toLocaleString()}/night
+                                                      {c.bedrooms != null && ` · ${c.bedrooms}BR`}
+                                                      {c.propertyType && ` · ${c.propertyType}`}
+                                                    </span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                            {villaOk && season.villa.sample.length > 0 && (
+                                              <div>
+                                                <div style={{ fontWeight: 600, fontSize: 10, color: "#92400e", marginBottom: 2 }}>
+                                                  Villa tier ({season.villa.sample.length} shown)
+                                                </div>
+                                                {season.villa.sample.map((c, i) => (
+                                                  <div key={`villa-${i}`} style={{ fontSize: 10, lineHeight: 1.5 }}>
+                                                    <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb", textDecoration: "underline" }}>
+                                                      {c.title}
+                                                    </a>
+                                                    <span style={{ color: "#6b7280" }}>
+                                                      {" · "}${c.nightlyRate.toLocaleString()}/night
+                                                      {c.bedrooms != null && ` · ${c.bedrooms}BR`}
+                                                      {c.propertyType && ` · ${c.propertyType}`}
+                                                    </span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        </details>
+                                      )}
                                     </div>
                                   );
                                 })}
