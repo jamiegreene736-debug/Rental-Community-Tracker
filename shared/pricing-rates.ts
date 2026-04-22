@@ -77,6 +77,42 @@ export function getSeasonForMonth(yearMonth: string, region: RegionType): Season
   return map[yearMonth] ?? "LOW";
 }
 
+// Channel host-fee model + target margin. Kept here so server and client
+// agree on the numbers — the client's pricing-data.ts re-exports from here.
+export type ChannelKey = "airbnb" | "vrbo" | "booking" | "direct";
+
+export const CHANNEL_HOST_FEE: Record<ChannelKey, number> = {
+  airbnb:  0.155,
+  vrbo:    0.08,
+  booking: 0.17,
+  direct:  0.03,
+};
+
+// Fee-differential markup per channel: makes every channel net the same
+// dollars as Direct after its fee. Formula:
+//   m_ch = (1 - fee_direct) / (1 - fee_ch) - 1
+// Rounded UP to 0.1% so the resulting margin never rounds DOWN below target.
+export function computeChannelMarkups(
+  fees: Record<ChannelKey, number> = CHANNEL_HOST_FEE,
+): Record<ChannelKey, number> {
+  const feeDirect = fees.direct ?? 0;
+  const out: Record<ChannelKey, number> = { airbnb: 0, vrbo: 0, booking: 0, direct: 0 };
+  for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
+    const raw = (1 - feeDirect) / (1 - (fees[ch] ?? 0)) - 1;
+    out[ch] = Math.max(0, Math.ceil(raw * 1000) / 1000);
+  }
+  return out;
+}
+
+// Maps our logical channel keys to Guesty's integration platform keys.
+// Confirmed from a live listing readback 2026-04-21.
+export const CHANNEL_TO_GUESTY_KEY: Record<ChannelKey, string> = {
+  airbnb:  "airbnb2",
+  vrbo:    "homeaway2",
+  booking: "bookingCom",
+  direct:  "manual",
+};
+
 // Total nightly buy-in cost for a property's full set of unit slots in
 // a given month. Used as the cost floor for the seasonal rate push.
 export function totalNightlyBuyInForMonth(

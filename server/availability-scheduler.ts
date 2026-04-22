@@ -11,7 +11,12 @@
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
-import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
+import {
+  totalNightlyBuyInForMonth,
+  computeChannelMarkups,
+  CHANNEL_TO_GUESTY_KEY,
+  type ChannelKey,
+} from "@shared/pricing-rates";
 import {
   countAirbnbCandidates,
   computeSetsFromCounts,
@@ -234,6 +239,32 @@ export async function runFullScanForProperty(
       } catch { /* continue */ }
     }
     summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
+
+    // ── Channel markup push ──
+    // The base rate above nets targetMargin% on Direct only. Each OTA
+    // has a higher host fee, so we layer per-channel markups on top so
+    // Airbnb/VRBO/Booking also net targetMargin% after their fees.
+    // Formula (from shared/pricing-rates.ts): m_ch = (1 - feeDirect)/(1 - fee_ch) - 1.
+    try {
+      const markups = computeChannelMarkups();
+      const markupsByPlatform: Record<string, { percent: number; active: boolean }> = {};
+      for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
+        markupsByPlatform[CHANNEL_TO_GUESTY_KEY[ch]] = {
+          percent: markups[ch] * 100,
+          active: true,
+        };
+      }
+      await guestyRequest("PUT", `/listings/${guestyListingId}`, {
+        useAccountMarkups: false,
+        markups: markupsByPlatform,
+      });
+      const labels = (["airbnb", "vrbo", "booking"] as ChannelKey[])
+        .map((ch) => `${ch[0]}${(markups[ch] * 100).toFixed(1)}%`)
+        .join("/");
+      summaries.push(`markups ${labels}`);
+    } catch (e: any) {
+      summaries.push(`markups FAILED: ${(e?.message ?? "unknown").slice(0, 40)}`);
+    }
   }
 
   return summaries.join(" · ");
