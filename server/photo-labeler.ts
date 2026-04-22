@@ -33,6 +33,18 @@ function mimeTypeForExt(filename: string): string {
   return "image/jpeg";
 }
 
+// Sniff the actual format from the file's magic bytes. Some photos in the
+// portfolio have the wrong extension (e.g. .jpg files that are really PNG)
+// and Anthropic's vision API rejects when the declared media_type doesn't
+// match. Falls back to the extension-based guess when no signature matches.
+function detectImageMime(buffer: Buffer, filename: string): string {
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 12 && buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  if (buffer.length >= 6 && buffer.slice(0, 6).toString("ascii").startsWith("GIF87") || buffer.slice(0, 6).toString("ascii").startsWith("GIF89")) return "image/gif";
+  return mimeTypeForExt(filename);
+}
+
 function promptFor(kind: PhotoKind): string {
   if (kind === "community") {
     // Community = resort amenities, grounds, building exteriors, beach
@@ -83,7 +95,7 @@ export async function labelPhoto(
   const buffer = await fs.promises.readFile(absolutePath);
   // Cap at 5MB — Claude's API has a 5MB per-image limit for base64.
   if (buffer.length > 5 * 1024 * 1024) return null;
-  const mimeType = mimeTypeForExt(absolutePath);
+  const mimeType = detectImageMime(buffer, absolutePath);
   const base64 = buffer.toString("base64");
   const prompt = promptFor(kind);
 
