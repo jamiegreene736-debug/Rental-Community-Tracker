@@ -4259,6 +4259,162 @@ export async function registerRoutes(
     }
   });
 
+  // ── Airbnb network-request inspector (Option C reverse-engineering) ──
+  // Loads the listing editor with cookie injection AND network logging.
+  // Every HTTP request the editor UI fires during load is captured; the
+  // endpoint filters for regulatory/license/permit/registration terms and
+  // returns them so we can find the API Airbnb's own UI uses to read
+  // (and presumably write) license data. Then we can replay that request
+  // directly with cookies — no Playwright form automation needed.
+  app.post("/api/admin/airbnb/inspect-network", async (req: Request, res: Response) => {
+    const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
+    if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
+
+    const { listingId, keepFor } = (req.body ?? {}) as {
+      listingId?: string;
+      keepFor?: number; // ms to keep listening after initial load (default 12s)
+    };
+    if (!listingId || !/^\d+$/.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
+    }
+    const listenMs = Math.min(Math.max(keepFor ?? 12000, 4000), 30000);
+
+    type RawCookie = { name?: string; value?: string; domain?: string; path?: string; expirationDate?: number; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string };
+    const raw: RawCookie[] = JSON.parse(cookieJson);
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!, value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires) : -1,
+        httpOnly: c.httpOnly ?? false, secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 900 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await ctx.addCookies(cookies);
+
+      type CapturedReq = {
+        method: string;
+        url: string;
+        resourceType: string;
+        // GraphQL operation name / persisted-query hash, when detectable
+        operationName?: string;
+        bodyPreview?: string;
+        // Response data — only populated for matched endpoints (to keep payload small)
+        respStatus?: number;
+        respPreview?: string;
+      };
+      const captured: CapturedReq[] = [];
+      const keywordRe = /regulat|licens|permit|regist|complian|taxmap|tat_license|str_license/i;
+
+      const page = await ctx.newPage();
+
+      page.on("request", (reqEvt) => {
+        const url = reqEvt.url();
+        const method = reqEvt.method();
+        const type = reqEvt.resourceType();
+        // Skip static assets — we want API calls only.
+        if (["image", "stylesheet", "font", "media"].includes(type)) return;
+        // Interesting if it hits an Airbnb API path AND matches a keyword,
+        // OR is a GraphQL op whose operationName is regulatory.
+        let operationName: string | undefined;
+        let bodyPreview: string | undefined;
+        const pdata = reqEvt.postData();
+        if (pdata) {
+          bodyPreview = pdata.slice(0, 600);
+          // GraphQL calls post JSON with `operationName`. Pull it out
+          // when present — Airbnb names operations after the feature.
+          if (/operationName/.test(pdata)) {
+            try {
+              const parsed = JSON.parse(pdata);
+              if (Array.isArray(parsed)) operationName = parsed[0]?.operationName;
+              else operationName = parsed?.operationName;
+            } catch { /* ignore */ }
+          }
+        }
+        const blob = `${url} ${operationName ?? ""} ${bodyPreview ?? ""}`;
+        if (!keywordRe.test(blob) && !(url.includes("/api/") && keywordRe.test(url))) return;
+        captured.push({ method, url, resourceType: type, operationName, bodyPreview });
+      });
+
+      page.on("response", async (resp) => {
+        const url = resp.url();
+        const matched = captured.find((c) => c.url === url);
+        if (!matched) return;
+        try {
+          matched.respStatus = resp.status();
+          const headers = resp.headers();
+          const ct = headers["content-type"] || "";
+          if (ct.includes("json")) {
+            const text = await resp.text().catch(() => "");
+            matched.respPreview = text.slice(0, 1200);
+          }
+        } catch { /* ignore */ }
+      });
+
+      // Warm up with /hosting so Akamai's trust cookies settle
+      await page.goto("https://www.airbnb.com/hosting", { waitUntil: "domcontentloaded", timeout: 25000 });
+      await page.waitForTimeout(2500);
+      await page.mouse.wheel(0, 300);
+      await page.waitForTimeout(1000);
+
+      // Navigate to the editor root — landed on /details/photo-tour last probe
+      await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, {
+        waitUntil: "domcontentloaded", timeout: 30000,
+      });
+      await page.waitForTimeout(listenMs);
+
+      // Also scrape the sidebar once more so the user can see what we saw
+      const sidebar = await page.evaluate((lid: string) => {
+        const out: Array<{ href: string; text: string }> = [];
+        const seen = new Set<string>();
+        document.querySelectorAll("a").forEach((a) => {
+          const href = (a as HTMLAnchorElement).href;
+          if (!href.includes("/hosting/listings/editor/" + lid)) return;
+          if (seen.has(href)) return;
+          seen.add(href);
+          const text = ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim();
+          out.push({ href, text: text.slice(0, 60) });
+        });
+        return out;
+      }, listingId).catch(() => []);
+
+      return res.json({
+        ok: true,
+        listingId,
+        listenMs,
+        finalUrl: page.url(),
+        finalTitle: await page.title().catch(() => ""),
+        capturedCount: captured.length,
+        capturedRequests: captured.slice(0, 30),
+        sidebarSample: sidebar.slice(0, 10),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
