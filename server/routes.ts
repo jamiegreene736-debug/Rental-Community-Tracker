@@ -4068,6 +4068,179 @@ export async function registerRoutes(
     }
   });
 
+  // ── Airbnb regulatory-page inspector (read-only dry run) ──
+  // Loads the host session, navigates to a specific listing's regulatory
+  // tab, and returns form metadata (input names, labels, current values)
+  // + a screenshot. No writes, no clicks on save — this is the schema
+  // probe we use to design the real compliance-push step.
+  //
+  // Query body: { listingId: string, candidatePaths?: string[] }
+  // Default candidates cover the observed path styles Airbnb has used;
+  // first one that loads a non-404 listing-editor page wins.
+  app.post("/api/admin/airbnb/inspect-regulatory", async (req: Request, res: Response) => {
+    const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
+    if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
+
+    const { listingId, candidatePaths } = (req.body ?? {}) as {
+      listingId?: string;
+      candidatePaths?: string[];
+    };
+    if (!listingId || !/^\d+$/.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
+    }
+
+    // Same cookie-normalize logic as test-login.
+    type RawCookie = { name?: string; value?: string; domain?: string; path?: string; expirationDate?: number; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string };
+    const raw: RawCookie[] = JSON.parse(cookieJson);
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = {
+      strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None",
+    };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!,
+        value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires)
+              : -1,
+        httpOnly: c.httpOnly ?? false,
+        secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
+
+    // Paths Airbnb has used for the regulatory tab (pattern matches the
+    // `/details/photo-tour` URL the user pointed at). Try in order; take
+    // the first that doesn't 404.
+    const pathsToTry = (candidatePaths && candidatePaths.length > 0) ? candidatePaths : [
+      `/hosting/listings/editor/${listingId}/details/regulatory`,
+      `/hosting/listings/editor/${listingId}/details/registration`,
+      `/hosting/listings/editor/${listingId}/details/compliance`,
+      `/hosting/listings/editor/${listingId}/details/legal`,
+      `/hosting/listings/${listingId}/details/regulatory`,
+      `/hosting/listings/${listingId}/details/registration`,
+    ];
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 900 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await ctx.addCookies(cookies);
+      const page = await ctx.newPage();
+
+      const attempts: Array<{ path: string; finalUrl: string; title: string; looksValid: boolean }> = [];
+      let chosenPath: string | null = null;
+
+      for (const p of pathsToTry) {
+        try {
+          await page.goto(`https://www.airbnb.com${p}`, { waitUntil: "domcontentloaded", timeout: 25000 });
+          await page.waitForTimeout(2000);
+          const u = page.url();
+          const t = await page.title().catch(() => "");
+          // "Valid" = didn't get bounced to /login or /404 and stayed within the
+          // listing editor chrome. Airbnb routes non-existent sub-paths to
+          // /hosting/listings/editor/{id}/details — we detect that too and
+          // flag as invalid so we don't report the landing page as a match.
+          const looksValid =
+            u.includes(p) &&
+            !/\/login\b/.test(u) &&
+            !/\/404\b/.test(t);
+          attempts.push({ path: p, finalUrl: u, title: t, looksValid });
+          if (looksValid) { chosenPath = p; break; }
+        } catch (e: any) {
+          attempts.push({ path: p, finalUrl: "(navigation error)", title: e?.message ?? "", looksValid: false });
+        }
+      }
+
+      // Also land on the plain editor root for comparison — helps us see
+      // what the sidebar looks like when our paths miss.
+      let sidebarLinks: Array<{ href: string; text: string }> = [];
+      if (!chosenPath) {
+        try {
+          await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, { waitUntil: "domcontentloaded", timeout: 25000 });
+          await page.waitForTimeout(2500);
+          sidebarLinks = await page.evaluate(() => {
+            const out: Array<{ href: string; text: string }> = [];
+            document.querySelectorAll("a[href*='/details/']").forEach((a) => {
+              out.push({
+                href: (a as HTMLAnchorElement).href,
+                text: ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
+              });
+            });
+            return out.slice(0, 40);
+          });
+        } catch { /* best effort */ }
+      }
+
+      // Dump all inputs + labels on whichever page we landed on.
+      const formFields = await page.evaluate(() => {
+        type Field = { tag: string; type?: string; name?: string; id?: string; label?: string; placeholder?: string; value?: string; ariaLabel?: string };
+        const out: Field[] = [];
+        const inputs = Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input, select, textarea"));
+        for (const el of inputs) {
+          // Find an associated label
+          let label: string | undefined;
+          if ((el as HTMLInputElement).labels && (el as HTMLInputElement).labels!.length > 0) {
+            label = (el as HTMLInputElement).labels![0].innerText?.trim();
+          }
+          if (!label && el.id) {
+            const lbl = document.querySelector(`label[for='${el.id}']`);
+            if (lbl) label = (lbl as HTMLLabelElement).innerText?.trim();
+          }
+          out.push({
+            tag: el.tagName.toLowerCase(),
+            type: (el as HTMLInputElement).type,
+            name: el.getAttribute("name") || undefined,
+            id: el.id || undefined,
+            label,
+            placeholder: el.getAttribute("placeholder") || undefined,
+            value: (el as HTMLInputElement).value?.slice(0, 120) || undefined,
+            ariaLabel: el.getAttribute("aria-label") || undefined,
+          });
+        }
+        return out.filter((f) =>
+          // Skip hidden / irrelevant inputs to keep the response sane.
+          f.type !== "hidden" && f.type !== "submit" && f.type !== "button"
+        ).slice(0, 60);
+      });
+
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => "");
+      const bodyText = await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 3500)).catch(() => "");
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: true }).catch(() => null);
+
+      return res.json({
+        ok: true,
+        chosenPath,
+        finalUrl,
+        title,
+        attempts,
+        sidebarLinks,
+        formFieldCount: formFields.length,
+        formFields,
+        bodyExcerpt: bodyText.slice(0, 1500),
+        screenshotBase64: screenshot ? `data:image/jpeg;base64,${screenshot.toString("base64")}` : null,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
