@@ -15,6 +15,7 @@ import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage } from "./photo-labeler";
+import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
@@ -5717,42 +5718,22 @@ export async function registerRoutes(
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
 
-      // Default 25 per unit. Two units × 25 + ~6 community = 56 total,
-      // which the Guesty push step trims to 40 preserving priority order.
-      // Raise this via `limit` param in the request body if you want more.
-      const cap = Math.max(1, Math.min(40, limit ?? 25));
-      const picked = scraped.slice(0, cap);
-
-      // Clear existing jpg/jpeg/png/webp (leave _source.json and other metadata in place)
-      const existing = await fs.promises.readdir(folderPath).catch(() => []);
-      for (const f of existing) {
-        if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
-          await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
-        }
-      }
-
-      const saved: string[] = [];
-      const failed: Array<{ url: string; reason: string }> = [];
-      for (let i = 0; i < picked.length; i++) {
-        const src = picked[i];
-        try {
-          const imgResp = await fetch(src.url, {
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
-            signal: AbortSignal.timeout(15000),
-          });
-          if (!imgResp.ok) { failed.push({ url: src.url, reason: `HTTP ${imgResp.status}` }); continue; }
-          const buffer = Buffer.from(await imgResp.arrayBuffer());
-          if (buffer.length < 5000) { failed.push({ url: src.url, reason: "too small" }); continue; }
-          const filename = `photo_${String(i).padStart(2, "0")}.jpg`;
-          await fs.promises.writeFile(path.join(folderPath, filename), buffer);
-          saved.push(filename);
-        } catch (e: any) {
-          failed.push({ url: src.url, reason: e?.message ?? "download failed" });
-        }
-      }
+      // Cap how many we ultimately keep. The pipeline downloads ALL scraped
+      // photos first, labels them, then keeps the top N by category priority
+      // (Bedrooms > Bathrooms > Living > Dining > Kitchen > ...) — so we
+      // never drop a bedroom just because it was late in Apify's list.
+      const maxKeep = Math.max(1, Math.min(40, limit ?? 25));
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      const result = await downloadAndPrioritize({
+        folder,
+        folderPath,
+        scrapedUrls: scraped.map((s) => s.url),
+        maxKeep,
+        anthropicKey,
+        kind: inferKindFromFolder(folder),
+      });
 
       // Stamp the URL back into _source.json so the next rescrape is one click.
-      // sourceDoc was already loaded above for URL resolution.
       sourceDoc.sourceListing = {
         url: sourceUrl,
         platform: /zillow\.com/i.test(sourceUrl) ? "zillow" : /homes\.com/i.test(sourceUrl) ? "homes.com" : /vrbo\.com/i.test(sourceUrl) ? "vrbo" : /airbnb\.com/i.test(sourceUrl) ? "airbnb" : "other",
@@ -5763,42 +5744,20 @@ export async function registerRoutes(
       sourceDoc.verifiedBy = "rescrape";
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
-      // Fire-and-forget Claude labeling — client polls /api/photo-labels/:folder
-      const anthropicKey = process.env.ANTHROPIC_API_KEY;
-      if (anthropicKey && saved.length > 0) {
-        (async () => {
-          await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
-          for (const filename of saved) {
-            try {
-              const result = await labelPhoto(
-                path.join(folderPath, filename),
-                inferKindFromFolder(folder),
-                anthropicKey,
-              );
-              if (result) {
-                await storage.upsertPhotoLabel({
-                  folder, filename,
-                  label: result.label, category: result.category, model: result.model,
-                });
-              }
-            } catch (e: any) {
-              console.warn(`[rescrape label] ${folder}/${filename}: ${e?.message ?? e}`);
-            }
-          }
-          console.log(`[rescrape] ${folder}: labeled ${saved.length} photo(s)`);
-        })();
-      }
-
       res.json({
         folder,
         sourceUrl,
         urlSource,
         scrapedCount: scraped.length,
-        savedCount: saved.length,
-        failedCount: failed.length,
-        saved,
-        failed,
-        autoLabeling: anthropicKey ? saved.length : 0,
+        savedCount: result.kept,
+        failedCount: result.downloaded - result.kept - result.dropped, // download failures
+        downloaded: result.downloaded,
+        dropped: result.dropped,
+        bedroomCount: result.bedroomCount,
+        bathroomCount: result.bathroomCount,
+        categorySummary: result.categorySummary,
+        saved: result.keptFilenames,
+        autoLabeling: anthropicKey ? result.kept : 0,
       });
     } catch (err: any) {
       console.error(`[rescrape] ${folder}: ${err?.message ?? err}`);
@@ -6968,36 +6927,20 @@ export async function registerRoutes(
       void (async () => {
         try {
           const folderPath = path.join(process.cwd(), "client/public/photos", folder);
-          await fs.promises.mkdir(folderPath, { recursive: true });
           const scraped = await scrapeListingPhotos(url);
           if (!scraped.length) {
             console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
             return;
           }
-          // Per-unit cap 25. The Guesty push step trims the total to 40
-          // to stay under Booking.com (~40) and VRBO (50) limits.
-          const picked = scraped.slice(0, 25);
-          const existing = await fs.promises.readdir(folderPath).catch(() => []);
-          for (const f of existing) {
-            if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
-              await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
-            }
-          }
-          const saved: string[] = [];
-          for (let i = 0; i < picked.length; i++) {
-            try {
-              const imgResp = await fetch(picked[i].url, {
-                headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
-                signal: AbortSignal.timeout(15000),
-              });
-              if (!imgResp.ok) continue;
-              const buffer = Buffer.from(await imgResp.arrayBuffer());
-              if (buffer.length < 5000) continue;
-              const filename = `photo_${String(i).padStart(2, "0")}.jpg`;
-              await fs.promises.writeFile(path.join(folderPath, filename), buffer);
-              saved.push(filename);
-            } catch {}
-          }
+
+          const result = await downloadAndPrioritize({
+            folder,
+            folderPath,
+            scrapedUrls: scraped.map((s) => s.url),
+            maxKeep: 25,
+            anthropicKey: process.env.ANTHROPIC_API_KEY,
+            kind: inferKindFromFolder(folder),
+          });
 
           // Stamp _source.json so the folder's provenance is recorded.
           const sourcePath = path.join(folderPath, "_source.json");
@@ -7012,29 +6955,7 @@ export async function registerRoutes(
           sourceDoc.verifiedBy = "unit-swap";
           await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
-          // Re-label with Claude so captions match the new photos.
-          const anthropicKey = process.env.ANTHROPIC_API_KEY;
-          if (anthropicKey && saved.length > 0) {
-            await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
-            for (const filename of saved) {
-              try {
-                const result = await labelPhoto(
-                  path.join(folderPath, filename),
-                  inferKindFromFolder(folder),
-                  anthropicKey,
-                );
-                if (result) {
-                  await storage.upsertPhotoLabel({
-                    folder, filename,
-                    label: result.label, category: result.category, model: result.model,
-                  });
-                }
-              } catch (e: any) {
-                console.warn(`[unit-swap label] ${folder}/${filename}: ${e?.message ?? e}`);
-              }
-            }
-          }
-          console.log(`[unit-swap rescrape] ${folder}: saved ${saved.length} photo(s) from ${url}`);
+          console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
         } catch (e: any) {
           console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
         }

@@ -501,12 +501,16 @@ export default function BuilderPreflight() {
                       }
                       if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
                       const saved = Number(data.savedCount ?? 0);
-                      const sparse = saved < 12;
+                      const beds = Number(data.bedroomCount ?? 0);
+                      const baths = Number(data.bathroomCount ?? 0);
+                      const noInteriors = beds === 0 && baths === 0;
                       toast({
-                        title: sparse ? `Rescraped but only ${saved} photos found` : "Photos rescraped",
-                        description: sparse
-                          ? `That Zillow listing only has ${saved} photos total (${data.failedCount ?? 0} failed to download) — likely a sparse listing with no bedroom shots. Click "Change" instead to search for a richer replacement unit (the finder now skips anything under 12 photos).`
-                          : `${saved} saved, ${data.failedCount ?? 0} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30–60s — hard-refresh the builder page then.`,
+                        title: noInteriors
+                          ? `Rescraped ${saved} photos — no bedrooms found`
+                          : `Photos rescraped — ${beds} bedroom${beds !== 1 ? "s" : ""}, ${baths} bathroom${baths !== 1 ? "s" : ""}`,
+                        description: noInteriors
+                          ? `That Zillow listing's photos are all kitchen/exterior/views — no bedrooms detected by Claude Vision. Click "Change" to search for a different replacement with actual interior shots.`
+                          : `${saved} saved (source: ${data.urlSource ?? "manual"}). Photos are sorted by priority — bedrooms and bathrooms first. Hard-refresh the builder page to see them.`,
                         duration: 10000,
                       });
                     } catch (e: any) {
