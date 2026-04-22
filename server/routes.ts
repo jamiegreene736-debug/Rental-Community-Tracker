@@ -5461,6 +5461,135 @@ export async function registerRoutes(
     res.json({ saved, failed, folder: communityFolder, autoLabeling: anthropicKey ? saved.length : 0 });
   });
 
+  // Rescrape a unit (or community) photo folder from a Zillow listing URL.
+  // Clears the folder, downloads the scraped photos as photo_NN.jpg, updates
+  // _source.json so future rescrapes are one click, and kicks off Claude labeling.
+  app.post("/api/builder/rescrape-unit-photos", async (req, res) => {
+    const { folder, sourceUrl, limit } = req.body as {
+      folder?: string;
+      sourceUrl?: string;
+      limit?: number;
+    };
+    if (!folder || !/^[\w-]+$/.test(folder)) {
+      return res.status(400).json({ error: "Invalid folder" });
+    }
+    if (!sourceUrl || typeof sourceUrl !== "string" || !/^https?:\/\//i.test(sourceUrl)) {
+      return res.status(400).json({ error: "sourceUrl must be a full http(s) URL" });
+    }
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    try {
+      const stat = await fs.promises.stat(folderPath).catch(() => null);
+      if (!stat || !stat.isDirectory()) {
+        return res.status(404).json({ error: `Folder not found: ${folder}` });
+      }
+
+      const scraped = await scrapeListingPhotos(sourceUrl);
+      if (!scraped.length) {
+        return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
+      }
+
+      const cap = Math.max(1, Math.min(30, limit ?? 20));
+      const picked = scraped.slice(0, cap);
+
+      // Clear existing jpg/jpeg/png/webp (leave _source.json and other metadata in place)
+      const existing = await fs.promises.readdir(folderPath).catch(() => []);
+      for (const f of existing) {
+        if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
+          await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+        }
+      }
+
+      const saved: string[] = [];
+      const failed: Array<{ url: string; reason: string }> = [];
+      for (let i = 0; i < picked.length; i++) {
+        const src = picked[i];
+        try {
+          const imgResp = await fetch(src.url, {
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!imgResp.ok) { failed.push({ url: src.url, reason: `HTTP ${imgResp.status}` }); continue; }
+          const buffer = Buffer.from(await imgResp.arrayBuffer());
+          if (buffer.length < 5000) { failed.push({ url: src.url, reason: "too small" }); continue; }
+          const filename = `photo_${String(i).padStart(2, "0")}.jpg`;
+          await fs.promises.writeFile(path.join(folderPath, filename), buffer);
+          saved.push(filename);
+        } catch (e: any) {
+          failed.push({ url: src.url, reason: e?.message ?? "download failed" });
+        }
+      }
+
+      // Stamp the URL back into _source.json so the next rescrape is one click
+      const sourcePath = path.join(folderPath, "_source.json");
+      let sourceDoc: any = {};
+      try {
+        sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+      } catch { /* create fresh */ }
+      sourceDoc.sourceListing = {
+        url: sourceUrl,
+        platform: /zillow\.com/i.test(sourceUrl) ? "zillow" : /homes\.com/i.test(sourceUrl) ? "homes.com" : /vrbo\.com/i.test(sourceUrl) ? "vrbo" : /airbnb\.com/i.test(sourceUrl) ? "airbnb" : "other",
+        scrapedDate: new Date().toISOString().slice(0, 10),
+      };
+      sourceDoc.verificationStatus = "needs-review";
+      sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
+      sourceDoc.verifiedBy = "rescrape";
+      await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+
+      // Fire-and-forget Claude labeling — client polls /api/photo-labels/:folder
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      if (anthropicKey && saved.length > 0) {
+        (async () => {
+          await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+          for (const filename of saved) {
+            try {
+              const result = await labelPhoto(
+                path.join(folderPath, filename),
+                inferKindFromFolder(folder),
+                anthropicKey,
+              );
+              if (result) {
+                await storage.upsertPhotoLabel({
+                  folder, filename,
+                  label: result.label, category: result.category, model: result.model,
+                });
+              }
+            } catch (e: any) {
+              console.warn(`[rescrape label] ${folder}/${filename}: ${e?.message ?? e}`);
+            }
+          }
+          console.log(`[rescrape] ${folder}: labeled ${saved.length} photo(s)`);
+        })();
+      }
+
+      res.json({
+        folder,
+        sourceUrl,
+        scrapedCount: scraped.length,
+        savedCount: saved.length,
+        failedCount: failed.length,
+        saved,
+        failed,
+        autoLabeling: anthropicKey ? saved.length : 0,
+      });
+    } catch (err: any) {
+      console.error(`[rescrape] ${folder}: ${err?.message ?? err}`);
+      res.status(500).json({ error: err?.message ?? "rescrape failed" });
+    }
+  });
+
+  // Read _source.json for a folder (so the client can pre-fill the URL prompt).
+  app.get("/api/builder/photo-source/:folder", async (req, res) => {
+    const folder = req.params.folder;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    const sourcePath = path.join(process.cwd(), "client/public/photos", folder, "_source.json");
+    try {
+      const doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+      res.json({ folder, source: doc });
+    } catch {
+      res.json({ folder, source: null });
+    }
+  });
+
   // ── Photo labels: read + relabel ──────────────────────────────────────
   // Returns the Claude-vision-generated captions for a given folder so
   // the client can override the static unit-builder-data.ts labels.
