@@ -4439,13 +4439,15 @@ export async function registerRoutes(
     const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
     if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
 
-    const { listingId, keepFor, widenCapture } = (req.body ?? {}) as {
+    const { listingId, keepFor, widenCapture, editorPaths } = (req.body ?? {}) as {
       listingId?: string;
       keepFor?: number; // ms to keep listening after initial load (default 12s)
-      // Set true to capture ALL /api/* requests, not just regulatory-keyword
-      // matches. Useful when the keyword filter catches nothing and we
-      // need to see what endpoints Airbnb fires at all.
       widenCapture?: boolean;
+      // Explicit list of /hosting/listings/editor/{id}{path} suffixes to
+      // visit sequentially. Useful when the editor's default landing page
+      // doesn't fire the endpoints we care about. Default probes the
+      // known regulatory-adjacent paths.
+      editorPaths?: string[];
     };
     if (!listingId || !/^\d+$/.test(listingId)) {
       return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
@@ -4555,20 +4557,32 @@ export async function registerRoutes(
       await page.mouse.wheel(0, 300);
       await page.waitForTimeout(1000);
 
-      // Navigate to the editor root — landed on /details/photo-tour last probe
-      await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, {
-        waitUntil: "domcontentloaded", timeout: 30000,
-      });
-      await page.waitForTimeout(Math.floor(listenMs / 2));
-      // Scroll around to trigger any lazy-loaded sections (regulatory
-      // info often lives in a collapsed footer or "Additional details"
-      // panel that fetches on view).
-      await page.mouse.wheel(0, 800);
-      await page.waitForTimeout(2000);
-      await page.mouse.wheel(0, 1600);
-      await page.waitForTimeout(1500);
+      // Walk through multiple editor paths — the regulations/licensing
+      // forms live behind specific sub-routes, and fetching them triggers
+      // the GraphQL calls we want to reverse-engineer.
+      const defaultPaths = [
+        "/details/regulations",
+        "/details/registration",
+        "/details/licenses",
+        "/details/taxes",
+        "/policies/hosting-rules",
+        "/compliance",
+        "/laws",
+        "",  // editor root last (tends to redirect to photo-tour)
+      ];
+      const pathsToVisit = (editorPaths && editorPaths.length > 0) ? editorPaths : defaultPaths;
+      const perPathDwell = Math.max(2000, Math.floor(listenMs / pathsToVisit.length));
+      for (const p of pathsToVisit) {
+        const targetUrl = `https://www.airbnb.com/hosting/listings/editor/${listingId}${p}`;
+        try {
+          await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+        } catch { /* 404s expected on some paths */ }
+        await page.waitForTimeout(perPathDwell);
+        await page.mouse.wheel(0, 600);
+        await page.waitForTimeout(400);
+      }
 
-      // Then visit the public listing page — regulatory info (license
+      // Also visit the public listing page — regulatory info (license
       // number, registration body) is rendered in the footer for
       // regulated markets, which triggers a regulations-metadata fetch.
       await page.goto(`https://www.airbnb.com/rooms/${listingId}`, {
@@ -4597,10 +4611,11 @@ export async function registerRoutes(
         ok: true,
         listingId,
         listenMs,
+        pathsVisited: pathsToVisit,
         finalUrl: page.url(),
         finalTitle: await page.title().catch(() => ""),
         capturedCount: captured.length,
-        capturedRequests: captured.slice(0, 30),
+        capturedRequests: captured.slice(0, 60),
         sidebarSample: sidebar.slice(0, 10),
       });
     } catch (e: any) {
