@@ -1510,6 +1510,60 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     return () => { cancelled = true; };
   }, [propertyId]);
 
+  // ── Market comparables ─────────────────────────────────────────────────
+  // Per-season distribution of area rates for properties with the SAME
+  // total bedroom count. Used to flag rows where our rate sits above the
+  // local villa/bundle market — i.e. where a guest can find something
+  // equivalent cheaper nearby and won't book us.
+  type SeasonStats = {
+    n: number;
+    enough: boolean;
+    min: number | null;
+    max: number | null;
+    p25: number | null;
+    p40: number | null;
+    median: number | null;
+    p75: number | null;
+    p90: number | null;
+  };
+  type MarketSeason = {
+    season: "LOW" | "HIGH" | "HOLIDAY";
+    checkIn: string;
+    checkOut: string;
+    stats: SeasonStats;
+    sample?: Array<{ title: string; url: string; bedrooms: number | null; nightlyRate: number }>;
+    error?: string;
+    rawCount?: number;
+    qualifyingCount?: number;
+  };
+  const [marketComps, setMarketComps] = useState<{
+    totalBR: number;
+    seasons: Record<"LOW" | "HIGH" | "HOLIDAY", MarketSeason>;
+  } | null>(null);
+  const [marketCompsLoading, setMarketCompsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    setMarketCompsLoading(true);
+    setMarketComps(null);
+    fetch(`/api/builder/market-comps/${propertyId}?nights=7`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: any) => {
+        if (cancelled) return;
+        setMarketComps({ totalBR: data.totalBR, seasons: data.seasons });
+      })
+      .catch(() => {
+        // Market comps are advisory — a failure shouldn't block the
+        // pricing tab. Just leave the column blank.
+      })
+      .finally(() => { if (!cancelled) setMarketCompsLoading(false); });
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
   return (
     <>
       <style>{CSS}</style>
@@ -2205,6 +2259,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                 )}
                               </div>
                             </div>
+                            {marketComps && (
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                <b>Market benchmark</b> — {marketComps.totalBR}BR comparable listings in the area. Your Guesty rate is bucketed against this distribution per season:
+                                {(["LOW", "HIGH", "HOLIDAY"] as const).map((s) => {
+                                  const st = marketComps.seasons[s]?.stats;
+                                  if (!st?.enough) return null;
+                                  return (
+                                    <span key={s} style={{ marginLeft: 8 }}>
+                                      <b>{s}:</b> median ${st.median?.toLocaleString()} <span style={{ color: "#9ca3af" }}>(p25 ${st.p25?.toLocaleString()} · p75 ${st.p75?.toLocaleString()} · n={st.n})</span>
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
                             <table className="glb-season-table">
                               <thead>
                                 <tr>
@@ -2213,12 +2281,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                   <th>Buy-In / Night</th>
                                   <th>Sheet Rate / Night</th>
                                   <th>Guesty Rate / Night</th>
+                                  <th>Market Position</th>
                                   <th colSpan={4} style={{ textAlign: "center", borderLeft: "1px solid #e5e7eb" }}>
                                     Net Profit per Channel (at Guesty rate) — {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% floor target
                                   </th>
                                 </tr>
                                 <tr>
-                                  <th colSpan={5}></th>
+                                  <th colSpan={6}></th>
                                   {(["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch, i) => (
                                     <th
                                       key={ch}
@@ -2271,6 +2340,46 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                             ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
                                           </div>
                                         )}
+                                      </td>
+                                      {/* Market positioning — where this month's Guesty
+                                          rate sits in the distribution of equivalent-BR
+                                          area listings for the same season. */}
+                                      <td style={{ fontSize: 11 }}>
+                                        {(() => {
+                                          const compStats = marketComps?.seasons[row.season]?.stats;
+                                          if (!guesty || !compStats?.enough) {
+                                            if (marketCompsLoading) return <span style={{ color: "#9ca3af" }}>…</span>;
+                                            return <span style={{ color: "#9ca3af" }}>—</span>;
+                                          }
+                                          const rate = guesty.avgRate;
+                                          // Bucket rate against the distribution. p-values
+                                          // are guaranteed non-null because enough=true.
+                                          const { p25, p40, median, p75, p90 } = compStats as {
+                                            p25: number; p40: number; median: number; p75: number; p90: number;
+                                          };
+                                          type Verdict = { label: string; bg: string; fg: string; pos: string };
+                                          let v: Verdict;
+                                          if (rate <= p25)        v = { label: "Very competitive", bg: "#dcfce7", fg: "#166534", pos: `≤ 25th pct` };
+                                          else if (rate <= p40)   v = { label: "Competitive",       bg: "#dcfce7", fg: "#166534", pos: `${Math.round(((rate - p25)/(p40 - p25))*15 + 25)}th pct` };
+                                          else if (rate <= p75)   v = { label: "Realistic",         bg: "#dbeafe", fg: "#1e40af", pos: `${Math.round(((rate - p40)/(p75 - p40))*35 + 40)}th pct` };
+                                          else if (rate <= p90)   v = { label: "Premium — slower",  bg: "#fef3c7", fg: "#92400e", pos: `${Math.round(((rate - p75)/(p90 - p75))*15 + 75)}th pct` };
+                                          else                    v = { label: "Too high",           bg: "#fee2e2", fg: "#991b1b", pos: `> 90th pct` };
+                                          const vsMedian = median > 0 ? Math.round(((rate - median) / median) * 100) : 0;
+                                          const hoverText =
+                                            `Your rate $${rate.toLocaleString()} vs area ${marketComps?.totalBR}BR median $${median.toLocaleString()}`
+                                            + ` (${vsMedian >= 0 ? "+" : ""}${vsMedian}%). Distribution: p25 $${p25.toLocaleString()} · p75 $${p75.toLocaleString()} · p90 $${p90.toLocaleString()} · n=${compStats.n}.`;
+                                          return (
+                                            <span
+                                              title={hoverText}
+                                              style={{ background: v.bg, color: v.fg, padding: "2px 6px", borderRadius: 4, fontWeight: 600, fontSize: 10, whiteSpace: "nowrap" }}
+                                            >
+                                              {v.label}
+                                              <span style={{ marginLeft: 4, fontWeight: 400, opacity: 0.75 }}>
+                                                {vsMedian >= 0 ? "+" : ""}{vsMedian}% vs median
+                                              </span>
+                                            </span>
+                                          );
+                                        })()}
                                       </td>
                                       {channelCells.map((c, i) => {
                                         if (c.profit === null) {

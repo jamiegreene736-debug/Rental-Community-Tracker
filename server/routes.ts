@@ -3325,6 +3325,160 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/builder/market-comps/:propertyId?nights=7
+  // Fetches comparable Airbnb listings with the same total bedroom count as
+  // our property bundle across three representative date windows (low,
+  // high, holiday). Returns per-season price distributions — median,
+  // percentiles, count — so the pricing table can flag whether a
+  // proposed rate lands in the competitive range or way above market.
+  //
+  // Why this exists: a 6BR combined listing competes against area 6BR
+  // villas + other multi-unit resort bundles. "$1,970/night" is meaningless
+  // without knowing what a 6BR oceanfront rental in Kauai actually goes
+  // for in July. This gives us the ceiling reference.
+  app.get("/api/builder/market-comps/:propertyId", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const nights = Math.min(Math.max(parseInt((req.query.nights as string) ?? "7", 10) || 7, 2), 14);
+
+    const config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config) return res.status(404).json({ error: "Property not in config" });
+
+    const totalBR = config.units.reduce((s, u) => s + u.bedrooms, 0);
+    const community = config.community;
+    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+    const bounds = COMMUNITY_BOUNDS[community];
+
+    // Pick one check-in per season bucket. We want recent-but-future dates —
+    // far enough ahead that Airbnb returns actual listings, not dead
+    // inventory; not so far that the pricing engines haven't built calendars
+    // yet. Walk ~4-10 months ahead and pick a weekday for each season.
+    const now = new Date();
+    const monthAhead = (delta: number): Date => {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() + delta, 12);
+      return d;
+    };
+    // LOW: mid-September (shoulder). HIGH: mid-July (summer). HOLIDAY: late Dec.
+    // If we're already past those months this year, roll to next year.
+    const pickDate = (targetMonth: number, targetDay: number): Date => {
+      const y = now.getFullYear();
+      const thisYear = new Date(y, targetMonth, targetDay, 12, 0, 0);
+      if (thisYear.getTime() < now.getTime() + 30 * 86_400_000) {
+        return new Date(y + 1, targetMonth, targetDay, 12, 0, 0);
+      }
+      return thisYear;
+    };
+    const toYmd = (d: Date) => d.toISOString().slice(0, 10);
+    const addDays = (d: Date, n: number) => {
+      const c = new Date(d); c.setDate(c.getDate() + n); return c;
+    };
+    const seasonWindows: Array<{ season: "LOW" | "HIGH" | "HOLIDAY"; checkIn: string; checkOut: string }> = [
+      (() => { const ci = pickDate(8, 15); return { season: "LOW" as const,     checkIn: toYmd(ci), checkOut: toYmd(addDays(ci, nights)) }; })(),
+      (() => { const ci = pickDate(6, 10); return { season: "HIGH" as const,    checkIn: toYmd(ci), checkOut: toYmd(addDays(ci, nights)) }; })(),
+      (() => { const ci = pickDate(11, 26); return { season: "HOLIDAY" as const, checkIn: toYmd(ci), checkOut: toYmd(addDays(ci, nights)) }; })(),
+    ];
+    // Safety net — keep only windows whose check-in is actually in the
+    // future. (pickDate already handles the roll-forward but double-check.)
+    const safeWindows = seasonWindows.filter((w) => new Date(w.checkIn) >= now);
+    if (safeWindows.length === 0) monthAhead(1); // silence unused warning
+
+    // Distribution stats on a sorted array. Returns null if too few comps
+    // — we don't want to call a "market median" on 2 samples.
+    const percentile = (sortedArr: number[], p: number): number | null => {
+      if (sortedArr.length === 0) return null;
+      const idx = Math.min(sortedArr.length - 1, Math.floor((p / 100) * sortedArr.length));
+      return sortedArr[idx];
+    };
+    const computeStats = (rates: number[]) => {
+      if (rates.length < 3) return { n: rates.length, enough: false, median: null, p25: null, p40: null, p75: null, p90: null, min: null, max: null };
+      const sorted = [...rates].sort((a, b) => a - b);
+      return {
+        n: sorted.length,
+        enough: true,
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+        p25: percentile(sorted, 25),
+        p40: percentile(sorted, 40),
+        median: percentile(sorted, 50),
+        p75: percentile(sorted, 75),
+        p90: percentile(sorted, 90),
+      };
+    };
+
+    try {
+      const perSeason = await Promise.all(seasonWindows.map(async (w) => {
+        const sp: Record<string, string> = {
+          engine: "airbnb",
+          check_in_date: w.checkIn,
+          check_out_date: w.checkOut,
+          adults: String(Math.min(16, totalBR * 2)),
+          bedrooms: String(totalBR),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+          q: searchLocation,
+        };
+        if (bounds) {
+          sp.sw_lat = String(bounds.sw_lat);
+          sp.sw_lng = String(bounds.sw_lng);
+          sp.ne_lat = String(bounds.ne_lat);
+          sp.ne_lng = String(bounds.ne_lng);
+        }
+        try {
+          const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+          if (!r.ok) return { ...w, error: `HTTP ${r.status}`, stats: computeStats([]), sample: [] };
+          const data = await r.json() as any;
+          const props: any[] = Array.isArray(data?.properties) ? data.properties : [];
+          // Post-filter: require actual BR count >= totalBR. The engine's
+          // `bedrooms` param is a minimum but some results slip through.
+          const qualifying = props.filter((p: any) => {
+            const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
+            return pb == null || pb >= totalBR;
+          });
+          const rates = qualifying
+            .map((p: any): number => {
+              const total = Number(p?.price?.extracted_total_price ?? 0);
+              return total / nights;
+            })
+            .filter((r: number) => r > 0);
+          const stats = computeStats(rates);
+          const sample = qualifying
+            .filter((p: any) => (p?.price?.extracted_total_price ?? 0) > 0)
+            .slice(0, 5)
+            .map((p: any) => ({
+              title: String(p?.name ?? p?.title ?? "Listing"),
+              url: String(p?.link ?? ""),
+              bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : null,
+              nightlyRate: Math.round((Number(p?.price?.extracted_total_price ?? 0) || 0) / nights),
+            }));
+          return { ...w, stats, sample, rawCount: props.length, qualifyingCount: qualifying.length };
+        } catch (e: any) {
+          return { ...w, error: e.message, stats: computeStats([]), sample: [] };
+        }
+      }));
+
+      // Keyed by season for easy client lookup.
+      const seasons: Record<string, any> = {};
+      for (const s of perSeason) seasons[s.season] = s;
+
+      return res.json({
+        propertyId,
+        community,
+        totalBR,
+        nights,
+        seasons,
+        searchLocation,
+      });
+    } catch (err: any) {
+      console.error(`[market-comps] error:`, err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // POST /api/builder/normalize-photos
   // Fetch a listing's existing Guesty pictures, run each through validateAndFixPhoto,
   // re-upload the fixed ones to ImgBB, and PUT the listing back.
