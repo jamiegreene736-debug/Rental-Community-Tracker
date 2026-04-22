@@ -4439,15 +4439,15 @@ export async function registerRoutes(
     const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
     if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
 
-    const { listingId, keepFor, widenCapture, editorPaths } = (req.body ?? {}) as {
+    const { listingId, keepFor, widenCapture, editorPaths, fullUrls } = (req.body ?? {}) as {
       listingId?: string;
       keepFor?: number; // ms to keep listening after initial load (default 12s)
       widenCapture?: boolean;
-      // Explicit list of /hosting/listings/editor/{id}{path} suffixes to
-      // visit sequentially. Useful when the editor's default landing page
-      // doesn't fire the endpoints we care about. Default probes the
-      // known regulatory-adjacent paths.
       editorPaths?: string[];
+      // When provided, navigate to THESE absolute URLs instead of walking
+      // the /hosting/listings/editor/ sub-paths. Lets us probe Airbnb
+      // namespaces that live outside the editor (e.g. /regulations/...).
+      fullUrls?: string[];
     };
     if (!listingId || !/^\d+$/.test(listingId)) {
       return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
@@ -4557,40 +4557,53 @@ export async function registerRoutes(
       await page.mouse.wheel(0, 300);
       await page.waitForTimeout(1000);
 
-      // Walk through multiple editor paths — the regulations/licensing
-      // forms live behind specific sub-routes, and fetching them triggers
-      // the GraphQL calls we want to reverse-engineer.
-      const defaultPaths = [
-        "/details/regulations",
-        "/details/registration",
-        "/details/licenses",
-        "/details/taxes",
-        "/policies/hosting-rules",
-        "/compliance",
-        "/laws",
-        "",  // editor root last (tends to redirect to photo-tour)
-      ];
-      const pathsToVisit = (editorPaths && editorPaths.length > 0) ? editorPaths : defaultPaths;
-      const perPathDwell = Math.max(2000, Math.floor(listenMs / pathsToVisit.length));
-      for (const p of pathsToVisit) {
-        const targetUrl = `https://www.airbnb.com/hosting/listings/editor/${listingId}${p}`;
-        try {
-          await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
-        } catch { /* 404s expected on some paths */ }
-        await page.waitForTimeout(perPathDwell);
-        await page.mouse.wheel(0, 600);
-        await page.waitForTimeout(400);
+      // Two modes:
+      //   fullUrls: navigate to these absolute URLs one after another.
+      //             Used to probe namespaces outside /hosting/listings/editor/
+      //             like /regulations/{id}/{jurisdiction}/.
+      //   editorPaths: legacy mode that walks /hosting/listings/editor/{id}{path}.
+      if (fullUrls && fullUrls.length > 0) {
+        const perDwell = Math.max(3000, Math.floor(listenMs / fullUrls.length));
+        for (const u of fullUrls) {
+          try {
+            await page.goto(u, { waitUntil: "domcontentloaded", timeout: 30000 });
+          } catch { /* 404s/redirects expected on some */ }
+          await page.waitForTimeout(perDwell);
+          await page.mouse.wheel(0, 800);
+          await page.waitForTimeout(800);
+          await page.mouse.wheel(0, 1600);
+          await page.waitForTimeout(800);
+        }
+      } else {
+        const defaultPaths = [
+          "/details/regulations",
+          "/details/registration",
+          "/details/licenses",
+          "/details/taxes",
+          "/policies/hosting-rules",
+          "/compliance",
+          "/laws",
+          "",
+        ];
+        const pathsToVisit = (editorPaths && editorPaths.length > 0) ? editorPaths : defaultPaths;
+        const perPathDwell = Math.max(2000, Math.floor(listenMs / pathsToVisit.length));
+        for (const p of pathsToVisit) {
+          const targetUrl = `https://www.airbnb.com/hosting/listings/editor/${listingId}${p}`;
+          try {
+            await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+          } catch { /* 404s expected on some paths */ }
+          await page.waitForTimeout(perPathDwell);
+          await page.mouse.wheel(0, 600);
+          await page.waitForTimeout(400);
+        }
+        // Public listing page fallback — regulatory info can render in the footer.
+        await page.goto(`https://www.airbnb.com/rooms/${listingId}`, {
+          waitUntil: "domcontentloaded", timeout: 30000,
+        });
+        await page.waitForTimeout(Math.floor(listenMs / 2));
+        await page.mouse.wheel(0, 4000);
+        await page.waitForTimeout(3000);
       }
-
-      // Also visit the public listing page — regulatory info (license
-      // number, registration body) is rendered in the footer for
-      // regulated markets, which triggers a regulations-metadata fetch.
-      await page.goto(`https://www.airbnb.com/rooms/${listingId}`, {
-        waitUntil: "domcontentloaded", timeout: 30000,
-      });
-      await page.waitForTimeout(Math.floor(listenMs / 2));
-      await page.mouse.wheel(0, 4000); // all the way to the footer
-      await page.waitForTimeout(3000);
 
       // Also scrape the sidebar once more so the user can see what we saw
       const sidebar = await page.evaluate((lid: string) => {
