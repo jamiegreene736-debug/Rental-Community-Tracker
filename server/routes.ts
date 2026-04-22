@@ -4144,58 +4144,63 @@ export async function registerRoutes(
       const attempts: Array<{ path: string; finalUrl: string; title: string; looksValid: boolean }> = [];
       let chosenPath: string | null = null;
 
-      for (const p of pathsToTry) {
-        try {
-          await page.goto(`https://www.airbnb.com${p}`, { waitUntil: "domcontentloaded", timeout: 25000 });
-          await page.waitForTimeout(2000);
-          const u = page.url();
-          const t = await page.title().catch(() => "");
-          // Airbnb returns its 404 chrome at the REQUESTED URL for
-          // non-existent sub-paths (title = "Page not found"), so
-          // we can't just compare URLs. Sample the body too.
-          const bodyCheck = await page.evaluate(() =>
-            (document.body?.innerText || "").slice(0, 400).toLowerCase()
-          ).catch(() => "");
-          const is404 =
-            /page not found/i.test(t) ||
-            /can't seem to find the page|error code:\s*404|oops/i.test(bodyCheck);
-          const looksValid =
-            u.includes(p) &&
-            !/\/login\b/.test(u) &&
-            !is404;
-          attempts.push({ path: p, finalUrl: u, title: t, looksValid });
-          if (looksValid) { chosenPath = p; break; }
-        } catch (e: any) {
-          attempts.push({ path: p, finalUrl: "(navigation error)", title: e?.message ?? "", looksValid: false });
-        }
+      // SINGLE-NAV strategy — 4 rapid sub-path fetches triggered Akamai's
+      // bot detector on the last probe. Instead: one warm-up navigation
+      // to /hosting (we know that works), a humanized wait, then ONE
+      // navigation to the listing editor root. The editor auto-redirects
+      // to whatever its default sub-path is, and we scrape the sidebar
+      // from there to discover where compliance/regulatory actually lives.
+      await page.goto("https://www.airbnb.com/hosting", { waitUntil: "domcontentloaded", timeout: 25000 });
+      await page.waitForTimeout(3000);
+      // Simulated scroll / mouse jiggle — low-budget humanization.
+      await page.mouse.move(500, 300);
+      await page.mouse.wheel(0, 400);
+      await page.waitForTimeout(1500);
+
+      await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, {
+        waitUntil: "domcontentloaded", timeout: 30000,
+      });
+      await page.waitForTimeout(4000);
+      await page.mouse.wheel(0, 300);
+      await page.waitForTimeout(1500);
+
+      const landedUrl = page.url();
+      const landedTitle = await page.title().catch(() => "");
+      const bodyCheckAfterLanding = await page.evaluate(() =>
+        (document.body?.innerText || "").slice(0, 500).toLowerCase()
+      ).catch(() => "");
+      const blockedByBotMgr = /503|temporarily unavailable|stay tuned/i.test(landedTitle) ||
+                              /503|temporarily unavailable|stay tuned/i.test(bodyCheckAfterLanding);
+      attempts.push({
+        path: `/hosting/listings/editor/${listingId}`,
+        finalUrl: landedUrl,
+        title: landedTitle,
+        looksValid: !blockedByBotMgr && !/page not found/i.test(landedTitle),
+      });
+      if (!blockedByBotMgr && !/page not found/i.test(landedTitle)) {
+        chosenPath = new URL(landedUrl).pathname;
       }
 
-      // Always dump the sidebar (even when a path DID match) — it's tiny
-      // and it lets us see what other tabs exist so we can find the
-      // correct name for any field we didn't hit.
+      // Scrape every in-editor link for the sidebar. Airbnb's sidebar
+      // lives as `a[href*='/details/']` inside the listing editor —
+      // grab all of them, dedupe by href, and capture visible text so
+      // we can find the regulatory / compliance / license tab by name.
       let sidebarLinks: Array<{ href: string; text: string }> = [];
       try {
-        // If no chosen path, go to the editor root so the sidebar
-        // definitely shows up. If chosenPath succeeded, we can harvest
-        // links from that same page.
-        if (!chosenPath) {
-          await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, { waitUntil: "domcontentloaded", timeout: 25000 });
-          await page.waitForTimeout(3000);
-        }
-        sidebarLinks = await page.evaluate(() => {
+        sidebarLinks = await page.evaluate((lid: string) => {
           const out: Array<{ href: string; text: string }> = [];
           const seen = new Set<string>();
-          document.querySelectorAll("a[href*='/details/'], a[href*='/hosting/listings/editor/']").forEach((a) => {
+          document.querySelectorAll("a").forEach((a) => {
             const href = (a as HTMLAnchorElement).href;
+            // Only keep in-editor links for THIS listing
+            if (!href.includes("/hosting/listings/editor/" + lid)) return;
             if (seen.has(href)) return;
             seen.add(href);
-            out.push({
-              href,
-              text: ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
-            });
+            const text = ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim();
+            out.push({ href, text: text.slice(0, 80) });
           });
-          return out.slice(0, 50);
-        });
+          return out.slice(0, 80);
+        }, listingId);
       } catch { /* best effort */ }
 
       // Dump all inputs + labels on whichever page we landed on.
