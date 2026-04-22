@@ -629,6 +629,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [selectedId, setSelectedId] = useState("");
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
+  // Per-listing "Push Compliance" button state so multiple in-flight
+  // compliance submits don't step on each other if the user switches
+  // listings mid-request.
+  const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
   const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -1344,7 +1348,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   }, [propertyId, listings, selectedId]);
 
   // ── Load channel status when selection changes ─────────────────────────────
-  useEffect(() => {
+  const refreshChannelStatus = useCallback(() => {
     if (!selectedId) { setChannelStatus(null); return; }
     setLoadingChannels(true);
     guestyService.getChannelStatus(selectedId)
@@ -1352,6 +1356,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
       .catch(() => setChannelStatus(null))
       .finally(() => setLoadingChannels(false));
   }, [selectedId]);
+  useEffect(() => { refreshChannelStatus(); }, [refreshChannelStatus]);
 
   // ── Build new listing ──────────────────────────────────────────────────────
   const handleBuild = useCallback(async () => {
@@ -1899,6 +1904,88 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     </div>
                     {info?.id && <div className="glb-ch-meta">ID: {info.id}</div>}
                     {info?.status && <div className="glb-ch-meta">Status: {info.status}</div>}
+
+                    {/* Airbnb-only compliance sub-block. Appears once the listing
+                        is live on Airbnb (so the regulations form page exists).
+                        Three states: already-success (✓), regulation pending (button),
+                        or no regulations object yet (button — likely brand-new listing). */}
+                    {ch === "airbnb" && isLive && (() => {
+                      const compliance = info?.compliance;
+                      const isComplianceDone = compliance?.status === "success";
+                      const complianceBusy = complianceStateByListing[selectedId] === "busy";
+                      const handlePushCompliance = async () => {
+                        if (!selectedId || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense) {
+                          toast({ title: "Missing data", description: "Need both TMK and TAT to submit Airbnb compliance.", variant: "destructive" });
+                          return;
+                        }
+                        setComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "busy" }));
+                        try {
+                          const r = await fetch("/api/admin/airbnb/submit-compliance", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              listingId: info.id,  // Airbnb numeric ID, not Guesty ID
+                              jurisdiction: compliance?.jurisdiction ?? "kauai_county_hawaii",
+                              taxMapKey: effectivePropertyData.taxMapKey,
+                              tatLicense: effectivePropertyData.tatLicense,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          toast({
+                            title: data.advanced ? "Airbnb compliance submitted" : "Compliance form filled",
+                            description: data.advanced
+                              ? "Form accepted and advanced. Re-check Channel Status in a minute — Guesty will reflect the success status."
+                              : `Submitted but page didn't advance — there may be a validation error. Final URL: ${data.finalUrl}. Check your Airbnb dashboard manually.`,
+                            duration: 10000,
+                          });
+                          // Kick a channel-status refresh so the badge flips if the status updated.
+                          refreshChannelStatus?.();
+                        } catch (e: any) {
+                          toast({ title: "Airbnb compliance failed", description: e.message, variant: "destructive" });
+                        } finally {
+                          setComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "idle" }));
+                        }
+                      };
+                      return (
+                        <div className="glb-ch-compliance" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed rgba(0,0,0,0.1)", fontSize: 12 }}>
+                          {isComplianceDone ? (
+                            <div style={{ color: "#16a34a", display: "flex", alignItems: "center", gap: 6 }}>
+                              <span>✓</span>
+                              <div>
+                                <div style={{ fontWeight: 600 }}>Compliance on file</div>
+                                <div style={{ fontSize: 11, color: "#6b7280" }}>
+                                  {(compliance?.jurisdiction ?? "regulated jurisdiction").replace(/_/g, " ")}
+                                  {compliance?.regulationType ? ` — ${compliance.regulationType}` : ""}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <div style={{ color: "#b45309", fontWeight: 600, marginBottom: 6 }}>
+                                ⚠ Compliance not submitted
+                              </div>
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                Airbnb requires TMK + TAT for this listing's jurisdiction.
+                              </div>
+                              <button
+                                type="button"
+                                onClick={handlePushCompliance}
+                                disabled={complianceBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
+                                style={{
+                                  fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                                  border: "1px solid #d97706", background: complianceBusy ? "#fef3c7" : "#fffbeb",
+                                  color: "#92400e", cursor: complianceBusy ? "wait" : "pointer", fontWeight: 500,
+                                }}
+                                data-testid="btn-push-airbnb-compliance"
+                              >
+                                {complianceBusy ? "⏳ Submitting…" : "↗ Push Compliance to Airbnb"}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}

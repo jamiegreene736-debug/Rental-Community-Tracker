@@ -130,16 +130,35 @@ async function scrapeZillowViaApify(url: string): Promise<string[]> {
     }
     walk(items, 0);
 
-    // Dedupe, keeping the widest variant per photo.
-    const byStem = new Map<string, { url: string; width: number }>();
+    // Dedupe by photo hash. Every Zillow CDN URL is shaped:
+    //   https://photos.zillowstatic.com/fp/<32-hex-hash>-<variant>.jpg
+    // where <variant> ranges over size-suffixed (-cc_ft_1536) AND
+    // non-size-suffixed (-p_e, -p_f, -p_h, etc.) tokens for the same
+    // underlying photo. Earlier code keyed dedupe on the numeric size
+    // suffix, which meant non-size variants slipped through as
+    // "different" photos and got saved 2-4 times each. The hash is the
+    // canonical per-photo identifier — use it.
+    const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
+    const byHash = new Map<string, { url: string; score: number }>();
+    const scoreForUrl = (u: string): number => {
+      const sizeMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d{3,4})\./i);
+      if (sizeMatch) return parseInt(sizeMatch[1], 10);
+      // Non-size variants roughly ordered by the quality letter Zillow uses
+      if (/-p_h\./i.test(u)) return 1200; // large
+      if (/-p_f\./i.test(u)) return 1024;
+      if (/-p_e\./i.test(u)) return 800;
+      if (/-p_d\./i.test(u)) return 600;
+      return 0;
+    };
     for (const u of found) {
-      const widthMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d+)\.(jpg|jpeg|png|webp)/i);
-      const w = widthMatch ? parseInt(widthMatch[1], 10) : 0;
-      const stem = u.replace(/_(?:cc_ft_|uncropped_scaled_within_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$1");
-      const prev = byStem.get(stem);
-      if (!prev || w > prev.width) byStem.set(stem, { url: u, width: w });
+      const m = u.match(hashRe);
+      if (!m) continue;
+      const hash = m[1];
+      const score = scoreForUrl(u);
+      const prev = byHash.get(hash);
+      if (!prev || score > prev.score) byHash.set(hash, { url: u, score });
     }
-    const uniq = Array.from(byStem.values()).map((v) => v.url);
+    const uniq = Array.from(byHash.values()).map((v) => v.url);
     console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos`);
     return uniq;
   } catch (e: any) {

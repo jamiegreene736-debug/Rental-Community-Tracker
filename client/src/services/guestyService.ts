@@ -87,6 +87,16 @@ export type ChannelInfo = {
   live: boolean;
   id: string | null;
   status: string | null;
+  // Airbnb only: regulatory/compliance state pulled from
+  // integrations[].airbnb2.permits.regulations[0]. null = no regulations
+  // record (jurisdiction isn't regulated in Airbnb's eyes, or the field
+  // hasn't been touched yet).
+  compliance?: {
+    status: "success" | "pending" | "failed" | "unknown";
+    jurisdiction: string | null;        // e.g. "kauai_county_hawaii"
+    regulationType: string | null;      // e.g. "registration"
+    lastUpdatedOn: string | null;
+  } | null;
 };
 
 export type GuestyChannelStatus = {
@@ -321,20 +331,44 @@ class GuestyService {
     const bookingComData = findIntegration(["bookingCom", "booking_com"])
       ?? (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
 
-    const toInfo = (data: Record<string, string> | undefined): ChannelInfo => {
-      const hasId = !!(data?.id || data?.listingId || data?.propertyId || data?.hotelId);
-      const isCompleted = data?.status === "COMPLETED" || data?.status === "connected";
+    const toInfo = (data: Record<string, unknown> | undefined): ChannelInfo => {
+      const d = data as Record<string, string> | undefined;
+      const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId);
+      const isCompleted = d?.status === "COMPLETED" || d?.status === "connected";
       return {
         connected: hasId || isCompleted,
         live: (hasId || isCompleted) && isListed,
-        id: data?.id || data?.listingId || data?.propertyId || data?.hotelId || null,
-        status: data?.status || null,
+        id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || null,
+        status: d?.status || null,
       };
     };
 
+    // Airbnb compliance — lifted from airbnb2.permits.regulations[0].
+    // Null if the permits object or regulations array is missing. That
+    // can mean the jurisdiction isn't regulated by Airbnb OR the form
+    // has never been submitted. The caller can disambiguate based on
+    // the listing's address (we don't guess here).
+    const airbnbCompliance = (() => {
+      const permits = (airbnbData as Record<string, unknown> | undefined)?.permits as Record<string, unknown> | undefined;
+      const regs = permits?.regulations as Array<Record<string, unknown>> | undefined;
+      const lastUpdated = (permits?.lastUpdatedOn as string | undefined) ?? null;
+      if (!regs || regs.length === 0) return null;
+      const first = regs[0];
+      const status = (first.status as string) || "unknown";
+      return {
+        status: (["success", "pending", "failed"].includes(status) ? status : "unknown") as "success" | "pending" | "failed" | "unknown",
+        jurisdiction: (first.regulatoryBody as string) ?? null,
+        regulationType: (first.regulationType as string) ?? null,
+        lastUpdatedOn: lastUpdated,
+      };
+    })();
+
+    const airbnbInfo = toInfo(airbnbData);
+    airbnbInfo.compliance = airbnbCompliance;
+
     return {
       isListed,
-      airbnb: toInfo(airbnbData),
+      airbnb: airbnbInfo,
       vrbo: toInfo(vrboData),
       bookingCom: toInfo(bookingComData),
     };

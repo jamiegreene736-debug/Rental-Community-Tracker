@@ -21,6 +21,7 @@
 
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { labelPhoto } from "./photo-labeler";
 import { storage } from "./storage";
 
@@ -52,19 +53,23 @@ type LabeledResult = DownloadResult & {
 
 const LABEL_CONCURRENCY = 8;
 
-async function downloadOne(srcUrl: string, destPath: string): Promise<boolean> {
+// Returns the MD5 of the bytes we wrote (hex) on success, null on failure.
+// Caller uses the hash to dedupe — two URLs with identical bytes collapse
+// to one saved file.
+async function downloadOne(srcUrl: string, destPath: string): Promise<string | null> {
   try {
     const r = await fetch(srcUrl, {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
       signal: AbortSignal.timeout(15000),
     });
-    if (!r.ok) return false;
+    if (!r.ok) return null;
     const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length < 5000) return false;
+    if (buf.length < 5000) return null;
+    const hash = crypto.createHash("md5").update(buf).digest("hex");
     await fs.promises.writeFile(destPath, buf);
-    return true;
+    return hash;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -124,12 +129,30 @@ export async function downloadAndPrioritize(opts: {
   // Step 1: download each URL to a temp filename. The _pending_ prefix keeps
   // them distinguishable from final photo_NN.jpg names so we can clean up
   // correctly even if the process dies mid-run.
+  //
+  // SECOND-LINE DEDUPE: track MD5 of the bytes we write. If two URLs
+  // return identical content (a real problem — Zillow serves the same
+  // photo under multiple filename variants and the URL-level dedupe
+  // can miss some), drop the duplicate immediately and move on.
   const downloaded: DownloadResult[] = [];
+  const seenHashes = new Set<string>();
+  let duplicateCount = 0;
   for (let i = 0; i < scrapedUrls.length; i++) {
     const tempName = `_pending_${String(i).padStart(3, "0")}.jpg`;
     const dest = path.join(folderPath, tempName);
-    const ok = await downloadOne(scrapedUrls[i], dest);
-    if (ok) downloaded.push({ tempName, url: scrapedUrls[i], originalIndex: i });
+    const hash = await downloadOne(scrapedUrls[i], dest);
+    if (!hash) continue;
+    if (seenHashes.has(hash)) {
+      // Byte-for-byte duplicate of one we already kept — discard.
+      await fs.promises.unlink(dest).catch(() => {});
+      duplicateCount++;
+      continue;
+    }
+    seenHashes.add(hash);
+    downloaded.push({ tempName, url: scrapedUrls[i], originalIndex: i });
+  }
+  if (duplicateCount > 0) {
+    console.log(`[downloadAndPrioritize] ${folder}: dropped ${duplicateCount} byte-identical duplicates`);
   }
 
   if (downloaded.length === 0) {
