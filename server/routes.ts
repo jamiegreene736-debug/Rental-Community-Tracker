@@ -64,64 +64,81 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
-// Fetch Zillow photos via SearchAPI's dedicated zillow_property engine.
-// Needed because Zillow returns HTTP 403 to both plain fetch and Playwright
-// from residential and hosted IPs (confirmed 2026-04-22). SearchAPI's
-// engine runs behind their anti-blocking infrastructure so this is the
-// only path that actually works end-to-end.
-async function scrapeZillowViaSearchAPI(url: string): Promise<string[]> {
+// Fetch Zillow listing photos via Google Images. Zillow's page at
+// zillow.com is locked down by Cloudflare/Akamai (HTTP 403 to every IP
+// we've tried, direct fetch and Playwright alike). But their CDN
+// (photos.zillowstatic.com) does NOT enforce the same bot rules, and
+// Google has indexed the full photo carousel. So: query google_images
+// for the zpid, pick URLs that point at photos.zillowstatic.com, and
+// download those directly. Zero coupling to zillow.com the domain.
+async function scrapeZillowViaGoogleImages(url: string): Promise<string[]> {
   const key = process.env.SEARCHAPI_API_KEY;
   if (!key) return [];
+  // Extract zpid from /homedetails/.../80152954_zpid/ patterns.
+  const zpidMatch = url.match(/(\d{6,12})_zpid/);
+  if (!zpidMatch) {
+    console.warn(`[scrapeZillow:GImages] no zpid in ${url}`);
+    return [];
+  }
+  const zpid = zpidMatch[1];
   try {
-    const api = `https://www.searchapi.io/api/v1/search?engine=zillow_property&property_url=${encodeURIComponent(url)}&api_key=${key}`;
-    const r = await fetch(api, { signal: AbortSignal.timeout(30000) });
+    // site:zillow.com <zpid> narrows Google to the single listing. 60 results
+    // gives us headroom for dupes + thumbnails we discard.
+    const params = new URLSearchParams({
+      engine: "google_images",
+      q: `site:zillow.com ${zpid}`,
+      api_key: key,
+      num: "60",
+      safe: "active",
+    });
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+      signal: AbortSignal.timeout(30000),
+    });
     if (!r.ok) {
-      console.warn(`[scrapeZillow:SearchAPI] ${url} → HTTP ${r.status}`);
+      console.warn(`[scrapeZillow:GImages] HTTP ${r.status} for zpid ${zpid}`);
       return [];
     }
-    const j: any = await r.json();
-    const out: string[] = [];
-    function walk(obj: any, depth: number): void {
-      if (depth > 10 || !obj || typeof obj !== "object") return;
-      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof v === "string" && /^https?:\/\/photos?\.zillowstatic\.com\//i.test(v)
-            && /\.(jpg|jpeg|png|webp)/i.test(v)) {
-          out.push(v);
-        } else if (v && typeof v === "object") {
-          walk(v, depth + 1);
-        }
-      }
+    const data = await r.json() as any;
+    const rows: any[] = data.images || data.images_results || [];
+    const urls: string[] = [];
+    for (const img of rows) {
+      const orig = img?.original?.link ?? img?.original ?? null;
+      if (typeof orig !== "string") continue;
+      if (!/^https?:\/\/photos?\.zillowstatic\.com\//i.test(orig)) continue;
+      if (!/\.(jpg|jpeg|png|webp)/i.test(orig)) continue;
+      urls.push(orig);
     }
-    walk(j, 0);
-    // Dedupe while keeping highest-resolution variant per photo. Zillow URLs
-    // look like .../abc-cc_ft_1536.jpg — 1536 is width, we want the biggest.
-    const byKey = new Map<string, { url: string; width: number }>();
-    for (const u of out) {
-      const widthMatch = u.match(/(\d+)\.(jpg|jpeg|png|webp)/i);
+    // Dedupe by photo "stem" (strip width suffixes so multiple sizes of the
+    // same image collapse to one). Zillow URLs look like:
+    //   .../fp/<hash>-cc_ft_1536.jpg  →  <hash>-cc_ft_W.jpg
+    //   .../fp/<hash>-p_h.jpg         →  <hash>-p_h.jpg
+    const byStem = new Map<string, { url: string; width: number }>();
+    for (const u of urls) {
+      const widthMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d+)\.(jpg|jpeg|png|webp)/i);
       const w = widthMatch ? parseInt(widthMatch[1], 10) : 0;
-      const key = u.replace(/_(?:cc_ft_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$2");
-      const prev = byKey.get(key);
-      if (!prev || w > prev.width) byKey.set(key, { url: u, width: w });
+      const stem = u.replace(/_(?:cc_ft_|uncropped_scaled_within_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$1");
+      const prev = byStem.get(stem);
+      if (!prev || w > prev.width) byStem.set(stem, { url: u, width: w });
     }
-    const uniq = Array.from(byKey.values()).map((v) => v.url);
-    console.log(`[scrapeZillow:SearchAPI] ${url} → ${uniq.length} photo urls`);
+    const uniq = Array.from(byStem.values()).map((v) => v.url);
+    console.log(`[scrapeZillow:GImages] zpid ${zpid}: ${rows.length} results → ${urls.length} CDN urls → ${uniq.length} unique photos`);
     return uniq;
   } catch (e: any) {
-    console.warn(`[scrapeZillow:SearchAPI] ${url} → ${e?.message ?? e}`);
+    console.warn(`[scrapeZillow:GImages] zpid ${zpid}: ${e?.message ?? e}`);
     return [];
   }
 }
 
 async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
-  // Fast path: Zillow URLs go through SearchAPI because every direct-fetch
-  // path (Playwright + plain fetch) gets blocked with 403.
+  // Fast path: Zillow URLs go through Google Images → zillowstatic CDN,
+  // because zillow.com itself 403s every IP we've tried (Playwright + fetch).
   if (/zillow\.com/i.test(primaryUrl)) {
-    const urls = await scrapeZillowViaSearchAPI(primaryUrl);
+    const urls = await scrapeZillowViaGoogleImages(primaryUrl);
     if (urls.length > 0) {
       return urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
-    // If SearchAPI failed and we have a non-Zillow fallback, try the browser path below.
+    // If the Google-Images path returned nothing and the fallback is also
+    // Zillow, there's nothing more we can do.
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
 
@@ -5693,6 +5710,22 @@ export async function registerRoutes(
       console.error(`[rescrape] ${folder}: ${err?.message ?? err}`);
       res.status(500).json({ error: err?.message ?? "rescrape failed" });
     }
+  });
+
+  // Diagnostic: does the Zillow scraper actually return photos for a given URL?
+  // Usage: GET /api/builder/probe-zillow?url=<zillow url>
+  // Returns the list of CDN URLs the scraper found, without writing anything.
+  app.get("/api/builder/probe-zillow", async (req, res) => {
+    const url = String(req.query.url ?? "");
+    if (!/^https?:\/\/(www\.)?zillow\.com\//i.test(url)) {
+      return res.status(400).json({ error: "url query must be a zillow.com URL" });
+    }
+    const scraped = await scrapeListingPhotos(url);
+    res.json({
+      url,
+      count: scraped.length,
+      samples: scraped.slice(0, 10).map((p) => p.url),
+    });
   });
 
   // Read _source.json for a folder (so the client can pre-fill the URL prompt).
