@@ -64,7 +64,67 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
+// Fetch Zillow photos via SearchAPI's dedicated zillow_property engine.
+// Needed because Zillow returns HTTP 403 to both plain fetch and Playwright
+// from residential and hosted IPs (confirmed 2026-04-22). SearchAPI's
+// engine runs behind their anti-blocking infrastructure so this is the
+// only path that actually works end-to-end.
+async function scrapeZillowViaSearchAPI(url: string): Promise<string[]> {
+  const key = process.env.SEARCHAPI_API_KEY;
+  if (!key) return [];
+  try {
+    const api = `https://www.searchapi.io/api/v1/search?engine=zillow_property&property_url=${encodeURIComponent(url)}&api_key=${key}`;
+    const r = await fetch(api, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) {
+      console.warn(`[scrapeZillow:SearchAPI] ${url} → HTTP ${r.status}`);
+      return [];
+    }
+    const j: any = await r.json();
+    const out: string[] = [];
+    function walk(obj: any, depth: number): void {
+      if (depth > 10 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === "string" && /^https?:\/\/photos?\.zillowstatic\.com\//i.test(v)
+            && /\.(jpg|jpeg|png|webp)/i.test(v)) {
+          out.push(v);
+        } else if (v && typeof v === "object") {
+          walk(v, depth + 1);
+        }
+      }
+    }
+    walk(j, 0);
+    // Dedupe while keeping highest-resolution variant per photo. Zillow URLs
+    // look like .../abc-cc_ft_1536.jpg — 1536 is width, we want the biggest.
+    const byKey = new Map<string, { url: string; width: number }>();
+    for (const u of out) {
+      const widthMatch = u.match(/(\d+)\.(jpg|jpeg|png|webp)/i);
+      const w = widthMatch ? parseInt(widthMatch[1], 10) : 0;
+      const key = u.replace(/_(?:cc_ft_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$2");
+      const prev = byKey.get(key);
+      if (!prev || w > prev.width) byKey.set(key, { url: u, width: w });
+    }
+    const uniq = Array.from(byKey.values()).map((v) => v.url);
+    console.log(`[scrapeZillow:SearchAPI] ${url} → ${uniq.length} photo urls`);
+    return uniq;
+  } catch (e: any) {
+    console.warn(`[scrapeZillow:SearchAPI] ${url} → ${e?.message ?? e}`);
+    return [];
+  }
+}
+
 async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
+  // Fast path: Zillow URLs go through SearchAPI because every direct-fetch
+  // path (Playwright + plain fetch) gets blocked with 403.
+  if (/zillow\.com/i.test(primaryUrl)) {
+    const urls = await scrapeZillowViaSearchAPI(primaryUrl);
+    if (urls.length > 0) {
+      return urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
+    }
+    // If SearchAPI failed and we have a non-Zillow fallback, try the browser path below.
+    if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
+  }
+
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],

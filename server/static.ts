@@ -10,6 +10,15 @@ export function serveStatic(app: Express) {
     );
   }
 
+  // Serve runtime photo writes (community-photo save, unit-swap rescrape, etc.)
+  // directly from client/public/photos/ BEFORE the built dist. Otherwise new
+  // photos written at runtime would be invisible until the next redeploy
+  // (because Vite copies client/public → dist/public only at build time).
+  const runtimePhotosPath = path.resolve(process.cwd(), "client/public/photos");
+  if (fs.existsSync(runtimePhotosPath)) {
+    app.use("/photos", express.static(runtimePhotosPath));
+  }
+
   app.use(express.static(distPath));
 
   // fall through to index.html if the file doesn't exist
