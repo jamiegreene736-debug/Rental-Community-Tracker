@@ -423,6 +423,11 @@ function ChannelMarkupCard({
           );
         })}
       </div>
+      {!listingId && (
+        <div style={{ marginBottom: 10, padding: "8px 12px", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4, fontSize: 11, color: "#92400e" }}>
+          ⚠ <b>Select a Guesty listing</b> in the dropdown at the top of the builder before pushing rates or markups. None of the push buttons will work until a listing is selected.
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <button
           className="glb-btn glb-btn-primary"
@@ -430,7 +435,7 @@ function ChannelMarkupCard({
           disabled={busy || !listingId || seasonalMonths.length === 0}
           style={{ fontSize: 12 }}
           data-testid="button-set-up-clean-margin"
-          title="Push seasonal base rates AND channel-equalizing markups so every month × every channel nets the target margin"
+          title={!listingId ? "Select a Guesty listing in the dropdown at the top of the builder first" : "Push seasonal base rates AND channel-equalizing markups so every month × every channel nets the target margin"}
         >
           {busy ? "Pushing…" : `⚡⬆ Set up clean ${targetMarginPct}% margin pricing`}
         </button>
@@ -1230,6 +1235,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
     init();
     return () => { cancelled = true; };
   }, []);
+
+  // ── Auto-select the Guesty listing mapped to this property ─────────────────
+  // Users landing on the pricing tab from a specific property expect the
+  // correct listing to be pre-selected — not a blank dropdown. Pulls the
+  // guestyPropertyMap and matches on propertyId the first time both
+  // `listings` and `propertyId` are populated.
+  useEffect(() => {
+    if (selectedId || !propertyId || listings.length === 0) return;
+    let cancelled = false;
+    fetch("/api/guesty-property-map")
+      .then((r) => r.json())
+      .then((maps: Array<{ propertyId: number; guestyListingId: string }>) => {
+        if (cancelled) return;
+        const match = maps.find((m) => m.propertyId === propertyId);
+        if (match && listings.some((l: any) => l._id === match.guestyListingId)) {
+          setSelectedId(match.guestyListingId);
+        }
+      })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, [propertyId, listings, selectedId]);
 
   // ── Load channel status when selection changes ─────────────────────────────
   useEffect(() => {
