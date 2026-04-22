@@ -16,6 +16,7 @@ import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-resear
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles } from "./photo-labeler";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
+import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -3917,6 +3918,45 @@ export async function registerRoutes(
     if (isNaN(propertyId) || !startDate) return res.status(400).json({ error: "invalid params" });
     const ok = await storage.deleteScannerOverride(propertyId, startDate);
     res.json({ deleted: ok });
+  });
+
+  // ── Scheduler (Phase 4) ──
+  app.get("/api/availability/schedule/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const row = await storage.getScannerSchedule(propertyId);
+    res.json({ schedule: row ?? null, tick: getScannerSchedulerStatus() });
+  });
+
+  app.post("/api/availability/schedule/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const body = req.body as Partial<{
+      enabled: boolean; intervalHours: number; runInventory: boolean; runPricing: boolean;
+      runSyncBlocks: boolean; targetMargin: number; minSets: number;
+    }>;
+    const existing = await storage.getScannerSchedule(propertyId);
+    const row = await storage.upsertScannerSchedule({
+      propertyId,
+      enabled: body.enabled ?? existing?.enabled ?? false,
+      intervalHours: body.intervalHours ?? existing?.intervalHours ?? 12,
+      runInventory: body.runInventory ?? existing?.runInventory ?? true,
+      runPricing: body.runPricing ?? existing?.runPricing ?? true,
+      runSyncBlocks: body.runSyncBlocks ?? existing?.runSyncBlocks ?? true,
+      targetMargin: String(body.targetMargin ?? (existing ? parseFloat(String(existing.targetMargin)) : 0.2)),
+      minSets: body.minSets ?? existing?.minSets ?? 3,
+    });
+    res.json({ schedule: row });
+  });
+
+  // POST /api/availability/run-now/:propertyId — trigger the full pipeline
+  // on demand (user clicked "Run now" in the UI).
+  app.post("/api/availability/run-now/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    // Don't await — let it run in the background and the UI polls status.
+    runFullScanNow(propertyId).catch(() => {});
+    res.json({ started: true });
   });
 
   // POST /api/builder/normalize-photos

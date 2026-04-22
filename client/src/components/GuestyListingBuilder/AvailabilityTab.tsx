@@ -6,7 +6,7 @@
 // get pushed as unavailable blocks to Guesty's calendar so they can't
 // be oversold.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Verdict = "open" | "tight" | "blocked" | "pending";
 
@@ -72,6 +72,68 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncResult, setSyncResult] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Scheduler state (Phase 4)
+  type Schedule = {
+    id: number; propertyId: number; enabled: boolean;
+    intervalHours: number;
+    runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean;
+    targetMargin: string | number; minSets: number;
+    lastRunAt: string | null; lastRunStatus: string | null; lastRunSummary: string | null;
+  };
+  const [schedule, setSchedule] = useState<Schedule | null>(null);
+  const [runNowBusy, setRunNowBusy] = useState(false);
+
+  const fetchSchedule = useCallback(async () => {
+    if (!propertyId) return;
+    try {
+      const r = await fetch(`/api/availability/schedule/${propertyId}`);
+      const d = await r.json();
+      setSchedule(d.schedule);
+    } catch { /* ignore */ }
+  }, [propertyId]);
+
+  useEffect(() => {
+    fetchSchedule();
+    // Poll while a manual run is in flight so the lastRunSummary updates.
+    const t = setInterval(fetchSchedule, 30_000);
+    return () => clearInterval(t);
+  }, [fetchSchedule]);
+
+  const updateSchedule = useCallback(async (patch: Partial<Schedule>) => {
+    if (!propertyId) return;
+    try {
+      const r = await fetch(`/api/availability/schedule/${propertyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const d = await r.json();
+      setSchedule(d.schedule);
+    } catch { /* ignore */ }
+  }, [propertyId]);
+
+  const runNow = useCallback(async () => {
+    if (!propertyId || runNowBusy) return;
+    setRunNowBusy(true);
+    try {
+      await fetch(`/api/availability/run-now/${propertyId}`, { method: "POST" });
+      // Pipeline runs in background; refresh status repeatedly until it
+      // completes or 90s elapse.
+      const start = Date.now();
+      const startedAt = schedule?.lastRunAt ?? "";
+      while (Date.now() - start < 90_000) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const r = await fetch(`/api/availability/schedule/${propertyId}`);
+        const d = await r.json();
+        if (d.schedule?.lastRunAt && d.schedule.lastRunAt !== startedAt) {
+          setSchedule(d.schedule);
+          break;
+        }
+      }
+    } finally {
+      setRunNowBusy(false);
+    }
+  }, [propertyId, runNowBusy, schedule?.lastRunAt]);
 
   const summary = useMemo(() => {
     const open = results.filter((r) => r.verdict === "open").length;
@@ -231,6 +293,109 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
   return (
     <div>
+      {/* ── Scheduler card (Phase 4) ─────────────────────────── */}
+      <div style={{
+        marginBottom: 16, padding: "12px 14px",
+        background: schedule?.enabled ? "#f0f9ff" : "var(--card)",
+        border: `1px solid ${schedule?.enabled ? "#bae6fd" : "var(--border)"}`,
+        borderRadius: 8,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: schedule?.enabled ? "#075985" : "#374151" }}>
+              ⏱ Auto-scan scheduler {schedule?.enabled ? "ON" : "OFF"}
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+              When enabled, the server runs the inventory scan + price scan + Guesty block + rate sync every{" "}
+              <b>{schedule?.intervalHours ?? 12}h</b> in the background.
+              Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
+              {schedule?.lastRunStatus && (
+                <span style={{ color: schedule.lastRunStatus === "ok" ? "#16a34a" : "#dc2626", marginLeft: 6 }}>
+                  ({schedule.lastRunStatus})
+                </span>
+              )}
+              {schedule?.lastRunSummary && (
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+                  ↳ {schedule.lastRunSummary}
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
+              Every
+              <select
+                value={schedule?.intervalHours ?? 12}
+                onChange={(e) => updateSchedule({ intervalHours: parseInt(e.target.value, 10) })}
+                disabled={!schedule}
+                style={{ padding: "2px 6px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
+              >
+                <option value={6}>6h</option>
+                <option value={12}>12h</option>
+                <option value={24}>24h</option>
+                <option value={48}>48h</option>
+              </select>
+            </label>
+            <button
+              className="glb-btn"
+              onClick={() => updateSchedule({ enabled: !schedule?.enabled })}
+              style={{ fontSize: 11 }}
+            >
+              {schedule?.enabled ? "Disable" : "Enable"} auto-scan
+            </button>
+            <button
+              className="glb-btn"
+              onClick={runNow}
+              disabled={runNowBusy}
+              style={{ fontSize: 11 }}
+            >
+              {runNowBusy ? "Running…" : "▶ Run pipeline now"}
+            </button>
+          </div>
+        </div>
+        {schedule?.enabled && (
+          <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "#6b7280" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input type="checkbox" checked={schedule.runInventory} onChange={(e) => updateSchedule({ runInventory: e.target.checked })} />
+              Inventory check
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input type="checkbox" checked={schedule.runPricing} onChange={(e) => updateSchedule({ runPricing: e.target.checked })} />
+              Price scan + rate push
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input type="checkbox" checked={schedule.runSyncBlocks} onChange={(e) => updateSchedule({ runSyncBlocks: e.target.checked })} />
+              Sync blocks to Guesty
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              Min sets:
+              <select
+                value={schedule.minSets}
+                onChange={(e) => updateSchedule({ minSets: parseInt(e.target.value, 10) })}
+                style={{ padding: "1px 4px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
+              >
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+                <option value={4}>4</option>
+                <option value={5}>5</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              Margin:
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="50"
+                value={Math.round(parseFloat(String(schedule.targetMargin)) * 100)}
+                onChange={(e) => updateSchedule({ targetMargin: parseFloat(e.target.value) / 100 })}
+                style={{ width: 50, padding: "1px 4px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
+              />%
+            </label>
+          </div>
+        )}
+      </div>
+
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
         <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>

@@ -13,7 +13,8 @@ import {
   type PhotoLabel, type InsertPhotoLabel,
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides,
+  type ScannerSchedule, type InsertScannerSchedule,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides, scannerSchedule,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -543,6 +544,41 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(scannerOverrides.propertyId, propertyId), eq(scannerOverrides.startDate, startDate)))
       .returning();
     return result.length > 0;
+  }
+
+  // ── Scanner schedule (Phase 4) ──
+  async getScannerSchedules(): Promise<ScannerSchedule[]> {
+    return db.select().from(scannerSchedule).orderBy(scannerSchedule.propertyId);
+  }
+
+  async getScannerSchedule(propertyId: number): Promise<ScannerSchedule | undefined> {
+    const [row] = await db.select().from(scannerSchedule)
+      .where(eq(scannerSchedule.propertyId, propertyId))
+      .limit(1);
+    return row;
+  }
+
+  async upsertScannerSchedule(data: InsertScannerSchedule): Promise<ScannerSchedule> {
+    const existing = await this.getScannerSchedule(data.propertyId);
+    if (existing) {
+      const [row] = await db.update(scannerSchedule)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(scannerSchedule.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(scannerSchedule).values(data).returning();
+    return row;
+  }
+
+  async markScannerScheduleRan(
+    propertyId: number,
+    status: "ok" | "error",
+    summary: string,
+  ): Promise<void> {
+    await db.update(scannerSchedule)
+      .set({ lastRunAt: new Date(), lastRunStatus: status, lastRunSummary: summary, updatedAt: new Date() })
+      .where(eq(scannerSchedule.propertyId, propertyId));
   }
 }
 

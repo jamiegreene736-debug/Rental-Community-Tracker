@@ -119,3 +119,77 @@ export function verdictFor(maxSets: number, minSets: number): "open" | "tight" |
   if (maxSets <= minSets + 1) return "tight";
   return "open";
 }
+
+// ── Price-side helpers (Phase 3) ────────────────────────────────────────
+// The cheap site-search counts inventory but doesn't carry prices. For
+// pricing we sample the SearchAPI airbnb engine sparingly — once per
+// season per bedroom count — and reuse those numbers across all weeks
+// in that season. ~6 priced calls per scan per property.
+
+export type SeasonKey = "LOW" | "HIGH" | "HOLIDAY";
+
+export type SeasonalCheapestPerBR = Record<SeasonKey, Record<number, number | null>>;
+//                                  ^ season       ^ bedrooms  cheapest nightly
+
+export type FindCheapestOptions = {
+  resortName: string | null;
+  community: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  q: string;
+  bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
+  apiKey: string;
+};
+
+// Single airbnb-engine call. Returns the cheapest available listing's
+// per-night rate for the given window — null if nothing comes back with
+// a usable price. Tolerates the engine's missing-price cases silently
+// (some short-notice or far-future windows have no priced inventory).
+export async function findCheapestPricedNightly(opts: FindCheapestOptions): Promise<number | null> {
+  const nights = Math.max(1, Math.round(
+    (new Date(opts.checkOut + "T12:00:00").getTime() - new Date(opts.checkIn + "T12:00:00").getTime()) / 86_400_000,
+  ));
+  const sp: Record<string, string> = {
+    engine: "airbnb",
+    check_in_date: opts.checkIn,
+    check_out_date: opts.checkOut,
+    adults: "2",
+    bedrooms: String(opts.bedrooms),
+    type_of_place: "entire_home",
+    currency: "USD",
+    api_key: opts.apiKey,
+    q: opts.q,
+  };
+  if (opts.bounds) {
+    sp.sw_lat = String(opts.bounds.sw_lat);
+    sp.sw_lng = String(opts.bounds.sw_lng);
+    sp.ne_lat = String(opts.bounds.ne_lat);
+    sp.ne_lng = String(opts.bounds.ne_lng);
+  }
+  try {
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+    if (!r.ok) return null;
+    const data = await r.json() as any;
+    let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    if (opts.resortName) {
+      const tokens = opts.resortName.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter((t) => t.length >= 3);
+      properties = properties.filter((p: any) => {
+        const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
+        return tokens.every((t) => hay.includes(t));
+      });
+    }
+    properties = properties.filter((p: any) => {
+      const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
+      return pb == null || pb === opts.bedrooms;
+    });
+    const prices = properties
+      .map((p: any) => Number(p?.price?.extracted_total_price ?? 0))
+      .filter((n) => n > 0);
+    if (prices.length === 0) return null;
+    const cheapestTotal = Math.min(...prices);
+    return Math.round(cheapestTotal / nights);
+  } catch {
+    return null;
+  }
+}

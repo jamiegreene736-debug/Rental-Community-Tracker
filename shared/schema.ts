@@ -302,6 +302,33 @@ export const scannerOverrides = pgTable("scanner_overrides", {
 export type ScannerOverride = typeof scannerOverrides.$inferSelect;
 export type InsertScannerOverride = typeof scannerOverrides.$inferInsert;
 
+// ── Per-listing scheduler rows (Phase 4) ──
+// One row per Guesty-mapped property that the inventory scanner should
+// keep refreshing on its own. The server-side tick reads this table
+// every few minutes and kicks off jobs for whichever rows are past due.
+export const scannerSchedule = pgTable("scanner_schedule", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull().unique(),
+  enabled: boolean("enabled").notNull().default(false),
+  intervalHours: integer("interval_hours").notNull().default(12),
+  // What the scheduled run should do. Flags so we can flip price-push
+  // off while keeping inventory-check on (or vice versa).
+  runInventory: boolean("run_inventory").notNull().default(true),
+  runPricing: boolean("run_pricing").notNull().default(true),
+  runSyncBlocks: boolean("run_sync_blocks").notNull().default(true),
+  // User's target margin for the inventory-driven pricing push.
+  targetMargin: numeric("target_margin", { precision: 5, scale: 4 }).notNull().default("0.2000"),
+  // Minimum sets floor the run uses when deciding blocks.
+  minSets: integer("min_sets").notNull().default(3),
+  lastRunAt: timestamp("last_run_at"),
+  lastRunStatus: text("last_run_status"),       // "ok" | "error" | null
+  lastRunSummary: text("last_run_summary"),     // short message for the UI
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type ScannerSchedule = typeof scannerSchedule.$inferSelect;
+export type InsertScannerSchedule = typeof scannerSchedule.$inferInsert;
+
 // ── Photo labels ──
 // Claude-vision-generated captions for property photos. The static
 // unit-builder-data.ts had hardcoded labels that drifted from reality
