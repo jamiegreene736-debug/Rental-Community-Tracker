@@ -130,6 +130,15 @@ export default function AddCommunity() {
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepDone, setSweepDone] = useState(false);
   const sweepAbortRef = useRef<AbortController | null>(null);
+  // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
+  // user picks markets from; "running" shows streaming per-market progress.
+  // Avoids the old behavior of firing a ~30-minute sweep across all 20
+  // markets the moment the user clicks the button.
+  type SweepPhase = "setup" | "running";
+  const [sweepPhase, setSweepPhase] = useState<SweepPhase>("setup");
+  const [seedMarkets, setSeedMarkets] = useState<Array<{ city: string; state: string; tag: string }> | null>(null);
+  const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
+  const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
 
   // Step 3
   const [unitSearchResults, setUnitSearchResults] = useState<{ units: UnitResult[]; grouped: Record<string, UnitResult[]> } | null>(null);
@@ -182,12 +191,56 @@ export default function AddCommunity() {
     }
   }, [selectedState, cityInput, toast]);
 
-  // ── Top-markets sweep: iterate curated list of VR hotspots ─────────────
-  const runTopMarketsSweep = useCallback(async () => {
+  // ── Open the sweep modal in setup mode. Fetches the curated list of
+  // markets (if we haven't already) so the checkbox grid can render.
+  const openSweepSetup = useCallback(async () => {
     setSweepOpen(true);
-    setSweepRunning(true);
+    setSweepPhase("setup");
     setSweepDone(false);
     setSweepMarkets([]);
+    if (!seedMarkets) {
+      try {
+        const resp = await fetch("/api/community/top-markets/seeds");
+        const data = await resp.json() as { seeds?: Array<{ city: string; state: string; tag: string }> };
+        const list = data.seeds ?? [];
+        setSeedMarkets(list);
+        // Pre-select everything so the user can hit Run immediately if
+        // they want the original auto-all behavior. They can uncheck what
+        // they don't want.
+        setSelectedMarkets(new Set(list.map(keyFor)));
+      } catch (e: any) {
+        toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
+      }
+    }
+  }, [seedMarkets, toast]);
+
+  const toggleMarket = (m: { city: string; state: string }) => {
+    setSelectedMarkets((prev) => {
+      const next = new Set(prev);
+      const k = keyFor(m);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  };
+
+  const selectAllMarkets = () => {
+    if (seedMarkets) setSelectedMarkets(new Set(seedMarkets.map(keyFor)));
+  };
+  const clearAllMarkets = () => setSelectedMarkets(new Set());
+
+  // ── Top-markets sweep: stream per-market progress for the selected
+  // markets. Kicked off by the Run button inside the modal's setup phase.
+  const runTopMarketsSweep = useCallback(async () => {
+    if (!seedMarkets) return;
+    const picked = seedMarkets.filter((m) => selectedMarkets.has(keyFor(m)));
+    if (picked.length === 0) {
+      toast({ title: "Pick at least one market", variant: "destructive" });
+      return;
+    }
+    setSweepPhase("running");
+    setSweepRunning(true);
+    setSweepDone(false);
+    setSweepMarkets(picked.map((m) => ({ city: m.city, state: m.state, tag: m.tag, status: "pending" })));
 
     const controller = new AbortController();
     sweepAbortRef.current = controller;
@@ -196,7 +249,7 @@ export default function AddCommunity() {
       const resp = await fetch("/api/community/scan-top-markets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ markets: picked, maxMarkets: picked.length }),
         signal: controller.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -252,7 +305,7 @@ export default function AddCommunity() {
       setSweepRunning(false);
       sweepAbortRef.current = null;
     }
-  }, [toast]);
+  }, [seedMarkets, selectedMarkets, toast]);
 
   const stopSweep = () => sweepAbortRef.current?.abort();
 
@@ -515,10 +568,10 @@ export default function AddCommunity() {
               </Button>
               <Button
                 variant="outline"
-                onClick={runTopMarketsSweep}
+                onClick={openSweepSetup}
                 disabled={researchLoading || sweepRunning}
                 data-testid="button-scan-top-markets"
-                aria-label="Scan the curated list of top vacation rental markets"
+                aria-label="Open market picker for the top vacation rental markets"
               >
                 <TrendingUp className="h-4 w-4 mr-2" />
                 {sweepRunning ? "Sweeping…" : "Scan top markets"}
@@ -546,10 +599,12 @@ export default function AddCommunity() {
                 <div>
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <TrendingUp className="h-5 w-5 text-primary" />
-                    Top Markets Sweep
+                    {sweepPhase === "setup" ? "Pick markets to scan" : "Top Markets Sweep"}
                   </h2>
                   <p className="text-xs text-muted-foreground">
-                    Running the finder across curated US vacation-rental hotspots. Takes ~90s per market.
+                    {sweepPhase === "setup"
+                      ? "Check the markets you want to research. Each one takes ~90s. Start with 2–3 to keep the wait short."
+                      : "Running the finder across your selected markets. Each takes ~90s."}
                   </p>
                 </div>
                 <div className="flex gap-2">
@@ -562,13 +617,89 @@ export default function AddCommunity() {
                 </div>
               </div>
 
-              {/* Overall progress */}
+              {/* ── SETUP PHASE — checkbox grid of candidate markets ── */}
+              {sweepPhase === "setup" && (
+                <div>
+                  {!seedMarkets ? (
+                    <div className="py-8 text-center text-sm text-muted-foreground">
+                      <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                      Loading market list…
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 mb-3 flex-wrap text-xs">
+                        <Button size="sm" variant="outline" onClick={selectAllMarkets}>Select all</Button>
+                        <Button size="sm" variant="outline" onClick={clearAllMarkets}>Clear</Button>
+                        <span className="text-muted-foreground ml-2">
+                          {selectedMarkets.size} of {seedMarkets.length} selected
+                        </span>
+                      </div>
+                      {(() => {
+                        const byTag: Record<string, typeof seedMarkets> = {};
+                        for (const m of seedMarkets) {
+                          (byTag[m.tag] = byTag[m.tag] ?? []).push(m);
+                        }
+                        return (
+                          <div className="space-y-3">
+                            {Object.entries(byTag).map(([tag, markets]) => (
+                              <div key={tag}>
+                                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                                  {tag}
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                  {markets.map((m) => {
+                                    const k = keyFor(m);
+                                    const checked = selectedMarkets.has(k);
+                                    return (
+                                      <label
+                                        key={k}
+                                        className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer text-sm transition-colors ${
+                                          checked ? "border-primary bg-primary/5" : "hover:border-muted-foreground/40"
+                                        }`}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={() => toggleMarket(m)}
+                                          className="accent-primary"
+                                        />
+                                        <span>
+                                          {m.city}, {m.state}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                      <div className="mt-5 flex items-center justify-end gap-2">
+                        <Button
+                          onClick={runTopMarketsSweep}
+                          disabled={selectedMarkets.size === 0}
+                          data-testid="button-run-sweep"
+                        >
+                          <Search className="h-4 w-4 mr-2" />
+                          Run scan on {selectedMarkets.size} market{selectedMarkets.size === 1 ? "" : "s"}
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Overall progress (running/done phase) */}
+              {sweepPhase === "running" && (
               <div className="mb-4 text-xs text-muted-foreground">
                 {sweepMarkets.filter((m) => m.status === "done").length} of {sweepMarkets.length} markets complete
                 {sweepDone && " — finished"}
               </div>
+              )}
 
-              {/* Per-market list */}
+              {/* Per-market list (running/done phase) */}
+              {sweepPhase === "running" && (
               <div className="space-y-2">
                 {sweepMarkets.map((m) => {
                   const best = m.communities?.[0];
@@ -619,10 +750,20 @@ export default function AddCommunity() {
                   );
                 })}
               </div>
+              )}
 
-              {sweepDone && (
-                <div className="mt-4 text-xs text-muted-foreground">
-                  Click any green market to load its results into Step 2.
+              {sweepPhase === "running" && sweepDone && (
+                <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
+                  <div className="text-xs text-muted-foreground">
+                    Click any green market to load its results into Step 2.
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setSweepPhase("setup"); setSweepMarkets([]); setSweepDone(false); }}
+                  >
+                    ← Scan different markets
+                  </Button>
                 </div>
               )}
             </div>
