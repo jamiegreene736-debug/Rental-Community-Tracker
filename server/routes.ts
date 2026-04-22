@@ -64,81 +64,85 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
-// Fetch Zillow listing photos via Google Images. Zillow's page at
-// zillow.com is locked down by Cloudflare/Akamai (HTTP 403 to every IP
-// we've tried, direct fetch and Playwright alike). But their CDN
-// (photos.zillowstatic.com) does NOT enforce the same bot rules, and
-// Google has indexed the full photo carousel. So: query google_images
-// for the zpid, pick URLs that point at photos.zillowstatic.com, and
-// download those directly. Zero coupling to zillow.com the domain.
-async function scrapeZillowViaGoogleImages(url: string): Promise<string[]> {
-  const key = process.env.SEARCHAPI_API_KEY;
-  if (!key) return [];
-  // Extract zpid from /homedetails/.../80152954_zpid/ patterns.
-  const zpidMatch = url.match(/(\d{6,12})_zpid/);
-  if (!zpidMatch) {
-    console.warn(`[scrapeZillow:GImages] no zpid in ${url}`);
+// Fetch Zillow listing photos via ScrapingBee. zillow.com itself 403s every
+// IP we've tried (Cloudflare/Akamai); SearchAPI has no per-URL Zillow engine;
+// Google Images only indexes ~1 photo per listing. ScrapingBee's stealth
+// proxy bypasses the Cloudflare wall and render_js hydrates __NEXT_DATA__
+// so we can walk the same JSON the in-browser scraper used to read.
+//
+// Cost per call: ~75 ScrapingBee credits (stealth_proxy=true). At 5 listings
+// a week with ~2 units each, usage is ~2-3k credits/month.
+async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
+  const key = process.env.SCRAPINGBEE_API_KEY;
+  if (!key) {
+    console.warn(`[scrapeZillow:SB] SCRAPINGBEE_API_KEY not set`);
     return [];
   }
-  const zpid = zpidMatch[1];
   try {
-    // site:zillow.com <zpid> narrows Google to the single listing. 60 results
-    // gives us headroom for dupes + thumbnails we discard.
     const params = new URLSearchParams({
-      engine: "google_images",
-      q: `site:zillow.com ${zpid}`,
       api_key: key,
-      num: "60",
-      safe: "active",
+      url,
+      render_js: "true",
+      stealth_proxy: "true",
+      country_code: "us",
+      // Speed up: skip images/fonts/styles while waiting for hydration.
+      block_resources: "true",
     });
-    const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
-      signal: AbortSignal.timeout(30000),
+    const r = await fetch(`https://app.scrapingbee.com/api/v1/?${params.toString()}`, {
+      signal: AbortSignal.timeout(90000),
     });
     if (!r.ok) {
-      console.warn(`[scrapeZillow:GImages] HTTP ${r.status} for zpid ${zpid}`);
+      const body = await r.text().catch(() => "");
+      console.warn(`[scrapeZillow:SB] HTTP ${r.status} ${body.slice(0, 200)}`);
       return [];
     }
-    const data = await r.json() as any;
-    const rows: any[] = data.images || data.images_results || [];
-    const urls: string[] = [];
-    for (const img of rows) {
-      const orig = img?.original?.link ?? img?.original ?? null;
-      if (typeof orig !== "string") continue;
-      if (!/^https?:\/\/photos?\.zillowstatic\.com\//i.test(orig)) continue;
-      if (!/\.(jpg|jpeg|png|webp)/i.test(orig)) continue;
-      urls.push(orig);
+    const html = await r.text();
+    const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+    if (!match) {
+      console.warn(`[scrapeZillow:SB] ${url}: no __NEXT_DATA__ blob (html length ${html.length})`);
+      return [];
     }
-    // Dedupe by photo "stem" (strip width suffixes so multiple sizes of the
-    // same image collapse to one). Zillow URLs look like:
-    //   .../fp/<hash>-cc_ft_1536.jpg  →  <hash>-cc_ft_W.jpg
-    //   .../fp/<hash>-p_h.jpg         →  <hash>-p_h.jpg
-    const byStem = new Map<string, { url: string; width: number }>();
-    for (const u of urls) {
-      const widthMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d+)\.(jpg|jpeg|png|webp)/i);
-      const w = widthMatch ? parseInt(widthMatch[1], 10) : 0;
-      const stem = u.replace(/_(?:cc_ft_|uncropped_scaled_within_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$1");
-      const prev = byStem.get(stem);
-      if (!prev || w > prev.width) byStem.set(stem, { url: u, width: w });
+    let nd: any;
+    try { nd = JSON.parse(match[1]); } catch { return []; }
+
+    // Walk the NEXT_DATA tree for mixedSources.jpeg arrays — each is one
+    // photo with multiple resolutions; keep the widest.
+    const out: string[] = [];
+    function walk(obj: any, depth: number): void {
+      if (depth > 16 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+      if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+        const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
+        if (jpegs.length > 0) {
+          const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+          if (biggest.url) out.push(biggest.url);
+        }
+        return;
+      }
+      Object.values(obj).forEach((v) => walk(v, depth + 1));
     }
-    const uniq = Array.from(byStem.values()).map((v) => v.url);
-    console.log(`[scrapeZillow:GImages] zpid ${zpid}: ${rows.length} results → ${urls.length} CDN urls → ${uniq.length} unique photos`);
+    walk(nd, 0);
+    const uniq = [...new Set(out)];
+    console.log(`[scrapeZillow:SB] ${url} → ${uniq.length} photos`);
     return uniq;
   } catch (e: any) {
-    console.warn(`[scrapeZillow:GImages] zpid ${zpid}: ${e?.message ?? e}`);
+    console.warn(`[scrapeZillow:SB] ${url}: ${e?.message ?? e}`);
     return [];
   }
 }
 
 async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
-  // Fast path: Zillow URLs go through Google Images → zillowstatic CDN,
-  // because zillow.com itself 403s every IP we've tried (Playwright + fetch).
+  // Fast path: Zillow URLs go through ScrapingBee (stealth proxy + JS render),
+  // because zillow.com itself 403s every IP we've tried (Playwright + fetch),
+  // SearchAPI has no per-URL Zillow engine, and Google Images only indexes ~1
+  // photo per listing. ScrapingBee's the only path that reliably returns the
+  // full photo carousel.
   if (/zillow\.com/i.test(primaryUrl)) {
-    const urls = await scrapeZillowViaGoogleImages(primaryUrl);
+    const urls = await scrapeZillowViaScrapingBee(primaryUrl);
     if (urls.length > 0) {
       return urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
-    // If the Google-Images path returned nothing and the fallback is also
-    // Zillow, there's nothing more we can do.
+    // If ScrapingBee returned nothing and the fallback is also Zillow, bail.
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
 
