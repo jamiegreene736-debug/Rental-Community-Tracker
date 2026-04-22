@@ -37,6 +37,11 @@ export type ReplacementUnitData = {
   bedrooms: number | null;
   source: string;
   photos: { url: string; label: string }[];
+  // Count of full-size photos the Apify scraper found on the source
+  // listing. Server only returns candidates with >= 12 photos, but we
+  // surface the exact number so the user can see they're picking a
+  // listing with a rich gallery (e.g. 25 vs 13).
+  photoCount?: number;
 };
 
 export function UnitReplacementFlow({
@@ -60,19 +65,24 @@ export function UnitReplacementFlow({
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  // URLs the user explicitly skipped via "Try another" — fed back into
+  // the next find-unit call so we don't surface the same listing again.
+  const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
 
-  async function search() {
+  async function search(opts: { extraSkip?: string } = {}) {
     setResult(null);
     setSwapError(null);
     setStage("searching");
     setTimeout(() => setStage(s => s === "searching" ? "checking" : s), 2000);
+    const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
+    if (opts.extraSkip) setExtraSkipUrls(nextExtra);
     try {
       const resp = await apiRequest("POST", "/api/replacement/find-unit", {
         communityFolder,
         requiredBedrooms: selectedUnit.bedrooms,
-        skipUrls,
+        skipUrls: [...skipUrls, ...nextExtra],
       });
       const data = await resp.json();
       if (data.error) {
@@ -236,18 +246,40 @@ export function UnitReplacementFlow({
             Clean replacement found — not on Airbnb
           </p>
           <div className="rounded border border-border bg-background px-3 py-2.5 space-y-2">
-            <div className="flex items-start gap-2">
-              <Home className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
-              <div>
-                <p className="text-xs font-semibold leading-snug">{result.unitLabel}</p>
-                <p className="text-[11px] text-muted-foreground leading-snug">{result.address}</p>
-                <p className="text-[11px] text-muted-foreground">Source: {result.source}</p>
-                {result.bedrooms && (
-                  <p className="text-[11px] text-muted-foreground">
-                    {result.bedrooms} Bedroom{result.bedrooms > 1 ? "s" : ""}
-                  </p>
-                )}
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2 min-w-0">
+                <Home className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold leading-snug">{result.unitLabel}</p>
+                  <p className="text-[11px] text-muted-foreground leading-snug">{result.address}</p>
+                  <p className="text-[11px] text-muted-foreground">Source: {result.source}</p>
+                  {result.bedrooms && (
+                    <p className="text-[11px] text-muted-foreground">
+                      {result.bedrooms} Bedroom{result.bedrooms > 1 ? "s" : ""}
+                    </p>
+                  )}
+                </div>
               </div>
+              {typeof result.photoCount === "number" && (
+                <div
+                  className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold flex items-center gap-1 ${
+                    result.photoCount >= 20
+                      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"
+                      : result.photoCount >= 12
+                        ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                        : "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300"
+                  }`}
+                  title={
+                    result.photoCount >= 20
+                      ? "Rich gallery — bedrooms, bathrooms, kitchen likely all covered"
+                      : result.photoCount >= 12
+                        ? "Adequate gallery — check for bedrooms before confirming"
+                        : "Sparse gallery — likely missing interior shots"
+                  }
+                >
+                  📷 {result.photoCount} photos
+                </div>
+              )}
             </div>
             {result.photos.length > 0 && (
               <div className="grid grid-cols-6 gap-1">
@@ -304,7 +336,14 @@ export function UnitReplacementFlow({
               size="sm"
               variant="outline"
               disabled={stage === "replacing"}
-              onClick={() => { setStage("idle"); setResult(null); setSwapError(null); }}
+              onClick={() => {
+                // Skip this URL and immediately re-search so the user
+                // doesn't have to click Find again.
+                const skipThis = result.url;
+                setResult(null);
+                setSwapError(null);
+                search({ extraSkip: skipThis });
+              }}
               data-testid="button-try-another-unit"
             >
               Try Another
