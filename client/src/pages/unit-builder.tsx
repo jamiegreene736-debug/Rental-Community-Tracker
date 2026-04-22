@@ -25,10 +25,12 @@ import {
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { usePhotoLabels } from "@/hooks/use-photo-labels";
 
 function PhotoGallery({ unit }: { unit: Unit }) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const { labelFor } = usePhotoLabels([unit.photoFolder]);
 
   if (unit.photos.length === 0) {
     return (
@@ -44,6 +46,11 @@ function PhotoGallery({ unit }: { unit: Unit }) {
 
   const photo = unit.photos[currentIndex];
   const photoPath = `/photos/${unit.photoFolder}/${photo.filename}`;
+  // Prefer Claude-vision label from DB; fall back to the static label
+  // baked into unit-builder-data.ts. Once relabel-all has run, every
+  // photo here will show the AI-generated caption instead of the stale
+  // hardcoded one.
+  const displayLabel = labelFor(unit.photoFolder, photo.filename) ?? photo.label;
 
   const goNext = () => setCurrentIndex((prev) => (prev + 1) % unit.photos.length);
   const goPrev = () => setCurrentIndex((prev) => (prev - 1 + unit.photos.length) % unit.photos.length);
@@ -94,29 +101,33 @@ function PhotoGallery({ unit }: { unit: Unit }) {
         </div>
       </div>
       <p className="text-sm text-muted-foreground mt-2 text-center" data-testid={`text-photo-label-${unit.id}`}>
-        {photo.label}
+        {displayLabel}
       </p>
 
       <div className="flex gap-1.5 mt-3 overflow-x-auto pb-2">
-        {unit.photos.map((p, idx) => (
-          <div
-            key={p.filename}
-            onClick={() => setCurrentIndex(idx)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setCurrentIndex(idx); }}
-            className={`flex-shrink-0 rounded overflow-hidden border-2 transition-colors cursor-pointer ${
-              idx === currentIndex ? "border-primary" : "border-transparent"
-            }`}
-            data-testid={`button-thumbnail-${unit.id}-${idx}`}
-          >
-            <img
-              src={`/photos/${unit.photoFolder}/${p.filename}`}
-              alt={p.label}
-              className="w-16 h-12 object-cover"
-            />
-          </div>
-        ))}
+        {unit.photos.map((p, idx) => {
+          const thumbLabel = labelFor(unit.photoFolder, p.filename) ?? p.label;
+          return (
+            <div
+              key={p.filename}
+              onClick={() => setCurrentIndex(idx)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setCurrentIndex(idx); }}
+              className={`flex-shrink-0 rounded overflow-hidden border-2 transition-colors cursor-pointer ${
+                idx === currentIndex ? "border-primary" : "border-transparent"
+              }`}
+              data-testid={`button-thumbnail-${unit.id}-${idx}`}
+              title={thumbLabel}
+            >
+              <img
+                src={`/photos/${unit.photoFolder}/${p.filename}`}
+                alt={thumbLabel}
+                className="w-16 h-12 object-cover"
+              />
+            </div>
+          );
+        })}
       </div>
 
       {isFullscreen && (

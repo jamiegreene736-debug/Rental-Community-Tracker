@@ -14,6 +14,7 @@ import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply
 import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
+import { labelPhoto, inferKindFromFolder, listPhotoFiles } from "./photo-labeler";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -4473,7 +4474,128 @@ export async function registerRoutes(
       }
     }
 
-    res.json({ saved, failed, folder: communityFolder });
+    // Auto-label the newly-saved photos with Claude Vision so the photo
+    // tab renders accurate captions without the user having to manually
+    // hit the relabel-all button after adding a community.
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (anthropicKey && saved.length > 0) {
+      // Fire-and-forget so the save response isn't blocked on 5-6 Claude calls.
+      (async () => {
+        await storage.deletePhotoLabelsByFolder(communityFolder).catch(() => {});
+        for (const filename of saved) {
+          try {
+            const result = await labelPhoto(
+              path.join(folderPath, filename),
+              inferKindFromFolder(communityFolder),
+              anthropicKey,
+            );
+            if (result) {
+              await storage.upsertPhotoLabel({
+                folder: communityFolder,
+                filename,
+                label: result.label,
+                category: result.category,
+                model: result.model,
+              });
+            }
+          } catch (e: any) {
+            console.warn(`[auto-label] ${communityFolder}/${filename}: ${e?.message ?? e}`);
+          }
+        }
+        console.log(`[auto-label] ${communityFolder}: labeled ${saved.length} photo(s)`);
+      })();
+    }
+
+    res.json({ saved, failed, folder: communityFolder, autoLabeling: anthropicKey ? saved.length : 0 });
+  });
+
+  // ── Photo labels: read + relabel ──────────────────────────────────────
+  // Returns the Claude-vision-generated captions for a given folder so
+  // the client can override the static unit-builder-data.ts labels.
+  // Shape: { labels: { "01-community.jpg": { label, category } }, folder }
+  app.get("/api/photo-labels/:folder", async (req, res) => {
+    const folder = req.params.folder;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    try {
+      const rows = await storage.getPhotoLabelsByFolder(folder);
+      const labels: Record<string, { label: string; category: string | null }> = {};
+      for (const r of rows) labels[r.filename] = { label: r.label, category: r.category };
+      return res.json({ folder, labels, count: rows.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Bulk-relabel every photo in every folder under client/public/photos.
+  // Streams NDJSON progress so the client can render a live log. Safe to
+  // re-run: upserts one row per (folder, filename), replacing the prior
+  // label. Skips unlabeled files (bad extensions, files > 5MB, etc.)
+  app.post("/api/admin/relabel-all-photos", async (req, res) => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+
+    const onlyFolder = typeof (req.body as any)?.folder === "string" ? (req.body as any).folder as string : null;
+    const photosRoot = path.join(process.cwd(), "client/public/photos");
+    if (!fs.existsSync(photosRoot)) return res.status(404).json({ error: "photos directory missing" });
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (obj: Record<string, unknown>) => { res.write(JSON.stringify(obj) + "\n"); };
+
+    try {
+      const all = await fs.promises.readdir(photosRoot);
+      const folders = all.filter((f) => !onlyFolder || f === onlyFolder);
+
+      // Count total photos upfront so the client progress bar is honest.
+      let total = 0;
+      const perFolder: Array<{ folder: string; files: string[] }> = [];
+      for (const folder of folders) {
+        const folderPath = path.join(photosRoot, folder);
+        const stat = await fs.promises.stat(folderPath).catch(() => null);
+        if (!stat?.isDirectory()) continue;
+        const files = await listPhotoFiles(folderPath);
+        if (files.length === 0) continue;
+        perFolder.push({ folder, files });
+        total += files.length;
+      }
+
+      emit({ type: "start", folders: perFolder.length, total });
+
+      let done = 0;
+      let failed = 0;
+      for (const { folder, files } of perFolder) {
+        emit({ type: "folder", folder, files: files.length });
+        // Nuke prior labels for this folder so stale entries don't linger
+        // when a folder's photos have been re-saved in a different order.
+        await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+        const kind = inferKindFromFolder(folder);
+        for (const filename of files) {
+          const abs = path.join(photosRoot, folder, filename);
+          const result = await labelPhoto(abs, kind, anthropicKey);
+          done++;
+          if (!result) {
+            failed++;
+            emit({ type: "photo", folder, filename, ok: false, done, total });
+            continue;
+          }
+          await storage.upsertPhotoLabel({
+            folder, filename,
+            label: result.label,
+            category: result.category,
+            model: result.model,
+          });
+          emit({ type: "photo", folder, filename, ok: true, label: result.label, category: result.category, done, total });
+        }
+      }
+
+      emit({ type: "done", total, done, failed, folders: perFolder.length });
+      res.end();
+    } catch (err: any) {
+      emit({ type: "error", error: err.message });
+      res.end();
+    }
   });
 
   // Batch-populate all community photo folders from web search (one-time operation)

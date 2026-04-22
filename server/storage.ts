@@ -10,7 +10,8 @@ import {
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog,
+  type PhotoLabel, type InsertPhotoLabel,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -463,6 +464,35 @@ export class DatabaseStorage implements IStorage {
   async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
     const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
     return row;
+  }
+
+  // ── Photo labels ──
+  async upsertPhotoLabel(data: InsertPhotoLabel): Promise<PhotoLabel> {
+    const existing = await db.select().from(photoLabels)
+      .where(and(eq(photoLabels.folder, data.folder), eq(photoLabels.filename, data.filename)))
+      .limit(1);
+    if (existing.length > 0) {
+      const [row] = await db.update(photoLabels)
+        .set({ label: data.label, category: data.category ?? null, model: data.model ?? null, generatedAt: new Date() })
+        .where(eq(photoLabels.id, existing[0].id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoLabels).values(data).returning();
+    return row;
+  }
+
+  async getPhotoLabelsByFolder(folder: string): Promise<PhotoLabel[]> {
+    return db.select().from(photoLabels).where(eq(photoLabels.folder, folder));
+  }
+
+  async getAllPhotoLabels(): Promise<PhotoLabel[]> {
+    return db.select().from(photoLabels);
+  }
+
+  async deletePhotoLabelsByFolder(folder: string): Promise<number> {
+    const result = await db.delete(photoLabels).where(eq(photoLabels.folder, folder)).returning();
+    return result.length;
   }
 }
 

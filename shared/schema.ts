@@ -262,3 +262,22 @@ export const guestyTokenCache = pgTable("guesty_token_cache", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 export type GuestyTokenCache = typeof guestyTokenCache.$inferSelect;
+
+// ── Photo labels ──
+// Claude-vision-generated captions for property photos. The static
+// unit-builder-data.ts had hardcoded labels that drifted from reality
+// (e.g. a photo labeled "Tennis Court" actually showed a rocky shoreline).
+// This table replaces the hardcoded ones — the photo tab renders
+// DB labels when present, falls back to the static label otherwise.
+// Keyed by (folder, filename) — e.g. ("community-kaha-lani", "01-community.jpg").
+export const photoLabels = pgTable("photo_labels", {
+  id: serial("id").primaryKey(),
+  folder: text("folder").notNull(),
+  filename: text("filename").notNull(),
+  label: text("label").notNull(),
+  category: text("category"),
+  model: text("model"),           // claude model used, for auditing
+  generatedAt: timestamp("generated_at").defaultNow().notNull(),
+});
+export type PhotoLabel = typeof photoLabels.$inferSelect;
+export type InsertPhotoLabel = typeof photoLabels.$inferInsert;

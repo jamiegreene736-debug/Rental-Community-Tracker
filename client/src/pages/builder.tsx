@@ -8,6 +8,7 @@ import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE } from "@/data/unit-buil
 import { getPropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import { usePhotoLabels } from "@/hooks/use-photo-labels";
 import type { GuestyPropertyData } from "@/services/guestyService";
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -41,6 +42,18 @@ export default function Builder() {
   const property = getUnitBuilderByPropertyId(propertyId);
   const pricing = getPropertyPricing(propertyId);
 
+  // Pull Claude-generated labels for every photo folder we'll render.
+  // Override the static unit-builder-data.ts labels with these when present;
+  // fall back to the static label so empty DB doesn't blank out the UI.
+  const allFolders = useMemo<string[]>(() => {
+    if (!property) return [];
+    const folders = new Set<string>();
+    if (property.communityPhotoFolder) folders.add(property.communityPhotoFolder);
+    for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
+    return Array.from(folders);
+  }, [property]);
+  const { labelFor } = usePhotoLabels(allFolders);
+
   const propertyData = useMemo<GuestyPropertyData | null>(() => {
     if (!property) return null;
 
@@ -60,13 +73,13 @@ export default function Builder() {
         .filter((p) => p.position === "beginning")
         .map((p) => ({
           url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
-          caption: p.label,
+          caption: labelFor(property.communityPhotoFolder, p.filename) ?? p.label,
           source: `Community — ${property.complexName}`,
         })),
       ...property.units.flatMap((u, i) =>
         u.photos.map((p) => ({
           url: `${origin}/photos/${u.photoFolder}/${p.filename}`,
-          caption: p.label,
+          caption: labelFor(u.photoFolder, p.filename) ?? p.label,
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         }))
       ),
@@ -74,7 +87,7 @@ export default function Builder() {
         .filter((p) => p.position === "end")
         .map((p) => ({
           url: `${origin}/photos/${property.communityPhotoFolder}/${p.filename}`,
-          caption: p.label,
+          caption: labelFor(property.communityPhotoFolder, p.filename) ?? p.label,
           source: `Community — ${property.complexName}`,
         })),
     ];
@@ -130,7 +143,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId]);
+  }, [property, pricing, propertyId, labelFor]);
 
   if (!property) {
     return (
