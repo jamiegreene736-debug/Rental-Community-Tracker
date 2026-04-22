@@ -193,31 +193,77 @@ function statusIcon(status: string) {
 // (e.g. +17% on Booking.com to recover the commission) and pushes it to
 // Guesty. Guesty's schema for channel markup differs across accounts so
 // the server tries multiple field shapes and reports which one stuck.
-function ChannelMarkupCard({ listingId }: { listingId: string | null }) {
-  const [airbnb, setAirbnb] = useState("");
-  const [vrbo, setVrbo] = useState("");
-  const [booking, setBooking] = useState("");
-  const [direct, setDirect] = useState("");
+function ChannelMarkupCard({
+  listingId,
+  markupPct,
+  setMarkupPct,
+  seasonalMonths,
+  guestyRatesByMonth,
+}: {
+  listingId: string | null;
+  // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
+  markupPct: Record<ChannelKey, number>;
+  setMarkupPct: (m: Record<ChannelKey, number>) => void;
+  seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
+  guestyRatesByMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>;
+}) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const pushMarkups = async () => {
+  // Compute the minimum markup per channel that clears the 20% floor on
+  // EVERY month with Guesty rate data. Picks the worst-case month — if the
+  // channel is red in December (peak season on a cheap rate) and green
+  // elsewhere, December sets the markup. Rounds up to the nearest 0.5%.
+  const computeAutoMarkups = (): Record<ChannelKey, number> => {
+    const required: Record<ChannelKey, number> = { airbnb: 0, vrbo: 0, booking: 0, direct: 0 };
+    for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
+      const fee = CHANNEL_HOST_FEE[ch] ?? 0;
+      let worst = 0;
+      for (const row of seasonalMonths) {
+        const g = guestyRatesByMonth[row.yearMonth];
+        if (!g || !g.avgRate || row.totalBuyIn <= 0) continue;
+        // To clear MIN_PROFIT_MARGIN:
+        //   avgRate * (1 + m) * (1 - fee) >= (1 + MIN_PROFIT_MARGIN) * buyIn
+        //   m >= ((1 + MIN_PROFIT_MARGIN) * buyIn) / (avgRate * (1 - fee)) - 1
+        const needed = ((1 + MIN_PROFIT_MARGIN) * row.totalBuyIn) / (g.avgRate * (1 - fee)) - 1;
+        if (needed > worst) worst = needed;
+      }
+      // Snap up to 0.5% increments, clamp at 0 (never discount).
+      required[ch] = Math.max(0, Math.ceil(worst * 200) / 200);
+    }
+    return required;
+  };
+
+  const autoCalculate = () => {
+    const next = computeAutoMarkups();
+    setMarkupPct(next);
+    setResult(null);
+    setError(null);
+  };
+
+  const autoCalculateAndPush = async () => {
+    const next = computeAutoMarkups();
+    setMarkupPct(next);
+    await pushMarkups(next);
+  };
+
+  const pushMarkups = async (override?: Record<ChannelKey, number>) => {
     if (!listingId) return;
     setBusy(true);
     setError(null);
     setResult(null);
-    const toDecimal = (s: string) => {
-      const n = parseFloat(s);
-      return isNaN(n) ? undefined : n / 100;
-    };
+    const source = override ?? markupPct;
+    // The server expects decimals (0.155 = +15.5%). We skip channels at 0
+    // so Guesty doesn't reset a previously-set markup we intentionally
+    // wanted to keep — callers pass 0 explicitly when they mean "clear it".
     const body = {
       listingId,
       markups: {
-        airbnb: toDecimal(airbnb),
-        vrbo: toDecimal(vrbo),
-        booking: toDecimal(booking),
-        direct: toDecimal(direct),
+        airbnb: source.airbnb > 0 ? source.airbnb : undefined,
+        vrbo: source.vrbo > 0 ? source.vrbo : undefined,
+        booking: source.booking > 0 ? source.booking : undefined,
+        direct: source.direct > 0 ? source.direct : undefined,
       },
     };
     try {
@@ -236,61 +282,144 @@ function ChannelMarkupCard({ listingId }: { listingId: string | null }) {
     }
   };
 
+  const updateChannel = (ch: ChannelKey, input: string) => {
+    const n = parseFloat(input);
+    setMarkupPct({ ...markupPct, [ch]: isNaN(n) ? 0 : n / 100 });
+  };
+
+  // Show live "would-push" markup % per channel in the inputs (0 renders empty)
+  const asInput = (v: number) => (v > 0 ? (v * 100).toFixed(1) : "");
+
+  // Preview the auto-calc so the user can see what it WOULD set before clicking.
+  const autoPreview = useMemo(() => computeAutoMarkups(), [seasonalMonths, guestyRatesByMonth]);
+  const anyGapExists = (Object.keys(autoPreview) as ChannelKey[]).some((ch) => autoPreview[ch] > (markupPct[ch] ?? 0));
+
+  const channelRows: Array<{ key: ChannelKey; label: string }> = [
+    { key: "airbnb",  label: "Airbnb" },
+    { key: "vrbo",    label: "Vrbo" },
+    { key: "booking", label: "Booking.com" },
+    { key: "direct",  label: "Direct" },
+  ];
+
   return (
     <div style={{ marginTop: 20, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
         📈 Channel markup — uplift the rate per channel
       </div>
-      <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 12, maxWidth: 720 }}>
-        Enter a % uplift to apply on each channel's published rate vs the base. E.g. <b>+17% on Booking.com</b> to recover the 17% commission. Guesty pushes these markups to the channels automatically. Leave blank to skip a channel.
+      <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 12, maxWidth: 760 }}>
+        The uplift here is added on top of Guesty's base rate before it's sent to each channel — so host payout net of that channel's fee still clears the <b>20% profit floor</b>. Click <b>Auto-calculate</b> to set each channel to the minimum markup that keeps every month green; the profit table above updates as soon as you change a value.
       </p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 10 }}>
-        {[
-          { key: "airbnb",  label: "Airbnb",     value: airbnb,  setValue: setAirbnb  },
-          { key: "vrbo",    label: "Vrbo",       value: vrbo,    setValue: setVrbo    },
-          { key: "booking", label: "Booking.com", value: booking, setValue: setBooking },
-          { key: "direct",  label: "Direct",     value: direct,  setValue: setDirect  },
-        ].map(({ key, label, value, setValue }) => (
-          <label key={key} style={{ fontSize: 11, color: "#6b7280" }}>
-            {label}
-            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-              <input
-                type="number"
-                step="0.5"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                placeholder="0"
-                style={{ padding: "4px 8px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: "100%" }}
-                data-testid={`input-markup-${key}`}
-              />
-              <span style={{ fontSize: 11, color: "#6b7280" }}>%</span>
-            </div>
-          </label>
-        ))}
+        {channelRows.map(({ key, label }) => {
+          const needed = autoPreview[key];
+          const current = markupPct[key] ?? 0;
+          const shortfall = needed > current + 1e-6;
+          return (
+            <label key={key} style={{ fontSize: 11, color: "#6b7280" }}>
+              {label}
+              {" "}
+              <span style={{ color: "#9ca3af" }}>({(CHANNEL_HOST_FEE[key] * 100).toFixed(1)}% fee)</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={asInput(current)}
+                  onChange={(e) => updateChannel(key, e.target.value)}
+                  placeholder="0"
+                  style={{ padding: "4px 8px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: "100%" }}
+                  data-testid={`input-markup-${key}`}
+                />
+                <span style={{ fontSize: 11, color: "#6b7280" }}>%</span>
+              </div>
+              <div style={{ fontSize: 10, marginTop: 2, color: shortfall ? "#b45309" : "#6b7280" }}>
+                auto-calc needs <b>{(needed * 100).toFixed(1)}%</b>
+                {shortfall && " — raise this to clear the floor"}
+              </div>
+            </label>
+          );
+        })}
       </div>
-      <button
-        className="glb-btn glb-btn-primary"
-        onClick={pushMarkups}
-        disabled={busy || !listingId}
-        style={{ fontSize: 12 }}
-        data-testid="button-push-channel-markups"
-      >
-        {busy ? "Pushing…" : "⬆ Push markups to Guesty"}
-      </button>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button
+          className="glb-btn"
+          onClick={autoCalculate}
+          disabled={busy || seasonalMonths.length === 0 || Object.keys(guestyRatesByMonth).length === 0}
+          style={{ fontSize: 12 }}
+          data-testid="button-auto-calc-markups"
+          title="Set each channel's markup to the minimum % that keeps every month green"
+        >
+          ⚡ Auto-calculate
+        </button>
+        <button
+          className="glb-btn glb-btn-primary"
+          onClick={autoCalculateAndPush}
+          disabled={busy || !listingId || seasonalMonths.length === 0 || Object.keys(guestyRatesByMonth).length === 0}
+          style={{ fontSize: 12 }}
+          data-testid="button-auto-calc-and-push"
+          title="Auto-calculate markups and push them to Guesty in one step"
+        >
+          {busy ? "Pushing…" : "⚡⬆ Auto-calculate & push to Guesty"}
+        </button>
+        <button
+          className="glb-btn"
+          onClick={() => pushMarkups()}
+          disabled={busy || !listingId}
+          style={{ fontSize: 12 }}
+          data-testid="button-push-channel-markups"
+        >
+          {busy ? "Pushing…" : "⬆ Push current values"}
+        </button>
+        {anyGapExists && (
+          <span style={{ fontSize: 11, color: "#b45309" }}>
+            Current markups don't clear the 20% floor on every month — click auto-calculate.
+          </span>
+        )}
+      </div>
       {error && (
         <div style={{ marginTop: 10, fontSize: 11, color: "#991b1b", background: "#fee2e2", padding: 8, borderRadius: 4 }}>
           {error}
         </div>
       )}
       {result && (
-        <details style={{ marginTop: 10, fontSize: 11 }}>
-          <summary style={{ cursor: "pointer", color: "#166534", fontWeight: 600 }}>
-            ✓ Pushed — click to see which fields Guesty accepted
-          </summary>
-          <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 220 }}>
-            {JSON.stringify(result, null, 2)}
-          </pre>
-        </details>
+        <div style={{ marginTop: 10, fontSize: 11 }}>
+          {/* Per-channel readback from Guesty — confirms the markup isn't just
+              sent but was stored. If a row is missing, Guesty's account uses
+              a different field shape and the markup won't reach the channel. */}
+          <div style={{ padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4 }}>
+            <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
+              ✓ Guesty accepted the push — verified channel-side:
+            </div>
+            {(() => {
+              const savedInt = (result as any)?.saved?.integrations ?? {};
+              const savedFlat = (result as any)?.saved?.priceMarkup ?? {};
+              const rows: Array<{ label: string; keys: string[]; flat: string }> = [
+                { label: "Airbnb",     keys: ["airbnb2", "airbnb"],      flat: "airbnb" },
+                { label: "Vrbo",       keys: ["homeaway", "vrbo"],       flat: "vrbo" },
+                { label: "Booking.com",keys: ["bookingCom", "booking"],  flat: "booking" },
+                { label: "Direct",     keys: ["manual", "direct"],       flat: "direct" },
+              ];
+              return rows.map((r) => {
+                const hit = r.keys.map((k) => savedInt[k]?.priceMarkup).find((v) => typeof v === "number");
+                const flatHit = savedFlat?.[r.flat];
+                const value = typeof hit === "number" ? hit : (typeof flatHit === "number" ? flatHit : null);
+                return (
+                  <div key={r.label} style={{ fontSize: 11, color: value != null ? "#166534" : "#6b7280" }}>
+                    {value != null ? "✓" : "—"} {r.label}:{" "}
+                    {value != null ? <b>+{(value * 100).toFixed(1)}% stored</b> : <span>not set / not sent</span>}
+                  </div>
+                );
+              });
+            })()}
+          </div>
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: "pointer", color: "#166534", fontWeight: 600 }}>
+              Raw response (which Guesty shape stuck)
+            </summary>
+            <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 220 }}>
+              {JSON.stringify(result, null, 2)}
+            </pre>
+          </details>
+        </div>
       )}
     </div>
   );
@@ -1230,6 +1359,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
+  // Per-channel markup (decimal form: 0.155 = +15.5%). Hoisted from
+  // ChannelMarkupCard so the profit columns in the pricing table can
+  // reflect the uplift in real time — not just after it's been pushed.
+  const [markupPct, setMarkupPct] = useState<Record<ChannelKey, number>>({
+    airbnb: 0, vrbo: 0, booking: 0, direct: 0,
+  });
 
   useEffect(() => {
     if (!propertyId) return;
@@ -1993,12 +2128,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                   // For each channel, compute what the host actually nets
                                   // at the current Guesty rate, and whether it meets the 20% floor.
                                   const channelCells = (["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch) => {
-                                    if (!guesty) return { ch, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch) };
-                                    const netGross = netPayoutAfterChannelFee(guesty.avgRate, ch);
+                                    if (!guesty) return { ch, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch), mk: 0 };
+                                    // Apply per-channel markup — what the guest actually pays
+                                    // on this channel is Guesty base rate * (1 + markup).
+                                    // Host then nets that * (1 - channel fee).
+                                    const mk = markupPct[ch] ?? 0;
+                                    const channelRate = guesty.avgRate * (1 + mk);
+                                    const netGross = netPayoutAfterChannelFee(channelRate, ch);
                                     const profit = Math.round(netGross - buyIn);
                                     const margin = buyIn > 0 ? profit / buyIn : 0;
                                     const ok = margin >= MIN_PROFIT_MARGIN;
-                                    return { ch, profit, margin, ok, min: minProfitableRate(buyIn, ch) };
+                                    return { ch, profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
                                   });
                                   return (
                                     <tr key={row.yearMonth}>
@@ -2035,10 +2175,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                         }
                                         const bg = c.ok ? "#dcfce7" : "#fee2e2";
                                         const textColor = c.ok ? "#166534" : "#991b1b";
+                                        const mkPct = (c.mk * 100).toFixed(1);
+                                        const hoverText =
+                                          `Need ≥ $${c.min.toLocaleString()}/night at 0% markup to hit 20% on ${c.ch}.`
+                                          + (c.mk > 0 ? ` Markup +${mkPct}% → channel rate $${Math.round(guesty!.avgRate * (1 + c.mk)).toLocaleString()}.` : "")
+                                          + ` Current net: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
                                         return (
                                           <td
                                             key={c.ch}
-                                            title={`Need ≥ $${c.min.toLocaleString()}/night to hit 20% profit on ${c.ch}. Current net: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`}
+                                            title={hoverText}
                                             style={{
                                               textAlign: "right",
                                               borderLeft: i === 0 ? "1px solid #e5e7eb" : undefined,
@@ -2052,6 +2197,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                             ${c.profit.toLocaleString()}
                                             <div style={{ fontSize: 9, fontWeight: 400, opacity: 0.75 }}>
                                               {(c.margin! * 100).toFixed(0)}% · min ${c.min.toLocaleString()}
+                                              {c.mk > 0 && <> · <b>+{mkPct}%</b> mk</>}
                                             </div>
                                           </td>
                                         );
@@ -2075,7 +2221,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
 
                 {/* ── Channel markup push card ───────────────────────────── */}
                 {activeTab === "pricing" && (
-                  <ChannelMarkupCard listingId={selectedId} />
+                  <ChannelMarkupCard
+                    listingId={selectedId}
+                    markupPct={markupPct}
+                    setMarkupPct={setMarkupPct}
+                    seasonalMonths={seasonalMonths}
+                    guestyRatesByMonth={guestyRatesByMonth}
+                  />
                 )}
 
                 {/* ── Booking Rules card (always shown in Pricing tab) ───── */}
