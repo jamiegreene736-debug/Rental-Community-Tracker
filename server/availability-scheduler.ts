@@ -160,23 +160,24 @@ export async function runFullScanForProperty(
     const active = await storage.getActiveScannerBlocks(propertyId);
     const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
     const desiredBlocks = new Set(windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`));
+    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
     let created = 0, removed = 0, failed = 0;
     for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
       const key = `${w.startDate}:${w.endDate}`;
       if (activeKeyed.has(key)) continue;
       try {
         const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets} sets`;
-        const resp = await guestyRequest("POST", "/blocks", {
-          listingId: guestyListingId,
+        const resp = await guestyRequest("PUT", calPath, {
           startDate: w.startDate,
           endDate: w.endDate,
-          reasonType: "owner_block",
+          status: "unavailable",
           note: `nexstay-scanner (cron): ${reason}`,
         }) as any;
+        const createdBlocksArr = resp?.data?.blocks?.createdBlocks ?? resp?.blocks?.createdBlocks ?? [];
         await storage.createScannerBlock({
           propertyId, guestyListingId,
           startDate: w.startDate, endDate: w.endDate,
-          guestyBlockId: resp?._id ?? resp?.id ?? null,
+          guestyBlockId: createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null,
           reason,
         });
         created++;
@@ -187,7 +188,11 @@ export async function runFullScanForProperty(
       const key = `${b.startDate}:${b.endDate}`;
       if (desiredBlocks.has(key)) continue;
       try {
-        if (b.guestyBlockId) await guestyRequest("DELETE", `/blocks/${b.guestyBlockId}`);
+        await guestyRequest("PUT", calPath, {
+          startDate: b.startDate,
+          endDate: b.endDate,
+          status: "available",
+        });
         await storage.markScannerBlockRemoved(b.id);
         removed++;
         await new Promise((r) => setTimeout(r, 150));

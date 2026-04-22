@@ -309,8 +309,21 @@ function ChannelMarkupCard({
   // One-click: push seasonal base rates AND channel-equalizing markups.
   // After this, every month × every channel should land at targetMargin%.
   const setUpCleanMargin = async () => {
+    // eslint-disable-next-line no-console
+    console.log("[ChannelMarkupCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
+    if (!listingId) {
+      setError("No Guesty listing selected. Pick one in the dropdown at the top of the builder first.");
+      return;
+    }
+    if (seasonalMonths.length === 0) {
+      setError("No pricing data loaded for this property.");
+      return;
+    }
     const markups = computeAutoMarkups();
+    // eslint-disable-next-line no-console
+    console.log("[ChannelMarkupCard] computed markups", markups);
     setMarkupPct(markups);
+    setError(null);
     await pushSeasonalRates();
     await pushMarkups(markups);
   };

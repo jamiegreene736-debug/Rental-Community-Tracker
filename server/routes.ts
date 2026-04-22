@@ -3799,11 +3799,14 @@ export async function registerRoutes(
   //
   // Reads the client's scan results (array of windows with verdicts),
   // diffs against the DB-tracked blocks we previously placed, and writes
-  // the delta to Guesty:
-  //   - New blocked windows → POST /blocks (create), save to scanner_blocks
-  //   - Previously-blocked windows now open/tight → DELETE /blocks/:id,
-  //     mark scanner_blocks.removedAt = now()
+  // the delta to Guesty's calendar:
   //
+  //   New blocked windows → PUT /availability-pricing/api/calendar/listings/{id}
+  //                         with { startDate, endDate, status: "unavailable" }
+  //   Previously-blocked windows now open/tight → same path with status: "available"
+  //
+  // (Confirmed by probe — the legacy POST /blocks path returns 404; the
+  // calendar PUT with a status field is the working approach.)
   // Only touches blocks where `source = "nexstay-scanner"`. Human-placed
   // blocks from other tools are never modified.
   app.post("/api/availability/sync-blocks/:propertyId", async (req: Request, res: Response) => {
@@ -3819,11 +3822,8 @@ export async function registerRoutes(
     const guestyListingId = await storage.getGuestyListingId(propertyId);
     if (!guestyListingId) return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
 
-    // Pull our currently-tracked active blocks so we know what to diff against
     const active = await storage.getActiveScannerBlocks(propertyId);
     const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
-
-    // Desired blocked windows from this scan
     const desiredBlocks = new Set(
       windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
     );
@@ -3831,46 +3831,50 @@ export async function registerRoutes(
     let created = 0;
     let removed = 0;
     const failures: Array<{ action: string; startDate: string; error: string }> = [];
+    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
 
-    // Create new blocks
+    // Block new windows via calendar PUT with status: "unavailable"
     for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
       const key = `${w.startDate}:${w.endDate}`;
       if (activeKeyed.has(key)) continue; // already blocked by us
       try {
-        // Guesty /blocks API — owner-block reason so it shows up in Guesty UI
-        // with a clear "owner-blocked" label.
         const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets ?? 0} sets`;
-        const resp = await guestyRequest("POST", "/blocks", {
-          listingId: guestyListingId,
+        const resp = await guestyRequest("PUT", calPath, {
           startDate: w.startDate,
           endDate: w.endDate,
-          reasonType: "owner_block",
+          status: "unavailable",
           note: `nexstay-scanner: ${reason}`,
         }) as any;
+        // Guesty returns the created blocks in resp.data.blocks.createdBlocks[0]._id
+        const createdBlocksArr = resp?.data?.blocks?.createdBlocks
+          ?? resp?.blocks?.createdBlocks
+          ?? [];
+        const guestyBlockId = createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null;
         await storage.createScannerBlock({
           propertyId,
           guestyListingId,
           startDate: w.startDate,
           endDate: w.endDate,
-          guestyBlockId: resp?._id ?? resp?.id ?? null,
+          guestyBlockId,
           reason,
         });
         created++;
-        // Small delay to not hammer Guesty.
         await new Promise((r) => setTimeout(r, 120));
       } catch (e: any) {
         failures.push({ action: "create", startDate: w.startDate, error: e?.message ?? String(e) });
       }
     }
 
-    // Remove blocks that are no longer needed
+    // Unblock windows by setting status: "available" on the same range
     for (const b of active) {
       const key = `${b.startDate}:${b.endDate}`;
       if (desiredBlocks.has(key)) continue;
       try {
-        if (b.guestyBlockId) {
-          await guestyRequest("DELETE", `/blocks/${b.guestyBlockId}`);
-        }
+        await guestyRequest("PUT", calPath, {
+          startDate: b.startDate,
+          endDate: b.endDate,
+          status: "available",
+        });
         await storage.markScannerBlockRemoved(b.id);
         removed++;
         await new Promise((r) => setTimeout(r, 120));
