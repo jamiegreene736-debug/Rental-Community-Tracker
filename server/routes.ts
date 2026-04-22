@@ -3234,6 +3234,97 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/builder/push-seasonal-rates
+  // Pushes per-day base nightly rates to Guesty's calendar. The client sends
+  // a flat rate per month and this expands it to the days in each month, then
+  // PUTs them to Guesty in one chunked batch.
+  //
+  // Why this exists: a flat Guesty base rate combined with seasonal buy-in
+  // cost creates wildly variable margins (95% in low season, 20% in high).
+  // To hit a steady margin target across months, the base rate itself has
+  // to scale with season — that's what this endpoint writes.
+  app.post("/api/builder/push-seasonal-rates", async (req: Request, res: Response) => {
+    const { listingId, monthlyRates } = req.body as {
+      listingId?: string;
+      // Each entry: { yearMonth: "2026-08", price: 1970 } — price becomes the
+      // per-night base for every day in that month.
+      monthlyRates?: Array<{ yearMonth: string; price: number }>;
+    };
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    if (!Array.isArray(monthlyRates) || monthlyRates.length === 0) {
+      return res.status(400).json({ error: "monthlyRates array required" });
+    }
+
+    // Expand monthly rates into per-day entries Guesty will accept.
+    type DayEntry = { date: string; price: number };
+    const days: DayEntry[] = [];
+    for (const { yearMonth, price } of monthlyRates) {
+      if (!/^\d{4}-\d{2}$/.test(yearMonth)) continue;
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const [y, m] = yearMonth.split("-").map(Number);
+      const lastDay = new Date(y, m, 0).getDate(); // day 0 of next month = last day of this
+      for (let d = 1; d <= lastDay; d++) {
+        const ds = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        days.push({ date: ds, price: Math.round(price) });
+      }
+    }
+    if (days.length === 0) return res.status(400).json({ error: "no valid days to push" });
+
+    // Guesty's calendar update prefers ranges over individual days — group
+    // consecutive same-price days into {startDate, endDate, price} ranges.
+    type Range = { startDate: string; endDate: string; price: number };
+    const ranges: Range[] = [];
+    let current: Range | null = null;
+    for (const d of days) {
+      if (current && current.price === d.price) {
+        current.endDate = d.date;
+      } else {
+        if (current) ranges.push(current);
+        current = { startDate: d.date, endDate: d.date, price: d.price };
+      }
+    }
+    if (current) ranges.push(current);
+
+    console.log(`[push-seasonal-rates] listing ${listingId} · ${ranges.length} ranges · ${days.length} days`);
+
+    try {
+      // Guesty calendar update: PUT /availability-pricing/api/calendar/listings/:id
+      // Body: { days: [{ startDate, endDate, price }] } — accounts vary on the
+      // exact wrapper shape so we also send a flat `data` field as a fallback.
+      const body = { days: ranges, data: ranges };
+      await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${listingId}`, body);
+
+      // Read back a sample of days to confirm the push stuck.
+      const firstDate = days[0].date;
+      const lastDate = days[days.length - 1].date;
+      const verifyUrl = `/availability-pricing/api/calendar/listings/${listingId}?startDate=${firstDate}&endDate=${lastDate}`;
+      const verify = await guestyRequest("GET", verifyUrl) as any;
+      const vDays: any[] = Array.isArray(verify) ? verify
+        : Array.isArray(verify?.data) ? verify.data
+        : Array.isArray(verify?.data?.days) ? verify.data.days
+        : Array.isArray(verify?.days) ? verify.days
+        : [];
+      // Count how many days in the response match the price we intended.
+      const priceByDate = new Map(days.map((d) => [d.date, d.price]));
+      let matched = 0;
+      for (const d of vDays) {
+        const dateStr: string = d.date ?? d.day ?? "";
+        const rate: number = Number(d.price ?? d.rate ?? d.nightlyPrice ?? 0);
+        if (priceByDate.get(dateStr) === Math.round(rate)) matched++;
+      }
+      return res.json({
+        success: true,
+        pushedDays: days.length,
+        pushedRanges: ranges.length,
+        verifiedDays: matched,
+        sampleRange: ranges[0],
+      });
+    } catch (err: any) {
+      console.error(`[push-seasonal-rates] error:`, err.message);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // POST /api/builder/normalize-photos
   // Fetch a listing's existing Guesty pictures, run each through validateAndFixPhoto,
   // re-upload the fixed ones to ImgBB, and PUT the listing back.
