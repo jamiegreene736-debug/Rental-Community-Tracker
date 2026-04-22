@@ -11,7 +11,9 @@ import {
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
   type PhotoLabel, type InsertPhotoLabel,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels,
+  type ScannerBlock, type InsertScannerBlock,
+  type ScannerOverride, type InsertScannerOverride,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -493,6 +495,54 @@ export class DatabaseStorage implements IStorage {
   async deletePhotoLabelsByFolder(folder: string): Promise<number> {
     const result = await db.delete(photoLabels).where(eq(photoLabels.folder, folder)).returning();
     return result.length;
+  }
+
+  // ── Scanner blocks ──
+  async getActiveScannerBlocks(propertyId: number): Promise<ScannerBlock[]> {
+    return db.select().from(scannerBlocks)
+      .where(and(eq(scannerBlocks.propertyId, propertyId), sql`${scannerBlocks.removedAt} IS NULL`))
+      .orderBy(scannerBlocks.startDate);
+  }
+
+  async createScannerBlock(data: InsertScannerBlock): Promise<ScannerBlock> {
+    const [row] = await db.insert(scannerBlocks).values(data).returning();
+    return row;
+  }
+
+  async markScannerBlockRemoved(id: number): Promise<void> {
+    await db.update(scannerBlocks)
+      .set({ removedAt: new Date() })
+      .where(eq(scannerBlocks.id, id));
+  }
+
+  // ── Scanner overrides ──
+  async getScannerOverrides(propertyId: number): Promise<ScannerOverride[]> {
+    return db.select().from(scannerOverrides)
+      .where(eq(scannerOverrides.propertyId, propertyId))
+      .orderBy(scannerOverrides.startDate);
+  }
+
+  async upsertScannerOverride(data: InsertScannerOverride): Promise<ScannerOverride> {
+    // One override per (propertyId, startDate). Replace existing.
+    const existing = await db.select().from(scannerOverrides)
+      .where(and(eq(scannerOverrides.propertyId, data.propertyId), eq(scannerOverrides.startDate, data.startDate)))
+      .limit(1);
+    if (existing.length > 0) {
+      const [row] = await db.update(scannerOverrides)
+        .set({ mode: data.mode, note: data.note ?? null, endDate: data.endDate })
+        .where(eq(scannerOverrides.id, existing[0].id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(scannerOverrides).values(data).returning();
+    return row;
+  }
+
+  async deleteScannerOverride(propertyId: number, startDate: string): Promise<boolean> {
+    const result = await db.delete(scannerOverrides)
+      .where(and(eq(scannerOverrides.propertyId, propertyId), eq(scannerOverrides.startDate, startDate)))
+      .returning();
+    return result.length > 0;
   }
 }
 

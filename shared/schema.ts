@@ -263,6 +263,45 @@ export const guestyTokenCache = pgTable("guesty_token_cache", {
 });
 export type GuestyTokenCache = typeof guestyTokenCache.$inferSelect;
 
+// ── Scanner-placed Guesty calendar blocks ──
+// Records every block the inventory scanner pushes to Guesty so a later
+// scan can REMOVE only the blocks WE placed when inventory recovers,
+// without touching blocks placed by humans / other tools. The scanner
+// re-runs nightly and uses this table to diff desired vs. actual blocks.
+export const scannerBlocks = pgTable("scanner_blocks", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date").notNull(),
+  guestyBlockId: text("guesty_block_id"),     // Guesty's id for the block we created
+  reason: text("reason").notNull(),           // e.g. "low-inventory: 0 sets / 3 needed"
+  source: text("source").notNull().default("nexstay-scanner"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  // When set, the block was removed from Guesty (inventory recovered or
+  // manual override). Kept for audit history.
+  removedAt: timestamp("removed_at"),
+});
+export type ScannerBlock = typeof scannerBlocks.$inferSelect;
+export type InsertScannerBlock = typeof scannerBlocks.$inferInsert;
+
+// ── Per-window manual overrides ──
+// Users can force a window to be open or blocked regardless of what the
+// scanner found. One row per (propertyId, startDate); the scanner reads
+// these before deciding to push/clear blocks.
+export const scannerOverrides = pgTable("scanner_overrides", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date").notNull(),
+  // "force-open" → never block this range; "force-block" → always block it
+  mode: text("mode").notNull(),
+  note: text("note"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type ScannerOverride = typeof scannerOverrides.$inferSelect;
+export type InsertScannerOverride = typeof scannerOverrides.$inferInsert;
+
 // ── Photo labels ──
 // Claude-vision-generated captions for property photos. The static
 // unit-builder-data.ts had hardcoded labels that drifted from reality

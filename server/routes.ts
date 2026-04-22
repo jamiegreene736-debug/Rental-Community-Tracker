@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertBuyInSchema, insertCommunityDraftSchema, insertUnitSwapSchema } from "@shared/schema";
-import { getPropertyUnits, getUnitConfig } from "@shared/property-units";
+import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
@@ -15,6 +15,7 @@ import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles } from "./photo-labeler";
+import { findPricedAirbnbListings, buildSets, verdictFor, type PricedListing } from "./availability-search";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -3640,6 +3641,290 @@ export async function registerRoutes(
       console.error(`[market-comps] error:`, err.message);
       return res.status(500).json({ error: err.message });
     }
+  });
+
+  // ===========================================================
+  // AVAILABILITY / INVENTORY SCANNER  (Phase 1+2)
+  // ===========================================================
+  //
+  // The dashboard's Availability tab used to surface individual buy-in
+  // candidates to click. That's not the job — the real goal is a
+  // booking-safety guarantee: for every 7-day window in the next 24
+  // months, make sure we can find enough independent complete buy-in
+  // SETS (one listing per unit slot, no reuse across sets) to honor
+  // whatever a guest books + some buffer. When we can't, block that
+  // window in Guesty's calendar so it can't be oversold.
+  //
+  // Two endpoints:
+  //   GET  /api/availability/scan/:propertyId         streams per-window verdicts
+  //   POST /api/availability/sync-blocks/:propertyId  diffs scan vs DB-tracked
+  //                                                    blocks and writes to Guesty
+  //
+  // Guesty blocking uses POST /blocks (with reasonType: "owner_block"),
+  // NOT the calendar PUT. Scanner-placed blocks get a `source: "nexstay-scanner"`
+  // tag in the DB so the diff step never touches blocks placed by
+  // humans or other integrations.
+
+  app.get("/api/availability/scan/:propertyId", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const weeks = Math.min(Math.max(parseInt((req.query.weeks as string) ?? "52", 10) || 52, 4), 104);
+    const minSets = Math.max(1, parseInt((req.query.minSets as string) ?? "3", 10) || 3);
+
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) return res.status(404).json({ error: `Property ${propertyId} not in config` });
+
+    const community = config.community;
+    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+    const bounds = COMMUNITY_BOUNDS[community];
+
+    // Resort name from the Guesty listing title — makes the per-listing
+    // filter much tighter than just "community area" geo bounds.
+    let resortName: string | null = null;
+    let guestyListingId: string | null = null;
+    try {
+      guestyListingId = await storage.getGuestyListingId(propertyId);
+      if (guestyListingId) {
+        const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=title%20nickname`) as any;
+        const title = listing?.title ?? listing?.nickname ?? null;
+        if (title) resortName = title.split(/\s+[–-]\s+/)[0].trim();
+      }
+    } catch { /* non-fatal */ }
+
+    // Pull any manual overrides up front so they can short-circuit the
+    // verdict without wasting SearchAPI calls.
+    const overrides = await storage.getScannerOverrides(propertyId).catch(() => []);
+    const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
+
+    // Unique BR counts we need to search (avoid 2× calls for 3BR+3BR)
+    const uniqueBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms)));
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (obj: Record<string, unknown>) => { res.write(JSON.stringify(obj) + "\n"); };
+
+    emit({
+      type: "start",
+      propertyId,
+      guestyListingId,
+      community,
+      resortName,
+      units: config.units,
+      minSets,
+      weeks,
+    });
+
+    // Generate 7-day windows starting tomorrow
+    const today = new Date();
+    today.setHours(12, 0, 0, 0);
+    const toYmd = (d: Date) => d.toISOString().slice(0, 10);
+
+    for (let w = 1; w <= weeks; w++) {
+      const start = new Date(today);
+      start.setDate(start.getDate() + (w - 1) * 7);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+      const startDate = toYmd(start);
+      const endDate = toYmd(end);
+
+      // Override handling — if the user has marked this week force-open
+      // or force-block, we skip the search entirely.
+      const ov = overrideByStart.get(startDate);
+      if (ov) {
+        const verdict = ov.mode === "force-block" ? "blocked" : "open";
+        emit({
+          type: "window",
+          startDate, endDate,
+          verdict,
+          maxSets: ov.mode === "force-open" ? minSets + 5 : 0,
+          minSets,
+          overridden: true,
+          overrideMode: ov.mode,
+          overrideNote: ov.note ?? null,
+          sets: [],
+        });
+        continue;
+      }
+
+      // Fetch priced listings for each unique BR count, in parallel within
+      // the window (so the three BR groups race each other; outer loop
+      // stays sequential to avoid blasting SearchAPI).
+      const listingsByBedrooms: Record<number, PricedListing[]> = {};
+      const errors: Record<number, string> = {};
+      await Promise.all(uniqueBedrooms.map(async (br) => {
+        try {
+          const results = await findPricedAirbnbListings({
+            community, resortName, bedrooms: br,
+            checkIn: startDate, checkOut: endDate,
+            q: searchLocation, bounds, apiKey,
+          });
+          listingsByBedrooms[br] = results;
+        } catch (e: any) {
+          errors[br] = e?.message ?? String(e);
+          listingsByBedrooms[br] = [];
+        }
+      }));
+
+      const { maxSets, sets } = buildSets(config.units, listingsByBedrooms, 3);
+      const verdict = verdictFor(maxSets, minSets);
+
+      emit({
+        type: "window",
+        startDate, endDate,
+        verdict,
+        maxSets,
+        minSets,
+        listingCounts: Object.fromEntries(
+          Object.entries(listingsByBedrooms).map(([br, arr]) => [br, arr.length]),
+        ),
+        cheapestSetTotal: sets[0]?.totalPrice ?? null,
+        sets: sets.map((s) => ({
+          totalPrice: s.totalPrice,
+          slots: s.slots.map(({ unitId, listing }) => ({
+            unitId,
+            title: listing.title,
+            url: listing.url,
+            bedrooms: listing.bedrooms,
+            nightlyPrice: listing.nightlyPrice,
+            totalPrice: listing.totalPrice,
+          })),
+        })),
+        errors,
+      });
+    }
+
+    emit({ type: "done", weeks });
+    res.end();
+  });
+
+  // POST /api/availability/sync-blocks/:propertyId
+  //
+  // Reads the client's scan results (array of windows with verdicts),
+  // diffs against the DB-tracked blocks we previously placed, and writes
+  // the delta to Guesty:
+  //   - New blocked windows → POST /blocks (create), save to scanner_blocks
+  //   - Previously-blocked windows now open/tight → DELETE /blocks/:id,
+  //     mark scanner_blocks.removedAt = now()
+  //
+  // Only touches blocks where `source = "nexstay-scanner"`. Human-placed
+  // blocks from other tools are never modified.
+  app.post("/api/availability/sync-blocks/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+
+    const body = req.body as {
+      windows?: Array<{ startDate: string; endDate: string; verdict: string; maxSets?: number; minSets?: number }>;
+    };
+    const windows = Array.isArray(body.windows) ? body.windows : [];
+    if (windows.length === 0) return res.status(400).json({ error: "windows array required" });
+
+    const guestyListingId = await storage.getGuestyListingId(propertyId);
+    if (!guestyListingId) return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
+
+    // Pull our currently-tracked active blocks so we know what to diff against
+    const active = await storage.getActiveScannerBlocks(propertyId);
+    const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
+
+    // Desired blocked windows from this scan
+    const desiredBlocks = new Set(
+      windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
+    );
+
+    let created = 0;
+    let removed = 0;
+    const failures: Array<{ action: string; startDate: string; error: string }> = [];
+
+    // Create new blocks
+    for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
+      const key = `${w.startDate}:${w.endDate}`;
+      if (activeKeyed.has(key)) continue; // already blocked by us
+      try {
+        // Guesty /blocks API — owner-block reason so it shows up in Guesty UI
+        // with a clear "owner-blocked" label.
+        const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets ?? 0} sets`;
+        const resp = await guestyRequest("POST", "/blocks", {
+          listingId: guestyListingId,
+          startDate: w.startDate,
+          endDate: w.endDate,
+          reasonType: "owner_block",
+          note: `nexstay-scanner: ${reason}`,
+        }) as any;
+        await storage.createScannerBlock({
+          propertyId,
+          guestyListingId,
+          startDate: w.startDate,
+          endDate: w.endDate,
+          guestyBlockId: resp?._id ?? resp?.id ?? null,
+          reason,
+        });
+        created++;
+        // Small delay to not hammer Guesty.
+        await new Promise((r) => setTimeout(r, 120));
+      } catch (e: any) {
+        failures.push({ action: "create", startDate: w.startDate, error: e?.message ?? String(e) });
+      }
+    }
+
+    // Remove blocks that are no longer needed
+    for (const b of active) {
+      const key = `${b.startDate}:${b.endDate}`;
+      if (desiredBlocks.has(key)) continue;
+      try {
+        if (b.guestyBlockId) {
+          await guestyRequest("DELETE", `/blocks/${b.guestyBlockId}`);
+        }
+        await storage.markScannerBlockRemoved(b.id);
+        removed++;
+        await new Promise((r) => setTimeout(r, 120));
+      } catch (e: any) {
+        failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
+      }
+    }
+
+    return res.json({
+      success: failures.length === 0,
+      propertyId,
+      guestyListingId,
+      created,
+      removed,
+      unchanged: active.length - removed,
+      failures,
+    });
+  });
+
+  // GET /api/availability/overrides/:propertyId
+  app.get("/api/availability/overrides/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const rows = await storage.getScannerOverrides(propertyId);
+    res.json({ overrides: rows });
+  });
+
+  // POST /api/availability/overrides/:propertyId  { startDate, endDate, mode, note }
+  app.post("/api/availability/overrides/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const { startDate, endDate, mode, note } = req.body as {
+      startDate?: string; endDate?: string; mode?: string; note?: string;
+    };
+    if (!startDate || !endDate || !mode) return res.status(400).json({ error: "startDate, endDate, mode required" });
+    if (mode !== "force-open" && mode !== "force-block") return res.status(400).json({ error: "mode must be force-open or force-block" });
+    const row = await storage.upsertScannerOverride({ propertyId, startDate, endDate, mode, note: note ?? null });
+    res.json({ override: row });
+  });
+
+  // DELETE /api/availability/overrides/:propertyId/:startDate
+  app.delete("/api/availability/overrides/:propertyId/:startDate", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    const { startDate } = req.params;
+    if (isNaN(propertyId) || !startDate) return res.status(400).json({ error: "invalid params" });
+    const ok = await storage.deleteScannerOverride(propertyId, startDate);
+    res.json({ deleted: ok });
   });
 
   // POST /api/builder/normalize-photos
