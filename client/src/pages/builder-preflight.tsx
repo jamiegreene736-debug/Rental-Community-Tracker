@@ -469,21 +469,39 @@ export default function BuilderPreflight() {
                         <span className="font-medium">{override.unitLabel}</span>
                         <span className="text-xs text-muted-foreground truncate">{override.address}</span>
                       </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 flex-shrink-0"
-                        onClick={() => { setSwapsCommitted(false); handleUndoSwap(oldUnitId); }}
-                        data-testid={`button-undo-committed-swap-${oldUnitId}`}
-                      >
-                        Undo
-                      </Button>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40"
+                          onClick={async () => {
+                            // Undo the committed swap first so it won't be in skipUrls,
+                            // then open the replacement flow for this specific unit.
+                            setSwapsCommitted(false);
+                            await handleUndoSwap(oldUnitId);
+                            setReplacementTargetId(oldUnitId);
+                            setShowReplacementFlow(true);
+                          }}
+                          data-testid={`button-change-committed-swap-${oldUnitId}`}
+                        >
+                          Change
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                          onClick={() => { setSwapsCommitted(false); handleUndoSwap(oldUnitId); }}
+                          data-testid={`button-undo-committed-swap-${oldUnitId}`}
+                        >
+                          Undo
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
               </div>
               <p className="text-xs text-green-700 dark:text-green-400">
-                Click "Recheck these units" to verify the replacement units aren't already listed on Airbnb, VRBO, or Booking.com before continuing to the builder.
+                Click "Change" to search for a different replacement (photos rescrape automatically), or "Recheck" to re-verify the current replacements are still clean on Airbnb/VRBO/Booking.com.
               </p>
             </div>
           )}
@@ -705,8 +723,9 @@ export default function BuilderPreflight() {
                 id: targetUnit.id,
                 unitNumber: targetUnit.unitNumber,
                 bedrooms: targetUnit.bedrooms,
+                photoFolder: (targetUnit as any).photoFolder,
               }}
-              allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms }))}
+              allUnits={property.units.map(u => ({ id: u.id, unitNumber: u.unitNumber, bedrooms: u.bedrooms, photoFolder: u.photoFolder }))}
               communityFolder={property.communityPhotoFolder}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}

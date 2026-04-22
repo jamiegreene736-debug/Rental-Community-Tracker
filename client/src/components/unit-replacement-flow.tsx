@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
-export type UnitStub = { id: string; unitNumber: string; bedrooms: number };
+export type UnitStub = { id: string; unitNumber: string; bedrooms: number; photoFolder?: string };
 
 export type ReplacementUnitData = {
   url: string;
@@ -97,6 +97,9 @@ export function UnitReplacementFlow({
         newBedrooms: result.bedrooms,
         newSourceUrl: result.url,
         thumbnailUrl: result.photos[0]?.url || null,
+        // Tell the server which folder to rescrape photos into so the
+        // builder's Photos tab reflects the new unit, not the stub.
+        photoFolder: selectedUnit.photoFolder,
       });
       if (!resp.ok) {
         const err = await resp.json();

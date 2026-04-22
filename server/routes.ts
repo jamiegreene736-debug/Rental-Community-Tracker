@@ -6706,13 +6706,98 @@ export async function registerRoutes(
 
   // ============================================================
   // Unit Swaps: Record a confirmed replacement unit for the builder
+  //
+  // If the client passes `photoFolder`, we scrape the Zillow listing
+  // (newSourceUrl) and drop its photos into client/public/photos/{photoFolder}/
+  // so the builder's Photos tab reflects the real replacement unit, not
+  // the original stub folder. Fire-and-forget so the POST stays snappy.
   // ============================================================
   app.post("/api/unit-swaps", async (req, res) => {
-    const parsed = insertUnitSwapSchema.safeParse(req.body);
+    const { photoFolder, ...swapBody } = req.body as any;
+    const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
     }
     const swap = await storage.createUnitSwap(parsed.data);
+
+    if (typeof photoFolder === "string" && /^[\w-]+$/.test(photoFolder)
+        && typeof swap.newSourceUrl === "string" && /^https?:\/\//i.test(swap.newSourceUrl)) {
+      const url = swap.newSourceUrl;
+      const folder = photoFolder;
+      void (async () => {
+        try {
+          const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+          await fs.promises.mkdir(folderPath, { recursive: true });
+          const scraped = await scrapeListingPhotos(url);
+          if (!scraped.length) {
+            console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
+            return;
+          }
+          const picked = scraped.slice(0, 20);
+          const existing = await fs.promises.readdir(folderPath).catch(() => []);
+          for (const f of existing) {
+            if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
+              await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
+            }
+          }
+          const saved: string[] = [];
+          for (let i = 0; i < picked.length; i++) {
+            try {
+              const imgResp = await fetch(picked[i].url, {
+                headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
+                signal: AbortSignal.timeout(15000),
+              });
+              if (!imgResp.ok) continue;
+              const buffer = Buffer.from(await imgResp.arrayBuffer());
+              if (buffer.length < 5000) continue;
+              const filename = `photo_${String(i).padStart(2, "0")}.jpg`;
+              await fs.promises.writeFile(path.join(folderPath, filename), buffer);
+              saved.push(filename);
+            } catch {}
+          }
+
+          // Stamp _source.json so the folder's provenance is recorded.
+          const sourcePath = path.join(folderPath, "_source.json");
+          let sourceDoc: any = {};
+          try { sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
+          sourceDoc.sourceListing = {
+            url, platform: /zillow/i.test(url) ? "zillow" : "other",
+            scrapedDate: new Date().toISOString().slice(0, 10),
+          };
+          sourceDoc.verificationStatus = "needs-review";
+          sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
+          sourceDoc.verifiedBy = "unit-swap";
+          await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+
+          // Re-label with Claude so captions match the new photos.
+          const anthropicKey = process.env.ANTHROPIC_API_KEY;
+          if (anthropicKey && saved.length > 0) {
+            await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+            for (const filename of saved) {
+              try {
+                const result = await labelPhoto(
+                  path.join(folderPath, filename),
+                  inferKindFromFolder(folder),
+                  anthropicKey,
+                );
+                if (result) {
+                  await storage.upsertPhotoLabel({
+                    folder, filename,
+                    label: result.label, category: result.category, model: result.model,
+                  });
+                }
+              } catch (e: any) {
+                console.warn(`[unit-swap label] ${folder}/${filename}: ${e?.message ?? e}`);
+              }
+            }
+          }
+          console.log(`[unit-swap rescrape] ${folder}: saved ${saved.length} photo(s) from ${url}`);
+        } catch (e: any) {
+          console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
+        }
+      })();
+    }
+
     return res.json({ swap });
   });
 

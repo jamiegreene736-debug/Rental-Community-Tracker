@@ -3164,85 +3164,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                             if (last && last.source === src) last.items.push(p);
                             else groups.push({ source: src, items: [p] });
                           });
-                          const folderFromUrl = (url: string): string | null => {
-                            const m = url.match(/\/photos\/([\w-]+)\//);
-                            return m ? m[1] : null;
-                          };
                           let globalIdx = 0;
-                          return groups.map((g) => {
-                            const folder = g.items[0] ? folderFromUrl(g.items[0].url) : null;
-                            const runRescrape = async (sourceUrl?: string) => {
-                              if (!folder) return;
-                              toast({
-                                title: "Rescraping…",
-                                description: sourceUrl
-                                  ? `Downloading photos from ${new URL(sourceUrl).hostname}. Can take up to a minute.`
-                                  : `Using saved URL for ${folder}. Can take up to a minute.`,
-                              });
-                              try {
-                                const resp = await fetch("/api/builder/rescrape-unit-photos", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify(sourceUrl ? { folder, sourceUrl } : { folder }),
-                                });
-                                const data = await resp.json();
-                                if (resp.status === 409 && data?.needsUrl) {
-                                  const url = window.prompt(
-                                    `No source URL on file for "${g.source}". Paste the Zillow (or VRBO/homes.com) listing URL — I'll save it so future rescrapes are one click.`,
-                                    "",
-                                  );
-                                  if (!url) return;
-                                  return runRescrape(url);
-                                }
-                                if (!resp.ok) throw new Error(data?.error ?? `HTTP ${resp.status}`);
-                                toast({
-                                  title: "Photos rescraped",
-                                  description:
-                                    `${data.savedCount} saved, ${data.failedCount} failed · source: ${data.urlSource ?? "manual"}. Labels regenerate in the background — refresh in ~30s.`,
-                                  duration: 10000,
-                                });
-                                setTimeout(() => window.location.reload(), 1200);
-                              } catch (e: any) {
-                                toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
-                              }
-                            };
-                            const onRescrape = () => {
-                              if (!folder) {
-                                toast({ title: "Can't rescrape", description: "Couldn't determine photo folder.", variant: "destructive" });
-                                return;
-                              }
-                              runRescrape();
-                            };
-                            return (
-                              <div key={g.source} style={{ marginBottom: 16 }}>
-                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
-                                  <span>{g.source} — {g.items.length} photo{g.items.length !== 1 ? "s" : ""}</span>
-                                  {folder && (
-                                    <button
-                                      type="button"
-                                      onClick={onRescrape}
-                                      style={{ fontSize: 11, padding: "3px 8px", borderRadius: 4, border: "1px solid #d1d5db", background: "white", color: "#374151", cursor: "pointer", textTransform: "none", fontWeight: 500 }}
-                                      title={`Clear ${folder}/ and re-download photos from a Zillow listing URL`}
-                                    >
-                                      ↻ Rescrape from Zillow
-                                    </button>
-                                  )}
-                                </div>
-                                <div className="glb-photo-grid">
-                                  {g.items.map((p) => {
-                                    const idx = ++globalIdx;
-                                    return (
-                                      <div key={idx} className="glb-photo-thumb" title={p.caption || ""}>
-                                        <img src={p.url} alt={p.caption || `Photo ${idx}`} loading="lazy" />
-                                        <span className="glb-photo-idx">{idx}</span>
-                                        {p.caption && <span className="glb-photo-caption">{p.caption}</span>}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
+                          return groups.map((g) => (
+                            <div key={g.source} style={{ marginBottom: 16 }}>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
+                                {g.source} — {g.items.length} photo{g.items.length !== 1 ? "s" : ""}
                               </div>
-                            );
-                          });
+                              <div className="glb-photo-grid">
+                                {g.items.map((p) => {
+                                  const idx = ++globalIdx;
+                                  return (
+                                    <div key={idx} className="glb-photo-thumb" title={p.caption || ""}>
+                                      <img src={p.url} alt={p.caption || `Photo ${idx}`} loading="lazy" />
+                                      <span className="glb-photo-idx">{idx}</span>
+                                      {p.caption && <span className="glb-photo-caption">{p.caption}</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ));
                         })()}
                       </div>
                     : <div className="glb-empty">No photos attached to this property</div>
