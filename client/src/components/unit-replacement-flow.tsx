@@ -42,6 +42,12 @@ export type ReplacementUnitData = {
   // surface the exact number so the user can see they're picking a
   // listing with a rich gallery (e.g. 25 vs 13).
   photoCount?: number;
+  // Room categories detected by the interior-content probe (Claude
+  // Haiku vision on 8 stratified samples). If Bedrooms isn't in here,
+  // the server would have already rejected the candidate — we surface
+  // this so the UI can show a "✓ Bedrooms · ✓ Bathrooms" style badge
+  // as proof the listing actually has interior photography.
+  sampledCategories?: string[];
 };
 
 export function UnitReplacementFlow({
@@ -293,6 +299,31 @@ export function UnitReplacementFlow({
                     />
                   </div>
                 ))}
+              </div>
+            )}
+            {/* Vision probe categories — shown as chips so the user can
+                verify the listing actually contains bedroom/bathroom photos,
+                not just exterior/aerial. Empty array means the probe didn't
+                run (no Anthropic key) — hide the row entirely in that case. */}
+            {Array.isArray(result.sampledCategories) && result.sampledCategories.length > 0 && (
+              <div className="flex items-center gap-1 flex-wrap pt-1">
+                <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">Detected:</span>
+                {Array.from(new Set(result.sampledCategories)).map((cat) => {
+                  const hot = cat === "Bedrooms" || cat === "Bathrooms";
+                  return (
+                    <span
+                      key={cat}
+                      className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        hot
+                          ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {hot && "✓ "}
+                      {cat}
+                    </span>
+                  );
+                })}
               </div>
             )}
             <a

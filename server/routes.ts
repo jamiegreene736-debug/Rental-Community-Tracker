@@ -6905,6 +6905,7 @@ export async function registerRoutes(
           }
 
           const anthropicKey = process.env.ANTHROPIC_API_KEY;
+          let sampledCategories: string[] = [];
           if (anthropicKey) {
             const probe = await probeInteriorCoverage(scrapedPhotoUrls, anthropicKey);
             console.error(`[find-unit] interior probe verdict=${probe.verdict} categories=[${probe.categories.join(", ")}]`);
@@ -6912,6 +6913,7 @@ export async function registerRoutes(
               console.error(`[find-unit] No bedroom/bathroom samples found — skipping to next candidate`);
               continue;
             }
+            sampledCategories = probe.categories;
             // "unknown" (no key) or "pass" → fall through to confirm.
           }
 
@@ -6928,6 +6930,7 @@ export async function registerRoutes(
               source: "Zillow",
               photos,
               photoCount,
+              sampledCategories,
             },
           });
         }
