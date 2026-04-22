@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
 import { useParams, useLocation } from "wouter";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,37 @@ export default function Builder() {
     return Array.from(folders);
   }, [property]);
   const { labelFor } = usePhotoLabels(allFolders);
+
+  // Walking-distance between units. Only meaningful for multi-unit
+  // properties. Uses the shared fallback (per-resort minute defaults)
+  // until the geocoded result from /api/tools/walk-between arrives —
+  // so the description renders something reasonable immediately.
+  const [walkResult, setWalkResult] = useState<WalkResult | null>(null);
+  useEffect(() => {
+    if (!property || property.units.length < 2) { setWalkResult(null); return; }
+    // Immediate fallback so the UI has a sensible default before the
+    // geocoder resolves.
+    setWalkResult(fallbackWalkForResort(property.complexName));
+    // Upgrade to the geocoded value if we can. All units share the
+    // property.address today, so send the same address twice — the
+    // endpoint will fall back to the resort-default-minutes path.
+    // When per-unit addresses exist (e.g. from swaps), swap them in.
+    const addrA = property.address;
+    const addrB = property.address;
+    if (addrA === addrB) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/tools/walk-between?a=${encodeURIComponent(addrA)}&b=${encodeURIComponent(addrB)}&resort=${encodeURIComponent(property.complexName)}`,
+        );
+        if (!r.ok) return;
+        const data = await r.json() as WalkResult;
+        if (!cancelled) setWalkResult(data);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [property]);
 
   // Fetch the actual file list for each unit/community folder instead of
   // relying on the hardcoded u.photos array. This is what makes rescraped
@@ -174,9 +206,14 @@ export default function Builder() {
       descriptions: {
         title: property.bookingTitle,
         summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
-        space: property.units
-          .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
-          .join("\n\n"),
+        space: [
+          property.units
+            .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
+            .join("\n\n"),
+          property.units.length >= 2 && walkResult
+            ? `\n\n${walkResult.description}`
+            : "",
+        ].join(""),
         neighborhood: property.neighborhood,
         transit: property.transit,
         houseRules:
@@ -194,7 +231,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId, labelFor, folderFiles]);
+  }, [property, pricing, propertyId, labelFor, folderFiles, walkResult]);
 
   if (!property) {
     return (

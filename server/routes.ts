@@ -19,6 +19,8 @@ import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type Candidat
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
+import { walkBetween } from "./walking-distance";
+import { fallbackWalkForResort } from "@shared/walking-distance";
 
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
 // All other communities fall back to Google Images search.
@@ -43,18 +45,20 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-pili-mai": "Pili Mai",
 };
 
-// Street address fragment for each community — used to find individual Zillow unit listings via Google Images
+// Street address fragment for each community — used to find individual
+// Zillow unit listings via Google Images. Kept in sync with the
+// address: field on each unit-builder-data.ts entry.
 const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
-  "community-regency-poipu-kai": "2253 Poipu Rd",
-  "community-kekaha-estate": "8351 Kekaha Rd",
-  "community-keauhou-estates": "78-261 Manukai St",
-  "community-mauna-kai": "3900 Wyllie Rd",
-  "community-kaha-lani": "4460 Nehe Rd",
-  "community-lae-nani": "410 Papaloa Rd",
-  "community-poipu-beachside": "2251 Poipu Rd",
-  "community-kaiulani": "3970 Wyllie Rd",
-  "community-poipu-oceanfront": "2249 Poipu Rd",
-  "community-pili-mai": "2611 Kiahuna Plantation Dr",
+  "community-regency-poipu-kai": "1831 Poipu Rd",           // Regency at Poipu Kai
+  "community-kekaha-estate": "8497 Kekaha Rd",              // Kekaha Beachfront Estate
+  "community-keauhou-estates": "78-6855 Ali'i Dr",          // Keauhou Estates
+  "community-mauna-kai": "3920 Wyllie Rd",                  // Mauna Kai Princeville
+  "community-kaha-lani": "4460 Nehe Rd",                    // Kaha Lani Resort
+  "community-lae-nani": "410 Papaloa Rd",                   // Lae Nani Resort
+  "community-poipu-beachside": "2298 Ho'one Rd",            // Poipu Brenneckes Beachside
+  "community-kaiulani": "4100 Queen Emma's Dr",             // Kaiulani of Princeville
+  "community-poipu-oceanfront": "2350 Ho'one Rd",           // Poipu Brenneckes Oceanfront
+  "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
 };
 
 interface ScrapedPhoto {
@@ -5788,6 +5792,22 @@ export async function registerRoutes(
     }
   });
 
+  // Walking-distance estimator for multi-unit listings.
+  // GET /api/tools/walk-between?a=<addr>&b=<addr>&resort=<name>
+  // Returns { minutes, feet, description, source }.
+  app.get("/api/tools/walk-between", async (req, res) => {
+    const a = String(req.query.a ?? "").trim();
+    const b = String(req.query.b ?? "").trim();
+    const resort = String(req.query.resort ?? "").trim() || undefined;
+    if (!a || !b) return res.status(400).json({ error: "both 'a' and 'b' query params required" });
+    try {
+      const result = await walkBetween(a, b, resort);
+      res.json(result);
+    } catch (e: any) {
+      res.json(fallbackWalkForResort(resort));
+    }
+  });
+
   // Diagnostic: does the Zillow scraper actually return photos for a given URL?
   // Usage: GET /api/builder/probe-zillow?url=<zillow url>
   // Returns the list of CDN URLs the scraper found, without writing anything.
@@ -7327,8 +7347,8 @@ export async function registerRoutes(
       communityName: string;
       city: string;
       state: string;
-      unit1: { bedrooms: number; url: string; description?: string };
-      unit2: { bedrooms: number; url: string; description?: string };
+      unit1: { bedrooms: number; url: string; description?: string; address?: string };
+      unit2: { bedrooms: number; url: string; description?: string; address?: string };
       suggestedRate: number;
     };
 
@@ -7339,6 +7359,13 @@ export async function registerRoutes(
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const combinedBedrooms = (unit1.bedrooms || 0) + (unit2.bedrooms || 0);
 
+    // Best-effort walking distance for the description. Uses geocoded
+    // addresses if both units provided one, else falls back to the
+    // per-resort default.
+    const walk = (unit1.address && unit2.address)
+      ? await walkBetween(unit1.address, unit2.address, communityName).catch(() => fallbackWalkForResort(communityName))
+      : fallbackWalkForResort(communityName);
+
     const DISCLOSURE = `⚠️ IMPORTANT DISCLOSURE
 
 This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.
@@ -7347,8 +7374,8 @@ This listing combines two separate, individually owned units within the same com
 
     if (!anthropicKey) {
       const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
-      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. Unit 1 is a ${unit1.bedrooms}-bedroom residence and Unit 2 is a ${unit2.bedrooms}-bedroom residence, totaling ${combinedBedrooms} bedrooms. Guests receive separate access codes for each unit at check-in.`;
-      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate });
+      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. Unit 1 is a ${unit1.bedrooms}-bedroom residence and Unit 2 is a ${unit2.bedrooms}-bedroom residence, totaling ${combinedBedrooms} bedrooms. ${walk.description} Guests receive separate access codes for each unit at check-in.`;
+      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate, walk });
     }
 
     const prompt = `Generate a VRBO-ready vacation rental listing for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
@@ -7358,6 +7385,7 @@ The listing combines:
 - Unit 2: ${unit2.bedrooms}-bedroom unit at ${communityName}
 - Combined total: ${combinedBedrooms} bedrooms
 - Suggested nightly rate: $${suggestedRate}
+- Walking distance between units: ${walk.description} (${walk.source})
 
 Requirements:
 1. HEADLINE: Max 80 characters, VRBO-compliant, exciting and descriptive
@@ -7368,6 +7396,7 @@ ${DISCLOSURE}
 Then follow with:
 - Engaging community/location highlights (2-3 paragraphs)
 - Bedroom and bathroom breakdown for both units
+- A sentence noting the walking distance between the two units, using the exact phrasing provided above (do not make up a different number)
 - Key amenities
 - Local attractions
 
@@ -7396,12 +7425,12 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       if (!jsonMatch) throw new Error("No JSON in Claude response");
 
       const { title, description } = JSON.parse(jsonMatch[0]);
-      return res.json({ title: title.slice(0, 80), description, combinedBedrooms, suggestedRate });
+      return res.json({ title: title.slice(0, 80), description, combinedBedrooms, suggestedRate, walk });
     } catch (e: any) {
       console.warn("[community/generate-listing] Claude error:", e.message);
       const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
-      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}.`;
-      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate });
+      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. ${walk.description}`;
+      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate, walk });
     }
   });
 

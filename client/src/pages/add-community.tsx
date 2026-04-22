@@ -423,8 +423,16 @@ export default function AddCommunity() {
         communityName: selectedCommunity.name,
         city: selectedCommunity.city,
         state: selectedCommunity.state,
-        unit1: { bedrooms: selectedUnit1.bedrooms ?? 2, url: selectedUnit1.url },
-        unit2: { bedrooms: selectedUnit2.bedrooms ?? 2, url: selectedUnit2.url },
+        unit1: {
+          bedrooms: selectedUnit1.bedrooms ?? 2,
+          url: selectedUnit1.url,
+          address: (selectedUnit1 as any).address,
+        },
+        unit2: {
+          bedrooms: selectedUnit2.bedrooms ?? 2,
+          url: selectedUnit2.url,
+          address: (selectedUnit2 as any).address,
+        },
         suggestedRate,
       });
       const data = await res.json();
