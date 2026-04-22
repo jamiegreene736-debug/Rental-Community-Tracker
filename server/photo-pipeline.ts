@@ -39,6 +39,23 @@ const CATEGORY_PRIORITY: Record<string, number> = {
   "Other":             8,
 };
 const UNKNOWN_PRIORITY = 99;
+const REJECT_CATEGORY = "Reject";
+
+// Per-category cap for the kept set. Prevents a category-dominated listing
+// (e.g. Zillow MLS with 10 kitchen angles) from crowding out bedrooms or
+// outdoor shots. Total across all categories should be at or below the
+// caller's maxKeep.
+const PER_CATEGORY_CAP: Record<string, number> = {
+  "Bedrooms":          6,
+  "Bathrooms":         5,
+  "Living Areas":      4,
+  "Kitchen":           4,
+  "Dining":            2,
+  "Outdoor & Lanai":   4,
+  "Views":             2,
+  "Building Exterior": 2,
+  "Other":             2,
+};
 
 type DownloadResult = {
   tempName: string;
@@ -175,17 +192,41 @@ export async function downloadAndPrioritize(opts: {
     labeledResults = downloaded.map((d) => ({ ...d, label: null, category: null }));
   }
 
-  // Step 3: sort by category priority, ties broken by original scrape order.
-  labeledResults.sort((a, b) => {
+  // Step 3a: drop explicitly-rejected photos (agent headshots, logos,
+  // unrelated marketing images). Claude Haiku flagged them with category
+  // "Reject" via the strict prompt. Delete their files too.
+  const rejectedResults = labeledResults.filter((r) => r.category === REJECT_CATEGORY);
+  for (const r of rejectedResults) {
+    await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
+  }
+  const survivors = labeledResults.filter((r) => r.category !== REJECT_CATEGORY);
+  if (rejectedResults.length > 0) {
+    console.log(`[downloadAndPrioritize] ${folder}: dropped ${rejectedResults.length} rejected photos (agents/logos/etc)`);
+  }
+
+  // Step 3b: sort by category priority, ties broken by original scrape order.
+  survivors.sort((a, b) => {
     const aPri = a.category ? (CATEGORY_PRIORITY[a.category] ?? UNKNOWN_PRIORITY) : UNKNOWN_PRIORITY;
     const bPri = b.category ? (CATEGORY_PRIORITY[b.category] ?? UNKNOWN_PRIORITY) : UNKNOWN_PRIORITY;
     if (aPri !== bPri) return aPri - bPri;
     return a.originalIndex - b.originalIndex;
   });
 
-  // Step 4: keep top N, drop the rest.
-  const kept = labeledResults.slice(0, maxKeep);
-  const dropped = labeledResults.slice(maxKeep);
+  // Step 4: keep top N with per-category caps. This prevents a kitchen-heavy
+  // listing (10 kitchen shots + 2 bedroom shots) from pushing the bedrooms
+  // off the end of the kept set. Caps are tuned in PER_CATEGORY_CAP above.
+  const kept: LabeledResult[] = [];
+  const dropped: LabeledResult[] = [];
+  const perCategoryCounts: Record<string, number> = {};
+  for (const r of survivors) {
+    if (kept.length >= maxKeep) { dropped.push(r); continue; }
+    const cat = r.category ?? "Other";
+    const cap = PER_CATEGORY_CAP[cat] ?? 2;  // unknown categories cap at 2
+    const seen = perCategoryCounts[cat] ?? 0;
+    if (seen >= cap) { dropped.push(r); continue; }
+    kept.push(r);
+    perCategoryCounts[cat] = seen + 1;
+  }
   for (const d of dropped) {
     await fs.promises.unlink(path.join(folderPath, d.tempName)).catch(() => {});
   }
@@ -223,7 +264,7 @@ export async function downloadAndPrioritize(opts: {
   }
 
   const categorySummary: Record<string, number> = {};
-  for (const r of labeledResults) {
+  for (const r of kept) {
     const key = r.category ?? "Unlabeled";
     categorySummary[key] = (categorySummary[key] ?? 0) + 1;
   }
@@ -232,7 +273,7 @@ export async function downloadAndPrioritize(opts: {
     downloaded: downloaded.length,
     labeled: labeledResults.filter((r) => r.label).length,
     kept: kept.length,
-    dropped: dropped.length,
+    dropped: dropped.length + rejectedResults.length,
     bedroomCount: kept.filter((k) => k.category === "Bedrooms").length,
     bathroomCount: kept.filter((k) => k.category === "Bathrooms").length,
     categorySummary,
