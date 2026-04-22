@@ -2057,6 +2057,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                                     taxMapKey: effectivePropertyData.taxMapKey,
                                     tatLicense: effectivePropertyData.tatLicense,
                                     getLicense: effectivePropertyData.getLicense,
+                                    strPermit: effectivePropertyData.strPermit,
                                   }),
                                 });
                                 const data = await res.json();

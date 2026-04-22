@@ -2825,11 +2825,12 @@ export async function registerRoutes(
 
   // POST /api/builder/push-compliance — pushes TMK, TAT, and GET license to Guesty's internal tags (not synced to Airbnb/VRBO)
   app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
-    const { listingId, taxMapKey, tatLicense, getLicense } = req.body as {
+    const { listingId, taxMapKey, tatLicense, getLicense, strPermit } = req.body as {
       listingId: string;
       taxMapKey?: string;
       tatLicense?: string;
       getLicense?: string;
+      strPermit?: string;
     };
     if (!listingId) return res.status(400).json({ error: "listingId required" });
     if (!taxMapKey && !tatLicense && !getLicense) return res.status(400).json({ error: "taxMapKey, tatLicense, or getLicense required" });
@@ -2875,6 +2876,40 @@ export async function registerRoutes(
         } catch { /* silently swallow — VRBO fields are optional */ }
       }
 
+      // ── Step 3b: Booking.com channel compliance fields ───────────────────────
+      // Booking.com's Guesty path uses a structured license object with a
+      // `variantId` that selects the jurisdiction-specific schema. For
+      // Hawaii the variant is 6 ("hawaii-hotel_v1") which accepts:
+      //   number         → TAT ID      (required by Booking.com)
+      //   tmk_number     → Tax Map Key
+      //   permit_number  → STR permit
+      // We push this whenever we have at least the TAT, since it's the
+      // required field. For non-Hawaii listings we skip (variantId 6 is
+      // Hawaii-only; we haven't mapped other states' variants yet).
+      const stateLooksHawaii = ((current.address as Record<string, unknown> | undefined)?.state as string | undefined || "").toLowerCase().startsWith("hawaii")
+        || ((current.address as Record<string, unknown> | undefined)?.state as string | undefined || "").toUpperCase() === "HI";
+      const bookingPayload: Record<string, unknown> = {};
+      if (stateLooksHawaii && tatLicense) {
+        const contentData: Array<{ name: string; value: string }> = [
+          { name: "number", value: tatLicense },
+        ];
+        if (taxMapKey) contentData.push({ name: "tmk_number", value: taxMapKey });
+        if (strPermit) contentData.push({ name: "permit_number", value: strPermit });
+        bookingPayload["channels"] = {
+          bookingCom: {
+            license: {
+              information: {
+                variantId: 6,
+                contentData,
+              },
+            },
+          },
+        };
+        try {
+          await guestyRequest("PUT", `/listings/${listingId}`, bookingPayload);
+        } catch { /* best-effort — Booking.com may not be connected */ }
+      }
+
       // ── Step 4: publicDescription.notes (OTA-facing compliance block) ────────
       const COMPLIANCE_MARKER = "=== Hawaii Tax Compliance ===";
       const pubDesc = (current.publicDescription || {}) as Record<string, string>;
@@ -2900,6 +2935,16 @@ export async function registerRoutes(
       const savedVrboTaxId    = vrboChannel.taxId          || "";
       const savedVrboParcel   = vrboChannel.parcelNumber   || "";
 
+      // Booking.com license schema lives under integrations[].bookingCom.license,
+      // not channels.bookingCom. Guesty translates our PUT into the right path
+      // internally. Pull what came back to verify.
+      const integrations = Array.isArray(fetched.integrations) ? fetched.integrations as any[] : [];
+      const bookingInteg = integrations.find((i: any) => i.platform === "bookingCom");
+      const bookingLicense = bookingInteg?.bookingCom?.license?.information?.contentData as Array<{ name: string; value: string }> | undefined;
+      const savedBookingTAT    = bookingLicense?.find((c) => c.name === "number")?.value ?? "";
+      const savedBookingTMK    = bookingLicense?.find((c) => c.name === "tmk_number")?.value ?? "";
+      const savedBookingPermit = bookingLicense?.find((c) => c.name === "permit_number")?.value ?? "";
+
       const tagsVerified =
         (!taxMapKey  || savedTags.some(t => t.includes(taxMapKey)))  &&
         (!tatLicense || savedTags.some(t => t.includes(tatLicense))) &&
@@ -2916,7 +2961,6 @@ export async function registerRoutes(
         verified: tagsVerified && notesVerified,
         savedTags,
         notesUpdated: notesVerified,
-        // New fields
         licenseNumber: { sent: licenseNumValue, saved: savedLicenseNumber, ok: licenseNumberSaved },
         taxId:         { sent: taxIdValue,       saved: savedTaxId,         ok: taxIdSaved },
         vrbo: {
@@ -2928,6 +2972,22 @@ export async function registerRoutes(
           note: vrboActive
             ? "VRBO channel compliance fields saved."
             : "VRBO fields not saved — listing needs an active VRBO channel (OAuth) in Guesty UI first.",
+        },
+        bookingCom: {
+          attempted: Object.keys(bookingPayload).length > 0,
+          saved: !!(savedBookingTAT || savedBookingTMK || savedBookingPermit),
+          number:         savedBookingTAT,
+          tmk_number:     savedBookingTMK,
+          permit_number:  savedBookingPermit,
+          variantId:      bookingInteg?.bookingCom?.license?.information?.variantId ?? null,
+          note: stateLooksHawaii
+            ? (tatLicense
+                ? "Booking.com Hawaii-hotel license pushed via channels.bookingCom."
+                : "Skipped — Booking.com Hawaii variant requires tatLicense (the 'number' field) at minimum.")
+            : "Skipped — Booking.com license variants for states other than Hawaii aren't mapped yet.",
+        },
+        airbnb: {
+          note: "Airbnb compliance can't be pushed programmatically — Guesty's airbnb2.permits.regulations is read-only. Use the Playwright submit endpoint or enter manually at /regulations/{listingId}/{jurisdiction}/registration.",
         },
       });
     } catch (err: any) {
@@ -4636,6 +4696,155 @@ export async function registerRoutes(
         capturedCount: captured.length,
         capturedRequests: captured.slice(0, 60),
         sidebarSample: sidebar.slice(0, 10),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
+  // ============================================================
+  // POST /api/admin/airbnb/inspect-form
+  //
+  // Navigates to the /regulations/{listingId}/{jurisdiction}/registration/
+  // initial/{step} URL and dumps the form's DOM structure (all input
+  // elements, their labels, names, types) so we can learn how to fill it.
+  // Read-only — never submits.
+  //
+  // Body: { listingId, jurisdiction, step? }
+  //   jurisdiction defaults to "kauai_county_hawaii"
+  //   step defaults to "existing-registration"
+  // ============================================================
+  app.post("/api/admin/airbnb/inspect-form", async (req: Request, res: Response) => {
+    const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
+    if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
+
+    const { listingId, jurisdiction, step } = (req.body ?? {}) as {
+      listingId?: string;
+      jurisdiction?: string;
+      step?: string;
+    };
+    if (!listingId || !/^\d+$/.test(listingId)) {
+      return res.status(400).json({ error: "listingId required" });
+    }
+    const juri = (jurisdiction || "kauai_county_hawaii").replace(/[^a-z0-9_]/gi, "");
+    const stp = (step || "existing-registration").replace(/[^a-z0-9_-]/gi, "");
+
+    type RawCookie = { name?: string; value?: string; domain?: string; path?: string; expirationDate?: number; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string };
+    const raw: RawCookie[] = JSON.parse(cookieJson);
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!, value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires) : -1,
+        httpOnly: c.httpOnly ?? false, secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 900 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await ctx.addCookies(cookies);
+      const page = await ctx.newPage();
+
+      // Warm up with /hosting so Akamai cookies settle before navigating to
+      // the regulations flow.
+      await page.goto("https://www.airbnb.com/hosting", { waitUntil: "domcontentloaded", timeout: 25000 });
+      await page.waitForTimeout(2500);
+      const targetUrl = `https://www.airbnb.com/regulations/${listingId}/${juri}/registration/initial/${stp}`;
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(5000); // let the form hydrate
+
+      // Dump every input/select/textarea on the page with enough context to
+      // identify each field. The visible label usually sits in a preceding
+      // <label> or an adjacent text node — we capture both so the caller
+      // has a fighting chance to map field semantics.
+      const formFields = await page.evaluate(() => {
+        const getLabel = (el: Element): string => {
+          const id = (el as HTMLInputElement).id;
+          if (id) {
+            const lab = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+            if (lab) return (lab.textContent || "").trim().slice(0, 120);
+          }
+          // Walk up looking for the nearest label wrapper
+          let cur: Element | null = el;
+          for (let i = 0; i < 4 && cur; i++) {
+            const parentLabel = cur.closest("label");
+            if (parentLabel) return (parentLabel.textContent || "").trim().slice(0, 120);
+            cur = cur.parentElement;
+          }
+          // Fallback: aria-label on the element
+          const al = el.getAttribute("aria-label");
+          if (al) return al.slice(0, 120);
+          return "";
+        };
+        const rows: Array<{ tag: string; type?: string; name?: string; id?: string; placeholder?: string; value?: string; label: string; required?: boolean }> = [];
+        document.querySelectorAll("input, select, textarea").forEach((el) => {
+          const tag = el.tagName.toLowerCase();
+          const t = el as HTMLInputElement;
+          if (["hidden", "submit", "button"].includes(t.type)) return;
+          rows.push({
+            tag,
+            type: t.type || undefined,
+            name: t.name || undefined,
+            id: t.id || undefined,
+            placeholder: t.placeholder || undefined,
+            value: t.value ? t.value.slice(0, 80) : undefined,
+            label: getLabel(el),
+            required: t.required || undefined,
+          });
+        });
+        return rows;
+      }).catch(() => []);
+
+      // Also dump headings so we can see what step / section we landed on.
+      const headings = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("h1, h2, h3")).map((h) => (h.textContent || "").trim().slice(0, 140)).filter(Boolean)
+      ).catch(() => []);
+
+      // Dump all visible button labels so we know what to click to submit.
+      const buttons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("button")).map((b) => ({
+          text: (b.textContent || "").trim().slice(0, 80),
+          type: b.type,
+          disabled: b.disabled,
+          ariaLabel: b.getAttribute("aria-label") || "",
+          dataTestId: b.getAttribute("data-testid") || "",
+        })).filter((b) => b.text)
+      ).catch(() => []);
+
+      const bodyPreview = await page
+        .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 2000))
+        .catch(() => "");
+
+      return res.json({
+        ok: true,
+        listingId, jurisdiction: juri, step: stp,
+        targetUrl,
+        finalUrl: page.url(),
+        finalTitle: await page.title().catch(() => ""),
+        formFields,
+        headings,
+        buttons: buttons.slice(0, 30),
+        bodyPreview,
       });
     } catch (e: any) {
       return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
