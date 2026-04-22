@@ -4150,14 +4150,19 @@ export async function registerRoutes(
           await page.waitForTimeout(2000);
           const u = page.url();
           const t = await page.title().catch(() => "");
-          // "Valid" = didn't get bounced to /login or /404 and stayed within the
-          // listing editor chrome. Airbnb routes non-existent sub-paths to
-          // /hosting/listings/editor/{id}/details — we detect that too and
-          // flag as invalid so we don't report the landing page as a match.
+          // Airbnb returns its 404 chrome at the REQUESTED URL for
+          // non-existent sub-paths (title = "Page not found"), so
+          // we can't just compare URLs. Sample the body too.
+          const bodyCheck = await page.evaluate(() =>
+            (document.body?.innerText || "").slice(0, 400).toLowerCase()
+          ).catch(() => "");
+          const is404 =
+            /page not found/i.test(t) ||
+            /can't seem to find the page|error code:\s*404|oops/i.test(bodyCheck);
           const looksValid =
             u.includes(p) &&
             !/\/login\b/.test(u) &&
-            !/\/404\b/.test(t);
+            !is404;
           attempts.push({ path: p, finalUrl: u, title: t, looksValid });
           if (looksValid) { chosenPath = p; break; }
         } catch (e: any) {
@@ -4165,25 +4170,33 @@ export async function registerRoutes(
         }
       }
 
-      // Also land on the plain editor root for comparison — helps us see
-      // what the sidebar looks like when our paths miss.
+      // Always dump the sidebar (even when a path DID match) — it's tiny
+      // and it lets us see what other tabs exist so we can find the
+      // correct name for any field we didn't hit.
       let sidebarLinks: Array<{ href: string; text: string }> = [];
-      if (!chosenPath) {
-        try {
+      try {
+        // If no chosen path, go to the editor root so the sidebar
+        // definitely shows up. If chosenPath succeeded, we can harvest
+        // links from that same page.
+        if (!chosenPath) {
           await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, { waitUntil: "domcontentloaded", timeout: 25000 });
-          await page.waitForTimeout(2500);
-          sidebarLinks = await page.evaluate(() => {
-            const out: Array<{ href: string; text: string }> = [];
-            document.querySelectorAll("a[href*='/details/']").forEach((a) => {
-              out.push({
-                href: (a as HTMLAnchorElement).href,
-                text: ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
-              });
+          await page.waitForTimeout(3000);
+        }
+        sidebarLinks = await page.evaluate(() => {
+          const out: Array<{ href: string; text: string }> = [];
+          const seen = new Set<string>();
+          document.querySelectorAll("a[href*='/details/'], a[href*='/hosting/listings/editor/']").forEach((a) => {
+            const href = (a as HTMLAnchorElement).href;
+            if (seen.has(href)) return;
+            seen.add(href);
+            out.push({
+              href,
+              text: ((a as HTMLAnchorElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
             });
-            return out.slice(0, 40);
           });
-        } catch { /* best effort */ }
-      }
+          return out.slice(0, 50);
+        });
+      } catch { /* best effort */ }
 
       // Dump all inputs + labels on whichever page we landed on.
       const formFields = await page.evaluate(() => {
