@@ -14,7 +14,7 @@ import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply
 import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
-import { labelPhoto, inferKindFromFolder, listPhotoFiles } from "./photo-labeler";
+import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage } from "./photo-labeler";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
@@ -6880,21 +6880,39 @@ export async function registerRoutes(
         }
 
         if (!foundOnAirbnb) {
-          // Extra gate: probe the Zillow listing's photo count via Apify.
-          // If it has < MIN_PHOTOS (typically means the listing is sparse
-          // and lacks bedroom/bathroom shots), skip and try the next
-          // candidate. Each probe costs one Apify run (~$0.005) but
-          // guarantees the confirmed unit has a full photo carousel.
+          // Two-stage quality filter before suggesting this candidate:
+          //
+          //   Stage 1 — photo-count floor (MIN_PHOTOS). Skips sparse
+          //   listings outright; avoids the downstream vision probe.
+          //
+          //   Stage 2 — interior content check via stratified Claude
+          //   vision labels on 8 samples. Accepts Bedrooms OR Bathrooms
+          //   as positive evidence (bathrooms almost always accompany
+          //   bedrooms, so this cuts false-negatives on single-bedroom
+          //   listings where our samples might miss the sole bedroom
+          //   photo). ~$0.004 per candidate. See probeInteriorCoverage.
           const MIN_PHOTOS = 12;
-          let photoCount = 0;
+          let scrapedPhotoUrls: string[] = [];
           try {
             const scraped = await scrapeListingPhotos(zillowUrl);
-            photoCount = scraped.length;
-          } catch { photoCount = 0; }
+            scrapedPhotoUrls = scraped.map((p) => p.url);
+          } catch { scrapedPhotoUrls = []; }
+          const photoCount = scrapedPhotoUrls.length;
           console.error(`[find-unit] ${zillowUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
           if (photoCount < MIN_PHOTOS) {
             console.error(`[find-unit] Too few photos — skipping to next candidate`);
             continue;
+          }
+
+          const anthropicKey = process.env.ANTHROPIC_API_KEY;
+          if (anthropicKey) {
+            const probe = await probeInteriorCoverage(scrapedPhotoUrls, anthropicKey);
+            console.error(`[find-unit] interior probe verdict=${probe.verdict} categories=[${probe.categories.join(", ")}]`);
+            if (probe.verdict === "reject") {
+              console.error(`[find-unit] No bedroom/bathroom samples found — skipping to next candidate`);
+              continue;
+            }
+            // "unknown" (no key) or "pass" → fall through to confirm.
           }
 
           console.error(`[find-unit] Clean unit found: ${zillowUrl}`);

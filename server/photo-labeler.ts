@@ -151,6 +151,93 @@ export function inferKindFromFolder(folder: string): PhotoKind {
   return folder.startsWith("community-") ? "community" : "unit";
 }
 
+// Classify a photo straight from its URL, without writing to disk. Used
+// by the replacement-finder to sample candidate listings cheaply.
+export async function labelPhotoFromUrl(
+  url: string,
+  kind: PhotoKind,
+  apiKey: string,
+): Promise<PhotoLabelResult | null> {
+  if (!apiKey || !url) return null;
+  try {
+    const imgResp = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!imgResp.ok) return null;
+    const buffer = Buffer.from(await imgResp.arrayBuffer());
+    if (buffer.length < 5000 || buffer.length > 5 * 1024 * 1024) return null;
+    const mimeType = detectImageMime(buffer, url.split("?")[0]);
+    const base64 = buffer.toString("base64");
+    const prompt = promptFor(kind);
+
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 100,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
+            { type: "text", text: prompt },
+          ],
+        }],
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json() as any;
+    const text: string = data?.content?.[0]?.text ?? "";
+    const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown };
+    const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
+    const category = typeof parsed.category === "string" ? parsed.category.trim() : "";
+    if (!label) return null;
+    return { label, category: category || "Other", model: MODEL };
+  } catch {
+    return null;
+  }
+}
+
+// Decide whether a Zillow listing's photo set actually contains interior
+// private-space photography (bedrooms or bathrooms), using 8 stratified
+// samples — or all photos if the set is sparse. Accepts bathrooms as
+// positive evidence because bathroom shots almost always accompany
+// bedroom shots (sellers photograph them together), which cuts false
+// negatives for single-bedroom listings where the one bedroom photo
+// might fall between our sample positions.
+//
+// Returns:
+//   "pass"      — at least one sample is a bedroom or bathroom
+//   "reject"    — confident no interior private spaces in this listing
+//   "unknown"   — no ANTHROPIC_API_KEY, can't determine; caller should default to pass
+export async function probeInteriorCoverage(
+  photoUrls: string[],
+  apiKey: string,
+): Promise<{ verdict: "pass" | "reject" | "unknown"; categories: string[] }> {
+  if (!apiKey) return { verdict: "unknown", categories: [] };
+  if (photoUrls.length === 0) return { verdict: "reject", categories: [] };
+
+  // Sparse listing → label all of them. Rich listing → 8 stratified samples.
+  const indices = photoUrls.length <= 15
+    ? photoUrls.map((_, i) => i)
+    : Array.from({ length: 8 }, (_, i) => Math.floor((photoUrls.length * i) / 8));
+
+  const sampleUrls = Array.from(new Set(indices.map((i) => photoUrls[i])));
+  const results = await Promise.all(sampleUrls.map((u) => labelPhotoFromUrl(u, "unit", apiKey)));
+  const categories = results.map((r) => r?.category ?? "").filter((c) => c);
+  const hasInterior = categories.some((c) => c === "Bedrooms" || c === "Bathrooms");
+  return { verdict: hasInterior ? "pass" : "reject", categories };
+}
+
 // Helper: enumerate image files in a folder, sorted by filename (which
 // is how the photo tab orders them). Filters out non-image files and the
 // optional `_source.json` sidecar the scraper writes.
