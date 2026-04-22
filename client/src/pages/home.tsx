@@ -45,9 +45,6 @@ import {
   Star,
   TrendingUp,
   MessageSquare,
-  Tag,
-  Loader2,
-  CheckCircle2,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
 import { computeQualityScore, gradeColor, gradeBg } from "@/data/quality-score";
@@ -411,7 +408,6 @@ export default function Home() {
                 Operations
               </Button>
             </Link>
-            <RelabelPhotosButton />
           </div>
         </div>
 
@@ -821,109 +817,6 @@ export default function Home() {
           NexStay portfolio data. Prices shown are nightly rates and may vary by season.
         </div>
       </div>
-    </div>
-  );
-}
-
-// Streams progress from POST /api/admin/relabel-all-photos so the user can
-// kick off the (~10-15 minute) full relabel without leaving this page and
-// see live status. Saves to the photo_labels DB table; the photo tab on
-// individual properties picks them up automatically via usePhotoLabels.
-function RelabelPhotosButton() {
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<{
-    folder: string;
-    done: number;
-    total: number;
-    failed: number;
-    lastLabel?: string;
-    lastFile?: string;
-  } | null>(null);
-  const [done, setDone] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const start = async () => {
-    if (busy) return;
-    setBusy(true); setProgress(null); setDone(false); setError(null);
-    try {
-      const resp = await fetch("/api/admin/relabel-all-photos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      let curFolder = "";
-      let lastDone = 0;
-      let lastTotal = 0;
-      let lastFailed = 0;
-      let lastFile = "";
-      let lastLabel = "";
-      while (true) {
-        const { value, done: streamDone } = await reader.read();
-        if (streamDone) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let evt: any; try { evt = JSON.parse(line); } catch { continue; }
-          if (evt.type === "start") {
-            lastTotal = evt.total ?? 0;
-          } else if (evt.type === "folder") {
-            curFolder = evt.folder ?? "";
-          } else if (evt.type === "photo") {
-            lastDone = evt.done ?? lastDone;
-            if (!evt.ok) lastFailed++;
-            lastFile = evt.filename ?? "";
-            lastLabel = evt.label ?? "";
-          } else if (evt.type === "done") {
-            setDone(true);
-          } else if (evt.type === "error") {
-            setError(evt.error ?? "stream error");
-          }
-          setProgress({ folder: curFolder, done: lastDone, total: lastTotal, failed: lastFailed, lastLabel, lastFile });
-        }
-      }
-    } catch (e: any) {
-      setError(e.message ?? String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
-
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <Button
-        variant="outline"
-        onClick={start}
-        disabled={busy}
-        data-testid="button-relabel-all-photos"
-        title="Walk every photo folder and regenerate captions with Claude Vision. ~10-15 minutes for the full portfolio."
-      >
-        {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : done ? <CheckCircle2 className="h-4 w-4 mr-2 text-green-600" /> : <Tag className="h-4 w-4 mr-2" />}
-        {busy ? "Relabeling…" : done ? "Relabel done" : "Relabel All Photos"}
-      </Button>
-      {(busy || done || error) && (
-        <div className="text-[10px] text-muted-foreground text-right max-w-[260px]">
-          {error && <span className="text-red-600">{error}</span>}
-          {!error && progress && (
-            <>
-              {progress.done}/{progress.total} ({pct}%) · {progress.failed} failed
-              {progress.folder && <> · {progress.folder}</>}
-              {progress.lastFile && (
-                <div className="truncate">
-                  ↳ {progress.lastFile}: <span className="text-foreground">{progress.lastLabel || "—"}</span>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 }
