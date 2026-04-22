@@ -4449,6 +4449,11 @@ export async function registerRoutes(
       // namespaces that live outside the editor (e.g. /regulations/...).
       fullUrls?: string[];
     };
+    console.error(`[inspect-network] body keys: ${Object.keys(req.body ?? {}).join(", ")}`);
+    console.error(`[inspect-network] fullUrls type: ${typeof fullUrls}, isArray: ${Array.isArray(fullUrls)}, length: ${Array.isArray(fullUrls) ? fullUrls.length : "n/a"}`);
+    if (Array.isArray(fullUrls)) {
+      for (const u of fullUrls) console.error(`[inspect-network]   fullUrl: ${u}`);
+    }
     if (!listingId || !/^\d+$/.test(listingId)) {
       return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
     }
@@ -4624,7 +4629,8 @@ export async function registerRoutes(
         ok: true,
         listingId,
         listenMs,
-        pathsVisited: pathsToVisit,
+        usedFullUrls: Array.isArray(fullUrls) && fullUrls.length > 0,
+        fullUrlsReceived: Array.isArray(fullUrls) ? fullUrls : null,
         finalUrl: page.url(),
         finalTitle: await page.title().catch(() => ""),
         capturedCount: captured.length,
