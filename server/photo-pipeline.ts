@@ -90,6 +90,117 @@ async function downloadOne(srcUrl: string, destPath: string): Promise<string | n
   }
 }
 
+// Parse the bed type from a bedroom label like "King Bedroom" or
+// "Two Queens Bedroom" → "King" / "Two Queens" / etc. Returns null if
+// no recognizable bed type is in the label.
+function detectBedType(label: string): string | null {
+  const lower = label.toLowerCase();
+  if (/\btwo queens?\b/.test(lower)) return "Two Queens";
+  if (/\btwo kings?\b/.test(lower))  return "Two Kings";
+  if (/\btwo doubles?\b/.test(lower)) return "Two Doubles";
+  if (/\bbunk\b/.test(lower))        return "Bunk Beds";
+  if (/\bking\b/.test(lower))        return "King";
+  if (/\bqueen\b/.test(lower))       return "Queen";
+  if (/\btwin\b/.test(lower))        return "Twin";
+  if (/\bdouble\b/.test(lower))      return "Double";
+  if (/\bfull\b/.test(lower))        return "Full";
+  return null;
+}
+
+// Detect a bathroom's defining feature from its label, used to dedupe
+// photos of the same bathroom from multiple angles.
+function detectBathFingerprint(label: string): string {
+  const lower = label.toLowerCase();
+  if (/\bhalf\b/.test(lower))        return "Half";
+  if (/\bjetted\b/.test(lower))      return "Jetted Tub";
+  if (/\bdouble vanity|double sink/.test(lower)) return "Double Vanity";
+  if (/\btub\b/.test(lower))         return "Tub";
+  if (/\bshower\b/.test(lower))      return "Shower";
+  return "Generic";
+}
+
+// Post-process bedroom photos: group by bed type, pick the master (King
+// preferred, then largest group), number the rest as Bedroom 2, 3, ...
+// Rewrites the .label field in place. Also caps at MAX_PER_BED_TYPE
+// photos per unique bed type to avoid 5 shots of the same room.
+const MAX_PER_BED_TYPE = 2;
+const MAX_PER_BATH_TYPE = 1;
+
+function coalesceBedrooms(items: LabeledResult[]): LabeledResult[] {
+  if (items.length === 0) return items;
+  // Bucket by bed type. Items with no recognized bed type land in "Unknown".
+  const byType = new Map<string, LabeledResult[]>();
+  const order: string[] = [];
+  for (const it of items) {
+    const bt = detectBedType(it.label ?? "") ?? "Unknown";
+    if (!byType.has(bt)) { byType.set(bt, []); order.push(bt); }
+    byType.get(bt)!.push(it);
+  }
+  // Pick master: King group first, else largest group.
+  let masterType: string;
+  if (byType.has("King") && (byType.get("King")?.length ?? 0) > 0) {
+    masterType = "King";
+  } else if (byType.has("Two Kings") && (byType.get("Two Kings")?.length ?? 0) > 0) {
+    masterType = "Two Kings";
+  } else {
+    masterType = [...byType.entries()].sort((a, b) => b[1].length - a[1].length)[0][0];
+  }
+  // Number bedrooms. Master first, then iterate the rest in original order.
+  let bedroomNum = 2;
+  const out: LabeledResult[] = [];
+  const renderType = (bt: string) => bt === "Unknown" ? "" : ` — ${bt}`;
+  // Master first
+  const masterItems = (byType.get(masterType) ?? []).slice(0, MAX_PER_BED_TYPE);
+  masterItems.forEach((it, i) => {
+    it.label = i === 0 ? `Master Bedroom${renderType(masterType)}` : `Master Bedroom — Alt View`;
+    out.push(it);
+  });
+  // Other bedrooms in original encounter order
+  for (const bt of order) {
+    if (bt === masterType) continue;
+    const slice = (byType.get(bt) ?? []).slice(0, MAX_PER_BED_TYPE);
+    slice.forEach((it, i) => {
+      it.label = i === 0 ? `Bedroom ${bedroomNum}${renderType(bt)}` : `Bedroom ${bedroomNum} — Alt View`;
+      out.push(it);
+    });
+    if (slice.length > 0) bedroomNum++;
+  }
+  return out;
+}
+
+// Same idea for bathrooms — Primary, then Guest/Hall numbered.
+function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
+  if (items.length === 0) return items;
+  const byFp = new Map<string, LabeledResult[]>();
+  const order: string[] = [];
+  for (const it of items) {
+    const fp = detectBathFingerprint(it.label ?? "");
+    if (!byFp.has(fp)) { byFp.set(fp, []); order.push(fp); }
+    byFp.get(fp)!.push(it);
+  }
+  // Primary = first non-Half group (Primary bathroom is rarely a half bath)
+  const primaryFp = order.find((fp) => fp !== "Half") ?? order[0];
+  let bathNum = 2;
+  const out: LabeledResult[] = [];
+  const renderFp = (fp: string) => fp === "Generic" ? "" : ` — ${fp}`;
+  const primaryItems = (byFp.get(primaryFp) ?? []).slice(0, MAX_PER_BATH_TYPE);
+  primaryItems.forEach((it) => {
+    it.label = `Primary Bathroom${renderFp(primaryFp)}`;
+    out.push(it);
+  });
+  for (const fp of order) {
+    if (fp === primaryFp) continue;
+    const slice = (byFp.get(fp) ?? []).slice(0, MAX_PER_BATH_TYPE);
+    slice.forEach((it) => {
+      const lab = fp === "Half" ? "Half Bath" : `Bathroom ${bathNum}${renderFp(fp)}`;
+      it.label = lab;
+      out.push(it);
+    });
+    if (slice.length > 0 && fp !== "Half") bathNum++;
+  }
+  return out;
+}
+
 // Run an async mapper over items with bounded concurrency.
 async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T, idx: number) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -111,8 +222,18 @@ export type DownloadAndPrioritizeResult = {
   labeled: number;
   kept: number;
   dropped: number;
-  bedroomCount: number;
-  bathroomCount: number;
+  bedroomCount: number;          // unique bedrooms detected (one per bed type)
+  bathroomCount: number;         // unique bathrooms detected
+  bedroomTypes: string[];        // ["King", "Queen", "Twin"]
+  bathroomTypes: string[];
+  coverage: {
+    bedroomsExpected: number | null;
+    bedroomsFound: number;
+    bedroomsShortfall: number;   // 0 = good, positive = listing missing rooms
+    bathroomsExpected: number | null;
+    bathroomsFound: number;
+    bathroomsShortfall: number;
+  };
   categorySummary: Record<string, number>;
   keptFilenames: string[];
 };
@@ -131,8 +252,12 @@ export async function downloadAndPrioritize(opts: {
   anthropicKey: string | undefined;
   kind: "unit" | "community";
   model?: string;
+  // When set, the result.coverage block reports whether we found enough
+  // unique bedrooms/bathrooms to match the unit's claimed counts.
+  requiredBedrooms?: number;
+  requiredBathrooms?: number;
 }): Promise<DownloadAndPrioritizeResult> {
-  const { folder, folderPath, scrapedUrls, maxKeep, anthropicKey, kind } = opts;
+  const { folder, folderPath, scrapedUrls, maxKeep, anthropicKey, kind, requiredBedrooms, requiredBathrooms } = opts;
   await fs.promises.mkdir(folderPath, { recursive: true });
 
   // Step 0: clear existing images. Leave _source.json + other metadata.
@@ -173,7 +298,18 @@ export async function downloadAndPrioritize(opts: {
   }
 
   if (downloaded.length === 0) {
-    return { downloaded: 0, labeled: 0, kept: 0, dropped: 0, bedroomCount: 0, bathroomCount: 0, categorySummary: {}, keptFilenames: [] };
+    return {
+      downloaded: 0, labeled: 0, kept: 0, dropped: 0,
+      bedroomCount: 0, bathroomCount: 0,
+      bedroomTypes: [], bathroomTypes: [],
+      coverage: {
+        bedroomsExpected: requiredBedrooms ?? null, bedroomsFound: 0,
+        bedroomsShortfall: requiredBedrooms ?? 0,
+        bathroomsExpected: requiredBathrooms ?? null, bathroomsFound: 0,
+        bathroomsShortfall: requiredBathrooms ?? 0,
+      },
+      categorySummary: {}, keptFilenames: [],
+    };
   }
 
   // Step 2: label every download in parallel batches. If no Anthropic key,
@@ -199,10 +335,39 @@ export async function downloadAndPrioritize(opts: {
   for (const r of rejectedResults) {
     await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
   }
-  const survivors = labeledResults.filter((r) => r.category !== REJECT_CATEGORY);
+  let survivors = labeledResults.filter((r) => r.category !== REJECT_CATEGORY);
   if (rejectedResults.length > 0) {
     console.log(`[downloadAndPrioritize] ${folder}: dropped ${rejectedResults.length} rejected photos (agents/logos/etc)`);
   }
+
+  // Step 3a.5 (NEW): Coalesce bedrooms and bathrooms.
+  //
+  // Bedrooms: group by bed type (King / Queen / Twin / Two Queens / etc.)
+  // detected from the label. Each unique bed type is one distinct room.
+  // Pick "Master Bedroom" = the King group (or biggest if no King). Number
+  // the rest as "Bedroom 2", "Bedroom 3". Cap each bed type at 2 photos to
+  // prevent same-room-five-times duplication.
+  //
+  // Bathrooms: similar logic with fixture profiles (Tub vs Shower vs
+  // Double Vanity vs Half). Primary bathroom + numbered guest bathrooms.
+  //
+  // The non-bedroom/bathroom photos pass through unchanged.
+  const bedroomItems = survivors.filter((r) => r.category === "Bedrooms");
+  const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
+  const otherItems = survivors.filter((r) => r.category !== "Bedrooms" && r.category !== "Bathrooms");
+  const coalescedBedrooms = coalesceBedrooms(bedroomItems);
+  const coalescedBathrooms = coalesceBathrooms(bathroomItems);
+  // Files that got dropped during coalesce (excess same-bed-type photos)
+  // need to be unlinked.
+  const keptIds = new Set([...coalescedBedrooms, ...coalescedBathrooms].map((r) => r.tempName));
+  const coalesceDropped = [...bedroomItems, ...bathroomItems].filter((r) => !keptIds.has(r.tempName));
+  for (const r of coalesceDropped) {
+    await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
+  }
+  if (coalesceDropped.length > 0) {
+    console.log(`[downloadAndPrioritize] ${folder}: coalesced ${coalesceDropped.length} duplicate-room shots`);
+  }
+  survivors = [...coalescedBedrooms, ...coalescedBathrooms, ...otherItems];
 
   // Step 3b: sort by category priority, ties broken by original scrape order.
   survivors.sort((a, b) => {
@@ -269,13 +434,48 @@ export async function downloadAndPrioritize(opts: {
     categorySummary[key] = (categorySummary[key] ?? 0) + 1;
   }
 
+  // Unique bedroom types in the kept set = how many distinct bedrooms we
+  // have photos of. (Two photos of "King Bedroom" still count as one room.)
+  const bedroomTypesSet = new Set<string>();
+  for (const k of kept) {
+    if (k.category === "Bedrooms") {
+      const bt = detectBedType(k.label ?? "");
+      // After coalesce the label format is "Master Bedroom — King" or
+      // "Bedroom 2 — Queen", so the bed type detection here finds the
+      // suffix. Items without a recognized type still count as one room.
+      bedroomTypesSet.add(bt ?? `Unknown-${k.tempName}`);
+    }
+  }
+  const bathroomTypesSet = new Set<string>();
+  for (const k of kept) {
+    if (k.category === "Bathrooms") {
+      bathroomTypesSet.add(detectBathFingerprint(k.label ?? "") + "-" + (k.label ?? ""));
+    }
+  }
+  const bedroomsFound = bedroomTypesSet.size;
+  const bathroomsFound = bathroomTypesSet.size;
+
+  if (requiredBedrooms && bedroomsFound < requiredBedrooms) {
+    console.warn(`[downloadAndPrioritize] ${folder}: COVERAGE GAP — listing claims ${requiredBedrooms} bedrooms but only ${bedroomsFound} unique ones detected`);
+  }
+
   return {
     downloaded: downloaded.length,
     labeled: labeledResults.filter((r) => r.label).length,
     kept: kept.length,
-    dropped: dropped.length + rejectedResults.length,
-    bedroomCount: kept.filter((k) => k.category === "Bedrooms").length,
-    bathroomCount: kept.filter((k) => k.category === "Bathrooms").length,
+    dropped: dropped.length + rejectedResults.length + coalesceDropped.length,
+    bedroomCount: bedroomsFound,
+    bathroomCount: bathroomsFound,
+    bedroomTypes: Array.from(bedroomTypesSet),
+    bathroomTypes: Array.from(bathroomTypesSet),
+    coverage: {
+      bedroomsExpected: requiredBedrooms ?? null,
+      bedroomsFound,
+      bedroomsShortfall: Math.max(0, (requiredBedrooms ?? 0) - bedroomsFound),
+      bathroomsExpected: requiredBathrooms ?? null,
+      bathroomsFound,
+      bathroomsShortfall: Math.max(0, (requiredBathrooms ?? 0) - bathroomsFound),
+    },
     categorySummary,
     keptFilenames,
   };

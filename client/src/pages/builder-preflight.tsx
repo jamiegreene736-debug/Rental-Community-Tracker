@@ -567,6 +567,10 @@ export default function BuilderPreflight() {
                       const beds = Number(data.bedroomCount ?? 0);
                       const baths = Number(data.bathroomCount ?? 0);
                       const noInteriors = beds === 0 && baths === 0;
+                      const cov = data.coverage ?? null;
+                      const bedShortfall = Number(cov?.bedroomsShortfall ?? 0);
+                      const bathShortfall = Number(cov?.bathroomsShortfall ?? 0);
+                      const expectedBeds = cov?.bedroomsExpected;
                       recordRescrape(folder, {
                         folder,
                         timestamp: Date.now(),
@@ -576,13 +580,16 @@ export default function BuilderPreflight() {
                         sourceUrl: data.sourceUrl,
                         urlSource: data.urlSource,
                       });
+                      const shortfallNote = bedShortfall > 0
+                        ? ` ⚠ Only ${beds} unique bedrooms found — listing claims ${expectedBeds}. Click "Change" if you need a richer source.`
+                        : "";
                       toast({
                         title: noInteriors
                           ? `Rescraped ${saved} photos — no bedrooms found`
                           : `Photos rescraped — ${beds} bedroom${beds !== 1 ? "s" : ""}, ${baths} bathroom${baths !== 1 ? "s" : ""}`,
                         description: noInteriors
                           ? `That Zillow listing's photos are all kitchen/exterior/views — no bedrooms detected by Claude Vision. Click "Change" to search for a different replacement with actual interior shots.`
-                          : `${saved} saved (source: ${data.urlSource ?? "manual"}). Photos are sorted by priority — bedrooms and bathrooms first. Hard-refresh the builder page to see them.`,
+                          : `${saved} saved (source: ${data.urlSource ?? "manual"}). Bedrooms are renamed Master / Bedroom 2 / Bedroom 3 by bed type. Hard-refresh the builder page to see them.${shortfallNote}`,
                         duration: 10000,
                       });
                     } catch (e: any) {

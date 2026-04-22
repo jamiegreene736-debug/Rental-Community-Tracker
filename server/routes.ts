@@ -6134,6 +6134,21 @@ export async function registerRoutes(
       // never drop a bedroom just because it was late in Apify's list.
       const maxKeep = Math.max(1, Math.min(40, limit ?? 25));
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      // Try to derive expected bedroom/bathroom counts from the most recent
+      // unit_swap that targets this folder (if any), so the pipeline can
+      // surface a coverage warning when the scraped listing has fewer
+      // unique rooms than the unit advertises.
+      let expectedBedrooms: number | undefined;
+      let expectedBathrooms: number | undefined;
+      const refs = (sourceDoc?.referencedBy as Array<Record<string, unknown>> | undefined) ?? [];
+      if (refs.length > 0) {
+        const ref = refs[0];
+        if (typeof ref.bedrooms === "number") expectedBedrooms = ref.bedrooms;
+        if (typeof ref.bathrooms === "number") expectedBathrooms = ref.bathrooms;
+        else if (typeof ref.bathrooms === "string" && !isNaN(parseFloat(ref.bathrooms))) {
+          expectedBathrooms = Math.floor(parseFloat(ref.bathrooms));
+        }
+      }
       const result = await downloadAndPrioritize({
         folder,
         folderPath,
@@ -6141,6 +6156,8 @@ export async function registerRoutes(
         maxKeep,
         anthropicKey,
         kind: inferKindFromFolder(folder),
+        requiredBedrooms: expectedBedrooms,
+        requiredBathrooms: expectedBathrooms,
       });
 
       // Stamp the URL back into _source.json so the next rescrape is one click.
@@ -6160,11 +6177,14 @@ export async function registerRoutes(
         urlSource,
         scrapedCount: scraped.length,
         savedCount: result.kept,
-        failedCount: result.downloaded - result.kept - result.dropped, // download failures
+        failedCount: result.downloaded - result.kept - result.dropped,
         downloaded: result.downloaded,
         dropped: result.dropped,
         bedroomCount: result.bedroomCount,
         bathroomCount: result.bathroomCount,
+        bedroomTypes: result.bedroomTypes,
+        bathroomTypes: result.bathroomTypes,
+        coverage: result.coverage,
         categorySummary: result.categorySummary,
         saved: result.keptFilenames,
         autoLabeling: anthropicKey ? result.kept : 0,
@@ -7350,6 +7370,7 @@ export async function registerRoutes(
             maxKeep: 25,
             anthropicKey: process.env.ANTHROPIC_API_KEY,
             kind: inferKindFromFolder(folder),
+            requiredBedrooms: swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
           });
 
           // Stamp _source.json so the folder's provenance is recorded.
