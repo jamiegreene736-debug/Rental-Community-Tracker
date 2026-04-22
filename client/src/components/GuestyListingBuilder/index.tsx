@@ -199,6 +199,7 @@ function ChannelMarkupCard({
   setMarkupPct,
   seasonalMonths,
   guestyRatesByMonth,
+  onRatesPushed,
 }: {
   listingId: string | null;
   // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
@@ -206,6 +207,7 @@ function ChannelMarkupCard({
   setMarkupPct: (m: Record<ChannelKey, number>) => void;
   seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
   guestyRatesByMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>;
+  onRatesPushed?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -287,6 +289,9 @@ function ChannelMarkupCard({
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       setSeasonalPushResult({ ...data, plan });
+      // Bump the parent refetch key so the 24-month table shows the new
+      // Guesty rates + recalculated profit cells without a page reload.
+      onRatesPushed?.();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -499,47 +504,83 @@ function ChannelMarkupCard({
           )}
         </div>
       )}
-      {result && (
-        <div style={{ marginTop: 10, fontSize: 11 }}>
-          {/* Per-channel readback from Guesty — confirms the markup isn't just
-              sent but was stored. If a row is missing, Guesty's account uses
-              a different field shape and the markup won't reach the channel. */}
-          <div style={{ padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4 }}>
-            <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
-              ✓ Guesty accepted the push — verified channel-side:
-            </div>
-            {(() => {
-              const savedInt = (result as any)?.saved?.integrations ?? {};
-              const savedFlat = (result as any)?.saved?.priceMarkup ?? {};
-              const rows: Array<{ label: string; keys: string[]; flat: string }> = [
-                { label: "Airbnb",     keys: ["airbnb2", "airbnb"],      flat: "airbnb" },
-                { label: "Vrbo",       keys: ["homeaway", "vrbo"],       flat: "vrbo" },
-                { label: "Booking.com",keys: ["bookingCom", "booking"],  flat: "booking" },
-                { label: "Direct",     keys: ["manual", "direct"],       flat: "direct" },
-              ];
-              return rows.map((r) => {
-                const hit = r.keys.map((k) => savedInt[k]?.priceMarkup).find((v) => typeof v === "number");
-                const flatHit = savedFlat?.[r.flat];
-                const value = typeof hit === "number" ? hit : (typeof flatHit === "number" ? flatHit : null);
-                return (
-                  <div key={r.label} style={{ fontSize: 11, color: value != null ? "#166534" : "#6b7280" }}>
-                    {value != null ? "✓" : "—"} {r.label}:{" "}
-                    {value != null ? <b>+{(value * 100).toFixed(1)}% stored</b> : <span>not set / not sent</span>}
-                  </div>
-                );
-              });
-            })()}
+      {result && (() => {
+        const r = result as any;
+        // Read the various shapes we inspect for stored values.
+        const savedMarkups = r?.saved?.markups ?? {};
+        const savedInt = r?.saved?.integrations ?? {};
+        const savedFlat = r?.saved?.priceMarkup ?? {};
+        const useAcct = r?.saved?.useAccountMarkups;
+
+        type Row = { label: string; keys: string[]; flat: string };
+        const rows: Row[] = [
+          { label: "Airbnb",     keys: ["airbnb2", "airbnb"],      flat: "airbnb" },
+          { label: "Vrbo",       keys: ["homeaway2", "homeaway", "vrbo"], flat: "vrbo" },
+          { label: "Booking.com",keys: ["bookingCom", "booking"],  flat: "booking" },
+          { label: "Direct",     keys: ["manual", "direct"],       flat: "direct" },
+        ];
+        const resolveValue = (row: Row): number | null => {
+          // Check `markups` object-with-percent shape first (0-100 scale)
+          for (const k of row.keys) {
+            const m = savedMarkups?.[k];
+            if (m && typeof m.percent === "number") return m.percent / 100;
+            if (typeof m === "number") return m;
+          }
+          // Then legacy integrations/priceMarkup
+          for (const k of row.keys) {
+            const v = savedInt?.[k]?.priceMarkup;
+            if (typeof v === "number") return v;
+          }
+          const flat = savedFlat?.[row.flat];
+          return typeof flat === "number" ? flat : null;
+        };
+        const anyStored = rows.some((row) => resolveValue(row) != null);
+        const apiAccepted = r?.success === true || (r?.attempts ?? []).some((a: any) => a.ok);
+        // "accepted but empty" — Guesty returned HTTP 200 on the PUT but
+        // read-back shows no stored values anywhere. This is the silent
+        // failure mode that makes push look successful in the toast but
+        // doesn't actually change anything on the channel.
+        const silentlyDiscarded = apiAccepted && !anyStored;
+
+        return (
+          <div style={{ marginTop: 10, fontSize: 11 }}>
+            {silentlyDiscarded ? (
+              <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4 }}>
+                <div style={{ fontWeight: 600, color: "#92400e", marginBottom: 4 }}>
+                  ⚠ Guesty returned HTTP 200 but stored NO markup — Open API can't set channel markups on this account.
+                </div>
+                <div style={{ fontSize: 11, color: "#92400e", lineHeight: 1.5 }}>
+                  {useAcct === true && <>Detected <code>useAccountMarkups: true</code> — listing-level markups are disabled. </>}
+                  Set the per-channel markup manually in Guesty: <b>Channel Manager → each channel → Price adjustment</b>. The seasonal base rates we pushed to the calendar work correctly regardless; only the per-channel uplift needs to be configured on the Guesty side.
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4 }}>
+                <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
+                  ✓ Guesty accepted the push — verified channel-side:
+                </div>
+                {rows.map((row) => {
+                  const value = resolveValue(row);
+                  return (
+                    <div key={row.label} style={{ fontSize: 11, color: value != null ? "#166534" : "#6b7280" }}>
+                      {value != null ? "✓" : "—"} {row.label}:{" "}
+                      {value != null ? <b>+{(value * 100).toFixed(1)}% stored</b> : <span>not set / not sent</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <details style={{ marginTop: 6 }}>
+              <summary style={{ cursor: "pointer", color: silentlyDiscarded ? "#92400e" : "#166534", fontWeight: 600 }}>
+                Raw response (shapes tried, what stuck)
+              </summary>
+              <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 260 }}>
+                {JSON.stringify(result, null, 2)}
+              </pre>
+            </details>
           </div>
-          <details style={{ marginTop: 6 }}>
-            <summary style={{ cursor: "pointer", color: "#166534", fontWeight: 600 }}>
-              Raw response (which Guesty shape stuck)
-            </summary>
-            <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 220 }}>
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          </details>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -1499,6 +1540,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
+  // Bumping this triggers a refetch of the monthly-rates table — used after
+  // a seasonal-rates push succeeds so the pricing table shows the new
+  // Guesty rates without a manual page refresh.
+  const [guestyRatesRefreshKey, setGuestyRatesRefreshKey] = useState(0);
+  const refreshGuestyRates = () => setGuestyRatesRefreshKey((n) => n + 1);
   // Per-channel markup (decimal form: 0.155 = +15.5%). Hoisted from
   // ChannelMarkupCard so the profit columns in the pricing table can
   // reflect the uplift in real time — not just after it's been pushed.
@@ -1534,7 +1580,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
         if (!cancelled) setGuestyRatesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [propertyId]);
+    // guestyRatesRefreshKey is included so a seasonal-rates push can
+    // trigger a re-fetch (bump the key) instead of requiring a page reload.
+  }, [propertyId, guestyRatesRefreshKey]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -2622,6 +2670,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                     setMarkupPct={setMarkupPct}
                     seasonalMonths={seasonalMonths}
                     guestyRatesByMonth={guestyRatesByMonth}
+                    onRatesPushed={refreshGuestyRates}
                   />
                 )}
 

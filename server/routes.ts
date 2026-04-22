@@ -2539,10 +2539,17 @@ export async function registerRoutes(
 
     console.log(`[push-channel-markups] listing ${listingId}`, priceMarkupFlat);
 
-    // Guesty's listing PUT rejects the merged-everything body shape on some
-    // accounts (returns 500 with no body). Try each shape independently
-    // and capture which one succeeds — then we know what Guesty wants for
-    // this account and can preserve it on subsequent pushes.
+    // Based on inspecting a live Guesty listing:
+    //   - There's a top-level `markups: {}` field. That's the real target.
+    //   - `integrations` is an ARRAY of {platform, ...}, not an object —
+    //     so the old {integrations: {airbnb2: ...}} body was malformed.
+    //   - `useAccountMarkups: true` flag forces Guesty to use account-level
+    //     markups and IGNORE listing-level ones. We must flip it to false
+    //     alongside the markup write or the push is silently thrown away.
+    //
+    // Guesty's exact schema for `markups` isn't documented (at least not
+    // in the Open API reference) so we still try a few candidate shapes
+    // and let the read-back confirm which one Guesty honors.
     type ShapeAttempt = {
       shape: string;
       body: Record<string, unknown>;
@@ -2562,61 +2569,92 @@ export async function registerRoutes(
       }
     };
 
-    // Try each variant in order of "most likely to work" → "deprecated".
-    // Stop on first success — Guesty stores it once and the read-back below
-    // will tell us where it landed.
+    // Helper: snapshot the listing AFTER a push to see what Guesty actually
+    // stored. The UI shows this so the operator knows which field path
+    // (if any) got through.
+    const readbackSaved = async () => {
+      try {
+        const fetched = await guestyRequest("GET", `/listings/${listingId}`) as any;
+        return {
+          markups: fetched?.markups ?? null,
+          useAccountMarkups: fetched?.useAccountMarkups ?? null,
+          priceMarkup: fetched?.priceMarkup ?? null,
+        };
+      } catch (e: any) {
+        return { markups: null, useAccountMarkups: null, priceMarkup: null, readError: e?.message };
+      }
+    };
+
+    // Convert our channel keys to Guesty platform keys for the `markups` body.
+    const markupsByPlatform: Record<string, number> = {};
+    const markupsByPlatformObj: Record<string, { percent: number; active: boolean }> = {};
+    for (const [key, value] of Object.entries(priceMarkupFlat)) {
+      for (const guestyKey of channelToGuesty[key] ?? [key]) {
+        markupsByPlatform[guestyKey] = value;
+        markupsByPlatformObj[guestyKey] = { percent: value * 100, active: true };
+      }
+    }
+
+    // IMPORTANT: always flip useAccountMarkups off — listing-level markups
+    // are ignored when the account-level toggle is true.
     let anySucceeded = false;
-    if (!anySucceeded && Object.keys(priceMarkupFlat).length > 0) {
-      anySucceeded = await tryShape("priceMarkup", { priceMarkup: priceMarkupFlat });
+    if (!anySucceeded && Object.keys(markupsByPlatform).length > 0) {
+      // Shape A: markups: { airbnb2: 0.148, ... } — flat decimals under `markups`
+      anySucceeded = await tryShape("markups-flat-decimal", {
+        useAccountMarkups: false,
+        markups: markupsByPlatform,
+      });
+      if (anySucceeded) {
+        const rb = await readbackSaved();
+        if (rb.markups && typeof rb.markups === "object" && Object.keys(rb.markups).length > 0) {
+          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "markups-flat-decimal" });
+        }
+        // Stored empty again — keep trying other shapes.
+        anySucceeded = false;
+      }
     }
-    if (!anySucceeded && Object.keys(integrationsPatch).length > 0) {
-      anySucceeded = await tryShape("integrations", { integrations: integrationsPatch });
+    if (!anySucceeded && Object.keys(markupsByPlatformObj).length > 0) {
+      // Shape B: markups: { airbnb2: { percent: 14.8, active: true }, ... }
+      anySucceeded = await tryShape("markups-object-percent", {
+        useAccountMarkups: false,
+        markups: markupsByPlatformObj,
+      });
+      if (anySucceeded) {
+        const rb = await readbackSaved();
+        if (rb.markups && typeof rb.markups === "object" && Object.keys(rb.markups).length > 0) {
+          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "markups-object-percent" });
+        }
+        anySucceeded = false;
+      }
     }
-    if (!anySucceeded && Object.keys(channelsPatch).length > 0) {
-      anySucceeded = await tryShape("channels", { channels: channelsPatch });
-    }
-
-    // If everything failed, surface the most recent (= deepest-tried) error
-    // so the client toast tells the user what Guesty actually said.
     if (!anySucceeded) {
-      const lastErr = attempts[attempts.length - 1]?.error ?? "Guesty rejected every payload shape";
-      return res.status(500).json({ success: false, error: lastErr, attempts });
+      // Shape C: legacy priceMarkup flat (old code path — kept as fallback).
+      anySucceeded = await tryShape("priceMarkup-flat", { priceMarkup: priceMarkupFlat });
+      if (anySucceeded) {
+        const rb = await readbackSaved();
+        if (rb.priceMarkup && Object.keys(rb.priceMarkup).length > 0) {
+          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "priceMarkup-flat" });
+        }
+        anySucceeded = false;
+      }
     }
 
-    try {
-      // Read back to see which shape stuck
-      const fetched = await guestyRequest("GET", `/listings/${listingId}`) as any;
-      const saved = {
-        priceMarkup: fetched?.priceMarkup ?? null,
-        integrations: Object.fromEntries(
-          Object.entries(fetched?.integrations ?? {})
-            .filter(([k]) => Object.keys(integrationsPatch).includes(k))
-            .map(([k, v]: [string, any]) => [k, { priceMarkup: v?.priceMarkup, priceAdjustment: v?.priceAdjustment }]),
-        ),
-        channels: Object.fromEntries(
-          Object.entries(fetched?.channels ?? {})
-            .filter(([k]) => Object.keys(channelsPatch).includes(k))
-            .map(([k, v]: [string, any]) => [k, { priceMarkup: v?.priceMarkup }]),
-        ),
-      };
-
-      return res.json({
-        success: true,
-        sent: { airbnb: markups.airbnb, vrbo: markups.vrbo, booking: markups.booking, direct: markups.direct },
-        saved,
-        attempts,
-        note: "Check the 'saved' block — whichever field populated is the one Guesty honors for your account.",
-      });
-    } catch (err: any) {
-      return res.json({
-        success: true,
-        sent: { airbnb: markups.airbnb, vrbo: markups.vrbo, booking: markups.booking, direct: markups.direct },
-        saved: null,
-        attempts,
-        verifyError: err.message,
-        note: "Push succeeded but read-back failed — check Guesty UI manually.",
-      });
-    }
+    // Every attempt "succeeded" at HTTP level but Guesty stored nothing.
+    // Tell the client honestly — they'll need to set markups in the
+    // Guesty UI or at account level since the Open API path isn't honoring
+    // any of the body shapes we've tried for this account.
+    const saved = await readbackSaved();
+    return res.json({
+      success: false,
+      sent: markups,
+      saved,
+      attempts,
+      error:
+        "Guesty accepted each PUT with HTTP 200 but stored nothing. Most likely cause: "
+        + "listing-level channel markups aren't exposed via the Open API on this account. "
+        + "Set them manually in the Guesty UI (Channel Manager → per-channel markup), "
+        + "or we need a real documented field path.",
+    });
   });
 
   // POST /api/builder/push-compliance — pushes TMK, TAT, and GET license to Guesty's internal tags (not synced to Airbnb/VRBO)
