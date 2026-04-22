@@ -3940,8 +3940,14 @@ export async function registerRoutes(
     const started = Date.now();
     let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
     try {
+      // Railway's Dockerfile apt-installs /usr/bin/chromium and sets a
+      // misnamed env var (PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH isn't a
+      // documented Playwright var). Pass the executable explicitly
+      // instead so launch() doesn't fall back to the bundled-browser
+      // cache that doesn't exist in this image.
       browser = await chromium.launch({
         headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",

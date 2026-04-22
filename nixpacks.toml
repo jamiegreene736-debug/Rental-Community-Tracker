@@ -26,14 +26,3 @@ nixPkgs = [
   'xorg.libXrandr',
   'xorg.libXrender',
 ]
-
-# Download Playwright's bundled Chromium during build. The system libs
-# above satisfy its runtime deps; this brings in the actual binary
-# Playwright expects at ~/.cache/ms-playwright/chromium-*. Without
-# this step, chromium.launch() fails with "Executable doesn't exist
-# at chromium_headless_shell-1208/...".
-[phases.build]
-cmds = [
-  'npx playwright install chromium',
-  'npm run build',
-]
