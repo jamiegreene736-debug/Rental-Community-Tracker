@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
+import { useToast } from "@/hooks/use-toast";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -128,6 +129,10 @@ export default function BuilderPreflight() {
   const [, setLocation] = useLocation();
   const id = parseInt(propertyId || "0", 10);
   const property = getUnitBuilderByPropertyId(id);
+  const { toast } = useToast();
+
+  // Per-row rescrape state so each row can show its own spinner/result.
+  const [rescrapingUnitId, setRescrapingUnitId] = useState<string | null>(null);
 
   const [platformChecking, setPlatformChecking] = useState(false);
   // Track which unit IDs are still being checked (for per-row spinner)
@@ -473,6 +478,47 @@ export default function BuilderPreflight() {
                         <Button
                           size="sm"
                           variant="outline"
+                          className="h-7 px-2 text-xs border-blue-400 dark:border-blue-600 text-blue-800 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/40"
+                          disabled={rescrapingUnitId === oldUnitId}
+                          onClick={async () => {
+                            // Just re-run the Apify scrape for the same Zillow URL —
+                            // no swap change, no re-picking a unit.
+                            const photoFolder = origUnit?.photoFolder;
+                            if (!photoFolder) {
+                              toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
+                              return;
+                            }
+                            setRescrapingUnitId(oldUnitId);
+                            try {
+                              const r = await fetch("/api/builder/rescrape-unit-photos", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ folder: photoFolder }),
+                              });
+                              const data = await r.json();
+                              if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                              toast({
+                                title: "Photos rescraped",
+                                description: `${data.savedCount} saved, ${data.failedCount} failed (source: ${data.urlSource ?? "manual"}). Claude labels regenerate in ~30-60s — hard-refresh the builder page then.`,
+                                duration: 8000,
+                              });
+                            } catch (e: any) {
+                              toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
+                            } finally {
+                              setRescrapingUnitId(null);
+                            }
+                          }}
+                          data-testid={`button-rescrape-committed-swap-${oldUnitId}`}
+                        >
+                          {rescrapingUnitId === oldUnitId ? (
+                            <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Rescraping…</>
+                          ) : (
+                            <><RefreshCw className="h-3 w-3 mr-1" /> Rescrape photos</>
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
                           className="h-7 px-2 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40"
                           onClick={async () => {
                             // Undo the committed swap first so it won't be in skipUrls,
@@ -501,7 +547,7 @@ export default function BuilderPreflight() {
                 })}
               </div>
               <p className="text-xs text-green-700 dark:text-green-400">
-                Click "Change" to search for a different replacement (photos rescrape automatically), or "Recheck" to re-verify the current replacements are still clean on Airbnb/VRBO/Booking.com.
+                <strong>Rescrape photos</strong> pulls the latest photo set from the same Zillow listing · <strong>Change</strong> searches for a different replacement unit · <strong>Recheck</strong> re-verifies the current ones aren't already listed on Airbnb/VRBO/Booking.
               </p>
             </div>
           )}
