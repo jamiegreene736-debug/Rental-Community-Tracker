@@ -64,14 +64,85 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
-// Fetch Zillow listing photos via ScrapingBee. zillow.com itself 403s every
-// IP we've tried (Cloudflare/Akamai); SearchAPI has no per-URL Zillow engine;
-// Google Images only indexes ~1 photo per listing. ScrapingBee's stealth
-// proxy bypasses the Cloudflare wall and render_js hydrates __NEXT_DATA__
-// so we can walk the same JSON the in-browser scraper used to read.
-//
-// Cost per call: ~75 ScrapingBee credits (stealth_proxy=true). At 5 listings
-// a week with ~2 units each, usage is ~2-3k credits/month.
+// Fetch Zillow listing photos via Apify. Pay-per-result (~$0.005 each) is
+// 50-80× cheaper than ScrapingBee's credit model for our low volume.
+// Requires APIFY_API_TOKEN on the env. APIFY_ZILLOW_ACTOR picks which
+// actor to run — defaults to maxcopell/zillow-detail-scraper which takes
+// a list of Zillow URLs and returns full listing JSON including photos.
+async function scrapeZillowViaApify(url: string): Promise<string[]> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) {
+    console.warn(`[scrapeZillow:Apify] APIFY_API_TOKEN not set`);
+    return [];
+  }
+  const actor = (process.env.APIFY_ZILLOW_ACTOR || "maxcopell~zillow-detail-scraper").replace("/", "~");
+  try {
+    // run-sync-get-dataset-items blocks until the actor finishes and returns
+    // the dataset as JSON in one call. Perfect for a single-URL lookup.
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startUrls: [{ url }] }),
+      signal: AbortSignal.timeout(180_000), // cold-start + scrape can take 60-120s
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[scrapeZillow:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
+      return [];
+    }
+    const items: any[] = await r.json().catch(() => []);
+    if (!Array.isArray(items) || items.length === 0) {
+      console.warn(`[scrapeZillow:Apify] empty dataset for ${url}`);
+      return [];
+    }
+
+    // Every Zillow actor uses a slightly different schema, so walk the whole
+    // dataset recursively and pull every string that looks like a real
+    // zillowstatic.com photo URL. Keep highest-resolution variant per photo.
+    const found: string[] = [];
+    function walk(obj: any, depth: number): void {
+      if (depth > 14 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+      // Schema A: mixedSources.jpeg: [{url, width}, ...] (what __NEXT_DATA__ uses)
+      if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+        const jpegs: Array<{ url?: string; width?: number }> = obj.mixedSources.jpeg;
+        if (jpegs.length > 0) {
+          const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+          if (biggest.url) found.push(biggest.url);
+          return;
+        }
+      }
+      for (const v of Object.values(obj)) {
+        if (typeof v === "string") {
+          if (/^https?:\/\/photos?\.zillowstatic\.com\//i.test(v) && /\.(jpg|jpeg|png|webp)/i.test(v)) {
+            found.push(v);
+          }
+        } else {
+          walk(v, depth + 1);
+        }
+      }
+    }
+    walk(items, 0);
+
+    // Dedupe, keeping the widest variant per photo.
+    const byStem = new Map<string, { url: string; width: number }>();
+    for (const u of found) {
+      const widthMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d+)\.(jpg|jpeg|png|webp)/i);
+      const w = widthMatch ? parseInt(widthMatch[1], 10) : 0;
+      const stem = u.replace(/_(?:cc_ft_|uncropped_scaled_within_)?\d+\.(jpg|jpeg|png|webp)/i, "_W.$1");
+      const prev = byStem.get(stem);
+      if (!prev || w > prev.width) byStem.set(stem, { url: u, width: w });
+    }
+    const uniq = Array.from(byStem.values()).map((v) => v.url);
+    console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos`);
+    return uniq;
+  } catch (e: any) {
+    console.warn(`[scrapeZillow:Apify] ${url}: ${e?.message ?? e}`);
+    return [];
+  }
+}
+
 async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
   const key = process.env.SCRAPINGBEE_API_KEY;
   if (!key) {
@@ -132,17 +203,18 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
 }
 
 async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
-  // Fast path: Zillow URLs go through ScrapingBee (stealth proxy + JS render),
-  // because zillow.com itself 403s every IP we've tried (Playwright + fetch),
-  // SearchAPI has no per-URL Zillow engine, and Google Images only indexes ~1
-  // photo per listing. ScrapingBee's the only path that reliably returns the
-  // full photo carousel.
+  // Zillow URLs: try Apify first (pay-per-result, way cheaper for our volume),
+  // then ScrapingBee as a fallback. zillow.com itself 403s every IP we've
+  // tried (Cloudflare/Akamai), so one of these paid paths is mandatory.
   if (/zillow\.com/i.test(primaryUrl)) {
-    const urls = await scrapeZillowViaScrapingBee(primaryUrl);
+    let urls = await scrapeZillowViaApify(primaryUrl);
+    if (urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+      console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
+      urls = await scrapeZillowViaScrapingBee(primaryUrl);
+    }
     if (urls.length > 0) {
       return urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
-    // If ScrapingBee returned nothing and the fallback is also Zillow, bail.
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
 
