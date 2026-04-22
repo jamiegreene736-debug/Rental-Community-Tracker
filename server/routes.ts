@@ -4270,9 +4270,13 @@ export async function registerRoutes(
     const cookieJson = process.env.AIRBNB_SESSION_COOKIES;
     if (!cookieJson) return res.status(500).json({ error: "AIRBNB_SESSION_COOKIES not set" });
 
-    const { listingId, keepFor } = (req.body ?? {}) as {
+    const { listingId, keepFor, widenCapture } = (req.body ?? {}) as {
       listingId?: string;
       keepFor?: number; // ms to keep listening after initial load (default 12s)
+      // Set true to capture ALL /api/* requests, not just regulatory-keyword
+      // matches. Useful when the keyword filter catches nothing and we
+      // need to see what endpoints Airbnb fires at all.
+      widenCapture?: boolean;
     };
     if (!listingId || !/^\d+$/.test(listingId)) {
       return res.status(400).json({ error: "listingId required (numeric Airbnb listing id)" });
@@ -4352,7 +4356,12 @@ export async function registerRoutes(
           }
         }
         const blob = `${url} ${operationName ?? ""} ${bodyPreview ?? ""}`;
-        if (!keywordRe.test(blob) && !(url.includes("/api/") && keywordRe.test(url))) return;
+        const matchesKeyword = keywordRe.test(blob);
+        // Widen mode: capture every airbnb.com/api/* call so we can see
+        // the actual API surface the editor uses, even when no one
+        // endpoint has a regulatory-sounding name.
+        const isApi = /airbnb\.com\/api\//.test(url);
+        if (!matchesKeyword && !(widenCapture && isApi)) return;
         captured.push({ method, url, resourceType: type, operationName, bodyPreview });
       });
 
@@ -4381,7 +4390,24 @@ export async function registerRoutes(
       await page.goto(`https://www.airbnb.com/hosting/listings/editor/${listingId}`, {
         waitUntil: "domcontentloaded", timeout: 30000,
       });
-      await page.waitForTimeout(listenMs);
+      await page.waitForTimeout(Math.floor(listenMs / 2));
+      // Scroll around to trigger any lazy-loaded sections (regulatory
+      // info often lives in a collapsed footer or "Additional details"
+      // panel that fetches on view).
+      await page.mouse.wheel(0, 800);
+      await page.waitForTimeout(2000);
+      await page.mouse.wheel(0, 1600);
+      await page.waitForTimeout(1500);
+
+      // Then visit the public listing page — regulatory info (license
+      // number, registration body) is rendered in the footer for
+      // regulated markets, which triggers a regulations-metadata fetch.
+      await page.goto(`https://www.airbnb.com/rooms/${listingId}`, {
+        waitUntil: "domcontentloaded", timeout: 30000,
+      });
+      await page.waitForTimeout(Math.floor(listenMs / 2));
+      await page.mouse.wheel(0, 4000); // all the way to the footer
+      await page.waitForTimeout(3000);
 
       // Also scrape the sidebar once more so the user can see what we saw
       const sidebar = await page.evaluate((lid: string) => {
