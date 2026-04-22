@@ -11,6 +11,7 @@
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import {
   countAirbnbCandidates,
   computeSetsFromCounts,
@@ -107,7 +108,11 @@ export async function runFullScanForProperty(
     summaries.push(`inventory ${baselineSets} sets (${baselineVerdict})`);
   }
 
-  // ── Pricing: 1 sample per season per BR ──
+  // ── Pricing telemetry: 1 sample per season per BR ──
+  // We snapshot the live Airbnb retail rate per season for visibility
+  // (lets the operator see if the market is moving), but we do NOT use
+  // these as the cost basis — those are other hosts' SELL prices, not
+  // our buy-in cost. Pushing rates off them caused 197% margins.
   const priceByBR: Record<SeasonKey, Record<number, number | null>> = {
     LOW: {}, HIGH: {}, HOLIDAY: {},
   };
@@ -127,7 +132,7 @@ export async function runFullScanForProperty(
     const pricedSeasons = Object.entries(priceByBR)
       .filter(([_, m]) => Object.values(m).some((v) => v != null))
       .map(([s]) => s);
-    summaries.push(`priced ${pricedSeasons.length}/3 seasons`);
+    summaries.push(`market-snapshot ${pricedSeasons.length}/3 seasons`);
   }
 
   // ── Block sync: push owner-blocks for insufficient windows ──
@@ -191,10 +196,14 @@ export async function runFullScanForProperty(
     summaries.push(`blocks +${created}/-${removed}${failed ? `/×${failed}` : ""}`);
   }
 
-  // ── Rate push: per-month Guesty calendar from per-season cheapest ──
+  // ── Rate push: per-month Guesty calendar from STATIC buy-in cost ──
+  // Uses the manually-curated BUY_IN_RATES from shared/pricing-rates.ts
+  // (cost we PAY per night) × season multiplier, then marks up to hit
+  // the target margin after the direct-channel fee. The earlier version
+  // used live Airbnb engine prices as the cost basis, which was wrong —
+  // those are SELL prices already inflated by other hosts' margins.
   if (opts.runPricing) {
     const feeDirect = 0.03;
-    // 24 months worth of (month → target rate)
     const today = new Date();
     const ranges: Array<{ startDate: string; endDate: string; price: number }> = [];
     for (let m = 0; m < 24; m++) {
@@ -202,35 +211,24 @@ export async function runFullScanForProperty(
       const y = d.getFullYear();
       const mm = d.getMonth() + 1;
       const yearMonth = `${y}-${String(mm).padStart(2, "0")}`;
-      const season = seasonForMonth(yearMonth);
-      // Set total = sum over slots of cheapest-nightly-in-season for that BR
-      let setTotal = 0;
-      let ok = true;
-      for (const slot of config.units) {
-        const n = priceByBR[season][slot.bedrooms];
-        if (n == null) { ok = false; break; }
-        setTotal += n;
-      }
-      if (!ok || setTotal <= 0) continue;
-      const targetRate = Math.round(((1 + opts.targetMargin) * setTotal) / (1 - feeDirect));
+      // Cost basis = sum of buy-in cost per slot for this month/season
+      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth);
+      if (setCost <= 0) continue;
+      const targetRate = Math.round(((1 + opts.targetMargin) * setCost) / (1 - feeDirect));
       const startDate = new Date(y, mm - 1, 1).toISOString().slice(0, 10);
       const lastDay = new Date(y, mm, 0).getDate();
       const endDate = new Date(y, mm - 1, lastDay).toISOString().slice(0, 10);
       ranges.push({ startDate, endDate, price: targetRate });
     }
-    if (ranges.length > 0) {
-      let pushedRanges = 0;
-      for (const r of ranges) {
-        try {
-          await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${guestyListingId}`, r);
-          pushedRanges++;
-          await new Promise((resolve) => setTimeout(resolve, 120));
-        } catch { /* continue */ }
-      }
-      summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
-    } else {
-      summaries.push("rates 0 months (no priced data)");
+    let pushedRanges = 0;
+    for (const r of ranges) {
+      try {
+        await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${guestyListingId}`, r);
+        pushedRanges++;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      } catch { /* continue */ }
     }
+    summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
   }
 
   return summaries.join(" · ");
