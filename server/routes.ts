@@ -15,7 +15,7 @@ import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles } from "./photo-labeler";
-import { findPricedAirbnbListings, buildSets, verdictFor, type PricedListing } from "./availability-search";
+import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 
@@ -3678,11 +3678,10 @@ export async function registerRoutes(
     if (!config) return res.status(404).json({ error: `Property ${propertyId} not in config` });
 
     const community = config.community;
-    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
-    const bounds = COMMUNITY_BOUNDS[community];
 
-    // Resort name from the Guesty listing title — makes the per-listing
-    // filter much tighter than just "community area" geo bounds.
+    // Resort name from the Guesty listing title — makes the search query
+    // tight enough that we count listings AT this resort, not the broader
+    // area.
     let resortName: string | null = null;
     let guestyListingId: string | null = null;
     try {
@@ -3694,12 +3693,10 @@ export async function registerRoutes(
       }
     } catch { /* non-fatal */ }
 
-    // Pull any manual overrides up front so they can short-circuit the
-    // verdict without wasting SearchAPI calls.
+    // Manual overrides — short-circuit the verdict for specific weeks.
     const overrides = await storage.getScannerOverrides(propertyId).catch(() => []);
     const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
 
-    // Unique BR counts we need to search (avoid 2× calls for 3BR+3BR)
     const uniqueBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms)));
 
     res.setHeader("Content-Type", "application/x-ndjson");
@@ -3719,7 +3716,38 @@ export async function registerRoutes(
       weeks,
     });
 
-    // Generate 7-day windows starting tomorrow
+    // Cheap mode: ONE site:airbnb.com/rooms search per unique BR count
+    // for the whole scan. Listings at a given resort don't appear or
+    // disappear week-to-week, so the same count applies to every window.
+    // Cost: ~3 SearchAPI calls for an 11-property × daily-scan portfolio
+    // instead of ~5,000.
+    const countsByBR: Record<number, number> = {};
+    const samplesByBR: Record<number, CandidateListing[]> = {};
+    const errorsByBR: Record<number, string> = {};
+    await Promise.all(uniqueBedrooms.map(async (br) => {
+      try {
+        const r = await countAirbnbCandidates({ resortName, community, bedrooms: br, apiKey });
+        countsByBR[br] = r.count;
+        samplesByBR[br] = r.sample;
+      } catch (e: any) {
+        errorsByBR[br] = e?.message ?? String(e);
+        countsByBR[br] = 0;
+        samplesByBR[br] = [];
+      }
+    }));
+
+    const baselineSets = computeSetsFromCounts(config.units, countsByBR);
+    const baselineVerdict = verdictFor(baselineSets, minSets);
+
+    emit({
+      type: "candidates",
+      countsByBR,
+      samplesByBR,
+      errors: errorsByBR,
+      baselineSets,
+      baselineVerdict,
+    });
+
     const today = new Date();
     today.setHours(12, 0, 0, 0);
     const toYmd = (d: Date) => d.toISOString().slice(0, 10);
@@ -3732,8 +3760,6 @@ export async function registerRoutes(
       const startDate = toYmd(start);
       const endDate = toYmd(end);
 
-      // Override handling — if the user has marked this week force-open
-      // or force-block, we skip the search entirely.
       const ov = overrideByStart.get(startDate);
       if (ov) {
         const verdict = ov.mode === "force-block" ? "blocked" : "open";
@@ -3746,59 +3772,25 @@ export async function registerRoutes(
           overridden: true,
           overrideMode: ov.mode,
           overrideNote: ov.note ?? null,
-          sets: [],
+          listingCounts: countsByBR,
+          sample: samplesByBR,
         });
         continue;
       }
 
-      // Fetch priced listings for each unique BR count, in parallel within
-      // the window (so the three BR groups race each other; outer loop
-      // stays sequential to avoid blasting SearchAPI).
-      const listingsByBedrooms: Record<number, PricedListing[]> = {};
-      const errors: Record<number, string> = {};
-      await Promise.all(uniqueBedrooms.map(async (br) => {
-        try {
-          const results = await findPricedAirbnbListings({
-            community, resortName, bedrooms: br,
-            checkIn: startDate, checkOut: endDate,
-            q: searchLocation, bounds, apiKey,
-          });
-          listingsByBedrooms[br] = results;
-        } catch (e: any) {
-          errors[br] = e?.message ?? String(e);
-          listingsByBedrooms[br] = [];
-        }
-      }));
-
-      const { maxSets, sets } = buildSets(config.units, listingsByBedrooms, 3);
-      const verdict = verdictFor(maxSets, minSets);
-
+      // Same baseline applies to every non-overridden window.
       emit({
         type: "window",
         startDate, endDate,
-        verdict,
-        maxSets,
+        verdict: baselineVerdict,
+        maxSets: baselineSets,
         minSets,
-        listingCounts: Object.fromEntries(
-          Object.entries(listingsByBedrooms).map(([br, arr]) => [br, arr.length]),
-        ),
-        cheapestSetTotal: sets[0]?.totalPrice ?? null,
-        sets: sets.map((s) => ({
-          totalPrice: s.totalPrice,
-          slots: s.slots.map(({ unitId, listing }) => ({
-            unitId,
-            title: listing.title,
-            url: listing.url,
-            bedrooms: listing.bedrooms,
-            nightlyPrice: listing.nightlyPrice,
-            totalPrice: listing.totalPrice,
-          })),
-        })),
-        errors,
+        listingCounts: countsByBR,
+        sample: samplesByBR,
       });
     }
 
-    emit({ type: "done", weeks });
+    emit({ type: "done", weeks, baselineSets, baselineVerdict });
     res.end();
   });
 

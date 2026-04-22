@@ -10,14 +10,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 type Verdict = "open" | "tight" | "blocked" | "pending";
 
-type SlotListing = {
-  unitId: string;
-  title: string;
-  url: string;
-  bedrooms: number | null;
-  nightlyPrice: number;
-  totalPrice: number;
-};
+type CandidateListing = { id: string; url: string; title: string };
 
 type WindowResult = {
   startDate: string;
@@ -25,13 +18,19 @@ type WindowResult = {
   verdict: Verdict;
   maxSets?: number;
   minSets?: number;
-  cheapestSetTotal?: number | null;
   listingCounts?: Record<string, number>;
-  sets?: Array<{ totalPrice: number; slots: SlotListing[] }>;
+  sample?: Record<string, CandidateListing[]>;
   overridden?: boolean;
   overrideMode?: "force-open" | "force-block";
   overrideNote?: string | null;
-  errors?: Record<string, string>;
+};
+
+type CandidatesEvent = {
+  countsByBR: Record<string, number>;
+  samplesByBR: Record<string, CandidateListing[]>;
+  errors: Record<string, string>;
+  baselineSets: number;
+  baselineVerdict: Verdict;
 };
 
 type Unit = { unitId: string; unitLabel: string; bedrooms: number };
@@ -66,6 +65,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [ctx, setCtx] = useState<ScanContext | null>(null);
+  const [candidates, setCandidates] = useState<CandidatesEvent | null>(null);
   const [results, setResults] = useState<WindowResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -95,6 +95,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     setScanning(true);
     setResults([]);
     setCtx(null);
+    setCandidates(null);
     setError(null);
     setProgress(null);
     setSelectedIdx(null);
@@ -139,6 +140,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               weeks: evt.weeks,
             });
             setProgress({ done: 0, total });
+          } else if (evt.type === "candidates") {
+            setCandidates(evt as CandidatesEvent);
           } else if (evt.type === "window") {
             done++;
             collected.push(evt as WindowResult);
@@ -296,6 +299,21 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           {" "}A "set" = one listing per unit slot (no reuse). Window is <b>blocked</b> when fewer than <b>{ctx.minSets}</b> independent sets exist.
         </div>
       )}
+      {candidates && (
+        <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, lineHeight: 1.6 }}>
+          <b>Candidate inventory found at this resort</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
+            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> listings</span>
+          ))} · max independent sets: <b>{candidates.baselineSets}</b>
+          {candidates.baselineSets < (ctx?.minSets ?? 3) && (
+            <span style={{ color: "#991b1b", marginLeft: 8 }}>
+              (below {ctx?.minSets ?? 3}-set floor → all weeks block)
+            </span>
+          )}
+          <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
+            Counts are static per scan — listings don't appear/disappear week-to-week, so a single search powers all {ctx?.weeks ?? 52} windows. Re-run the scan to refresh.
+          </div>
+        </div>
+      )}
       {results.length > 0 && (
         <div style={{ display: "flex", gap: 12, marginBottom: 16, fontSize: 12 }}>
           <span style={{ color: "#166534", fontWeight: 600 }}>✓ {summary.open} open</span>
@@ -375,11 +393,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                           {r.maxSets} set{r.maxSets === 1 ? "" : "s"} / need {r.minSets ?? minSets}
                         </div>
                       )}
-                      {typeof r.cheapestSetTotal === "number" && (
-                        <div style={{ fontSize: 10, opacity: 0.7, marginTop: 1 }}>
-                          ${r.cheapestSetTotal.toLocaleString()} cheapest
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -440,33 +453,39 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </div>
           </div>
 
-          {/* Sample sets */}
-          {selected.sets && selected.sets.length > 0 ? (
+          {/* Candidate inventory — same listings power every week, listed
+              here so the operator can spot-check a few before booking. */}
+          {selected.sample && Object.keys(selected.sample).length > 0 ? (
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Cheapest {selected.sets.length} set{selected.sets.length === 1 ? "" : "s"}
+                Sample candidate listings at this resort
               </div>
-              {selected.sets.map((s, i) => (
-                <div key={i} style={{ padding: 8, border: "1px solid #e5e7eb", borderRadius: 6, marginBottom: 6, background: "#f9fafb" }}>
-                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>
-                    Set {i + 1} — total <b>${s.totalPrice.toLocaleString()}</b>
-                    {" "}(nightly ~${Math.round(s.totalPrice / 7).toLocaleString()})
+              {Object.entries(selected.sample).map(([br, listings]) => (
+                <div key={br} style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: "#374151", marginBottom: 2 }}>
+                    <b>{br}BR</b>{" "}
+                    <span style={{ color: "#6b7280" }}>({selected.listingCounts?.[br] ?? listings.length} found · {listings.length} shown)</span>
                   </div>
-                  {s.slots.map((slot) => (
-                    <div key={slot.unitId} style={{ fontSize: 11, display: "flex", gap: 8, alignItems: "center", paddingLeft: 8 }}>
-                      <span style={{ color: "#6b7280", minWidth: 80 }}>{slot.unitId} ({slot.bedrooms ?? "?"}BR)</span>
-                      <a href={slot.url} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb", textDecoration: "underline", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {slot.title}
-                      </a>
-                      <span style={{ color: "#374151" }}>${slot.totalPrice.toLocaleString()}</span>
-                    </div>
-                  ))}
+                  {listings.length === 0 ? (
+                    <div style={{ fontSize: 11, color: "#9ca3af", paddingLeft: 12 }}>None found.</div>
+                  ) : (
+                    listings.map((l) => (
+                      <div key={l.id} style={{ fontSize: 11, paddingLeft: 12, lineHeight: 1.5 }}>
+                        <a href={l.url} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb", textDecoration: "underline" }}>
+                          {l.title || `Airbnb ${l.id}`}
+                        </a>
+                      </div>
+                    ))
+                  )}
                 </div>
               ))}
+              <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
+                Inventory count is the same for every week in this scan — daily re-runs catch listings appearing/disappearing.
+              </div>
             </div>
           ) : (
             <div style={{ fontSize: 12, color: "#6b7280" }}>
-              No complete sets found for this week. {selected.verdict === "blocked" && "Will be blocked on Guesty if you click Sync."}
+              {selected.verdict === "blocked" && "No inventory found at this resort for the required bedroom mix. Will be blocked on Guesty if you click Sync."}
             </div>
           )}
         </div>

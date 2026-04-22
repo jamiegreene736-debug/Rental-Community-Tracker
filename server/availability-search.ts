@@ -1,171 +1,117 @@
-// Lightweight wrapper around SearchAPI's `airbnb` engine, extracted so
-// the availability scanner can call it directly without HTTP overhead or
-// the 500-line find-buy-in route handler.
+// Lightweight inventory-counter for the availability scanner.
 //
-// Returns only *priced* Airbnb listings for the given bedroom count +
-// dates, filtered to the resort name when available. This is what
-// actually drives the set-counting logic: a window is "available" only
-// if enough real, bookable listings exist at the right BR count.
+// Original design (Apr 2026, removed): one SearchAPI airbnb-engine call
+// per (window × bedroom-count). At 52 weeks × 2 BR groups × 11 properties
+// × daily runs = ~73,000 calls/year/property in SearchAPI spend (~$70+).
+// Worse, the engine doesn't reliably return prices for short-notice or
+// far-future windows, so the per-window detail wasn't paying off anyway.
+//
+// New design: one cheap Google `site:airbnb.com/rooms` search per
+// (resort × bedroom-count), counting unique listing IDs that exist for
+// that resort. Apply the same count across every window — listings at
+// a given resort don't appear/disappear week-to-week, so the count is
+// effectively static over any single 24-month scan. Drops scan cost
+// to ~3 SearchAPI calls per property per run (one per unique BR).
+//
+// Trade-off: doesn't model real-time availability depletion (e.g. a busy
+// July 4 week where most listings are booked). For those edge cases, the
+// daily re-scan + manual force-block override is the safety net.
 
 import type { PropertyUnitConfig } from "@shared/property-units";
 
-export type PricedListing = {
-  id: string;
-  title: string;
+export type CandidateListing = {
+  id: string;          // Airbnb listing id (extracted from /rooms/<id> URL)
   url: string;
-  bedrooms: number | null;
-  nightlyPrice: number;
-  totalPrice: number;
-  gpsCoordinates?: { latitude: number; longitude: number };
+  title: string;
 };
 
-export type CommunityBounds = { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
+export type CountByBedrooms = {
+  count: number;
+  sample: CandidateListing[];   // first ~5 for the detail panel
+  raw: number;                   // raw search hits before dedup
+};
 
-export type FindPricedOptions = {
-  community: string;          // e.g. "Kapaa Beachfront"
-  resortName: string | null;  // e.g. "Kaha Lani" — post-filter (title / desc)
+export type CountOptions = {
+  resortName: string | null;     // e.g. "Kaha Lani" — used in the quoted query
+  community: string;             // fallback when resortName is null
   bedrooms: number;
-  checkIn: string;            // YYYY-MM-DD
-  checkOut: string;           // YYYY-MM-DD
-  q: string;                  // search query (e.g. "Kaha Lani, Kauai, Hawaii")
-  bounds?: CommunityBounds;
   apiKey: string;
 };
 
-// Case-insensitive token-subset match — every significant token (≥3 chars)
-// of the resort name must appear somewhere in the haystack. Matches the
-// approach used in the find-buy-in route so results stay consistent.
-export function matchesResort(haystack: string, resortName: string): boolean {
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const tokens = norm(resortName).split(" ").filter((t) => t.length >= 3);
-  if (tokens.length === 0) return true;
-  const h = norm(haystack);
-  return tokens.every((t) => h.includes(t));
-}
-
-export async function findPricedAirbnbListings(opts: FindPricedOptions): Promise<PricedListing[]> {
-  const { community, resortName, bedrooms, checkIn, checkOut, q, bounds, apiKey } = opts;
-  const nights = Math.max(1, Math.round(
-    (new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000,
-  ));
-  const sp: Record<string, string> = {
-    engine: "airbnb",
-    check_in_date: checkIn,
-    check_out_date: checkOut,
-    adults: "2",
-    bedrooms: String(bedrooms),
-    type_of_place: "entire_home",
-    currency: "USD",
-    api_key: apiKey,
+export async function countAirbnbCandidates(opts: CountOptions): Promise<CountByBedrooms> {
+  const qualifier = opts.resortName ? `"${opts.resortName}"` : `"${opts.community}"`;
+  // Two complementary queries — `site:airbnb.com/rooms` to force per-listing
+  // pages (not search results), with the bedroom count phrased in the
+  // common ways listings spell it out.
+  const q = `site:airbnb.com/rooms ${qualifier} (${opts.bedrooms}BR OR "${opts.bedrooms} bedroom")`;
+  const sp = new URLSearchParams({
+    engine: "google",
     q,
-  };
-  if (bounds) {
-    sp.sw_lat = String(bounds.sw_lat);
-    sp.sw_lng = String(bounds.sw_lng);
-    sp.ne_lat = String(bounds.ne_lat);
-    sp.ne_lng = String(bounds.ne_lng);
-  }
-
+    num: "20",
+    api_key: opts.apiKey,
+  });
   try {
-    const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-    if (!r.ok) return [];
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
+    if (!r.ok) return { count: 0, sample: [], raw: 0 };
     const data = await r.json() as any;
-    let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    const organic: any[] = Array.isArray(data?.organic_results) ? data.organic_results : [];
 
-    // Post-filter by resort name when we have one (the engine's geo bounds
-    // alone aren't tight enough — neighbors in the same tile can slip in).
-    if (resortName) {
-      properties = properties.filter((p: any) => {
-        const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
-        return matchesResort(hay, resortName);
-      });
+    // De-dupe by listing id — Google returns the same listing under
+    // multiple URLs sometimes (locale prefixes, query params).
+    const seen = new Map<string, CandidateListing>();
+    for (const o of organic) {
+      const link = String(o?.link ?? "");
+      const m = link.match(/airbnb\.com\/(?:[a-z]{2}-[a-z]{2}\/)?rooms\/(?:plus\/)?(\d+)/);
+      if (!m) continue;
+      const id = m[1];
+      if (seen.has(id)) continue;
+      // Best-effort BR check on the title — listings that don't mention
+      // the right BR count get skipped to keep the count meaningful.
+      const title = String(o?.title ?? "");
+      const snippet = String(o?.snippet ?? "");
+      const txt = `${title} ${snippet}`.toLowerCase();
+      // Match "<n>BR", "<n> bedroom", "<n>-bedroom"
+      const brRe = new RegExp(`(?:^|[^\\d])${opts.bedrooms}\\s*(?:br\\b|-?bedroom)`, "i");
+      // Reject when title clearly says a different BR count
+      const otherBrMatch = txt.match(/(\d)\s*(?:br\b|-?bedroom)/i);
+      if (otherBrMatch && parseInt(otherBrMatch[1], 10) !== opts.bedrooms && !brRe.test(txt)) {
+        continue;
+      }
+      seen.set(id, { id, url: `https://www.airbnb.com/rooms/${id}`, title });
     }
 
-    // Post-filter by actual bedrooms. The engine's `bedrooms` param is a
-    // minimum filter, not an exact match — 4BR listings come back for a
-    // 3BR query. For SET COUNTING this matters: the set is 3BR+3BR, so we
-    // reject 4BR from the 3BR pool.
-    properties = properties.filter((p: any) => {
-      const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
-      if (pb == null) return true; // unknown BR — keep for manual review
-      return pb === bedrooms;
-    });
-
-    return properties
-      .filter((p: any) => p?.price?.extracted_total_price > 0 && p?.link)
-      .map((p: any): PricedListing => {
-        const total = Number(p.price.extracted_total_price);
-        return {
-          id: String(p?.id ?? p?.listing_id ?? p?.link),
-          title: String(p?.name ?? p?.title ?? "Airbnb listing"),
-          url: String(p.link),
-          bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : null,
-          totalPrice: total,
-          nightlyPrice: Math.round(total / nights),
-          gpsCoordinates: p?.gps_coordinates,
-        };
-      });
+    const sample = Array.from(seen.values()).slice(0, 5);
+    return { count: seen.size, sample, raw: organic.length };
   } catch (e: any) {
-    console.error(`[availability-search] ${resortName ?? community} ${bedrooms}BR ${checkIn}→${checkOut}: ${e?.message ?? e}`);
-    return [];
+    console.error(`[availability-search] count error ${opts.resortName ?? opts.community} ${opts.bedrooms}BR: ${e?.message ?? e}`);
+    return { count: 0, sample: [], raw: 0 };
   }
 }
 
-// For a property with multiple unit slots, work out how many COMPLETE
-// independent sets we can form from the available listings. A "set" is
-// one bookable listing per unit slot, with no listing reused across
-// sets. Groups slots by bedroom count — e.g. a 6BR listing that's
-// 3BR+3BR needs 2 distinct 3BR listings for one set, 4 for two sets.
+// Given the per-bedroom counts and the unit config, work out how many
+// independent complete sets exist. Group slots by BR count: for each
+// group, sets = floor(count / units-of-that-BR-per-set). Take the min.
 //
-// Returns max sets we could form AND the specific cheapest N sets.
-export function buildSets(
+// E.g. a 6BR listing made of 3BR + 3BR needs 2 distinct 3BR listings
+// per set. With 7 candidates → floor(7/2) = 3 sets.
+//
+// E.g. a 5BR listing made of 3BR + 2BR needs 1 of each per set. With
+// 7 3BR candidates and 4 2BR candidates → min(7, 4) = 4 sets.
+export function computeSetsFromCounts(
   unitSlots: PropertyUnitConfig["units"],
-  listingsByBedrooms: Record<number, PricedListing[]>,
-  wantN: number,
-): { maxSets: number; sets: Array<{ slots: Array<{ unitId: string; listing: PricedListing }>; totalPrice: number }> } {
-  // How many listings of each BR count we need per set
-  const needPerSet: Record<number, number> = {};
+  countsByBR: Record<number, number>,
+): number {
+  const need: Record<number, number> = {};
   for (const slot of unitSlots) {
-    needPerSet[slot.bedrooms] = (needPerSet[slot.bedrooms] ?? 0) + 1;
+    need[slot.bedrooms] = (need[slot.bedrooms] ?? 0) + 1;
   }
-
-  // Max sets = min across BR groups of floor(available / needed)
-  let maxSets = Infinity;
-  for (const [brStr, need] of Object.entries(needPerSet)) {
+  let max = Infinity;
+  for (const [brStr, n] of Object.entries(need)) {
     const br = parseInt(brStr, 10);
-    const available = listingsByBedrooms[br]?.length ?? 0;
-    maxSets = Math.min(maxSets, Math.floor(available / need));
+    const have = countsByBR[br] ?? 0;
+    max = Math.min(max, Math.floor(have / n));
   }
-  if (maxSets === Infinity) maxSets = 0;
-  const sampleN = Math.min(maxSets, wantN);
-
-  // Build the cheapest `sampleN` sets. Sort listings per BR cheapest-first,
-  // then greedily assign top `need*sampleN` to the sets in rotation.
-  const sets: Array<{ slots: Array<{ unitId: string; listing: PricedListing }>; totalPrice: number }> = [];
-  if (sampleN === 0) return { maxSets, sets };
-
-  // Sorted pools, cheapest first. Pool is a shallow copy we can shift from.
-  const pools: Record<number, PricedListing[]> = {};
-  for (const [brStr, pool] of Object.entries(listingsByBedrooms)) {
-    pools[parseInt(brStr, 10)] = [...pool].sort((a, b) => a.totalPrice - b.totalPrice);
-  }
-
-  for (let i = 0; i < sampleN; i++) {
-    const slotAssignments: Array<{ unitId: string; listing: PricedListing }> = [];
-    let total = 0;
-    let ok = true;
-    for (const slot of unitSlots) {
-      const pool = pools[slot.bedrooms];
-      if (!pool || pool.length === 0) { ok = false; break; }
-      const listing = pool.shift()!;
-      slotAssignments.push({ unitId: slot.unitId, listing });
-      total += listing.totalPrice;
-    }
-    if (!ok) break;
-    sets.push({ slots: slotAssignments, totalPrice: total });
-  }
-
-  return { maxSets, sets };
+  return max === Infinity ? 0 : max;
 }
 
 export function verdictFor(maxSets: number, minSets: number): "open" | "tight" | "blocked" {
