@@ -112,12 +112,17 @@ established it so you can read the rationale in the commit message.
     uses `Math.round(b * 2) / 2`, not `Math.floor(b)`. A 2.5 BA
     listing stays 2.5, not 2. PR #8.
 
-13. **24-month cost forecast is zero-external-API-cost by design.**
-    `GET /api/availability/cost-forecast/:propertyId` uses ONLY static
-    `BUY_IN_RATES × SEASON_MULTIPLIERS`. It renders on tab mount
-    without burning SearchAPI / Anthropic credits. Do NOT wire a live
-    scan into this endpoint — that's what the Weekly Pricing
-    Correlation table is for (runs post-scan).
+13. ~~**24-month cost forecast is zero-external-API-cost by design.**~~
+    **Removed in PR #29.** The forecast table (endpoint
+    `/api/availability/cost-forecast/:propertyId` + the table at the
+    top of the Availability tab) duplicated the seasonality table
+    already on the Pricing tab, so it was deleted end-to-end — UI,
+    endpoint, types. The surviving pricing surface on the Availability
+    tab is the Weekly Pricing Correlation block (Load-Bearing #14),
+    which is the demand-adjusted counterpart that runs post-scan.
+    If you find yourself wanting a static month-by-month forecast in
+    the Availability tab again, reach for the Pricing tab's table
+    first — it's the same math.
 
 14. **Weekly pricing adds +12% demand markup on "tight" weeks.** Not
     configurable per property yet. If you need to change the factor,
