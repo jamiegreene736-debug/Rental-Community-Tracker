@@ -6457,17 +6457,68 @@ export async function registerRoutes(
   });
 
   // ── Photo labels: read + relabel ──────────────────────────────────────
-  // Returns the Claude-vision-generated captions for a given folder so
-  // the client can override the static unit-builder-data.ts labels.
-  // Shape: { labels: { "01-community.jpg": { label, category } }, folder }
+  // Returns the Claude-vision-generated captions for a given folder plus
+  // any human overrides (userLabel / userCategory / hidden). The curation
+  // UI needs BOTH sets so it can show the model's output and let the user
+  // override — existing callers that only touched `label` / `category`
+  // keep working since those fields are unchanged.
   app.get("/api/photo-labels/:folder", async (req, res) => {
     const folder = req.params.folder;
     if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
     try {
       const rows = await storage.getPhotoLabelsByFolder(folder);
-      const labels: Record<string, { label: string; category: string | null }> = {};
-      for (const r of rows) labels[r.filename] = { label: r.label, category: r.category };
+      const labels: Record<string, {
+        label: string;
+        category: string | null;
+        confidence: number | null;
+        userLabel: string | null;
+        userCategory: string | null;
+        hidden: boolean;
+      }> = {};
+      for (const r of rows) {
+        labels[r.filename] = {
+          label: r.label,
+          category: r.category,
+          confidence: r.confidence,
+          userLabel: r.userLabel,
+          userCategory: r.userCategory,
+          hidden: r.hidden,
+        };
+      }
       return res.json({ folder, labels, count: rows.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Update a single photo's human-authored overrides. Accepts any subset
+  // of { userLabel, userCategory, hidden }; the labeler-generated fields
+  // (label, category, confidence, model) are preserved. Pass null on
+  // userLabel / userCategory to clear an override.
+  app.put("/api/photo-labels/:folder/:filename", async (req, res) => {
+    const { folder, filename } = req.params;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    if (!filename || !/^[\w.-]+\.(jpe?g|png|webp)$/i.test(filename)) {
+      return res.status(400).json({ error: "invalid filename" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean } = {};
+    if ("userLabel" in body) {
+      patch.userLabel = body.userLabel == null ? null : String(body.userLabel).slice(0, 200);
+    }
+    if ("userCategory" in body) {
+      patch.userCategory = body.userCategory == null ? null : String(body.userCategory).slice(0, 64);
+    }
+    if ("hidden" in body) {
+      patch.hidden = Boolean(body.hidden);
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "no override fields in body" });
+    }
+    try {
+      const row = await storage.updatePhotoLabelOverrides(folder, filename, patch);
+      if (!row) return res.status(404).json({ error: "photo label not found — rescrape first?" });
+      return res.json({ ok: true, row });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

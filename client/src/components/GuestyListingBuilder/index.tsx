@@ -6,6 +6,7 @@ import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
+import PhotoCurator from "./PhotoCurator";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
 
@@ -3252,36 +3253,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                           </div>
                         )}
 
-                        {/* Photo groups */}
-                        {(() => {
-                          const groups: { source: string; items: typeof photos }[] = [];
-                          photos.forEach((p, i) => {
-                            const src = p.source || "Other";
-                            const last = groups[groups.length - 1];
-                            if (last && last.source === src) last.items.push(p);
-                            else groups.push({ source: src, items: [p] });
-                          });
-                          let globalIdx = 0;
-                          return groups.map((g) => (
-                            <div key={g.source} style={{ marginBottom: 16 }}>
-                              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 8 }}>
-                                {g.source} — {g.items.length} photo{g.items.length !== 1 ? "s" : ""}
-                              </div>
-                              <div className="glb-photo-grid">
-                                {g.items.map((p) => {
-                                  const idx = ++globalIdx;
-                                  return (
-                                    <div key={idx} className="glb-photo-thumb" title={p.caption || ""}>
-                                      <img src={p.url} alt={p.caption || `Photo ${idx}`} loading="lazy" />
-                                      <span className="glb-photo-idx">{idx}</span>
-                                      {p.caption && <span className="glb-photo-caption">{p.caption}</span>}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ));
-                        })()}
+                        {/* Curation grid: grouped by category, editable, hide-toggle,
+                            low-confidence flag. Cover-collage button lives in the
+                            block above this one — no need to duplicate here. */}
+                        <PhotoCurator photos={photos} />
+
                       </div>
                     : <div className="glb-empty">No photos attached to this property</div>
                 )}

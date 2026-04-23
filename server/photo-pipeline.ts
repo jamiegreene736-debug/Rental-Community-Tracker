@@ -712,6 +712,7 @@ export async function downloadAndPrioritize(opts: {
           filename: keptFilenames[i],
           label: k.label,
           category: k.category ?? "Other",
+          confidence: k.confidence ?? null,
           model: opts.model ?? "claude-haiku-4-5",
         }).catch(() => {});
       }

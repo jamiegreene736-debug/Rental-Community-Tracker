@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, numeric, timestamp, serial, date, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, numeric, timestamp, serial, date, boolean, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -340,9 +340,13 @@ export const photoLabels = pgTable("photo_labels", {
   id: serial("id").primaryKey(),
   folder: text("folder").notNull(),
   filename: text("filename").notNull(),
-  label: text("label").notNull(),
-  category: text("category"),
-  model: text("model"),           // claude model used, for auditing
+  label: text("label").notNull(),            // Claude's caption
+  category: text("category"),                // Claude's category
+  confidence: doublePrecision("confidence"), // 0.0-1.0 from labeler; null for legacy rows
+  userLabel: text("user_label"),             // human override of caption — wins over `label`
+  userCategory: text("user_category"),       // human override of category — wins over `category`
+  hidden: boolean("hidden").default(false).notNull(), // user soft-delete — skipped on push-photos
+  model: text("model"),                      // claude model used, for auditing
   generatedAt: timestamp("generated_at").defaultNow().notNull(),
 });
 export type PhotoLabel = typeof photoLabels.$inferSelect;

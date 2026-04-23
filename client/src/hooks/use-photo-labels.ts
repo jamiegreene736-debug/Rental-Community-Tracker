@@ -8,13 +8,28 @@
 
 import { useEffect, useState } from "react";
 
-type FolderLabels = Record<string, { label: string; category: string | null }>;
+type LabelMeta = {
+  label: string;
+  category: string | null;
+  confidence?: number | null;
+  userLabel?: string | null;
+  userCategory?: string | null;
+  hidden?: boolean;
+};
+type FolderLabels = Record<string, LabelMeta>;
 type LabelsMap = Record<string, FolderLabels>;
 
 export function usePhotoLabels(folders: readonly string[]): {
   labels: LabelsMap;
   loading: boolean;
+  /**
+   * Effective caption — user override wins, else Claude's label. Null when
+   * we have no row for that photo at all (pre-rescrape defaults, or photos
+   * from folders we didn't request).
+   */
   labelFor: (folder: string, filename: string) => string | null;
+  /** True when the user marked this photo as hidden in the curator. */
+  isHidden: (folder: string, filename: string) => boolean;
 } {
   const [labels, setLabels] = useState<LabelsMap>({});
   const [loading, setLoading] = useState(false);
@@ -52,8 +67,13 @@ export function usePhotoLabels(folders: readonly string[]): {
   }, [key]);
 
   const labelFor = (folder: string, filename: string): string | null => {
-    return labels[folder]?.[filename]?.label ?? null;
+    const row = labels[folder]?.[filename];
+    if (!row) return null;
+    return row.userLabel || row.label || null;
+  };
+  const isHidden = (folder: string, filename: string): boolean => {
+    return !!labels[folder]?.[filename]?.hidden;
   };
 
-  return { labels, loading, labelFor };
+  return { labels, loading, labelFor, isHidden };
 }
