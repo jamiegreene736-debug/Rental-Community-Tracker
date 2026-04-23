@@ -6,7 +6,7 @@
 // Batches fetches by folder and dedupes — safe to call with duplicate
 // folders across units. Each folder is queried once per component lifetime.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type LabelMeta = {
   label: string;
@@ -30,6 +30,13 @@ export function usePhotoLabels(folders: readonly string[]): {
   labelFor: (folder: string, filename: string) => string | null;
   /** True when the user marked this photo as hidden in the curator. */
   isHidden: (folder: string, filename: string) => boolean;
+  /**
+   * Re-fetch labels for the currently-tracked folders. Callers (e.g. the
+   * PhotoCurator delete button) invoke this after a server-side mutation
+   * so the builder's `isHidden` lookup reflects the new state without
+   * requiring a full page reload.
+   */
+  refresh: () => void;
 } {
   const [labels, setLabels] = useState<LabelsMap>({});
   const [loading, setLoading] = useState(false);
@@ -38,6 +45,12 @@ export function usePhotoLabels(folders: readonly string[]): {
   // re-runs when the set of folders actually changes, not on every render.
   const sortedUniqueFolders = Array.from(new Set(folders.filter(Boolean))).sort();
   const key = sortedUniqueFolders.join("|");
+
+  // Bumped by `refresh()` to force the effect to re-run without needing
+  // the folder set to change. Lets callers pull fresh server state after
+  // mutating a label (hide/restore/rename).
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
 
   useEffect(() => {
     if (sortedUniqueFolders.length === 0) return;
@@ -64,7 +77,7 @@ export function usePhotoLabels(folders: readonly string[]): {
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, refreshTick]);
 
   const labelFor = (folder: string, filename: string): string | null => {
     const row = labels[folder]?.[filename];
@@ -75,5 +88,5 @@ export function usePhotoLabels(folders: readonly string[]): {
     return !!labels[folder]?.[filename]?.hidden;
   };
 
-  return { labels, loading, labelFor, isHidden };
+  return { labels, loading, labelFor, isHidden, refresh };
 }
