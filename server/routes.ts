@@ -8701,16 +8701,56 @@ Write a helpful, friendly reply in 3-4 sentences. Be specific and warm. Do not i
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": anthropicKey, "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet-20241022",
+          // Haiku 4.5 is plenty for a warm 3-4 sentence reply — fast,
+          // cheap, and never rate-limits in our throughput envelope.
+          // Previous ID `claude-3-5-sonnet-20241022` was a legacy alias
+          // that Anthropic occasionally returned errors for; swap to
+          // the current Haiku family so drafts reliably generate.
+          model: "claude-haiku-4-5-20251001",
           max_tokens: 400,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),
       });
-      const claudeData = await claudeResp.json() as any;
+
+      // Old code trusted the body parse without checking status or
+      // Anthropic's error envelope — any non-200 or error response
+      // silently produced `{draft: ""}`, which hit the client's
+      // "AI draft unavailable" toast with NO description. Propagate
+      // the real reason so operators can see (key invalid, model
+      // deprecated, rate limit, etc.) instead of a blank toast.
+      const claudeData = await claudeResp.json().catch(() => null) as any;
+
+      // Return 200 with an `error` field (and empty `draft`) on upstream
+      // failures so the client's existing `if (data.draft) ... else
+      // toast(..., description: data.error)` flow surfaces the actual
+      // reason. apiRequest throws on non-2xx which would swallow the
+      // error detail behind a generic "Draft failed: 502: {...}" string.
+
+      if (!claudeResp.ok) {
+        const upstreamMsg =
+          claudeData?.error?.message ??
+          claudeData?.error?.type ??
+          `HTTP ${claudeResp.status}`;
+        console.error(`[ai-draft] Anthropic ${claudeResp.status}: ${upstreamMsg}`);
+        return res.json({ draft: "", error: `Anthropic error: ${upstreamMsg}` });
+      }
+
+      if (claudeData?.error) {
+        const upstreamMsg = claudeData.error.message ?? claudeData.error.type ?? "unknown";
+        console.error(`[ai-draft] Anthropic error envelope: ${upstreamMsg}`);
+        return res.json({ draft: "", error: `Anthropic error: ${upstreamMsg}` });
+      }
+
       const draft: string = claudeData?.content?.[0]?.text ?? "";
+      if (!draft.trim()) {
+        console.error(`[ai-draft] Empty draft from Anthropic — raw response:`, JSON.stringify(claudeData).slice(0, 500));
+        return res.json({ draft: "", error: "Anthropic returned an empty response" });
+      }
+
       res.json({ draft });
     } catch (err: any) {
+      console.error(`[ai-draft] exception: ${err.message}`);
       res.status(500).json({ error: "AI draft failed", message: err.message });
     }
   });
