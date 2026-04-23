@@ -8674,19 +8674,42 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext } = req.body as {
       guestMessage: string;
       propertyName?: string;
       guestName?: string;
       checkIn?: string;
       checkOut?: string;
+      // Structured property facts built by the client (inbox.tsx
+      // `buildPropertyContextForDraft`). When present, the AI answers
+      // from these facts instead of hand-waving. Optional — generic
+      // prompt still works for conversations whose listing isn't
+      // mapped to a NexStay property.
+      propertyContext?: string | null;
     };
 
     if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
 
-    const systemPrompt = `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages. Never mention that units are combined. Sign off as "The NexStay Team".`;
+    // System prompt tells the model HOW to behave. Adjusted to make it
+    // ground answers in the provided facts when we have them, and say
+    // "let me confirm and follow up" rather than inventing details when
+    // a question falls outside the context block.
+    const systemPrompt = propertyContext
+      ? `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages.
 
-    const userPrompt = `Guest name: ${guestName || "Guest"}
+You will be given structured facts about the property (unit breakdown, distance between units, parking, amenities, description). USE THESE FACTS to answer specific questions accurately — per-unit bedroom counts, how far apart units are, whether parking is free/included, pool access, etc.
+
+If the guest asks something that isn't covered by the provided facts, acknowledge the question and say you'll confirm and follow up — never invent details.
+
+Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units. Sign off as "The NexStay Team".`
+      : `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages. Never mention that units are combined. Sign off as "The NexStay Team".`;
+
+    const contextBlock = propertyContext ? `PROPERTY FACTS (ground your answer in these — don't invent beyond them):
+${propertyContext}
+
+` : "";
+
+    const userPrompt = `${contextBlock}Guest name: ${guestName || "Guest"}
 Property: ${propertyName || "our property"}
 ${checkIn ? `Check-in: ${checkIn}` : ""}
 ${checkOut ? `Check-out: ${checkOut}` : ""}
@@ -8694,7 +8717,7 @@ ${checkOut ? `Check-out: ${checkOut}` : ""}
 Guest message:
 "${guestMessage}"
 
-Write a helpful, friendly reply in 3-4 sentences. Be specific and warm. Do not include a subject line.`;
+Write a helpful, friendly reply. Keep it 3-5 sentences — longer is OK if the guest asked multiple specific questions that need direct answers. Be specific and warm. Do not include a subject line.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -8707,7 +8730,7 @@ Write a helpful, friendly reply in 3-4 sentences. Be specific and warm. Do not i
           // that Anthropic occasionally returned errors for; swap to
           // the current Haiku family so drafts reliably generate.
           model: "claude-haiku-4-5-20251001",
-          max_tokens: 400,
+          max_tokens: 700,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),

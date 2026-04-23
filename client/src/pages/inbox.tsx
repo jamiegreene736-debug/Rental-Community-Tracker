@@ -23,6 +23,58 @@ import {
   ToggleRight, Bot, Flag, X,
 } from "lucide-react";
 import type { MessageTemplate } from "@shared/schema";
+import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
+import { fallbackWalkForResort } from "@shared/walking-distance";
+
+// ─── AI draft property-context builder ────────────────────────────────────────
+// Given a Guesty listingId, look up the matching NexStay property via the
+// backing map and build a rich text block the AI can use to answer
+// specific guest questions (per-unit bedroom counts, distance between
+// units, parking, pool, etc.) instead of hand-waving. Returns null when
+// we can't resolve the listing — the server falls back to a generic
+// prompt in that case.
+async function buildPropertyContextForDraft(listingId: string): Promise<string | null> {
+  if (!listingId) return null;
+  try {
+    const r = await apiRequest("GET", "/api/guesty-property-map");
+    const maps = await r.json() as Array<{ propertyId: number; guestyListingId: string }>;
+    const row = maps.find(m => m.guestyListingId === listingId);
+    if (!row) return null;
+    const prop = getUnitBuilderByPropertyId(row.propertyId);
+    if (!prop) return null;
+
+    const unitLines = prop.units.map((u, i) => {
+      const label = `Unit ${String.fromCharCode(65 + i)}`;
+      return `- ${label} (${u.unitNumber}): ${u.bedrooms}BR / ${u.bathrooms}BA · ~${u.sqft} sqft · sleeps ${u.maxGuests}. ${u.shortDescription}`;
+    }).join("\n");
+
+    // Per-resort walking-distance fallback (same helper the Builder
+    // uses before its live /api/tools/walk-between result arrives).
+    const walk = prop.units.length >= 2 ? fallbackWalkForResort(prop.complexName) : null;
+
+    // Amenity strings tied to questions the AI is most likely to need
+    // to answer: parking, pool, AC, pets, kitchen, accessibility.
+    const amenityKeys = getGuestyAmenities(row.propertyId);
+    const amenityLabels = amenityKeys.map(getAmenityLabel);
+    const parkingAmenities = amenityLabels.filter(a => /parking|garage|carport/i.test(a));
+    const otherHighlights = amenityLabels.filter(a => /pool|hot tub|beach|ac|air conditioning|pet|wifi|laundry|kitchen|bbq|grill/i.test(a));
+
+    const parts: string[] = [];
+    parts.push(`PROPERTY: ${prop.propertyName} at ${prop.complexName}`);
+    parts.push(`Address: ${prop.address}`);
+    parts.push(`Total: ${prop.units.reduce((s, u) => s + u.bedrooms, 0)} bedrooms across ${prop.units.length} unit${prop.units.length === 1 ? "" : "s"}, sleeps ${prop.units.reduce((s, u) => s + u.maxGuests, 0)}.`);
+    parts.push(`\nUNITS:\n${unitLines}`);
+    if (walk) parts.push(`\nDISTANCE BETWEEN UNITS: ${walk.description} (approx ${walk.minutes}-min walk)`);
+    if (parkingAmenities.length > 0) parts.push(`\nPARKING: ${parkingAmenities.join(", ")}`);
+    if (otherHighlights.length > 0) parts.push(`\nKEY AMENITIES: ${otherHighlights.slice(0, 12).join(", ")}`);
+    parts.push(`\nDESCRIPTION: ${prop.combinedDescription.slice(0, 600)}${prop.combinedDescription.length > 600 ? "…" : ""}`);
+
+    return parts.join("\n");
+  } catch {
+    return null;
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -562,11 +614,21 @@ export default function InboxPage() {
     if (!selectedConv) return;
     setDraftLoading(true);
     const lastGuestPost = [...posts].reverse().find(p => p.authorType !== "host" && p.authorRole !== "host");
+    // Build property-specific context so the AI can answer "how many
+    // bedrooms per unit?" / "how far apart are the units?" / "is
+    // parking free?" with facts instead of hand-waves. Non-blocking:
+    // if the listing isn't mapped to one of our properties we fall
+    // through with propertyContext=null and the server uses its
+    // generic prompt.
+    const propertyContext = selectedConv.listingId
+      ? await buildPropertyContextForDraft(selectedConv.listingId)
+      : null;
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
         guestMessage: lastGuestPost?.body ?? lastGuestPost?.text ?? "",
         guestName: selectedConv.guestName,
         propertyName: selectedConv.listingNickname,
+        propertyContext,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);
