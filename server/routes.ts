@@ -8703,10 +8703,16 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     // over-season — sounds like a local host, not a tourist brochure.
     // Standard tone: friendly + professional, no Hawaiian vocabulary.
     //
-    // Shared signature block — always the same three lines at the
-    // end, regardless of tone variant. This is going into guest email
-    // and in-channel messages, so plain text only (no Markdown).
-    const SIGNATURE = `Thank You,
+    // Signature block — same name + company in both variants; only
+    // the sign-off word swaps. Hawaii listings close with "Mahalo,"
+    // (the Hawaiian word for thank you) instead of "Thank You,",
+    // which also avoids two "thank you"s in the same message when the
+    // body already thanks the guest.
+    const SIGNATURE = isHawaii
+      ? `Mahalo,
+John Carpenter
+Magical Island Rentals`
+      : `Thank You,
 John Carpenter
 Magical Island Rentals`;
 
@@ -8720,9 +8726,9 @@ ${SIGNATURE}`;
     const tonePreamble = isHawaii
       ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
   - Open with "Aloha [Name]," or a similar welcoming phrase
-  - Use "mahalo" (thank you) naturally in the body when thanking the guest for a question
   - Use "'ohana" (family/group) when referring to the guest's party, if natural
   - Use "makai" (toward the ocean) / "mauka" (toward the mountains) only if geographically relevant to the answer
+  - Do NOT use "mahalo" in the body — the signature already closes with "Mahalo,", and doubling it up reads as forced. If you need to thank the guest inside the message, use natural English ("Thanks for reaching out", "Appreciate the question", etc.).
 
 Avoid over-using Hawaiian words — one or two per reply max. The goal is authentic local warmth, not a caricature. Write in natural American English for the rest of the message.
 
