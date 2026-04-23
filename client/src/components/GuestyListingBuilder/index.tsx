@@ -3172,8 +3172,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         for late cancellation" where each channel's
                         vocabulary allows it (see state defaults above). */}
                     <div style={{ marginTop: 14, padding: "12px 14px", background: "var(--muted)", borderRadius: 6, border: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-foreground)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-foreground)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
                         Cancellation policies by channel
+                      </div>
+                      <div style={{ fontSize: 10, color: "#92400e", marginBottom: 10, fontStyle: "italic" }}>
+                        ⚠ Only the Airbnb policy syncs to Guesty via this button.
+                        VRBO &amp; Booking.com per-channel values are captured here
+                        for your records — set them in Guesty's own Booking-Rules
+                        UI to actually apply per-channel.
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
                         {/* Airbnb */}
