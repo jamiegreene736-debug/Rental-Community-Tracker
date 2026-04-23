@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y chromium \
@@ -11,9 +12,28 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-COPY . .
+# Split the committed photo bundle from the rest of the source tree so
+# the image only ships it once. The main COPY excludes
+# client/public/photos; the second COPY places the same files at
+# /app/photos-seed — the backup location the CMD seeds the Railway
+# volume from on boot. Avoiding the duplicate keeps the image ~88MB
+# smaller, which matters for Railway's snapshot/upload step. See
+# Load-Bearing Decision #17 in AGENTS.md.
+#
+# Requires the BuildKit Dockerfile 1.7 frontend (the `# syntax=` line
+# above) for the `--exclude` flag. Railway's builder supports this.
+COPY --exclude=client/public/photos . .
+COPY client/public/photos /app/photos-seed/
+
 RUN npm run build
 
 ENV NODE_ENV=production
 
-CMD ["sh", "-c", "npm run db:push && node dist/index.cjs"]
+# Startup sequence:
+#   1. Ensure the photos dir exists (first boot with fresh volume = empty).
+#   2. Seed the volume from /app/photos-seed using `cp -Rn` — non-clobber,
+#      so scraped photos from prior boots are preserved while any
+#      newly-committed seed photos still land on fresh volumes.
+#   3. Run drizzle db:push (Load-Bearing #15).
+#   4. Start the server.
+CMD ["sh", "-c", "mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; npm run db:push && node dist/index.cjs"]
