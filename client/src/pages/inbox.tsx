@@ -824,7 +824,15 @@ export default function InboxPage() {
       // Refetch authoritative state in the background
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations", reservationId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Pre-approved on Airbnb", description: "Kim can now book without further host action." });
+      // Use the ACTUAL selected conversation's guest name — the toast
+      // previously hardcoded "Kim" (leftover from a test conversation),
+      // which made the operator think the wrong guest had been
+      // pre-approved. Falls back to "Guest" if the name isn't available.
+      const who = selectedConv?.guestName || "Guest";
+      toast({
+        title: "Pre-approved on Airbnb",
+        description: `${who} can now book without further host action.`,
+      });
     },
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
   });
