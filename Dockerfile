@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7-labs
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y chromium \
@@ -20,8 +20,11 @@ RUN npm ci
 # smaller, which matters for Railway's snapshot/upload step. See
 # Load-Bearing Decision #17 in AGENTS.md.
 #
-# Requires the BuildKit Dockerfile 1.7 frontend (the `# syntax=` line
-# above) for the `--exclude` flag. Railway's builder supports this.
+# Requires the BuildKit Dockerfile 1.7-labs frontend (the `# syntax=`
+# line above). `--exclude` lives in the experimental/labs channel, not
+# mainline 1.7 — the plain `1.7` tag will fail to parse this flag with
+# "unknown flag: exclude". Promote to mainline when docker/dockerfile
+# ships it there.
 COPY --exclude=client/public/photos . .
 COPY client/public/photos /app/photos-seed/
 
