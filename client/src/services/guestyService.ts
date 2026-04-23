@@ -319,26 +319,23 @@ class GuestyService {
 
     const body: Record<string, unknown> = { terms };
 
-    // Per-channel overrides via the Guesty integrations payload. Following
-    // the same multi-shape defensive approach as channel markup (see
-    // server/routes.ts /push-channel-markups) — Guesty's schema for these
-    // fields has drifted across API versions; we send the current
-    // canonical shape. If a channel isn't selected it stays untouched.
-    if (perChannel) {
-      const integrations: Record<string, Record<string, unknown>> = {};
-      if (perChannel.airbnb) {
-        integrations.airbnb2 = { cancellationPolicy: perChannel.airbnb };
-      }
-      if (perChannel.vrbo) {
-        integrations.homeaway2 = { cancellationPolicy: perChannel.vrbo };
-      }
-      if (perChannel.booking) {
-        integrations.bookingCom = { cancellationPolicy: perChannel.booking };
-      }
-      if (Object.keys(integrations).length > 0) {
-        body.integrations = integrations;
-      }
-    }
+    // NOTE: per-channel cancellation policies are visible + editable in
+    // the UI (Pricing tab → Booking Rules card), but only the
+    // `universalPolicy` above is synced to Guesty via `terms.cancellationPolicy`.
+    //
+    // An earlier version of this function also sent
+    // `body.integrations = { airbnb2: {...}, homeaway2: {...},
+    // bookingCom: {...} }` — Guesty rejected that with a 500 because
+    // their write shape for `integrations` is an ARRAY of
+    // `{platform, <platform-key>:{...}}` entries, not an object keyed
+    // by platform. Sending the wrong shape 500'd every Booking-Rules
+    // push. Until we confirm Guesty's actual accepted write shape
+    // (docs are opaque on this), we push only the top-level policy and
+    // rely on the operator to set channel-specific overrides in
+    // Guesty's UI. The per-channel dropdowns in our builder serve as
+    // the operator's own record of what they intend — not a sync
+    // mechanism. See PR #43 for the fix and PR #35 for the original
+    // per-channel UI.
 
     return this.request("PUT", `/listings/${id}`, body);
   }
