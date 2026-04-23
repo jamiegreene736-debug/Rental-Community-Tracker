@@ -68,8 +68,15 @@ export type PhotoCuratorProps = {
   // inline explanation, used when the Guesty listing isn't selected yet
   // (the push target is unknown). This way the feature is discoverable
   // even before a listing is picked.
+  //
+  // `coverCollageCurrentUrl` is the URL of the Cover Collage currently
+  // set on Guesty (if any). When set, rendered as a standalone tile
+  // above the section grid so the operator can see it from the Photos
+  // tab without navigating to Guesty. Survives page reloads because the
+  // parent re-fetches it from the Guesty listing on mount.
   coverCollageEnabled?: boolean;
   coverCollageDisabledReason?: string | null;
+  coverCollageCurrentUrl?: string | null;
   onRequestCoverCollage?: () => void;
   coverCollageStatus?: {
     phase: "idle" | "generating" | "uploading" | "done" | "error";
@@ -85,6 +92,7 @@ export default function PhotoCurator({
   onOverridesChanged,
   coverCollageEnabled,
   coverCollageDisabledReason,
+  coverCollageCurrentUrl,
   onRequestCoverCollage,
   coverCollageStatus,
 }: PhotoCuratorProps) {
@@ -297,6 +305,69 @@ export default function PhotoCurator({
           </div>
         );
       })()}
+
+      {/* Cover collage tile — rendered above the regular sections when
+          Guesty has a "Cover Collage"-captioned picture on the listing.
+          Read-only (no delete/rename/hide); operator regenerates via
+          the banner above. Persists across page reloads because the
+          parent refreshes this URL from Guesty on every mount. */}
+      {coverCollageCurrentUrl && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
+            padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 10,
+          }}>
+            <div style={{
+              fontSize: 12, fontWeight: 600, color: "#0369a1",
+              textTransform: "uppercase", letterSpacing: "0.05em",
+            }}>
+              Cover Collage — live on Guesty
+            </div>
+            <a
+              href={coverCollageCurrentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontSize: 11, color: "#2563eb", textDecoration: "none",
+                padding: "2px 8px", background: "#eff6ff", border: "1px solid #bfdbfe",
+                borderRadius: 3,
+              }}
+              title="Open the full-size collage image"
+            >
+              ↗ Open full size
+            </a>
+          </div>
+          <div style={{
+            display: "grid", gap: 8,
+            gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          }}>
+            <div style={{
+              position: "relative",
+              border: "2px solid #0369a1",
+              borderRadius: 6, background: "#fff",
+              overflow: "hidden",
+            }}>
+              <div style={{ position: "relative", aspectRatio: "2/1", background: "#f3f4f6" }}>
+                <img
+                  src={coverCollageCurrentUrl}
+                  alt="Cover Collage"
+                  loading="lazy"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+                <div style={{
+                  position: "absolute", top: 6, left: 6,
+                  background: "#0369a1", color: "white", fontSize: 10, fontWeight: 700,
+                  padding: "3px 8px", borderRadius: 3,
+                  textTransform: "uppercase", letterSpacing: "0.05em",
+                }}>Cover</div>
+              </div>
+              <div style={{ padding: "6px 10px", fontSize: 11, color: "#6b7280" }}>
+                Auto-generated 2-up community + patio collage. Regenerate via the banner above.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Sections — one block per contiguous run of same-source photos. */}
       {sections.map((section, i) => {

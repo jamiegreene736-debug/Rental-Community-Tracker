@@ -2896,13 +2896,32 @@ export async function registerRoutes(
 
   // ========== BUILDER COVER COLLAGE UPLOAD ==========
   // POST /api/builder/upload-collage
-  // Accepts { base64: string (data URL or raw base64), listingId: string }
-  // Uploads to ImgBB, prepends to Guesty listing pictures as cover photo.
+  // Accepts:
+  //   { base64: string (data URL or raw base64),
+  //     listingId: string,
+  //     existingPhotos?: { original: string; caption: string }[]  // optional
+  //   }
+  // Uploads the collage bytes to ImgBB, then PUTs Guesty's pictures
+  // array with the collage at index 0 + the rest.
+  //
+  // "The rest" is either:
+  //   (a) what the CALLER just pushed (passed in as `existingPhotos`) —
+  //       preferred, because this is race-free. Guesty's read-after-write
+  //       isn't strongly consistent, so a GET right after a push-photos
+  //       finish can return stale data and we'd write back fewer pictures
+  //       than the caller actually uploaded.
+  //   (b) a fresh GET from Guesty — fallback for callers that don't
+  //       track their last push (e.g. user returns to the tab later and
+  //       regenerates the collage without re-pushing).
   app.post("/api/builder/upload-collage", async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!imgbbKey) return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
 
-    const { base64, listingId } = req.body as { base64: string; listingId: string };
+    const { base64, listingId, existingPhotos } = req.body as {
+      base64: string;
+      listingId: string;
+      existingPhotos?: { original: string; caption: string }[];
+    };
     if (!base64 || !listingId) return res.status(400).json({ error: "base64 and listingId required" });
 
     // Strip data URL prefix if present
@@ -2925,15 +2944,26 @@ export async function registerRoutes(
       return res.status(500).json({ error: "ImgBB error", message: e.message });
     }
 
-    // Fetch existing pictures from Guesty, prepend collage as cover
     try {
-      const listing = await guestyRequest("GET", `/listings/${listingId}`) as any;
-      const existing: { original: string; caption: string }[] = (listing?.pictures || []).map((p: any) => ({
-        original: p.original || p.url || "",
-        caption: p.caption || "",
-      })).filter((p: any) => p.original);
+      let existing: { original: string; caption: string }[];
 
-      // Remove any previous collage (first photo tagged with caption "Cover Collage")
+      if (Array.isArray(existingPhotos) && existingPhotos.length > 0) {
+        // Race-free path: trust the caller's list.
+        existing = existingPhotos
+          .map((p) => ({ original: String(p.original || ""), caption: String(p.caption || "") }))
+          .filter((p) => p.original);
+      } else {
+        // Fallback: GET from Guesty. Subject to eventual-consistency
+        // lag after recent PUTs — callers that just finished a push
+        // should pass `existingPhotos` instead.
+        const listing = await guestyRequest("GET", `/listings/${listingId}`) as any;
+        existing = (listing?.pictures || []).map((p: any) => ({
+          original: p.original || p.url || "",
+          caption: p.caption || "",
+        })).filter((p: any) => p.original);
+      }
+
+      // Remove any previous collage so regeneration doesn't accumulate.
       const withoutOldCollage = existing.filter(p => p.caption !== "Cover Collage");
       const updated = [{ original: collageUrl, caption: "Cover Collage" }, ...withoutOldCollage];
       await guestyRequest("PUT", `/listings/${listingId}`, { pictures: updated });
