@@ -475,14 +475,43 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(photoLabels.folder, data.folder), eq(photoLabels.filename, data.filename)))
       .limit(1);
     if (existing.length > 0) {
+      // Update ONLY the labeler-generated fields (label, category, confidence,
+      // model). Preserve any existing user overrides (userLabel, userCategory,
+      // hidden) — they were set by a human and shouldn't be wiped by a
+      // rescrape or relabel operation.
       const [row] = await db.update(photoLabels)
-        .set({ label: data.label, category: data.category ?? null, model: data.model ?? null, generatedAt: new Date() })
+        .set({
+          label: data.label,
+          category: data.category ?? null,
+          confidence: data.confidence ?? null,
+          model: data.model ?? null,
+          generatedAt: new Date(),
+        })
         .where(eq(photoLabels.id, existing[0].id))
         .returning();
       return row;
     }
     const [row] = await db.insert(photoLabels).values(data).returning();
     return row;
+  }
+
+  // Write a human override onto a single photo. Fields left undefined are
+  // preserved. Pass null explicitly to clear an override.
+  async updatePhotoLabelOverrides(
+    folder: string,
+    filename: string,
+    patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean },
+  ): Promise<PhotoLabel | null> {
+    const set: Record<string, unknown> = {};
+    if ("userLabel" in patch) set.userLabel = patch.userLabel;
+    if ("userCategory" in patch) set.userCategory = patch.userCategory;
+    if ("hidden" in patch) set.hidden = patch.hidden;
+    if (Object.keys(set).length === 0) return null;
+    const [row] = await db.update(photoLabels)
+      .set(set)
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)))
+      .returning();
+    return row ?? null;
   }
 
   async getPhotoLabelsByFolder(folder: string): Promise<PhotoLabel[]> {

@@ -53,7 +53,7 @@ export default function Builder() {
     for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
     return Array.from(folders);
   }, [property]);
-  const { labelFor } = usePhotoLabels(allFolders);
+  const { labelFor, isHidden } = usePhotoLabels(allFolders);
 
   // Walking-distance between units. Only meaningful for multi-unit
   // properties. Uses the shared fallback (per-resort minute defaults)
@@ -146,7 +146,11 @@ export default function Builder() {
     const communityBegin = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
     const communityEnd   = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
 
+    // Skip photos the user marked as hidden in the curator — they're kept
+    // in the DB (and in the folder on disk) but excluded from the published
+    // set sent to Guesty / Airbnb / VRBO / Booking.com.
     for (const filename of communityBegin) {
+      if (isHidden(property.communityPhotoFolder, filename)) continue;
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
         caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
@@ -159,6 +163,7 @@ export default function Builder() {
       // rescrape), fall back to the static u.photos array.
       const files = folderFiles[u.photoFolder] ?? u.photos.map((p) => p.filename);
       for (const filename of files) {
+        if (isHidden(u.photoFolder, filename)) continue;
         photos.push({
           url: `${origin}/photos/${u.photoFolder}/${filename}`,
           caption: labelFor(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
@@ -168,6 +173,7 @@ export default function Builder() {
     });
 
     for (const filename of communityEnd) {
+      if (isHidden(property.communityPhotoFolder, filename)) continue;
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
         caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
@@ -231,7 +237,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId, labelFor, folderFiles, walkResult]);
+  }, [property, pricing, propertyId, labelFor, isHidden, folderFiles, walkResult]);
 
   if (!property) {
     return (
