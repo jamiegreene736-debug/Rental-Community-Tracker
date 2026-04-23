@@ -22,6 +22,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import sharp from "sharp";
 import { labelPhoto } from "./photo-labeler";
 import { storage } from "./storage";
 
@@ -119,51 +120,151 @@ function detectBathFingerprint(label: string): string {
   return "Generic";
 }
 
-// Post-process bedroom photos: group by bed type, pick the master (King
-// preferred, then largest group), number the rest as Bedroom 2, 3, ...
-// Rewrites the .label field in place. Also caps at MAX_PER_BED_TYPE
-// photos per unique bed type to avoid 5 shots of the same room.
-const MAX_PER_BED_TYPE = 2;
+// Post-process bedroom photos: group by visual similarity (dHash) to
+// identify distinct rooms, then pick the master (largest cluster, King-bed
+// preferred) and number the rest as Bedroom 2, 3, ... Rewrites the .label
+// field in place. Caps at MAX_PER_ROOM photos per unique room.
+//
+// PRIOR BUG: bucketing was by bed type, so two Queen-bed bedrooms collapsed
+// into a single "room" with alt views and the unit appeared to have 1
+// bedroom instead of 2. Visual similarity is the correct signal — different
+// rooms look different regardless of whether their beds happen to match.
+const MAX_PER_ROOM = 2;
 const MAX_PER_BATH_TYPE = 1;
+// Hamming distance threshold on 64-bit dHashes. Photos of the same room
+// from different angles typically differ by ~0-14 bits; photos of entirely
+// different rooms differ by 20+. 16 is the empirical middle that separates
+// them reliably for vacation-rental photography.
+const DHASH_SIMILARITY_THRESHOLD = 16;
 
-function coalesceBedrooms(items: LabeledResult[]): LabeledResult[] {
+// Perceptual hash (dHash): resize to 9x8 grayscale, compare each pixel to
+// the one to its right, yield a 64-bit hash packed into 8 bytes. Two photos
+// of the same room score 0-14 bits apart; photos of different rooms 20+.
+// Stored as a Buffer (not bigint) to stay compatible with the repo's TS
+// target — popcount is done byte-wise in hammingDistance64.
+async function computeDHash(absPath: string): Promise<Buffer | null> {
+  try {
+    const { data } = await sharp(absPath)
+      .greyscale()
+      .resize(9, 8, { fit: "fill" })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const hash = Buffer.alloc(8);
+    for (let row = 0; row < 8; row++) {
+      let byte = 0;
+      for (let col = 0; col < 8; col++) {
+        const left = data[row * 9 + col];
+        const right = data[row * 9 + col + 1];
+        byte = (byte << 1) | (left < right ? 1 : 0);
+      }
+      hash[row] = byte;
+    }
+    return hash;
+  } catch {
+    return null;
+  }
+}
+
+// Precomputed popcount table for 0-255.
+const POPCOUNT = (() => {
+  const t = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    let n = i, c = 0;
+    while (n) { c += n & 1; n >>= 1; }
+    t[i] = c;
+  }
+  return t;
+})();
+
+function hammingDistance64(a: Buffer, b: Buffer): number {
+  let d = 0;
+  for (let i = 0; i < 8; i++) d += POPCOUNT[a[i] ^ b[i]];
+  return d;
+}
+
+// Single-linkage clustering by dHash Hamming distance. Photos whose hashes
+// are within threshold of any photo already in a cluster join that cluster.
+// Items with null hashes each become their own cluster — we prefer a false
+// positive (over-counting bedrooms by one) over a false negative.
+function clusterByDHash(hashes: (Buffer | null)[], threshold: number): number[] {
+  const clusterOf: number[] = new Array(hashes.length).fill(-1);
+  let next = 0;
+  for (let i = 0; i < hashes.length; i++) {
+    if (clusterOf[i] !== -1) continue;
+    clusterOf[i] = next;
+    const hi = hashes[i];
+    if (hi != null) {
+      for (let j = i + 1; j < hashes.length; j++) {
+        if (clusterOf[j] !== -1) continue;
+        const hj = hashes[j];
+        if (hj != null && hammingDistance64(hi, hj) <= threshold) {
+          clusterOf[j] = next;
+        }
+      }
+    }
+    next++;
+  }
+  return clusterOf;
+}
+
+async function coalesceBedrooms(items: LabeledResult[], folderPath: string): Promise<LabeledResult[]> {
   if (items.length === 0) return items;
-  // Bucket by bed type. Items with no recognized bed type land in "Unknown".
-  const byType = new Map<string, LabeledResult[]>();
-  const order: string[] = [];
-  for (const it of items) {
-    const bt = detectBedType(it.label ?? "") ?? "Unknown";
-    if (!byType.has(bt)) { byType.set(bt, []); order.push(bt); }
-    byType.get(bt)!.push(it);
+
+  // Step 1: compute dHash per photo from the on-disk file.
+  const hashes = await Promise.all(
+    items.map((it) => computeDHash(path.join(folderPath, it.tempName)))
+  );
+
+  // Step 2: cluster by visual similarity — one cluster per distinct room.
+  const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
+  const clusters = new Map<number, LabeledResult[]>();
+  const clusterOrder: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const c = clusterOf[i];
+    if (!clusters.has(c)) { clusters.set(c, []); clusterOrder.push(c); }
+    clusters.get(c)!.push(items[i]);
   }
-  // Pick master: King group first, else largest group.
-  let masterType: string;
-  if (byType.has("King") && (byType.get("King")?.length ?? 0) > 0) {
-    masterType = "King";
-  } else if (byType.has("Two Kings") && (byType.get("Two Kings")?.length ?? 0) > 0) {
-    masterType = "Two Kings";
+
+  // Step 3: pick the master cluster. Prefer a cluster whose photos are
+  // labeled with a King bed (common convention for primary bedroom). Tie-
+  // break by cluster size (more photos usually = more-emphasized room).
+  const clusterBedType = (c: number): string | null => {
+    for (const it of clusters.get(c) ?? []) {
+      const bt = detectBedType(it.label ?? "");
+      if (bt) return bt;
+    }
+    return null;
+  };
+  const clusterSize = (c: number) => (clusters.get(c)?.length ?? 0);
+  let masterCluster: number;
+  const kingCluster = clusterOrder.find((c) => clusterBedType(c) === "King");
+  if (kingCluster != null) {
+    masterCluster = kingCluster;
   } else {
-    masterType = [...byType.entries()].sort((a, b) => b[1].length - a[1].length)[0][0];
+    const twoKings = clusterOrder.find((c) => clusterBedType(c) === "Two Kings");
+    masterCluster = twoKings ?? clusterOrder.slice().sort((a, b) => clusterSize(b) - clusterSize(a))[0];
   }
-  // Number bedrooms. Master first, then iterate the rest in original order.
-  let bedroomNum = 2;
+
+  // Step 4: number rooms — master first, then the rest in encounter order.
+  // Within each room, first photo gets the primary label (with bed type if
+  // we detected one), additional photos labeled as alt views. Cap at
+  // MAX_PER_ROOM photos per room.
   const out: LabeledResult[] = [];
-  const renderType = (bt: string) => bt === "Unknown" ? "" : ` — ${bt}`;
-  // Master first
-  const masterItems = (byType.get(masterType) ?? []).slice(0, MAX_PER_BED_TYPE);
-  masterItems.forEach((it, i) => {
-    it.label = i === 0 ? `Master Bedroom${renderType(masterType)}` : `Master Bedroom — Alt View`;
-    out.push(it);
-  });
-  // Other bedrooms in original encounter order
-  for (const bt of order) {
-    if (bt === masterType) continue;
-    const slice = (byType.get(bt) ?? []).slice(0, MAX_PER_BED_TYPE);
+  const renderType = (bt: string | null) => bt ? ` — ${bt}` : "";
+  const labelCluster = (c: number, name: string) => {
+    const bt = clusterBedType(c);
+    const slice = (clusters.get(c) ?? []).slice(0, MAX_PER_ROOM);
     slice.forEach((it, i) => {
-      it.label = i === 0 ? `Bedroom ${bedroomNum}${renderType(bt)}` : `Bedroom ${bedroomNum} — Alt View`;
+      it.label = i === 0 ? `${name}${renderType(bt)}` : `${name} — Alt View`;
       out.push(it);
     });
-    if (slice.length > 0) bedroomNum++;
+  };
+  labelCluster(masterCluster, "Master Bedroom");
+  let bedroomNum = 2;
+  for (const c of clusterOrder) {
+    if (c === masterCluster) continue;
+    labelCluster(c, `Bedroom ${bedroomNum}`);
+    bedroomNum++;
   }
   return out;
 }
@@ -342,20 +443,20 @@ export async function downloadAndPrioritize(opts: {
 
   // Step 3a.5 (NEW): Coalesce bedrooms and bathrooms.
   //
-  // Bedrooms: group by bed type (King / Queen / Twin / Two Queens / etc.)
-  // detected from the label. Each unique bed type is one distinct room.
-  // Pick "Master Bedroom" = the King group (or biggest if no King). Number
-  // the rest as "Bedroom 2", "Bedroom 3". Cap each bed type at 2 photos to
-  // prevent same-room-five-times duplication.
+  // Bedrooms: group by visual similarity (perceptual dHash). Each distinct
+  // visual cluster is one distinct room. Pick "Master Bedroom" = the
+  // cluster whose photos show a King bed (or the largest cluster). Number
+  // the rest as "Bedroom 2", "Bedroom 3". Cap each room at MAX_PER_ROOM
+  // photos to prevent same-room-five-times duplication.
   //
-  // Bathrooms: similar logic with fixture profiles (Tub vs Shower vs
-  // Double Vanity vs Half). Primary bathroom + numbered guest bathrooms.
+  // Bathrooms: fixture-profile bucketing (Tub vs Shower vs Double Vanity
+  // vs Half). Primary bathroom + numbered guest bathrooms.
   //
   // The non-bedroom/bathroom photos pass through unchanged.
   const bedroomItems = survivors.filter((r) => r.category === "Bedrooms");
   const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
   const otherItems = survivors.filter((r) => r.category !== "Bedrooms" && r.category !== "Bathrooms");
-  const coalescedBedrooms = coalesceBedrooms(bedroomItems);
+  const coalescedBedrooms = await coalesceBedrooms(bedroomItems, folderPath);
   const coalescedBathrooms = coalesceBathrooms(bathroomItems);
   // Files that got dropped during coalesce (excess same-bed-type photos)
   // need to be unlinked.
@@ -434,17 +535,20 @@ export async function downloadAndPrioritize(opts: {
     categorySummary[key] = (categorySummary[key] ?? 0) + 1;
   }
 
-  // Unique bedroom types in the kept set = how many distinct bedrooms we
-  // have photos of. (Two photos of "King Bedroom" still count as one room.)
+  // Count distinct bedrooms by their post-coalesce room-identity label
+  // prefix: "Master Bedroom", "Bedroom 2", "Bedroom 3", ... This reflects
+  // the dHash-based clustering done in coalesceBedrooms — one cluster per
+  // visually-distinct room. (Counting bed types here was the old bug: two
+  // Queen-bed rooms collapsed to 1.)
+  const bedroomRoomsSet = new Set<string>();
   const bedroomTypesSet = new Set<string>();
   for (const k of kept) {
-    if (k.category === "Bedrooms") {
-      const bt = detectBedType(k.label ?? "");
-      // After coalesce the label format is "Master Bedroom — King" or
-      // "Bedroom 2 — Queen", so the bed type detection here finds the
-      // suffix. Items without a recognized type still count as one room.
-      bedroomTypesSet.add(bt ?? `Unknown-${k.tempName}`);
-    }
+    if (k.category !== "Bedrooms") continue;
+    const label = k.label ?? "";
+    const roomMatch = label.match(/^(Master Bedroom|Bedroom \d+)/);
+    bedroomRoomsSet.add(roomMatch ? roomMatch[1] : `Unknown-${k.tempName}`);
+    const bt = detectBedType(label);
+    if (bt) bedroomTypesSet.add(bt);
   }
   const bathroomTypesSet = new Set<string>();
   for (const k of kept) {
@@ -452,7 +556,7 @@ export async function downloadAndPrioritize(opts: {
       bathroomTypesSet.add(detectBathFingerprint(k.label ?? "") + "-" + (k.label ?? ""));
     }
   }
-  const bedroomsFound = bedroomTypesSet.size;
+  const bedroomsFound = bedroomRoomsSet.size;
   const bathroomsFound = bathroomTypesSet.size;
 
   if (requiredBedrooms && bedroomsFound < requiredBedrooms) {
