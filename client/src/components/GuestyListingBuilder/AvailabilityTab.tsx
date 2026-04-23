@@ -118,24 +118,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     return () => clearInterval(t);
   }, [fetchSchedule]);
 
-  // Auto-enable the scheduler for any property that's connected to a Guesty
-  // listing. The historical default was `enabled: false`, which left many
-  // connected properties with dormant schedules — the user has to click a
-  // button to turn on something that should be on by default. This runs
-  // once, after the initial fetch, when all three conditions hold:
-  //   - we have a Guesty listingId (connected)
-  //   - we have a schedule row back from the server
-  //   - that row is currently disabled
-  // The server PATCH path is idempotent, so a redundant call here is cheap.
-  const autoEnableCheckedRef = useRef(false);
-  useEffect(() => {
-    if (autoEnableCheckedRef.current) return;
-    if (!schedule || !listingId || !propertyId) return;
-    if (schedule.enabled) { autoEnableCheckedRef.current = true; return; }
-    autoEnableCheckedRef.current = true;
-    updateSchedule({ enabled: true });
-  }, [schedule, listingId, propertyId, updateSchedule]);
-
   const updateSchedule = useCallback(async (patch: Partial<Schedule>) => {
     if (!propertyId) return;
     try {
@@ -148,6 +130,22 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       setSchedule(d.schedule);
     } catch { /* ignore */ }
   }, [propertyId]);
+
+  // Auto-enable the scheduler for any property that's connected to a Guesty
+  // listing. The historical default was `enabled: false`, which left many
+  // connected properties with dormant schedules. Runs once, after the
+  // initial fetch, when all three conditions hold: we have a Guesty
+  // listingId, the schedule row is loaded, and it's currently disabled.
+  // Declared *after* updateSchedule because the dep array references it —
+  // putting the useEffect before updateSchedule hits a TDZ error.
+  const autoEnableCheckedRef = useRef(false);
+  useEffect(() => {
+    if (autoEnableCheckedRef.current) return;
+    if (!schedule || !listingId || !propertyId) return;
+    if (schedule.enabled) { autoEnableCheckedRef.current = true; return; }
+    autoEnableCheckedRef.current = true;
+    updateSchedule({ enabled: true });
+  }, [schedule, listingId, propertyId, updateSchedule]);
 
   const runNow = useCallback(async () => {
     if (!propertyId || runNowBusy) return;
