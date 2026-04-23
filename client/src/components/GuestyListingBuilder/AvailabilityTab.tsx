@@ -102,12 +102,19 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
 
+  // Tracks whether the initial GET for the schedule has completed, so we
+  // can distinguish "still loading" from "server says no row exists".
+  // Both collapse to `schedule === null` in local state, which prevented
+  // the auto-enable useEffect from firing — it was waiting for a truthy
+  // schedule that never arrived because there was no row to fetch.
+  const scheduleFetchedRef = useRef(false);
   const fetchSchedule = useCallback(async () => {
     if (!propertyId) return;
     try {
       const r = await fetch(`/api/availability/schedule/${propertyId}`);
       const d = await r.json();
       setSchedule(d.schedule);
+      scheduleFetchedRef.current = true;
     } catch { /* ignore */ }
   }, [propertyId]);
 
@@ -131,21 +138,29 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     } catch { /* ignore */ }
   }, [propertyId]);
 
-  // Auto-enable the scheduler for any property that's connected to a Guesty
-  // listing. The historical default was `enabled: false`, which left many
-  // connected properties with dormant schedules. Runs once, after the
-  // initial fetch, when all three conditions hold: we have a Guesty
-  // listingId, the schedule row is loaded, and it's currently disabled.
-  // Declared *after* updateSchedule because the dep array references it —
-  // putting the useEffect before updateSchedule hits a TDZ error.
+  // Auto-enable the scheduler for any property the user is viewing. Covers
+  // two cases: (a) a schedule row exists but enabled=false, (b) no schedule
+  // row exists at all. POST /api/availability/schedule is idempotent +
+  // upserting, so either case is handled by the same call.
+  //
+  // Intentionally does NOT gate on `listingId` — that's the dropdown
+  // selection in the parent component, which starts empty on direct page
+  // navigation and populates only after the user picks. The scheduler cron
+  // itself validates the Guesty mapping at run-time and no-ops on unmapped
+  // properties, so enabling pre-mapping is harmless.
+  //
+  // Guards on `scheduleFetchedRef` so we only auto-enable AFTER the initial
+  // GET completes — otherwise we'd race the fetch and potentially flip a
+  // user's explicitly-disabled schedule back on.
   const autoEnableCheckedRef = useRef(false);
   useEffect(() => {
     if (autoEnableCheckedRef.current) return;
-    if (!schedule || !listingId || !propertyId) return;
-    if (schedule.enabled) { autoEnableCheckedRef.current = true; return; }
+    if (!propertyId) return;
+    if (!scheduleFetchedRef.current) return;
+    if (schedule?.enabled) { autoEnableCheckedRef.current = true; return; }
     autoEnableCheckedRef.current = true;
     updateSchedule({ enabled: true });
-  }, [schedule, listingId, propertyId, updateSchedule]);
+  }, [schedule, propertyId, updateSchedule]);
 
   const runNow = useCallback(async () => {
     if (!propertyId || runNowBusy) return;
