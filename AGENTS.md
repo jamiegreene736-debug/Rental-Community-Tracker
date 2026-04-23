@@ -163,6 +163,23 @@ established it so you can read the rationale in the commit message.
     push the collage as cover") when `selectedId` is falsy — the push
     target is unknown without a selected listing. See PR #26.
 
+19. **The availability scheduler does NOT fan out the baseline
+    verdict across 52 future weeks.** Only explicit per-window
+    overrides (`scanner_overrides.mode = "force-block"`) drive
+    automatic Guesty blocks from the scheduler's block-sync step.
+    Earlier revision applied `baselineVerdict` to every non-override
+    week, which meant a single point-in-time Airbnb-listing count of
+    "2 sets, need 3" auto-blocked every week for a year — user
+    reported "every future date is blocked." The baseline scan is a
+    SIGNAL about current supply tightness (still reported in the run
+    summary as `inventory N sets (verdict)`), not an ACTION that
+    should translate to 52 Guesty blocks. For real per-week blocks
+    based on actual per-week availability scans, use the manual "Run
+    inventory scan" → "Push Blackouts to Guesty" flow in the
+    Availability tab — that flow queries each window individually
+    and writes only weeks that actually failed. Do NOT reintroduce
+    baseline-to-52-weeks fanout. See PR #38.
+
 ## Conventions
 
 ### Branches
