@@ -363,11 +363,11 @@ async function coalesceByVisualCluster(
 ): Promise<LabeledResult[]> {
   if (items.length <= 1) return items;
 
-  // Pre-merge by normalized label text. When Claude gives the same exact
-  // caption to multiple photos (e.g. 4× "Kitchen With Island"), it's calling
-  // them the same room regardless of angle — and that's a stronger signal
-  // than dHash, which can split wide-angle alt views of the same kitchen
-  // into "different" clusters simply because they look different pixel-wise.
+  // First pass: group by normalized label text. When Claude gives the same
+  // exact caption to multiple photos (e.g. 4× "Kitchen With Island"), treat
+  // them as the same room — that's a stronger signal than dHash, which can
+  // split wide-angle alt views of the same kitchen into "different" clusters
+  // when the photos are taken from opposite ends.
   const normalize = (s: string | null) => (s ?? "").toLowerCase().trim().replace(/\s+/g, " ");
   const byLabel = new Map<string, LabeledResult[]>();
   const labelOrder: string[] = [];
@@ -377,32 +377,37 @@ async function coalesceByVisualCluster(
     byLabel.get(key)!.push(it);
   }
 
-  // Within each identical-label group, keep one representative per visual
-  // cluster — so if there really ARE two distinct kitchens both captioned
-  // "Updated Kitchen", dHash still separates them. But the common case of
-  // multiple angles of one kitchen collapses to a single kept photo.
-  const out: LabeledResult[] = [];
+  // One representative per unique label. If there really are two distinct
+  // kitchens in one unit, Claude typically gives them different labels
+  // (e.g. "Updated Kitchen" vs "Galley Kitchen With Window") — so labels
+  // diverge and both survive. If they share a label, they're the same room.
+  const representatives: LabeledResult[] = [];
   for (const key of labelOrder) {
     const group = byLabel.get(key) ?? [];
-    if (group.length === 0) continue;
-    if (group.length === 1) { out.push(...group.slice(0, keepPerCluster)); continue; }
-    // Use a wider threshold here (24 bits) because photos already share the
-    // same label — we're only separating them if they look very different.
-    const hashes = await Promise.all(
-      group.map((it) => computeDHash(path.join(folderPath, it.tempName)))
-    );
-    const clusterOf = clusterByDHash(hashes, 24);
-    const byCluster = new Map<number, LabeledResult[]>();
-    const order: number[] = [];
-    for (let i = 0; i < group.length; i++) {
-      const c = clusterOf[i];
-      if (!byCluster.has(c)) { byCluster.set(c, []); order.push(c); }
-      byCluster.get(c)!.push(group[i]);
-    }
-    for (const c of order) {
-      const slice = (byCluster.get(c) ?? []).slice(0, keepPerCluster);
-      out.push(...slice);
-    }
+    representatives.push(...group.slice(0, keepPerCluster));
+  }
+
+  // Second pass (safety net): even with different labels, dHash still
+  // catches edge cases — e.g. Claude labels the same kitchen "Kitchen With
+  // Island" once and "Modern Kitchen With Island" another time. Cluster the
+  // label-unique representatives by dHash; within each visual cluster keep
+  // only `keepPerCluster`.
+  if (representatives.length <= 1) return representatives;
+  const hashes = await Promise.all(
+    representatives.map((it) => computeDHash(path.join(folderPath, it.tempName)))
+  );
+  const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
+  const byCluster = new Map<number, LabeledResult[]>();
+  const order: number[] = [];
+  for (let i = 0; i < representatives.length; i++) {
+    const c = clusterOf[i];
+    if (!byCluster.has(c)) { byCluster.set(c, []); order.push(c); }
+    byCluster.get(c)!.push(representatives[i]);
+  }
+  const out: LabeledResult[] = [];
+  for (const c of order) {
+    const slice = (byCluster.get(c) ?? []).slice(0, keepPerCluster);
+    out.push(...slice);
   }
   return out;
 }
