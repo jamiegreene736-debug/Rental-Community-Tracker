@@ -69,16 +69,49 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
+// Structured listing facts (bed/bath counts) pulled from the scraper's
+// response. Callers pass a mutable object and read it after the scrape —
+// this keeps scrapeListingPhotos' photo-array return signature stable for
+// the ~8 existing callers while letting new callers opt into the metadata.
+export interface ListingFacts {
+  bedrooms?: number;
+  bathrooms?: number;
+}
+
+// Pick plausible bed/bath counts from a Zillow scraper payload. The various
+// actor schemas expose them under different paths (`bedrooms`, `resoFacts.
+// bedrooms`, `hdpData.homeInfo.bedrooms`), but they all use the same field
+// names — so a depth-bounded walk that takes the first numeric value at the
+// shallowest depth is robust across schemas. Ignore 0/negative/huge values
+// to skip obvious junk like per-unit sub-records with zeroed fields.
+function extractListingFacts(payload: any): ListingFacts {
+  const facts: ListingFacts = {};
+  function walk(o: any, depth: number): void {
+    if (depth > 8 || !o || typeof o !== "object") return;
+    if (Array.isArray(o)) { for (const v of o) walk(v, depth + 1); return; }
+    if (facts.bedrooms == null && typeof o.bedrooms === "number" && o.bedrooms > 0 && o.bedrooms < 50) {
+      facts.bedrooms = Math.round(o.bedrooms);
+    }
+    if (facts.bathrooms == null) {
+      const b = o.bathrooms ?? o.bathroomsFull ?? o.bathroomsTotalInteger;
+      if (typeof b === "number" && b > 0 && b < 50) facts.bathrooms = Math.floor(b);
+    }
+    for (const v of Object.values(o)) walk(v, depth + 1);
+  }
+  walk(payload, 0);
+  return facts;
+}
+
 // Fetch Zillow listing photos via Apify. Pay-per-result (~$0.005 each) is
 // 50-80× cheaper than ScrapingBee's credit model for our low volume.
 // Requires APIFY_API_TOKEN on the env. APIFY_ZILLOW_ACTOR picks which
 // actor to run — defaults to maxcopell/zillow-detail-scraper which takes
 // a list of Zillow URLs and returns full listing JSON including photos.
-async function scrapeZillowViaApify(url: string): Promise<string[]> {
+async function scrapeZillowViaApify(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
     console.warn(`[scrapeZillow:Apify] APIFY_API_TOKEN not set`);
-    return [];
+    return { urls: [], facts: {} };
   }
   const actor = (process.env.APIFY_ZILLOW_ACTOR || "maxcopell~zillow-detail-scraper").replace("/", "~");
   try {
@@ -94,13 +127,14 @@ async function scrapeZillowViaApify(url: string): Promise<string[]> {
     if (!r.ok) {
       const body = await r.text().catch(() => "");
       console.warn(`[scrapeZillow:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
-      return [];
+      return { urls: [], facts: {} };
     }
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items) || items.length === 0) {
       console.warn(`[scrapeZillow:Apify] empty dataset for ${url}`);
-      return [];
+      return { urls: [], facts: {} };
     }
+    const facts = extractListingFacts(items);
 
     // Every Zillow actor uses a slightly different schema, so walk the whole
     // dataset recursively and pull every string that looks like a real
@@ -159,19 +193,19 @@ async function scrapeZillowViaApify(url: string): Promise<string[]> {
       if (!prev || score > prev.score) byHash.set(hash, { url: u, score });
     }
     const uniq = Array.from(byHash.values()).map((v) => v.url);
-    console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos`);
-    return uniq;
+    console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls: uniq, facts };
   } catch (e: any) {
     console.warn(`[scrapeZillow:Apify] ${url}: ${e?.message ?? e}`);
-    return [];
+    return { urls: [], facts: {} };
   }
 }
 
-async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
+async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
   const key = process.env.SCRAPINGBEE_API_KEY;
   if (!key) {
     console.warn(`[scrapeZillow:SB] SCRAPINGBEE_API_KEY not set`);
-    return [];
+    return { urls: [], facts: {} };
   }
   try {
     const params = new URLSearchParams({
@@ -189,16 +223,16 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
     if (!r.ok) {
       const body = await r.text().catch(() => "");
       console.warn(`[scrapeZillow:SB] HTTP ${r.status} ${body.slice(0, 200)}`);
-      return [];
+      return { urls: [], facts: {} };
     }
     const html = await r.text();
     const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
     if (!match) {
       console.warn(`[scrapeZillow:SB] ${url}: no __NEXT_DATA__ blob (html length ${html.length})`);
-      return [];
+      return { urls: [], facts: {} };
     }
     let nd: any;
-    try { nd = JSON.parse(match[1]); } catch { return []; }
+    try { nd = JSON.parse(match[1]); } catch { return { urls: [], facts: {} }; }
 
     // Walk the NEXT_DATA tree for mixedSources.jpeg arrays — each is one
     // photo with multiple resolutions; keep the widest.
@@ -218,26 +252,39 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<string[]> {
     }
     walk(nd, 0);
     const uniq = [...new Set(out)];
-    console.log(`[scrapeZillow:SB] ${url} → ${uniq.length} photos`);
-    return uniq;
+    const facts = extractListingFacts(nd);
+    console.log(`[scrapeZillow:SB] ${url} → ${uniq.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls: uniq, facts };
   } catch (e: any) {
     console.warn(`[scrapeZillow:SB] ${url}: ${e?.message ?? e}`);
-    return [];
+    return { urls: [], facts: {} };
   }
 }
 
-async function scrapeListingPhotos(primaryUrl: string, fallbackUrl?: string): Promise<ScrapedPhoto[]> {
+// scrapeListingPhotos optionally populates the caller's `listingFacts` object
+// with the scraper-extracted bed/bath counts. Existing callers that don't
+// pass one are unaffected. New callers (notably the rescrape handler) use
+// these counts as ground truth over photo-based inference.
+async function scrapeListingPhotos(
+  primaryUrl: string,
+  fallbackUrl?: string,
+  listingFacts?: ListingFacts,
+): Promise<ScrapedPhoto[]> {
   // Zillow URLs: try Apify first (pay-per-result, way cheaper for our volume),
   // then ScrapingBee as a fallback. zillow.com itself 403s every IP we've
   // tried (Cloudflare/Akamai), so one of these paid paths is mandatory.
   if (/zillow\.com/i.test(primaryUrl)) {
-    let urls = await scrapeZillowViaApify(primaryUrl);
-    if (urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+    let result = await scrapeZillowViaApify(primaryUrl);
+    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
-      urls = await scrapeZillowViaScrapingBee(primaryUrl);
+      result = await scrapeZillowViaScrapingBee(primaryUrl);
     }
-    if (urls.length > 0) {
-      return urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
+    if (listingFacts) {
+      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
+      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+    }
+    if (result.urls.length > 0) {
+      return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
@@ -6123,7 +6170,8 @@ export async function registerRoutes(
         });
       }
 
-      const scraped = await scrapeListingPhotos(sourceUrl);
+      const listingFacts: ListingFacts = {};
+      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts);
       if (!scraped.length) {
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
@@ -6134,19 +6182,21 @@ export async function registerRoutes(
       // never drop a bedroom just because it was late in Apify's list.
       const maxKeep = Math.max(1, Math.min(40, limit ?? 25));
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
-      // Try to derive expected bedroom/bathroom counts from the most recent
-      // unit_swap that targets this folder (if any), so the pipeline can
-      // surface a coverage warning when the scraped listing has fewer
-      // unique rooms than the unit advertises.
-      let expectedBedrooms: number | undefined;
-      let expectedBathrooms: number | undefined;
+      // Expected bed/bath counts. The Zillow listing's own structured data
+      // (listingFacts) is authoritative when available — the scraper pulled
+      // it straight out of the listing payload. Fall back to the unit_swap
+      // reference on the source doc if the scraper didn't surface facts.
+      let expectedBedrooms: number | undefined = listingFacts.bedrooms;
+      let expectedBathrooms: number | undefined = listingFacts.bathrooms;
       const refs = (sourceDoc?.referencedBy as Array<Record<string, unknown>> | undefined) ?? [];
       if (refs.length > 0) {
         const ref = refs[0];
-        if (typeof ref.bedrooms === "number") expectedBedrooms = ref.bedrooms;
-        if (typeof ref.bathrooms === "number") expectedBathrooms = ref.bathrooms;
-        else if (typeof ref.bathrooms === "string" && !isNaN(parseFloat(ref.bathrooms))) {
-          expectedBathrooms = Math.floor(parseFloat(ref.bathrooms));
+        if (expectedBedrooms == null && typeof ref.bedrooms === "number") expectedBedrooms = ref.bedrooms;
+        if (expectedBathrooms == null) {
+          if (typeof ref.bathrooms === "number") expectedBathrooms = ref.bathrooms;
+          else if (typeof ref.bathrooms === "string" && !isNaN(parseFloat(ref.bathrooms))) {
+            expectedBathrooms = Math.floor(parseFloat(ref.bathrooms));
+          }
         }
       }
       const result = await downloadAndPrioritize({
@@ -6159,6 +6209,14 @@ export async function registerRoutes(
         requiredBedrooms: expectedBedrooms,
         requiredBathrooms: expectedBathrooms,
       });
+
+      // The UI-facing bed/bath counts. Prefer the listing's own declared
+      // numbers over photo-derived inference — Zillow knows what the unit
+      // has far more reliably than a vision model counting photos. Keep
+      // photo-derived as the floor, so if the listing undersells (rare),
+      // we don't over-suppress the detected rooms.
+      const displayBedroomCount = Math.max(result.bedroomCount, listingFacts.bedrooms ?? 0);
+      const displayBathroomCount = Math.max(result.bathroomCount, listingFacts.bathrooms ?? 0);
 
       // Stamp the URL back into _source.json so the next rescrape is one click.
       sourceDoc.sourceListing = {
@@ -6180,10 +6238,11 @@ export async function registerRoutes(
         failedCount: result.downloaded - result.kept - result.dropped,
         downloaded: result.downloaded,
         dropped: result.dropped,
-        bedroomCount: result.bedroomCount,
-        bathroomCount: result.bathroomCount,
+        bedroomCount: displayBedroomCount,
+        bathroomCount: displayBathroomCount,
         bedroomTypes: result.bedroomTypes,
         bathroomTypes: result.bathroomTypes,
+        listingFacts,
         coverage: result.coverage,
         categorySummary: result.categorySummary,
         saved: result.keptFilenames,
@@ -7357,7 +7416,8 @@ export async function registerRoutes(
       void (async () => {
         try {
           const folderPath = path.join(process.cwd(), "client/public/photos", folder);
-          const scraped = await scrapeListingPhotos(url);
+          const listingFacts: ListingFacts = {};
+          const scraped = await scrapeListingPhotos(url, undefined, listingFacts);
           if (!scraped.length) {
             console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
             return;
@@ -7370,7 +7430,8 @@ export async function registerRoutes(
             maxKeep: 25,
             anthropicKey: process.env.ANTHROPIC_API_KEY,
             kind: inferKindFromFolder(folder),
-            requiredBedrooms: swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
+            requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
+            requiredBathrooms: listingFacts.bathrooms ?? undefined,
           });
 
           // Stamp _source.json so the folder's provenance is recorded.
