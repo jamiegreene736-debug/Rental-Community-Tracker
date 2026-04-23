@@ -4,3 +4,4 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+.guesty_token_cache.json
