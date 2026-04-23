@@ -5381,6 +5381,21 @@ export async function registerRoutes(
         });
         return Array.from(out).slice(0, 5);
       }).catch(() => [] as string[]);
+      // Capture visible button/link texts — when the flow is multi-step the
+      // post-Next page has a "Submit" / "Confirm" / "Done" button we need
+      // to click to complete the registration. Knowing the exact labels lets
+      // us extend the automation rather than guessing.
+      const buttonTexts = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('button, a[role="button"]'))
+          .map((b) => ({
+            text: (b.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80),
+            type: (b as HTMLButtonElement).type || null,
+            disabled: (b as HTMLButtonElement).disabled ?? false,
+            ariaLabel: b.getAttribute("aria-label"),
+          }))
+          .filter((b) => b.text.length > 0)
+          .slice(0, 25)
+      ).catch(() => [] as Array<{ text: string; type: string | null; disabled: boolean; ariaLabel: string | null }>);
       const advanced = postSubmitUrl !== targetUrl;
 
       // Pull the saved status from Guesty — airbnb2.permits.regulations is
@@ -5388,11 +5403,35 @@ export async function registerRoutes(
       // submit worked we'll see status:"success" there (may take a
       // moment to propagate; caller can re-check).
       trace.push({ step: advanced ? "submission-advanced" : "submission-maybe-stuck", detail: postSubmitUrl });
-      if (!advanced) {
-        console.log(`[airbnb-compliance] listing ${listingId} did not advance. errors=${JSON.stringify(errorMessages)} headings=${JSON.stringify(postHeadings)} trace=${JSON.stringify(trace)}`);
+
+      // Always persist a screenshot of the post-Next page so we can inspect
+      // what step 2 of Airbnb's flow looks like. Saved to the photos volume
+      // under /photos/debug/ so it's reachable via public URL without any
+      // extra routing. Keeps last ~20 files to stay bounded.
+      const screenshotBuf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
+      let screenshotUrl: string | null = null;
+      if (screenshotBuf) {
+        try {
+          const debugDir = path.resolve(process.cwd(), "client/public/photos/debug");
+          if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+          const fname = `compliance-${listingId}-${Date.now()}.jpg`;
+          fs.writeFileSync(path.join(debugDir, fname), screenshotBuf);
+          screenshotUrl = `/photos/debug/${fname}`;
+          // Prune oldest files beyond the 20 most recent so the volume doesn't fill up.
+          try {
+            const all = fs.readdirSync(debugDir)
+              .filter((f) => f.startsWith("compliance-") && f.endsWith(".jpg"))
+              .map((f) => ({ f, mtime: fs.statSync(path.join(debugDir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime);
+            for (const old of all.slice(20)) fs.unlinkSync(path.join(debugDir, old.f));
+          } catch { /* non-fatal prune */ }
+        } catch (e) {
+          trace.push({ step: "screenshot-save-failed", detail: (e as Error).message });
+        }
       }
 
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
+      console.log(`[airbnb-compliance] listing=${listingId} advanced=${advanced} finalUrl=${postSubmitUrl} screenshot=${screenshotUrl} headings=${JSON.stringify(postHeadings)} buttons=${JSON.stringify(buttonTexts)} errors=${JSON.stringify(errorMessages)} trace=${JSON.stringify(trace)}`);
+
       return res.json({
         ok: true,
         advanced,
@@ -5401,7 +5440,9 @@ export async function registerRoutes(
         postSubmitHeadings: postHeadings,
         postBodyPreview,
         errorMessages,
-        screenshot: screenshot ? screenshot.toString("base64") : null,
+        buttonTexts,
+        screenshot: screenshotBuf ? screenshotBuf.toString("base64") : null,
+        screenshotUrl,
       });
     } catch (e: any) {
       return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });

@@ -85,6 +85,7 @@ const CSS = `
   .glb-ch-icon { width:26px; height:26px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; background:var(--bg-hover); }
   .glb-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:100px; font-size:11px; font-weight:500; border:1px solid transparent; }
   .glb-badge.live { background:var(--green-bg); border-color:var(--green-border); color:var(--green); }
+  .glb-badge.live-warn { background:#fffbeb; border-color:#f59e0b; color:#b45309; }
   .glb-badge.not-live { background:var(--red-bg); border-color:var(--red-border); color:var(--red); }
   .glb-badge.no-account { background:var(--bg-hover); border-color:var(--border); color:var(--faint); }
   .glb-badge-dot { width:5px; height:5px; border-radius:50%; background:currentColor; flex-shrink:0; }
@@ -2021,9 +2022,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 const info = channelStatus?.[ch];
                 const isLive = info?.live;
                 const isConnected = info?.connected;
+                // Guesty reports the last sync operation's result in `status`.
+                // "FAILED" means the listing still exists on the channel but
+                // Guesty's most recent push errored out — the page is live
+                // but Guesty and the channel are out of sync until the user
+                // retries via Push Updates.
+                const lastSyncFailed = isLive && info?.status === "FAILED";
                 const cardClass = `glb-ch ${isLive ? "live" : isConnected ? "dead" : ""}`;
-                const badgeClass = `glb-badge ${isLive ? "live" : isConnected ? "not-live" : "no-account"}`;
-                const badgeLabel = loadingChannels ? "…" : isLive ? "LIVE" : isConnected ? "Not Live" : "No Account";
+                const badgeClass = `glb-badge ${isLive ? (lastSyncFailed ? "live-warn" : "live") : isConnected ? "not-live" : "no-account"}`;
+                const badgeLabel = loadingChannels
+                  ? "…"
+                  : isLive
+                    ? (lastSyncFailed ? "LIVE ⚠" : "LIVE")
+                    : isConnected ? "Not Live" : "No Account";
+                const badgeTitle = lastSyncFailed
+                  ? "Listing is on the channel, but Guesty's last sync operation failed. Use Push Updates to retry."
+                  : undefined;
                 // Click-to-open: when the listing is live AND we have a
                 // public URL (Airbnb: constructed from ID; VRBO/Booking:
                 // only when Guesty stamped listingUrl), the whole card
@@ -2056,7 +2070,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <span className="glb-ch-icon">{ICONS[ch]}</span>
                         {LABELS[ch]}
                       </span>
-                      <span className={badgeClass}>
+                      <span className={badgeClass} title={badgeTitle}>
                         {!loadingChannels && <span className="glb-badge-dot" />}
                         {badgeLabel}
                       </span>
@@ -2102,15 +2116,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           const data = await r.json();
                           if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
                           const airbnbErrors: string[] = Array.isArray(data.errorMessages) ? data.errorMessages : [];
+                          const screenshotUrl: string | null = typeof data.screenshotUrl === "string" ? data.screenshotUrl : null;
+                          const shotSuffix = screenshotUrl ? ` · Screenshot: ${window.location.origin}${screenshotUrl}` : "";
                           toast({
-                            title: data.advanced ? "Airbnb compliance submitted" : "Compliance form filled",
+                            title: data.advanced ? "Compliance step 1 submitted" : "Compliance form filled",
                             description: data.advanced
-                              ? "Form accepted and advanced. Re-check Channel Status in a minute — Guesty will reflect the success status."
+                              ? `Step 1 advanced. Airbnb's flow may have more steps — Guesty currently shows permits empty for this listing. Inspect the step-2 screenshot to confirm.${shotSuffix}`
                               : airbnbErrors.length > 0
-                                ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}`
-                                : `Submitted but page didn't advance — no visible Airbnb error captured. Check your Airbnb dashboard manually. Final URL: ${data.finalUrl}`,
+                                ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}${shotSuffix}`
+                                : `Submitted but page didn't advance — no visible Airbnb error captured. Check your Airbnb dashboard manually. Final URL: ${data.finalUrl}${shotSuffix}`,
                             variant: data.advanced ? "default" : "destructive",
-                            duration: 12000,
+                            duration: 15000,
                           });
                           // Kick a channel-status refresh so the badge flips if the status updated.
                           refreshChannelStatus?.();
