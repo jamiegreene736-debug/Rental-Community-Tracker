@@ -99,6 +99,12 @@ export type ChannelInfo = {
   live: boolean;
   id: string | null;
   status: string | null;
+  // Public listing URL on the channel's own site, when derivable. Airbnb
+  // has a canonical pattern we construct from the ID; VRBO and
+  // Booking.com require Guesty to have stamped a URL field on the
+  // integration record (best-effort, null when not present). Used to
+  // make the Channel Status cards click through to the live listing.
+  publicUrl: string | null;
   // Airbnb only: regulatory/compliance state pulled from
   // integrations[].airbnb2.permits.regulations[0]. null = no regulations
   // record (jurisdiction isn't regulated in Airbnb's eyes, or the field
@@ -379,6 +385,19 @@ class GuestyService {
     const bookingComData = findIntegration(["bookingCom", "booking_com"])
       ?? (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
 
+    // Look for the public listing URL across the various field names
+    // Guesty has used for it over different API versions — `listingUrl`
+    // is the current canonical, but older records may have `url`,
+    // `propertyUrl`, or `publicUrl`. Returns the first non-empty match.
+    const pickChannelUrl = (d: Record<string, unknown> | undefined): string | null => {
+      if (!d) return null;
+      for (const k of ["listingUrl", "url", "publicUrl", "propertyUrl"]) {
+        const v = d[k];
+        if (typeof v === "string" && /^https?:\/\//i.test(v)) return v;
+      }
+      return null;
+    };
+
     const toInfo = (data: Record<string, unknown> | undefined): ChannelInfo => {
       const d = data as Record<string, string> | undefined;
       const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId);
@@ -388,6 +407,7 @@ class GuestyService {
         live: (hasId || isCompleted) && isListed,
         id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || null,
         status: d?.status || null,
+        publicUrl: pickChannelUrl(data),
       };
     };
 
@@ -413,6 +433,14 @@ class GuestyService {
 
     const airbnbInfo = toInfo(airbnbData);
     airbnbInfo.compliance = airbnbCompliance;
+
+    // Airbnb URLs are deterministic from the listing ID —
+    // https://www.airbnb.com/rooms/{id} has been the canonical shape
+    // for years. Only fill this in when the integration didn't already
+    // stamp a listingUrl, so a channel-manager-provided URL always wins.
+    if (!airbnbInfo.publicUrl && airbnbInfo.id) {
+      airbnbInfo.publicUrl = `https://www.airbnb.com/rooms/${airbnbInfo.id}`;
+    }
 
     return {
       isListed,

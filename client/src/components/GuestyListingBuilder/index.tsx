@@ -1954,8 +1954,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 const cardClass = `glb-ch ${isLive ? "live" : isConnected ? "dead" : ""}`;
                 const badgeClass = `glb-badge ${isLive ? "live" : isConnected ? "not-live" : "no-account"}`;
                 const badgeLabel = loadingChannels ? "…" : isLive ? "LIVE" : isConnected ? "Not Live" : "No Account";
+                // Click-to-open: when the listing is live AND we have a
+                // public URL (Airbnb: constructed from ID; VRBO/Booking:
+                // only when Guesty stamped listingUrl), the whole card
+                // opens the channel's public listing page in a new tab.
+                // Uses onClick on a <div> rather than wrapping in <a>
+                // because the Airbnb card has a nested <button> for the
+                // compliance push — <button> inside <a> is invalid HTML
+                // and the click conflict would fire both handlers. The
+                // compliance button calls stopPropagation so clicks on
+                // it don't bubble up and trigger the card navigation.
+                const publicUrl = isLive ? info?.publicUrl ?? null : null;
+                const interactive = !!publicUrl;
+                const openChannel = () => {
+                  if (publicUrl) window.open(publicUrl, "_blank", "noopener,noreferrer");
+                };
                 return (
-                  <div key={ch} className={cardClass} data-testid={`channel-card-${ch}`}>
+                  <div
+                    key={ch}
+                    className={cardClass}
+                    data-testid={`channel-card-${ch}`}
+                    onClick={interactive ? openChannel : undefined}
+                    onKeyDown={interactive ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openChannel(); } } : undefined}
+                    role={interactive ? "link" : undefined}
+                    tabIndex={interactive ? 0 : undefined}
+                    style={interactive ? { cursor: "pointer" } : undefined}
+                    title={interactive ? `Open ${LABELS[ch]} listing in a new tab` : undefined}
+                  >
                     <div className="glb-ch-hdr">
                       <span className="glb-ch-name">
                         <span className="glb-ch-icon">{ICONS[ch]}</span>
@@ -1968,6 +1993,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     </div>
                     {info?.id && <div className="glb-ch-meta">ID: {info.id}</div>}
                     {info?.status && <div className="glb-ch-meta">Status: {info.status}</div>}
+                    {interactive && (
+                      <div className="glb-ch-meta" style={{ color: "#2563eb", fontWeight: 500, marginTop: 4 }}>
+                        ↗ View live listing
+                      </div>
+                    )}
+                    {isLive && !interactive && (
+                      <div className="glb-ch-meta" style={{ color: "#9ca3af", fontSize: 10, marginTop: 4 }}>
+                        Public URL not yet in Guesty payload — check the channel dashboard.
+                      </div>
+                    )}
 
                     {/* Airbnb-only compliance sub-block. Appears once the listing
                         is live on Airbnb (so the regulations form page exists).
@@ -2034,7 +2069,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                               <button
                                 type="button"
-                                onClick={handlePushCompliance}
+                                onClick={(e) => {
+                                  // Airbnb card becomes click-to-open-listing
+                                  // when live. Stop bubbling so clicking this
+                                  // button doesn't also fire that handler.
+                                  e.stopPropagation();
+                                  handlePushCompliance();
+                                }}
                                 disabled={complianceBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
                                 style={{
                                   fontSize: 12, padding: "4px 10px", borderRadius: 4,
