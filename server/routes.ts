@@ -5324,6 +5324,17 @@ export async function registerRoutes(
     res.json({ schedule: row });
   });
 
+  // GET /api/availability/scanner-history/:propertyId?limit=5 — returns
+  // the N most recent scanner runs (scheduled ticks + manual "Run now"
+  // calls) for the given property. Default limit 5, capped at 50.
+  app.get("/api/availability/scanner-history/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit ?? "5"), 10) || 5));
+    const rows = await storage.getRecentScannerRuns(propertyId, limit);
+    res.json({ runs: rows });
+  });
+
   // POST /api/availability/run-now/:propertyId — trigger the full pipeline
   // on demand (user clicked "Run now" in the UI).
   app.post("/api/availability/run-now/:propertyId", async (req, res) => {
