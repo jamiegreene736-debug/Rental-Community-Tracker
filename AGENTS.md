@@ -135,6 +135,29 @@ established it so you can read the rationale in the commit message.
     hash — use API response checks to verify server deploys, not
     bundle diffs.
 
+17. **Scraped photos live on a Railway volume mounted at
+    `/app/client/public/photos`.** The Docker filesystem is ephemeral,
+    so without a volume every deploy wipes the scrape output and the
+    builder silently falls back to the static
+    `property.communityPhotos` / `u.photos` arrays (user-visible as
+    "my 40-photo scrape reverted to 22"). The image ships a backup
+    copy of the committed static photos at `/app/photos-seed/`, and
+    the CMD runs `cp -Rn /app/photos-seed/. /app/client/public/photos/`
+    on boot so a fresh volume gets seeded with the static set without
+    clobbering any scraped photos from prior boots. See PR #26. **Do
+    NOT** collapse `/app/photos-seed` into `/app/client/public/photos`
+    at build time — the volume mount shadows anything at the
+    destination path, so the seed must live elsewhere in the image.
+
+18. **Cover collage banner renders whenever `photos.length >= 2`, not
+    only when a Guesty listing is selected.** Earlier gate was
+    `!!selectedId && photos.length >= 2`, which hid the feature
+    entirely until a listing was picked. The revised surface keeps
+    the banner visible so the feature is discoverable, but disables
+    the button with an inline hint ("Select a Guesty listing above to
+    push the collage as cover") when `selectedId` is falsy — the push
+    target is unknown without a selected listing. See PR #26.
+
 ## Conventions
 
 ### Branches

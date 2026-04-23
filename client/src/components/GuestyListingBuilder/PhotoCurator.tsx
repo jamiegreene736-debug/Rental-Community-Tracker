@@ -61,7 +61,15 @@ export type PhotoCuratorProps = {
 
   // Cover collage hookup — the canvas + upload pipeline lives in the
   // parent (GuestyListingBuilder), this component renders the banner.
+  //
+  // `coverCollageEnabled` controls whether the banner RENDERS at all —
+  // gate it on having enough photos to pair (>=2). `coverCollageDisabledReason`
+  // keeps the banner visible but disables the action button with an
+  // inline explanation, used when the Guesty listing isn't selected yet
+  // (the push target is unknown). This way the feature is discoverable
+  // even before a listing is picked.
   coverCollageEnabled?: boolean;
+  coverCollageDisabledReason?: string | null;
   onRequestCoverCollage?: () => void;
   coverCollageStatus?: {
     phase: "idle" | "generating" | "uploading" | "done" | "error";
@@ -76,6 +84,7 @@ export default function PhotoCurator({
   sourceUrlsByFolder,
   onOverridesChanged,
   coverCollageEnabled,
+  coverCollageDisabledReason,
   onRequestCoverCollage,
   coverCollageStatus,
 }: PhotoCuratorProps) {
@@ -239,6 +248,8 @@ export default function PhotoCurator({
       {coverCollageEnabled && onRequestCoverCollage && (() => {
         const phase = coverCollageStatus?.phase ?? "idle";
         const busy = phase === "generating" || phase === "uploading";
+        const gated = !!coverCollageDisabledReason;
+        const disabled = busy || gated;
         const buttonText =
           phase === "done" ? "↺ Regenerate Cover Collage" :
           busy ? (phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…") :
@@ -251,16 +262,24 @@ export default function PhotoCurator({
           }}>
             <button
               onClick={onRequestCoverCollage}
-              disabled={busy}
+              disabled={disabled}
+              title={gated ? coverCollageDisabledReason! : undefined}
               style={{
                 padding: "6px 12px", fontSize: 12, fontWeight: 600,
-                background: busy ? "#93c5fd" : "#0369a1", color: "white",
-                border: 0, borderRadius: 4, cursor: busy ? "default" : "pointer",
+                background: disabled ? "#93c5fd" : "#0369a1", color: "white",
+                border: 0, borderRadius: 4, cursor: disabled ? "not-allowed" : "pointer",
+                opacity: gated && !busy ? 0.7 : 1,
               }}
             >{buttonText}</button>
             <span style={{ color: "#075985" }}>
               Picks the best community shot + best private patio/lanai, stitches them into a 2-up cover, and sets it as the Guesty cover photo.
             </span>
+            {gated && (
+              <span style={{
+                flexBasis: "100%", color: "#b45309",
+                fontSize: 11, fontWeight: 500,
+              }}>⚠ {coverCollageDisabledReason}</span>
+            )}
             {coverCollageStatus?.picks && (
               <div style={{ flexBasis: "100%", fontSize: 11, color: "#0369a1" }}>
                 Picks: <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>

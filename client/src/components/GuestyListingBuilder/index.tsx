@@ -3267,7 +3267,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <PhotoCurator
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
-                          coverCollageEnabled={!!selectedId && photos.length >= 2}
+                          coverCollageEnabled={photos.length >= 2}
+                          coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
                           onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
                           coverCollageStatus={{
                             phase: collagePhase === "upscaling" ? "generating" : collagePhase,
