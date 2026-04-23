@@ -93,8 +93,20 @@ function extractListingFacts(payload: any): ListingFacts {
       facts.bedrooms = Math.round(o.bedrooms);
     }
     if (facts.bathrooms == null) {
-      const b = o.bathrooms ?? o.bathroomsFull ?? o.bathroomsTotalInteger;
-      if (typeof b === "number" && b > 0 && b < 50) facts.bathrooms = Math.floor(b);
+      // Prefer the most-precise field we can find. `bathrooms` carries the
+      // 2.5 / 3.5 half-bath increments; `bathroomsFull` + `bathroomsHalf`
+      // reconstructs the same value when the combined field is absent.
+      // `bathroomsTotalInteger` is the last-resort integer-only fallback.
+      let b: number | undefined;
+      if (typeof o.bathrooms === "number") b = o.bathrooms;
+      else if (typeof o.bathroomsFull === "number") {
+        b = o.bathroomsFull + (typeof o.bathroomsHalf === "number" ? o.bathroomsHalf * 0.5 : 0);
+      } else if (typeof o.bathroomsTotalInteger === "number") b = o.bathroomsTotalInteger;
+      if (typeof b === "number" && b > 0 && b < 50) {
+        // Snap to nearest 0.5 — Zillow half-baths are always multiples of
+        // 0.5, so a non-half fractional is almost certainly noise.
+        facts.bathrooms = Math.round(b * 2) / 2;
+      }
     }
     for (const v of Object.values(o)) walk(v, depth + 1);
   }
@@ -151,7 +163,7 @@ function extractFactsFromText(html: string): ListingFacts {
   }
   if (bathMatch) {
     const n = parseFloat(bathMatch[1]);
-    if (n > 0 && n < 50) out.bathrooms = Math.floor(n);
+    if (n > 0 && n < 50) out.bathrooms = Math.round(n * 2) / 2;
   }
   return out;
 }
@@ -6291,7 +6303,9 @@ export async function registerRoutes(
         if (expectedBathrooms == null) {
           if (typeof ref.bathrooms === "number") expectedBathrooms = ref.bathrooms;
           else if (typeof ref.bathrooms === "string" && !isNaN(parseFloat(ref.bathrooms))) {
-            expectedBathrooms = Math.floor(parseFloat(ref.bathrooms));
+            // Preserve half-baths (2.5 → 2.5) — snap to nearest 0.5 in case
+            // the string has trailing noise like "2.5 (plus half bath)".
+            expectedBathrooms = Math.round(parseFloat(ref.bathrooms) * 2) / 2;
           }
         }
       }
