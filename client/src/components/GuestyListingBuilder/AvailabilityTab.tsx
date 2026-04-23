@@ -146,7 +146,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   type RunHistoryRow = {
     id: number;
     ranAt: string;
-    status: "ok" | "error";
+    status: "ok" | "error" | "skipped";
     summary: string;
     durationMs: number | null;
     trigger: "scheduled" | "manual";
@@ -519,18 +519,25 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               When enabled, the server runs the inventory scan + price scan + Guesty block + rate sync every{" "}
               <b>{schedule?.intervalHours ?? 12}h</b> in the background.
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
-              {schedule?.lastRunStatus && (
-                <span style={{ color: schedule.lastRunStatus === "ok" ? "#16a34a" : "#dc2626", marginLeft: 6 }}>
-                  ({schedule.lastRunStatus})
-                </span>
-              )}
+              {schedule?.lastRunStatus && (() => {
+                const statusColor =
+                  schedule.lastRunStatus === "ok" ? "#16a34a" :
+                  schedule.lastRunStatus === "skipped" ? "#6b7280" :
+                  "#dc2626";
+                return (
+                  <span style={{ color: statusColor, marginLeft: 6 }}>
+                    ({schedule.lastRunStatus})
+                  </span>
+                );
+              })()}
             </div>
             {/* Structured badges for the last run. Parses the summary
                 string so each phase renders as its own labeled chip,
                 making it easy to tell "scan happened, 2 blocks pushed"
                 at a glance. On error the full message gets a red box
                 so the operator can see what went wrong without
-                opening the server logs. */}
+                opening the server logs. Skipped runs (e.g. no Guesty
+                mapping yet) get a neutral amber hint instead. */}
             {schedule?.lastRunStatus === "error" && schedule?.lastRunSummary && (
               <div style={{
                 marginTop: 6, padding: "6px 10px",
@@ -539,6 +546,16 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 wordBreak: "break-word",
               }}>
                 <b>Error:</b> {schedule.lastRunSummary}
+              </div>
+            )}
+            {schedule?.lastRunStatus === "skipped" && schedule?.lastRunSummary && (
+              <div style={{
+                marginTop: 6, padding: "6px 10px",
+                background: "#fffbeb", border: "1px solid #fde68a",
+                borderRadius: 4, fontSize: 11, color: "#92400e",
+                wordBreak: "break-word",
+              }}>
+                <b>Skipped:</b> {schedule.lastRunSummary.replace(/^skipped:\s*/i, "")}
               </div>
             )}
             {schedule?.lastRunStatus === "ok" && schedule?.lastRunSummary && (() => {
@@ -694,23 +711,24 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                     <td style={{ padding: "5px 12px" }}>
                       <span style={{
                         fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 3,
-                        background: r.status === "ok" ? "#dcfce7" : "#fee2e2",
-                        color: r.status === "ok" ? "#166534" : "#991b1b",
+                        background: r.status === "ok" ? "#dcfce7" : r.status === "skipped" ? "#f3f4f6" : "#fee2e2",
+                        color: r.status === "ok" ? "#166534" : r.status === "skipped" ? "#6b7280" : "#991b1b",
                         textTransform: "uppercase", letterSpacing: "0.04em",
                       }}>{r.status}</span>
                     </td>
                     <td style={{ padding: "5px 12px", color: "#374151" }}>
-                      {r.status === "error"
-                        ? <span style={{ color: "#991b1b" }}>{r.summary}</span>
-                        : (
-                          <span style={{ color: "#6b7280" }}>
-                            {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
-                            {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
-                            {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
-                            {!parsed.inventory && !parsed.blocks && !parsed.rates && r.summary}
-                          </span>
-                        )
-                      }
+                      {r.status === "error" ? (
+                        <span style={{ color: "#991b1b" }}>{r.summary}</span>
+                      ) : r.status === "skipped" ? (
+                        <span style={{ color: "#6b7280", fontStyle: "italic" }}>{r.summary}</span>
+                      ) : (
+                        <span style={{ color: "#6b7280" }}>
+                          {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
+                          {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
+                          {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
+                          {!parsed.inventory && !parsed.blocks && !parsed.rates && r.summary}
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: "5px 12px", textAlign: "right", color: "#6b7280" }}>
                       {durSec ? `${durSec}s` : "—"}

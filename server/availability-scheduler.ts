@@ -72,7 +72,17 @@ function seasonForMonth(yearMonth: string): SeasonKey {
 }
 
 // Main pipeline — identical to what the UI buttons do, all in one pass.
+// Sentinel prefix the scheduler uses to distinguish "this was a no-op
+// because the preconditions aren't met" from "this crashed". The tick
+// + manual runners treat summaries starting with this as status="skipped"
+// instead of "ok"/"error". Keeps run history clean — a freshly-created
+// property with scheduler auto-enabled (per Load-Bearing #10) but no
+// Guesty mapping yet shouldn't look like a failure.
+const SKIP_PREFIX = "skipped:";
+
 // Returns a short human-readable summary that goes in lastRunSummary.
+// Summaries beginning with SKIP_PREFIX indicate the run was a clean
+// no-op (precondition missing, not a failure).
 export async function runFullScanForProperty(
   propertyId: number,
   opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
@@ -84,7 +94,14 @@ export async function runFullScanForProperty(
   if (!config) throw new Error(`Property ${propertyId} not in config`);
 
   const guestyListingId = await storage.getGuestyListingId(propertyId);
-  if (!guestyListingId) throw new Error(`No Guesty listing mapped for property ${propertyId}`);
+  if (!guestyListingId) {
+    // Graceful skip: scheduler auto-enables on Availability-tab load
+    // for every property (Load-Bearing #10), but properties that
+    // haven't been built on Guesty yet have no listing to scan
+    // against. Return a skip summary rather than throwing so the
+    // run history shows this as a no-op, not an error.
+    return `${SKIP_PREFIX} no Guesty listing mapped — connect one to enable scans`;
+  }
 
   // Resort name from Guesty listing title
   let resortName: string | null = null;
@@ -303,12 +320,17 @@ async function tick() {
           runSyncBlocks: row.runSyncBlocks,
         });
         const durationMs = Date.now() - startedAt;
-        await storage.markScannerScheduleRan(row.propertyId, "ok", summary);
+        // "skipped:"-prefixed summaries are clean no-ops (missing
+        // precondition, e.g. no Guesty mapping yet). Record as
+        // "skipped" so the UI can show a neutral pill instead of
+        // green-ok, and the error log stays clean.
+        const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
+        await storage.markScannerScheduleRan(row.propertyId, status, summary);
         await storage.recordScannerRun({
           propertyId: row.propertyId,
-          status: "ok", summary, durationMs, trigger: "scheduled",
+          status, summary, durationMs, trigger: "scheduled",
         }).catch(() => {});
-        console.log(`[availability-scheduler] property ${row.propertyId} ok · ${summary}`);
+        console.log(`[availability-scheduler] property ${row.propertyId} ${status} · ${summary}`);
       } catch (e: any) {
         const durationMs = Date.now() - startedAt;
         const msg = e?.message ?? String(e);
@@ -333,7 +355,7 @@ export function startAvailabilityScheduler() {
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.
-export async function runFullScanNow(propertyId: number): Promise<{ summary: string; status: "ok" | "error" }> {
+export async function runFullScanNow(propertyId: number): Promise<{ summary: string; status: "ok" | "error" | "skipped" }> {
   const startedAt = Date.now();
   try {
     const sched = await storage.getScannerSchedule(propertyId);
@@ -345,11 +367,12 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
       runSyncBlocks: sched?.runSyncBlocks ?? true,
     });
     const durationMs = Date.now() - startedAt;
-    await storage.markScannerScheduleRan(propertyId, "ok", summary).catch(() => {});
+    const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
+    await storage.markScannerScheduleRan(propertyId, status, summary).catch(() => {});
     await storage.recordScannerRun({
-      propertyId, status: "ok", summary, durationMs, trigger: "manual",
+      propertyId, status, summary, durationMs, trigger: "manual",
     }).catch(() => {});
-    return { summary, status: "ok" };
+    return { summary, status };
   } catch (e: any) {
     const durationMs = Date.now() - startedAt;
     const msg = e?.message ?? String(e);

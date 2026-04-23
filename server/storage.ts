@@ -603,7 +603,7 @@ export class DatabaseStorage implements IStorage {
 
   async markScannerScheduleRan(
     propertyId: number,
-    status: "ok" | "error",
+    status: "ok" | "error" | "skipped",
     summary: string,
   ): Promise<void> {
     await db.update(scannerSchedule)
