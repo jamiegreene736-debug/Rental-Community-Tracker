@@ -1322,7 +1322,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line) as {
-              type: "photo" | "checkpoint" | "saving" | "done";
+              type: "photo" | "checkpoint" | "saving" | "verify" | "done";
               index?: number;
               total?: number;
               saved?: number;
@@ -1332,8 +1332,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               wasUpscaled?: boolean;
               error?: string;
               successCount?: number;
+              verifiedCount?: number;
+              shortfall?: number;
               upscaledCount?: number;
               trimmed?: number;
+              // "verify" event fields
+              attempt?: number;
+              expected?: number;
+              got?: number;
             };
 
             if (event.type === "photo") {
@@ -1359,6 +1365,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               refreshGuestyPhotoCount();
             } else if (event.type === "saving") {
               setSavingToGuesty(true);
+            } else if (event.type === "verify") {
+              // The server re-checks Guesty after the final PUT and
+              // retries up to 3 times if pictures were silently dropped
+              // (ImgBB CDN propagation lag causes Guesty to strip URLs
+              // it can't fetch). Reflect that in-flight verification in
+              // the UI so the "saving" spinner stays honest.
+              setSavingToGuesty(true);
             } else if (event.type === "done") {
               setSavingToGuesty(false);
               setUpscaledCount(event.upscaledCount ?? 0);
@@ -1372,12 +1385,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   duration: 10000,
                 });
               }
-              const sc = event.successCount ?? 0;
+              // Use the server-verified count (what's actually on Guesty
+              // after retries) as the authoritative "succeeded" number,
+              // not the blind upload count. Falls back to successCount
+              // for backwards-compat with old server builds that don't
+              // emit verifiedCount.
+              const sc = event.verifiedCount ?? event.successCount ?? 0;
+              const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
               if (sc === 0 && tot > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");
+              }
+              if (shortfall > 0) {
+                toast({
+                  title: `Guesty dropped ${shortfall} photo${shortfall === 1 ? "" : "s"}`,
+                  description: `Uploaded ${event.successCount ?? sc}, but only ${sc} persisted on Guesty after 3 verify retries. Usually caused by ImgBB CDN lag — re-pushing in ~30s normally recovers them.`,
+                  variant: "destructive",
+                  duration: 12000,
+                });
               }
               // Persist summary to localStorage and refresh live count
               if (succeeded && selectedId) {

@@ -3796,8 +3796,59 @@ export async function registerRoutes(
       }
     }
 
-    emit({ type: "done", successCount, upscaledCount, total: photos.length, trimmed: trimmedCount });
-    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed to fit Booking/VRBO 40-photo cap` : ""}`);
+    // Verify-and-retry loop. Guesty silently drops pictures from the
+    // array when it can't fetch the URL during its internal validation
+    // (observed: ImgBB CDN propagation lag on newly-uploaded images
+    // causes the last few URLs to 404 when Guesty tries them, and Guesty
+    // strips them from `pictures` without signaling an error). Without
+    // this loop the server reports successCount=N but Guesty stored
+    // fewer. The retry gives the ImgBB CDN time to catch up and re-PUTs.
+    //
+    // Retry ladder: wait 3s, verify, retry if short. Wait 6s, verify,
+    // retry. Wait 10s, verify. Give up after that and report the final
+    // observed count so the UI doesn't lie.
+    let verifiedCount = successCount;
+    if (collected.length > 0) {
+      const waits = [3000, 6000, 10000];
+      for (let attempt = 0; attempt < waits.length; attempt++) {
+        await new Promise((r) => setTimeout(r, waits[attempt]));
+        try {
+          const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
+          const savedLen = Array.isArray(listing?.pictures) ? listing.pictures.length : 0;
+          emit({ type: "verify", attempt: attempt + 1, expected: collected.length, got: savedLen });
+          console.log(`[push-photos] Verify #${attempt + 1}: expected ${collected.length}, Guesty has ${savedLen}`);
+          if (savedLen >= collected.length) {
+            verifiedCount = savedLen;
+            break;
+          }
+          // Under-count — re-PUT and loop. Don't early-break on success
+          // because some later attempts might succeed once the CDN
+          // settles.
+          try {
+            await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
+            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${collected.length} pictures after short-count verify`);
+          } catch (e: any) {
+            console.error(`[push-photos] Retry PUT #${attempt + 1} failed: ${e.message}`);
+          }
+          verifiedCount = savedLen;
+        } catch (e: any) {
+          console.error(`[push-photos] Verify #${attempt + 1} GET failed: ${e.message}`);
+          // Don't break — a transient GET failure shouldn't abort the loop
+        }
+      }
+    }
+
+    const shortfall = collected.length - verifiedCount;
+    emit({
+      type: "done",
+      successCount,
+      verifiedCount,
+      shortfall: shortfall > 0 ? shortfall : 0,
+      upscaledCount,
+      total: photos.length,
+      trimmed: trimmedCount,
+    });
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
   });
 
