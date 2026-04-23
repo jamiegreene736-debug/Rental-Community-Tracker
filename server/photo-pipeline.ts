@@ -362,21 +362,47 @@ async function coalesceByVisualCluster(
   keepPerCluster: number,
 ): Promise<LabeledResult[]> {
   if (items.length <= 1) return items;
-  const hashes = await Promise.all(
-    items.map((it) => computeDHash(path.join(folderPath, it.tempName)))
-  );
-  const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
-  const byCluster = new Map<number, LabeledResult[]>();
-  const order: number[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const c = clusterOf[i];
-    if (!byCluster.has(c)) { byCluster.set(c, []); order.push(c); }
-    byCluster.get(c)!.push(items[i]);
+
+  // Pre-merge by normalized label text. When Claude gives the same exact
+  // caption to multiple photos (e.g. 4× "Kitchen With Island"), it's calling
+  // them the same room regardless of angle — and that's a stronger signal
+  // than dHash, which can split wide-angle alt views of the same kitchen
+  // into "different" clusters simply because they look different pixel-wise.
+  const normalize = (s: string | null) => (s ?? "").toLowerCase().trim().replace(/\s+/g, " ");
+  const byLabel = new Map<string, LabeledResult[]>();
+  const labelOrder: string[] = [];
+  for (const it of items) {
+    const key = normalize(it.label);
+    if (!byLabel.has(key)) { byLabel.set(key, []); labelOrder.push(key); }
+    byLabel.get(key)!.push(it);
   }
+
+  // Within each identical-label group, keep one representative per visual
+  // cluster — so if there really ARE two distinct kitchens both captioned
+  // "Updated Kitchen", dHash still separates them. But the common case of
+  // multiple angles of one kitchen collapses to a single kept photo.
   const out: LabeledResult[] = [];
-  for (const c of order) {
-    const slice = (byCluster.get(c) ?? []).slice(0, keepPerCluster);
-    out.push(...slice);
+  for (const key of labelOrder) {
+    const group = byLabel.get(key) ?? [];
+    if (group.length === 0) continue;
+    if (group.length === 1) { out.push(...group.slice(0, keepPerCluster)); continue; }
+    // Use a wider threshold here (24 bits) because photos already share the
+    // same label — we're only separating them if they look very different.
+    const hashes = await Promise.all(
+      group.map((it) => computeDHash(path.join(folderPath, it.tempName)))
+    );
+    const clusterOf = clusterByDHash(hashes, 24);
+    const byCluster = new Map<number, LabeledResult[]>();
+    const order: number[] = [];
+    for (let i = 0; i < group.length; i++) {
+      const c = clusterOf[i];
+      if (!byCluster.has(c)) { byCluster.set(c, []); order.push(c); }
+      byCluster.get(c)!.push(group[i]);
+    }
+    for (const c of order) {
+      const slice = (byCluster.get(c) ?? []).slice(0, keepPerCluster);
+      out.push(...slice);
+    }
   }
   return out;
 }
@@ -548,15 +574,26 @@ export async function downloadAndPrioritize(opts: {
   }
 
   // Step 3a: drop explicitly-rejected photos (agent headshots, logos,
-  // unrelated marketing images). Claude Haiku flagged them with category
-  // "Reject" via the strict prompt. Delete their files too.
+  // unrelated marketing images) AND photos where labeling failed outright.
+  // The earlier retry gives Claude two attempts; if both returned null the
+  // file is either corrupted, unreadable, or the API is flaking on it.
+  // Dropping is safer than keeping — a failed-to-label photo otherwise
+  // surfaces in the UI as a generic "Photo" tile with no useful caption,
+  // which is what the e2e test caught on 2026-04-23.
   const rejectedResults = labeledResults.filter((r) => r.category === REJECT_CATEGORY);
-  for (const r of rejectedResults) {
+  const unlabeledResults = labeledResults.filter((r) => r.label == null || r.category == null);
+  const toDrop = [...rejectedResults, ...unlabeledResults];
+  for (const r of toDrop) {
     await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
   }
-  let survivors = labeledResults.filter((r) => r.category !== REJECT_CATEGORY);
+  let survivors = labeledResults.filter(
+    (r) => r.category !== REJECT_CATEGORY && r.label != null && r.category != null,
+  );
   if (rejectedResults.length > 0) {
     console.log(`[downloadAndPrioritize] ${folder}: dropped ${rejectedResults.length} rejected photos (agents/logos/etc)`);
+  }
+  if (unlabeledResults.length > 0) {
+    console.log(`[downloadAndPrioritize] ${folder}: dropped ${unlabeledResults.length} unlabeled photos (labeler returned null after retry)`);
   }
 
   // Step 3a.5: Coalesce duplicate room shots by visual similarity.
