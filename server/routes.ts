@@ -378,21 +378,68 @@ async function scrapeListingPhotos(
   fallbackUrl?: string,
   listingFacts?: ListingFacts,
 ): Promise<ScrapedPhoto[]> {
-  // Zillow URLs: try Apify first (pay-per-result, way cheaper for our volume),
-  // then ScrapingBee as a fallback. zillow.com itself 403s every IP we've
-  // tried (Cloudflare/Akamai), so one of these paid paths is mandatory.
+  // Zillow URLs: run Apify and ScrapingBee in PARALLEL and union the
+  // results. Each scraper sometimes returns an incomplete photo set for a
+  // listing (different Zillow page variants, Apify actor quirks, cache
+  // staleness). Running both doubles our coverage — ScrapingBee routinely
+  // picks up photos Apify misses and vice versa. The MD5 byte-dedupe in
+  // the download pipeline drops anything byte-identical, and the Zillow
+  // URL-hash dedupe below collapses the same-photo-different-variant case.
+  //
+  // Cost: ~$0.005 (Apify) + ~1 ScrapingBee credit per rescrape. Worth it —
+  // scraper under-coverage was the top remaining cause of missing
+  // bedrooms/bathrooms in the e2e tests.
   if (/zillow\.com/i.test(primaryUrl)) {
-    let result = await scrapeZillowViaApify(primaryUrl);
-    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
-      console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
-      result = await scrapeZillowViaScrapingBee(primaryUrl);
-    }
+    const [apifyResult, sbResult] = await Promise.all([
+      scrapeZillowViaApify(primaryUrl),
+      process.env.SCRAPINGBEE_API_KEY
+        ? scrapeZillowViaScrapingBee(primaryUrl)
+        : Promise.resolve({ urls: [] as string[], facts: {} as ListingFacts }),
+    ]);
+
+    // Merge facts — prefer Apify (more trustworthy structured payload),
+    // fill gaps from ScrapingBee.
+    const mergedFacts: ListingFacts = {
+      bedrooms: apifyResult.facts.bedrooms ?? sbResult.facts.bedrooms,
+      bathrooms: apifyResult.facts.bathrooms ?? sbResult.facts.bathrooms,
+    };
     if (listingFacts) {
-      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
-      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+      if (mergedFacts.bedrooms != null) listingFacts.bedrooms = mergedFacts.bedrooms;
+      if (mergedFacts.bathrooms != null) listingFacts.bathrooms = mergedFacts.bathrooms;
     }
-    if (result.urls.length > 0) {
-      return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
+
+    // Union URLs, deduped by the /fp/<hash>- photo hash that Zillow bakes
+    // into every CDN URL. Same photo served from Apify and ScrapingBee
+    // under different size variants collapses to one.
+    const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
+    const scoreForUrl = (u: string): number => {
+      const m = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d{3,4})\./i);
+      if (m) return parseInt(m[1], 10);
+      if (/-p_h\./i.test(u)) return 1200;
+      if (/-p_f\./i.test(u)) return 1024;
+      if (/-p_e\./i.test(u)) return 800;
+      if (/-p_d\./i.test(u)) return 600;
+      return 0;
+    };
+    const byHash = new Map<string, string>();
+    const hashScores = new Map<string, number>();
+    const nonZillowFallback: string[] = [];
+    for (const u of [...apifyResult.urls, ...sbResult.urls]) {
+      const m = u.match(hashRe);
+      if (!m) { nonZillowFallback.push(u); continue; }
+      const hash = m[1];
+      const score = scoreForUrl(u);
+      const prev = hashScores.get(hash) ?? -1;
+      if (score > prev) {
+        byHash.set(hash, u);
+        hashScores.set(hash, score);
+      }
+    }
+    const merged = [...byHash.values(), ...nonZillowFallback];
+    console.log(`[scrapeZillow] merged — Apify=${apifyResult.urls.length} + ScrapingBee=${sbResult.urls.length} → ${merged.length} unique (facts: ${mergedFacts.bedrooms ?? "?"}BR / ${mergedFacts.bathrooms ?? "?"}BA)`);
+
+    if (merged.length > 0) {
+      return merged.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
