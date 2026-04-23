@@ -813,7 +813,7 @@ export async function downloadAndPrioritize(opts: {
     downloaded: downloaded.length,
     labeled: labeledResults.filter((r) => r.label).length,
     kept: kept.length,
-    dropped: dropped.length + rejectedResults.length + coalesceDropped.length,
+    dropped: dropped.length + rejectedResults.length + unlabeledResults.length,
     bedroomCount: bedroomsFound,
     bathroomCount: bathroomsFound,
     bedroomTypes: Array.from(bedroomTypesSet),
