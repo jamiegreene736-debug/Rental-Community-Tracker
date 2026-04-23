@@ -761,7 +761,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     cancellationPolicies: {
       airbnb: "firm",     // 30d full refund · 14d 50% refund · <14d no refund
       vrbo: "FIRM",       // 60d full refund · 30d 50% refund · <30d no refund
-      booking: "non_refundable", // Booking.com custom schedules are operator-defined in the Extranet
+      booking: "strict",  // One shape below "non_refundable" — the tightest Booking.com policy that still allows a limited refund window; exact day/percent thresholds are operator-configured in the Extranet
     },
   });
   const [pushingBooking, setPushingBooking] = useState(false);

@@ -285,7 +285,7 @@ export default function Builder() {
         cancellationPolicies: {
           airbnb: "firm",
           vrbo: "FIRM",
-          booking: "non_refundable",
+          booking: "strict",
         },
         instantBooking: true,
       },
