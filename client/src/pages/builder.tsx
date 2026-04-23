@@ -278,7 +278,15 @@ export default function Builder() {
         // bookingRules state so the Pricing-tab form and the full-build
         // push can't diverge.
         advanceNotice: 60,
-        cancellationPolicy: "moderate",
+        // Per-channel cancellation policies — must match the defaults in
+        // GuestyListingBuilder's bookingRules state. "30+ days notice for
+        // full refund, 50%+ penalty for late cancellation" where each
+        // channel's vocabulary allows it.
+        cancellationPolicies: {
+          airbnb: "firm",
+          vrbo: "FIRM",
+          booking: "non_refundable",
+        },
         instantBooking: true,
       },
     };
