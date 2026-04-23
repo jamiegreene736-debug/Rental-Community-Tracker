@@ -170,6 +170,36 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, schedule?.lastRunAt]);
 
+  // Active blocks the scheduler has pushed to Guesty for this property.
+  // The summary badge on the scheduler card shows aggregate counts
+  // ("blocks +2/-1"); this table shows WHICH date ranges are currently
+  // blocked so the operator can spot-check or unblock in Guesty.
+  type ActiveBlock = {
+    id: number;
+    startDate: string;
+    endDate: string;
+    guestyListingId: string;
+    guestyBlockId: string | null;
+    reason: string;
+    createdAt: string;
+  };
+  const [activeBlocks, setActiveBlocks] = useState<ActiveBlock[]>([]);
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/availability/scanner-blocks/${propertyId}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled && Array.isArray(d?.blocks)) setActiveBlocks(d.blocks);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+    // Re-fetch after each run so new blocks appear without a page refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, schedule?.lastRunAt]);
+
   // Tracks whether the initial GET for the schedule has completed. Uses
   // state (not a ref) so the auto-enable useEffect below re-runs after
   // the fetch resolves — a ref wouldn't trigger a re-render, and since
@@ -688,6 +718,54 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Active blocks pushed to Guesty ─────────────────────
+          The scheduler writes one row per blocked week to
+          `scanner_blocks` and then PUTs Guesty's calendar to mark
+          the range unavailable. This panel lists what's currently
+          active — dates + reason — so the operator can see exactly
+          which weeks are blocked without cross-checking Guesty. */}
+      {activeBlocks.length > 0 && (
+        <div style={{ marginBottom: 16, border: "1px solid #fecaca", borderRadius: 6, overflow: "hidden" }}>
+          <div style={{
+            padding: "6px 12px", background: "#fef2f2", borderBottom: "1px solid #fecaca",
+            fontSize: 11, fontWeight: 600, color: "#991b1b",
+            textTransform: "uppercase", letterSpacing: "0.05em",
+            display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap",
+          }}>
+            <span>Blocked windows — {activeBlocks.length} active</span>
+            <span style={{ fontSize: 10, fontWeight: 500, color: "#b45309", textTransform: "none", letterSpacing: "normal" }}>
+              Pushed to Guesty as unavailable. Unblock manually in Guesty if you need to release a week.
+            </span>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ background: "#fff1f2", color: "#991b1b", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 130 }}>Start</th>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 130 }}>End</th>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600 }}>Reason</th>
+                <th style={{ textAlign: "right", padding: "5px 12px", fontWeight: 600, width: 150 }}>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeBlocks.map((b) => (
+                <tr key={b.id} style={{ borderTop: "1px solid #fee2e2" }}>
+                  <td style={{ padding: "5px 12px", color: "#374151", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                    {new Date(b.startDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                  </td>
+                  <td style={{ padding: "5px 12px", color: "#374151", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                    {new Date(b.endDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                  </td>
+                  <td style={{ padding: "5px 12px", color: "#6b7280" }}>{b.reason}</td>
+                  <td style={{ padding: "5px 12px", textAlign: "right", color: "#9ca3af", whiteSpace: "nowrap" }}>
+                    {new Date(b.createdAt).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
