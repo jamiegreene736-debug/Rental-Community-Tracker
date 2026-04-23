@@ -58,12 +58,26 @@ export type PhotoCuratorProps = {
   // render for folders missing a source URL.
   sourceUrlsByFolder?: Record<string, string>;
   onOverridesChanged?: () => void;
+
+  // Cover collage hookup — the canvas + upload pipeline lives in the
+  // parent (GuestyListingBuilder), this component renders the banner.
+  coverCollageEnabled?: boolean;
+  onRequestCoverCollage?: () => void;
+  coverCollageStatus?: {
+    phase: "idle" | "generating" | "uploading" | "done" | "error";
+    error?: string | null;
+    preview?: string | null;
+    picks?: { community: string; patio: string } | null;
+  };
 };
 
 export default function PhotoCurator({
   photos,
   sourceUrlsByFolder,
   onOverridesChanged,
+  coverCollageEnabled,
+  onRequestCoverCollage,
+  coverCollageStatus,
 }: PhotoCuratorProps) {
   const [meta, setMeta] = useState<Map<string, LabelMeta>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -216,6 +230,54 @@ export default function PhotoCurator({
         })}
         {loading && <span style={{ marginLeft: "auto", color: "#9ca3af" }}>Loading labels…</span>}
       </div>
+
+      {/* Cover collage banner — "sell the destination + sell the space"
+          pairing: best community shot (resort pool, beach, aerial) on the
+          left, best private patio/lanai on the right. Canvas + Guesty
+          upload happens in the parent; this surface just renders the
+          trigger + status. */}
+      {coverCollageEnabled && onRequestCoverCollage && (() => {
+        const phase = coverCollageStatus?.phase ?? "idle";
+        const busy = phase === "generating" || phase === "uploading";
+        const buttonText =
+          phase === "done" ? "↺ Regenerate Cover Collage" :
+          busy ? (phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…") :
+          "🖼 Auto-Set Cover Collage";
+        return (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+            padding: "10px 14px", background: "#f0f9ff", border: "1px solid #bae6fd",
+            borderRadius: 6, marginBottom: 14, fontSize: 12,
+          }}>
+            <button
+              onClick={onRequestCoverCollage}
+              disabled={busy}
+              style={{
+                padding: "6px 12px", fontSize: 12, fontWeight: 600,
+                background: busy ? "#93c5fd" : "#0369a1", color: "white",
+                border: 0, borderRadius: 4, cursor: busy ? "default" : "pointer",
+              }}
+            >{buttonText}</button>
+            <span style={{ color: "#075985" }}>
+              Picks the best community shot + best private patio/lanai, stitches them into a 2-up cover, and sets it as the Guesty cover photo.
+            </span>
+            {coverCollageStatus?.picks && (
+              <div style={{ flexBasis: "100%", fontSize: 11, color: "#0369a1" }}>
+                Picks: <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
+              </div>
+            )}
+            {phase === "done" && <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Set as cover on Guesty</span>}
+            {phase === "error" && <span style={{ color: "#991b1b" }}>✗ {coverCollageStatus?.error}</span>}
+            {coverCollageStatus?.preview && (
+              <img
+                src={coverCollageStatus.preview}
+                alt="Cover collage preview"
+                style={{ height: 40, borderRadius: 4, border: "1px solid #bae6fd", marginLeft: "auto" }}
+              />
+            )}
+          </div>
+        );
+      })()}
 
       {/* Sections — one block per contiguous run of same-source photos. */}
       {sections.map((section, i) => {
