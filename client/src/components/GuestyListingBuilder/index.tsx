@@ -1033,36 +1033,72 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
   const [collagePreviewUrl, setCollagePreviewUrl] = useState<string | null>(null);
-  const [collagePicks, setCollagePicks] = useState<{ outdoor: string; indoor: string } | null>(null);
+  const [collagePicks, setCollagePicks] = useState<{ community: string; patio: string } | null>(null);
 
-  function scoreOutdoor(label: string): number {
+  // Community scene: resort amenities, grounds, aerial shots. These are
+  // the "sell the destination" photos — ocean views, pool complexes,
+  // beach access, coastline. We pull from the Community source tiles
+  // specifically so the collage doesn't pick a unit-balcony view as the
+  // "community" half.
+  function scoreCommunityShot(label: string): number {
     const l = label.toLowerCase();
-    return (l.includes("ocean") ? 10 : 0) + (l.includes("sunrise") ? 9 : 0) +
-           (l.includes("pool") ? 8 : 0) + (l.includes("beach") ? 7 : 0) +
-           (l.includes("coastal") ? 6 : 0) + (l.includes("bay") ? 6 : 0) +
-           (l.includes("view") ? 4 : 0) + (l.includes("waterfront") ? 8 : 0) +
-           (l.includes("resort") ? 3 : 0) + (l.includes("lanai") ? 3 : 0);
-  }
-  function scoreIndoor(label: string): number {
-    const l = label.toLowerCase();
-    return (l.includes("living room") ? 9 : 0) + (l.includes("great room") ? 8 : 0) +
-           (l.includes("open kitchen") ? 7 : 0) + (l.includes("kitchen") ? 5 : 0) +
-           (l.includes("master suite") || l.includes("king master") || l.includes("master king") ? 7 : 0) +
-           (l.includes("master bedroom") ? 6 : 0) + (l.includes("ocean") ? 4 : 0) +
-           (l.includes("bright") ? 2 : 0) + (l.includes("dining") ? 3 : 0);
+    return (l.includes("ocean") ? 10 : 0) + (l.includes("beach") ? 9 : 0) +
+           (l.includes("pool") ? 9 : 0) + (l.includes("sunset") || l.includes("sunrise") ? 8 : 0) +
+           (l.includes("waterfront") ? 8 : 0) + (l.includes("aerial") ? 7 : 0) +
+           (l.includes("coastal") ? 7 : 0) + (l.includes("resort") ? 6 : 0) +
+           (l.includes("grounds") ? 5 : 0) + (l.includes("view") ? 4 : 0) +
+           (l.includes("property") ? 3 : 0);
   }
 
-  function pickCollagePhotos(allPhotos: GuestyPropertyData["photos"]): { outdoor: typeof allPhotos[0]; indoor: typeof allPhotos[0] } | null {
+  // Patio scene: the unit's own private outdoor space — lanai, balcony,
+  // covered patio, deck. Bonus for scenic backdrop (ocean/golf/mountain).
+  // Falls back to generic unit-exterior scoring when the listing has no
+  // captioned lanai.
+  function scorePatioShot(label: string): number {
+    const l = label.toLowerCase();
+    let s = 0;
+    if (l.includes("lanai")) s += 10;
+    if (l.includes("balcony")) s += 9;
+    if (l.includes("patio")) s += 9;
+    if (l.includes("covered") && (l.includes("deck") || l.includes("porch"))) s += 8;
+    if (l.includes("deck")) s += 7;
+    if (l.includes("porch")) s += 6;
+    // Scenic bonus — a lanai with an ocean view wins over a plain lanai.
+    if (l.includes("ocean")) s += 4;
+    if (l.includes("golf")) s += 2;
+    if (l.includes("mountain") || l.includes("garden")) s += 2;
+    return s;
+  }
+
+  // Pick best-community + best-patio pair. Community candidates pull from
+  // photos whose `source` field starts with "Community" (so we don't mix a
+  // unit-interior shot in as "community"). Patio candidates come from the
+  // unit-level photos with outdoor keywords in the caption. If either
+  // pool is empty we fall back to the overall best-scoring photo of that
+  // type anywhere in the set.
+  function pickCollagePhotos(
+    allPhotos: GuestyPropertyData["photos"],
+  ): { community: NonNullable<GuestyPropertyData["photos"]>[0]; patio: NonNullable<GuestyPropertyData["photos"]>[0] } | null {
     if (!allPhotos?.length) return null;
-    let bestOutdoor = allPhotos[0], bestOutdoorScore = -1;
-    let bestIndoor = allPhotos[0], bestIndoorScore = -1;
-    for (const p of allPhotos) {
-      const os = scoreOutdoor(p.caption || "");
-      const is_ = scoreIndoor(p.caption || "");
-      if (os > bestOutdoorScore) { bestOutdoorScore = os; bestOutdoor = p; }
-      if (is_ > bestIndoorScore) { bestIndoorScore = is_; bestIndoor = p; }
-    }
-    return { outdoor: bestOutdoor, indoor: bestIndoor };
+    const communityPool = allPhotos.filter((p) => (p.source ?? "").toLowerCase().startsWith("community"));
+    const unitPool = allPhotos.filter((p) => !((p.source ?? "").toLowerCase().startsWith("community")));
+
+    const pickBest = <T extends { caption?: string }>(pool: T[], scorer: (l: string) => number, fallback: T[]): T | null => {
+      const searchIn = pool.length > 0 ? pool : fallback;
+      if (searchIn.length === 0) return null;
+      let best = searchIn[0];
+      let bestScore = -1;
+      for (const p of searchIn) {
+        const s = scorer(p.caption || "");
+        if (s > bestScore) { bestScore = s; best = p; }
+      }
+      return best;
+    };
+
+    const community = pickBest(communityPool, scoreCommunityShot, allPhotos);
+    const patio = pickBest(unitPool, scorePatioShot, allPhotos);
+    if (!community || !patio) return null;
+    return { community, patio };
   }
 
   const generateCoverCollage = useCallback(async (allPhotos: GuestyPropertyData["photos"]) => {
@@ -1074,20 +1110,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
     const picks = pickCollagePhotos(allPhotos);
     if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
-    setCollagePicks({ outdoor: picks.outdoor.caption || picks.outdoor.url, indoor: picks.indoor.caption || picks.indoor.url });
+    setCollagePicks({ outdoor: picks.community.caption || picks.community.url, indoor: picks.patio.caption || picks.patio.url });
 
     // Extract local path from URL (e.g. "/photos/kaha-lani-109/photo_00.jpg")
     const toLocalPath = (url: string): string => {
       try { return new URL(url, window.location.origin).pathname; }
       catch { return url.startsWith("/") ? url : `/${url}`; }
     };
-    const outdoorLocal = toLocalPath(picks.outdoor.url);
-    const indoorLocal  = toLocalPath(picks.indoor.url);
+    const communityLocal = toLocalPath(picks.community.url);
+    const patioLocal  = toLocalPath(picks.patio.url);
 
     // Upscale both picks via server (Real-ESRGAN → ImgBB), run in parallel
-    let outdoorSrc = picks.outdoor.url;
-    let indoorSrc = picks.indoor.url;
-    if (outdoorLocal.startsWith("/photos/") || indoorLocal.startsWith("/photos/")) {
+    let communitySrc = picks.community.url;
+    let patioSrc = picks.patio.url;
+    if (communityLocal.startsWith("/photos/") || patioLocal.startsWith("/photos/")) {
       const upscaleOne = async (localPath: string, fallback: string) => {
         try {
           const r = await fetch("/api/builder/upscale-photo", {
@@ -1100,9 +1136,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           return d.url || fallback;
         } catch { return fallback; }
       };
-      [outdoorSrc, indoorSrc] = await Promise.all([
-        outdoorLocal.startsWith("/photos/") ? upscaleOne(outdoorLocal, picks.outdoor.url) : Promise.resolve(picks.outdoor.url),
-        indoorLocal.startsWith("/photos/")  ? upscaleOne(indoorLocal,  picks.indoor.url)  : Promise.resolve(picks.indoor.url),
+      [communitySrc, patioSrc] = await Promise.all([
+        communityLocal.startsWith("/photos/") ? upscaleOne(communityLocal, picks.community.url) : Promise.resolve(picks.community.url),
+        patioLocal.startsWith("/photos/")  ? upscaleOne(patioLocal,  picks.patio.url)  : Promise.resolve(picks.patio.url),
       ]);
     }
 
@@ -1114,9 +1150,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       img.onload = () => res(img); img.onerror = rej; img.src = src;
     });
 
-    let outdoorImg: HTMLImageElement, indoorImg: HTMLImageElement;
+    let communityImg: HTMLImageElement, patioImg: HTMLImageElement;
     try {
-      [outdoorImg, indoorImg] = await Promise.all([loadImg(outdoorSrc), loadImg(indoorSrc)]);
+      [communityImg, patioImg] = await Promise.all([loadImg(communitySrc), loadImg(patioSrc)]);
     } catch {
       setCollageError("Failed to load photos for collage"); setCollagePhase("error"); return;
     }
@@ -1134,11 +1170,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
 
     ctx.save(); ctx.beginPath(); ctx.rect(0, 0, half, H); ctx.clip();
-    drawCover(outdoorImg, 0, half);
+    drawCover(communityImg, 0, half);
     ctx.restore();
 
     ctx.save(); ctx.beginPath(); ctx.rect(half, 0, half, H); ctx.clip();
-    drawCover(indoorImg, half, half);
+    drawCover(patioImg, half, half);
     ctx.restore();
 
     // Thin divider line
@@ -3123,41 +3159,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </div>
                               )}
 
-                              {/* Cover collage generator — picks the best outdoor + indoor photo and sets them as a 2-up cover. */}
-                              {selectedId && photos.length >= 2 && (
-                                <div style={{ marginBottom: 10 }}>
-                                  {collagePhase === "idle" || collagePhase === "done" || collagePhase === "error" ? (
-                                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
-                                      <div>
-                                        <button
-                                          className="glb-btn"
-                                          onClick={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
-                                          disabled={collagePhase === "generating" || collagePhase === "uploading"}
-                                          style={{ fontSize: 12, background: "#f0f9ff", color: "#0369a1", border: "1px solid #bae6fd" }}
-                                        >
-                                          {collagePhase === "done" ? "↺ Regenerate Cover Collage" : "🖼 Auto-Set Cover Collage"}
-                                        </button>
-                                        {collagePicks && (
-                                          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 3 }}>
-                                            Picks: <em>{collagePicks.outdoor}</em> + <em>{collagePicks.indoor}</em>
-                                          </div>
-                                        )}
-                                        {collagePhase === "done" && <div style={{ fontSize: 11, color: "#16a34a", marginTop: 2 }}>✓ Set as cover photo in Guesty</div>}
-                                        {collagePhase === "error" && <div style={{ fontSize: 11, color: "#dc2626", marginTop: 2 }}>✗ {collageError}</div>}
-                                      </div>
-                                      {collagePreviewUrl && (
-                                        <img src={collagePreviewUrl} alt="Cover collage preview" style={{ height: 54, borderRadius: 4, border: "1px solid #e5e7eb", objectFit: "cover" }} />
-                                      )}
-                                    </div>
-                                  ) : (
-                                    <div style={{ fontSize: 12, color: "#2563eb" }}>
-                                      {collagePhase === "upscaling" ? "⏳ Upscaling photos for best quality… (~30s)" :
-                                       collagePhase === "generating" ? "⏳ Generating collage…" :
-                                       "⏳ Uploading to Guesty…"}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
+                              {/* Cover collage lives inside PhotoCurator now —
+                                  see the banner at the top of the tile grid. */}
 
                               {/* Persisted last-push summary — shown after refresh */}
                               {upscalePhase === "idle" && lastPushSummary && lastPushSummary.listingId === selectedId && (
@@ -3256,10 +3259,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                         )}
 
-                        {/* Curation grid: grouped by category, editable, hide-toggle,
-                            low-confidence flag. Cover-collage button lives in the
-                            block above this one — no need to duplicate here. */}
-                        <PhotoCurator photos={photos} sourceUrlsByFolder={sourceUrlsByFolder} />
+                        {/* Curation grid — simple tiles in Zillow's order,
+                            with an "Auto-Set Cover Collage" banner at the top
+                            that stitches the best community + best patio
+                            photo into a single 2-up cover and sets it as the
+                            Guesty listing cover. */}
+                        <PhotoCurator
+                          photos={photos}
+                          sourceUrlsByFolder={sourceUrlsByFolder}
+                          coverCollageEnabled={!!selectedId && photos.length >= 2}
+                          onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
+                          coverCollageStatus={{
+                            phase: collagePhase === "upscaling" ? "generating" : collagePhase,
+                            error: collageError,
+                            preview: collagePreviewUrl,
+                            picks: collagePicks
+                              ? { community: collagePicks.community, patio: collagePicks.patio }
+                              : null,
+                          }}
+                        />
 
                       </div>
                     : <div className="glb-empty">No photos attached to this property</div>
