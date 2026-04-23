@@ -236,7 +236,13 @@ export default function Builder() {
       accommodates: totalGuests,
       bedrooms: totalBedrooms || undefined,
       bathrooms: totalBathrooms || undefined,
-      propertyType: "Condominium",
+      // Pull from per-property config in unit-builder-data.ts. Fallback
+      // "Condominium" preserves behavior for older properties that haven't
+      // been explicitly typed yet — Pili Mai (32, 33) set it to
+      // "Townhouse" explicitly because they're two-story townhomes, not
+      // flat condos. The TSDoc on `PropertyUnitBuilder.propertyType`
+      // tells future onboards to set this deliberately per property.
+      propertyType: property.propertyType ?? "Condominium",
       roomType: "Entire home/apt",
       otaRoomType: "Holiday home",
       amenities: guestyAmenities,
