@@ -1109,15 +1109,20 @@ export default function InboxPage() {
                       )}
                     </div>
 
-                    {/* Reply compose */}
+                    {/* Reply compose. 10 rows by default fits a typical
+                        AI-drafted 4-7 sentence reply without scrolling
+                        for the signature; `resize-y` lets the operator
+                        drag taller for long custom messages without
+                        letting them drag horizontally (which would break
+                        the column layout). */}
                     <div className="border-t px-4 py-3 space-y-2">
                       <Textarea
                         data-testid="textarea-reply"
                         placeholder="Write a reply…"
                         value={replyText}
                         onChange={e => setReplyText(e.target.value)}
-                        rows={3}
-                        className="resize-none"
+                        rows={10}
+                        className="resize-y min-h-[180px]"
                         onKeyDown={e => {
                           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText.trim()) {
                             sendMessage.mutate();
