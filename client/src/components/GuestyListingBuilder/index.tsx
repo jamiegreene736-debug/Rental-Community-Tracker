@@ -166,6 +166,9 @@ type LogEntry = BuildStepEntry & { icon: string };
 type Props = {
   propertyData?: GuestyPropertyData | null;
   propertyId?: number;
+  // folder → source listing URL (Zillow/Airbnb/VRBO). Fed straight to the
+  // PhotoCurator so each unit section can show a "View source listing" link.
+  sourceUrlsByFolder?: Record<string, string>;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
 };
@@ -622,7 +625,7 @@ function ChannelMarkupCard({
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, onBuildComplete, onUpdateComplete }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete }: Props) {
   const { toast } = useToast();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
@@ -3256,7 +3259,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, onBuild
                         {/* Curation grid: grouped by category, editable, hide-toggle,
                             low-confidence flag. Cover-collage button lives in the
                             block above this one — no need to duplicate here. */}
-                        <PhotoCurator photos={photos} />
+                        <PhotoCurator photos={photos} sourceUrlsByFolder={sourceUrlsByFolder} />
 
                       </div>
                     : <div className="glb-empty">No photos attached to this property</div>
