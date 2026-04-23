@@ -142,9 +142,22 @@ export async function runFullScanForProperty(
 
   // ── Block sync: push owner-blocks for insufficient windows ──
   if (opts.runSyncBlocks && opts.runInventory) {
-    // Build 52 weeks of verdicts. With the baseline-count model the
-    // verdict is the same for every non-overridden week — we still write
-    // overrides per-week though.
+    // Build 52 weeks of verdicts. ONLY explicit per-window overrides
+    // (force-block) turn into actual Guesty blocks here — the baseline
+    // supply count is NOT fanned out across all 52 weeks.
+    //
+    // Earlier revisions applied `baselineVerdict` to every non-override
+    // week, which meant a single point-in-time Airbnb-listing count of
+    // "2 sets, need 3" auto-blocked every future week for a year.
+    // That's the wrong shape: baseline is a SIGNAL about current supply
+    // tightness, not an ACTION that should block bookings 11 months
+    // out when supply will almost certainly have shifted by then.
+    //
+    // The per-week scan flow (manual "Run inventory scan" button +
+    // "Push Blackouts to Guesty" in the Availability tab) is the
+    // correct place to push real per-week blocks — it actually queries
+    // each window individually. See Load-Bearing Decision #19 in
+    // AGENTS.md.
     const overrides = await storage.getScannerOverrides(propertyId);
     const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
     const today = new Date(); today.setHours(12, 0, 0, 0);
@@ -156,9 +169,8 @@ export async function runFullScanForProperty(
       const sd = start.toISOString().slice(0, 10);
       const ed = end.toISOString().slice(0, 10);
       const ov = overrideByStart.get(sd);
-      const verdict = ov
-        ? (ov.mode === "force-block" ? "blocked" : "open" as const)
-        : baselineVerdict;
+      const verdict: "open" | "blocked" =
+        ov && ov.mode === "force-block" ? "blocked" : "open";
       windows.push({ startDate: sd, endDate: ed, verdict, maxSets: baselineSets, minSets: opts.minSets });
     }
 
