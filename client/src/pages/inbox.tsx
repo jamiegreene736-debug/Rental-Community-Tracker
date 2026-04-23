@@ -596,7 +596,26 @@ export default function InboxPage() {
     mutationFn: async () => {
       if (!selectedConv) throw new Error("No conversation selected");
       const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const mod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+
+      // Guesty's /send-message validator rejects extra keys on the
+      // `module` object with a 400 — specifically `templateValues`,
+      // `templateVariableNames`, and `externalId`, which show up on
+      // the module of any post that was itself sent via a Guesty
+      // template or external channel link. Reading `selectedConv.module`
+      // or `lastPostModule` carries those fields forward, and the
+      // send blows up with `"module.templateValues" is not allowed`.
+      //
+      // Whitelist only what /send-message accepts. Everything else is
+      // metadata from Guesty's read shape that the write shape doesn't
+      // tolerate.
+      const mod: GuestyModule = {};
+      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
+      for (const k of allowedKeys) {
+        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
+      }
+      if (!mod.type) mod.type = "email";
+
       const r = await apiRequest(
         "POST",
         `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
