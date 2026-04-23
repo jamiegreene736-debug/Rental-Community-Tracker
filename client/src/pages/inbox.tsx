@@ -31,10 +31,13 @@ import { fallbackWalkForResort } from "@shared/walking-distance";
 // Given a Guesty listingId, look up the matching NexStay property via the
 // backing map and build a rich text block the AI can use to answer
 // specific guest questions (per-unit bedroom counts, distance between
-// units, parking, pool, etc.) instead of hand-waving. Returns null when
-// we can't resolve the listing — the server falls back to a generic
-// prompt in that case.
-async function buildPropertyContextForDraft(listingId: string): Promise<string | null> {
+// units, parking, pool, etc.) instead of hand-waving. Also flags whether
+// the property is in Hawaii so the server can pick the right tone
+// variant. Returns null when we can't resolve the listing — the server
+// falls back to a generic prompt in that case.
+async function buildPropertyContextForDraft(
+  listingId: string,
+): Promise<{ text: string; isHawaii: boolean } | null> {
   if (!listingId) return null;
   try {
     const r = await apiRequest("GET", "/api/guesty-property-map");
@@ -70,7 +73,12 @@ async function buildPropertyContextForDraft(listingId: string): Promise<string |
     if (otherHighlights.length > 0) parts.push(`\nKEY AMENITIES: ${otherHighlights.slice(0, 12).join(", ")}`);
     parts.push(`\nDESCRIPTION: ${prop.combinedDescription.slice(0, 600)}${prop.combinedDescription.length > 600 ? "…" : ""}`);
 
-    return parts.join("\n");
+    // Hawaii detection by state code / name in the address string.
+    // Every current listing is HI; this check keeps the Hawaiian tone
+    // from bleeding onto future mainland additions.
+    const isHawaii = /\b(HI|Hawaii|Hawai['ʻ]?i)\b/i.test(prop.address);
+
+    return { text: parts.join("\n"), isHawaii };
   } catch {
     return null;
   }
@@ -620,7 +628,7 @@ export default function InboxPage() {
     // if the listing isn't mapped to one of our properties we fall
     // through with propertyContext=null and the server uses its
     // generic prompt.
-    const propertyContext = selectedConv.listingId
+    const ctx = selectedConv.listingId
       ? await buildPropertyContextForDraft(selectedConv.listingId)
       : null;
     try {
@@ -628,7 +636,12 @@ export default function InboxPage() {
         guestMessage: lastGuestPost?.body ?? lastGuestPost?.text ?? "",
         guestName: selectedConv.guestName,
         propertyName: selectedConv.listingNickname,
-        propertyContext,
+        propertyContext: ctx?.text ?? null,
+        // Gates the Hawaiian-tone variant of the system prompt on the
+        // server — Aloha openings / "mahalo" / "'ohana" / etc. — so
+        // only Hawaii listings get that flavor. Non-HI properties
+        // stay on the standard friendly+professional voice.
+        isHawaii: ctx?.isHawaii ?? false,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);

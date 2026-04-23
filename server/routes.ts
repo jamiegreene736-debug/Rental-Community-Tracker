@@ -8674,7 +8674,7 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext, isHawaii } = req.body as {
       guestMessage: string;
       propertyName?: string;
       guestName?: string;
@@ -8686,23 +8686,46 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       // prompt still works for conversations whose listing isn't
       // mapped to a NexStay property.
       propertyContext?: string | null;
+      // Client detects HI/Hawaii in the property address. When true,
+      // the system prompt picks up a Hawaiian-tone variant (Aloha /
+      // mahalo / 'ohana sprinkled in naturally). Non-HI properties
+      // stay on the standard friendly+professional voice — avoids
+      // bleeding the Hawaii voice onto future mainland listings.
+      isHawaii?: boolean;
     };
 
     if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
+
+    // Tone preamble — prepended to whichever grounded/ungrounded
+    // system prompt we pick below. Hawaiian tone: warm, familiar,
+    // uses a handful of Hawaiian words (Aloha, mahalo, 'ohana,
+    // makai/mauka when geographically relevant) but doesn't
+    // over-season — sounds like a local host, not a tourist brochure.
+    // Standard tone: friendly + professional, no Hawaiian vocabulary.
+    const tonePreamble = isHawaii
+      ? `You are writing as a NexStay host in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
+  - Open with "Aloha [Name]," or a similar welcoming phrase
+  - Use "mahalo" (thank you) instead of "thanks" when signing off or thanking the guest
+  - Use "'ohana" (family/group) when referring to the guest's party, if natural
+  - Use "makai" (toward the ocean) / "mauka" (toward the mountains) only if geographically relevant to the answer
+  - Sign off with a warm Hawaiian closing (e.g. "Mahalo, and we can't wait to welcome you to the islands!") then "The NexStay Team"
+
+Avoid over-using Hawaiian words — one or two per reply max. The goal is authentic local warmth, not a caricature. Write in natural American English for the rest of the message.`
+      : `You are writing as a NexStay host. Tone is warm, personable, and professional. Sign off as "The NexStay Team".`;
 
     // System prompt tells the model HOW to behave. Adjusted to make it
     // ground answers in the provided facts when we have them, and say
     // "let me confirm and follow up" rather than inventing details when
     // a question falls outside the context block.
-    const systemPrompt = propertyContext
-      ? `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages.
-
-You will be given structured facts about the property (unit breakdown, distance between units, parking, amenities, description). USE THESE FACTS to answer specific questions accurately — per-unit bedroom counts, how far apart units are, whether parking is free/included, pool access, etc.
+    const groundingPrompt = propertyContext
+      ? `You will be given structured facts about the property (unit breakdown, distance between units, parking, amenities, description). USE THESE FACTS to answer specific questions accurately — per-unit bedroom counts, how far apart units are, whether parking is free/included, pool access, etc.
 
 If the guest asks something that isn't covered by the provided facts, acknowledge the question and say you'll confirm and follow up — never invent details.
 
-Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units. Sign off as "The NexStay Team".`
-      : `You are a friendly, professional vacation rental host for NexStay. You manage premium multi-unit properties in Hawaii. Write warm, helpful, concise replies to guest messages. Never mention that units are combined. Sign off as "The NexStay Team".`;
+Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units.`
+      : `Never mention that units are "combined" or that this is a portfolio listing.`;
+
+    const systemPrompt = `${tonePreamble}\n\n${groundingPrompt}`;
 
     const contextBlock = propertyContext ? `PROPERTY FACTS (ground your answer in these — don't invent beyond them):
 ${propertyContext}
