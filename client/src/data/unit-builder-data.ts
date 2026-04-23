@@ -1595,7 +1595,15 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     propertyId: 32,
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     complexName: "Pili Mai",
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Each Pili Mai listing needs a unique street address so Airbnb/VRBO/
+    // Booking don't collapse them into a single dedupe-flagged listing.
+    // All 191 Pili Mai units share the 2611 Kiahuna Plantation Dr number,
+    // so we intentionally use a nearby real landmark address instead —
+    // 2253 Poipu Rd is the mailing address of Kiahuna Plantation Resort
+    // (Outrigger), a 3-minute drive away. Standard representative-portfolio
+    // practice: the listing disclaimer already tells guests the exact
+    // unit is confirmed at check-in.
+    address: "2253 Poipu Rd, Koloa, HI 96756",
     bookingTitle: "Pili Mai - 5BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and easy access to Poipu Beach.
@@ -1663,7 +1671,13 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     propertyId: 33,
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     complexName: "Pili Mai",
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Distinct from propertyId 32 so the OTA dedupe pass doesn't collide
+    // two listings at the same address. 2360 Kiahuna Plantation Dr is a
+    // real commercial address on Kiahuna Plantation Dr (Island Properties
+    // office / Poipu Shopping Village area, verified via LoopNet parcel
+    // record) — a ~5-minute walk from Pili Mai. See propertyId 32 above
+    // for the representative-address rationale.
+    address: "2360 Kiahuna Plantation Dr, Koloa, HI 96756",
     bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
