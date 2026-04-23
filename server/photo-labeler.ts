@@ -106,21 +106,15 @@ function promptFor(kind: PhotoKind): string {
   ].join("\n");
 }
 
-export async function labelPhoto(
-  absolutePath: string,
-  kind: PhotoKind,
+// One attempt at the vision call. Returns null on any failure (HTTP error,
+// network timeout, unparseable response). Caller decides whether to retry.
+async function labelPhotoOnce(
+  filenameForLog: string,
+  mimeType: string,
+  base64: string,
+  prompt: string,
   apiKey: string,
 ): Promise<PhotoLabelResult | null> {
-  if (!apiKey) return null;
-  if (!fs.existsSync(absolutePath)) return null;
-
-  const buffer = await fs.promises.readFile(absolutePath);
-  // Cap at 5MB — Claude's API has a 5MB per-image limit for base64.
-  if (buffer.length > 5 * 1024 * 1024) return null;
-  const mimeType = detectImageMime(buffer, absolutePath);
-  const base64 = buffer.toString("base64");
-  const prompt = promptFor(kind);
-
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -140,31 +134,53 @@ export async function labelPhoto(
           ],
         }],
       }),
+      signal: AbortSignal.timeout(20000),
     });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      console.warn(`[photo-labeler] ${path.basename(absolutePath)}: HTTP ${resp.status} ${body.slice(0, 200)}`);
+      console.warn(`[photo-labeler] ${filenameForLog}: HTTP ${resp.status} ${body.slice(0, 200)}`);
       return null;
     }
     const data = await resp.json() as any;
     const text: string = data?.content?.[0]?.text ?? "";
-    // Some replies wrap JSON in code fences despite the instruction — strip them.
     const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
-    try {
-      const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown };
-      const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
-      const category = typeof parsed.category === "string" ? parsed.category.trim() : "";
-      if (!label) return null;
-      return { label, category: category || "Other", model: MODEL };
-    } catch {
-      return null;
-    }
+    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown };
+    const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
+    const category = typeof parsed.category === "string" ? parsed.category.trim() : "";
+    if (!label) return null;
+    return { label, category: category || "Other", model: MODEL };
   } catch (e: any) {
-    console.warn(`[photo-labeler] ${path.basename(absolutePath)}: ${e?.message ?? e}`);
+    console.warn(`[photo-labeler] ${filenameForLog}: ${e?.message ?? e}`);
     return null;
   }
+}
+
+export async function labelPhoto(
+  absolutePath: string,
+  kind: PhotoKind,
+  apiKey: string,
+): Promise<PhotoLabelResult | null> {
+  if (!apiKey) return null;
+  if (!fs.existsSync(absolutePath)) return null;
+
+  const buffer = await fs.promises.readFile(absolutePath);
+  // Cap at 5MB — Claude's API has a 5MB per-image limit for base64.
+  if (buffer.length > 5 * 1024 * 1024) return null;
+  const mimeType = detectImageMime(buffer, absolutePath);
+  const base64 = buffer.toString("base64");
+  const prompt = promptFor(kind);
+  const logName = path.basename(absolutePath);
+
+  // One retry covers transient failures: network blips, 429s, an
+  // occasional malformed JSON response. Without this, a single dropped
+  // call leaves the photo with no label and it surfaces in the UI as
+  // generic "Photo" — a real bed ends up uncategorized.
+  const first = await labelPhotoOnce(logName, mimeType, base64, prompt, apiKey);
+  if (first) return first;
+  await new Promise((r) => setTimeout(r, 500));
+  return labelPhotoOnce(logName, mimeType, base64, prompt, apiKey);
 }
 
 // Helper: infer the photo kind from its folder name. Community photo

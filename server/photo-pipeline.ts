@@ -269,6 +269,42 @@ async function coalesceBedrooms(items: LabeledResult[], folderPath: string): Pro
   return out;
 }
 
+// Dedupe a room category (Kitchen, Living Areas, Dining) by visual
+// similarity. Same dHash clustering as bedrooms, but without bed-type
+// aware naming — we just keep one representative photo per distinct
+// visual cluster. This catches the "4 Kitchen angles of the same
+// kitchen" case where the labeler correctly tags each as Kitchen but
+// we only want one of them.
+//
+// When multiple visually-distinct rooms exist (rare in one unit — e.g.
+// a great room + separate family room both labeled "Living Areas"),
+// each cluster contributes its own representative, so distinct rooms
+// are preserved.
+async function coalesceByVisualCluster(
+  items: LabeledResult[],
+  folderPath: string,
+  keepPerCluster: number,
+): Promise<LabeledResult[]> {
+  if (items.length <= 1) return items;
+  const hashes = await Promise.all(
+    items.map((it) => computeDHash(path.join(folderPath, it.tempName)))
+  );
+  const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
+  const byCluster = new Map<number, LabeledResult[]>();
+  const order: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const c = clusterOf[i];
+    if (!byCluster.has(c)) { byCluster.set(c, []); order.push(c); }
+    byCluster.get(c)!.push(items[i]);
+  }
+  const out: LabeledResult[] = [];
+  for (const c of order) {
+    const slice = (byCluster.get(c) ?? []).slice(0, keepPerCluster);
+    out.push(...slice);
+  }
+  return out;
+}
+
 // Same idea for bathrooms — Primary, then Guest/Hall numbered.
 function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
   if (items.length === 0) return items;
@@ -441,34 +477,53 @@ export async function downloadAndPrioritize(opts: {
     console.log(`[downloadAndPrioritize] ${folder}: dropped ${rejectedResults.length} rejected photos (agents/logos/etc)`);
   }
 
-  // Step 3a.5 (NEW): Coalesce bedrooms and bathrooms.
+  // Step 3a.5: Coalesce duplicate room shots by visual similarity.
   //
-  // Bedrooms: group by visual similarity (perceptual dHash). Each distinct
-  // visual cluster is one distinct room. Pick "Master Bedroom" = the
-  // cluster whose photos show a King bed (or the largest cluster). Number
-  // the rest as "Bedroom 2", "Bedroom 3". Cap each room at MAX_PER_ROOM
-  // photos to prevent same-room-five-times duplication.
+  // Bedrooms: dHash clustering + bed-type-aware Master/Bedroom 2/... naming.
+  // Bathrooms: fixture-fingerprint clustering + Primary/Bathroom 2/... naming.
+  // Kitchen, Living Areas, Dining: plain visual-cluster dedupe — labeler's
+  //   label is kept, but multiple angles of the same room collapse to one
+  //   photo (was the "4 Kitchen duplicates" bug).
   //
-  // Bathrooms: fixture-profile bucketing (Tub vs Shower vs Double Vanity
-  // vs Half). Primary bathroom + numbered guest bathrooms.
-  //
-  // The non-bedroom/bathroom photos pass through unchanged.
+  // Other categories (Outdoor, Views, Exterior, Other) pass through unchanged
+  // — those are naturally varied shots where duplicates are much rarer and
+  // when they happen the per-category cap already handles them.
   const bedroomItems = survivors.filter((r) => r.category === "Bedrooms");
   const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
-  const otherItems = survivors.filter((r) => r.category !== "Bedrooms" && r.category !== "Bathrooms");
+  const livingItems = survivors.filter((r) => r.category === "Living Areas");
+  const kitchenItems = survivors.filter((r) => r.category === "Kitchen");
+  const diningItems = survivors.filter((r) => r.category === "Dining");
+  const coalescedInputs = new Set<string>([
+    ...bedroomItems, ...bathroomItems, ...livingItems, ...kitchenItems, ...diningItems,
+  ].map((r) => r.tempName));
+  const otherItems = survivors.filter((r) => !coalescedInputs.has(r.tempName));
   const coalescedBedrooms = await coalesceBedrooms(bedroomItems, folderPath);
   const coalescedBathrooms = coalesceBathrooms(bathroomItems);
-  // Files that got dropped during coalesce (excess same-bed-type photos)
-  // need to be unlinked.
-  const keptIds = new Set([...coalescedBedrooms, ...coalescedBathrooms].map((r) => r.tempName));
-  const coalesceDropped = [...bedroomItems, ...bathroomItems].filter((r) => !keptIds.has(r.tempName));
+  // For Living/Kitchen/Dining: 1 photo per distinct room is usually right.
+  // Living Areas allows 2 (many units have a separate family room or great
+  // room worth showing) — visual clustering still collapses alt angles.
+  const coalescedLiving = await coalesceByVisualCluster(livingItems, folderPath, 1);
+  const coalescedKitchen = await coalesceByVisualCluster(kitchenItems, folderPath, 1);
+  const coalescedDining = await coalesceByVisualCluster(diningItems, folderPath, 1);
+  const keptIds = new Set([
+    ...coalescedBedrooms, ...coalescedBathrooms,
+    ...coalescedLiving, ...coalescedKitchen, ...coalescedDining,
+  ].map((r) => r.tempName));
+  const coalesceDropped = [
+    ...bedroomItems, ...bathroomItems,
+    ...livingItems, ...kitchenItems, ...diningItems,
+  ].filter((r) => !keptIds.has(r.tempName));
   for (const r of coalesceDropped) {
     await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
   }
   if (coalesceDropped.length > 0) {
-    console.log(`[downloadAndPrioritize] ${folder}: coalesced ${coalesceDropped.length} duplicate-room shots`);
+    console.log(`[downloadAndPrioritize] ${folder}: coalesced ${coalesceDropped.length} duplicate-room shots across bedrooms/bathrooms/living/kitchen/dining`);
   }
-  survivors = [...coalescedBedrooms, ...coalescedBathrooms, ...otherItems];
+  survivors = [
+    ...coalescedBedrooms, ...coalescedBathrooms,
+    ...coalescedLiving, ...coalescedKitchen, ...coalescedDining,
+    ...otherItems,
+  ];
 
   // Step 3b: sort by category priority, ties broken by original scrape order.
   survivors.sort((a, b) => {
