@@ -60,7 +60,10 @@ function fmtShort(iso: string): string {
 }
 
 export default function AvailabilityTab({ propertyId, listingId }: { propertyId: number | undefined; listingId: string | null }) {
-  const [weeks, setWeeks] = useState(52);
+  // Default to 24 months — matches how Guesty's calendar horizon is typically
+  // set, and gives the scanner enough lookahead to catch high-season buy-in
+  // spikes when rates start publishing.
+  const [weeks, setWeeks] = useState(104);
   const [minSets, setMinSets] = useState(3);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -98,6 +101,24 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     const t = setInterval(fetchSchedule, 30_000);
     return () => clearInterval(t);
   }, [fetchSchedule]);
+
+  // Auto-enable the scheduler for any property that's connected to a Guesty
+  // listing. The historical default was `enabled: false`, which left many
+  // connected properties with dormant schedules — the user has to click a
+  // button to turn on something that should be on by default. This runs
+  // once, after the initial fetch, when all three conditions hold:
+  //   - we have a Guesty listingId (connected)
+  //   - we have a schedule row back from the server
+  //   - that row is currently disabled
+  // The server PATCH path is idempotent, so a redundant call here is cheap.
+  const autoEnableCheckedRef = useRef(false);
+  useEffect(() => {
+    if (autoEnableCheckedRef.current) return;
+    if (!schedule || !listingId || !propertyId) return;
+    if (schedule.enabled) { autoEnableCheckedRef.current = true; return; }
+    autoEnableCheckedRef.current = true;
+    updateSchedule({ enabled: true });
+  }, [schedule, listingId, propertyId, updateSchedule]);
 
   const updateSchedule = useCallback(async (patch: Partial<Schedule>) => {
     if (!propertyId) return;
@@ -228,6 +249,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     if (!propertyId || results.length === 0) return;
     setSyncBusy(true);
     setSyncResult(null);
+    const blockedWindows = results.filter((r) => r.verdict === "blocked");
     try {
       const resp = await fetch(`/api/availability/sync-blocks/${propertyId}`, {
         method: "POST",
@@ -244,7 +266,15 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      setSyncResult(data);
+      // Enrich the receipt with when + the actual blocked date ranges that
+      // got pushed. The server already tells us counts; adding a timestamp
+      // and the list of blocked windows turns a vague "3 new" into a clear
+      // audit trail.
+      setSyncResult({
+        ...data,
+        syncedAt: new Date().toISOString(),
+        blockedWindows: blockedWindows.map((w) => ({ startDate: w.startDate, endDate: w.endDate })),
+      });
     } catch (e: any) {
       setSyncResult({ success: false, error: e?.message ?? String(e) });
     } finally {
@@ -507,10 +537,20 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             marginBottom: 12,
           }}
         >
-          {syncResult.success ? "✓" : "⚠"} Sync:
-          {" "}<b>{syncResult.created ?? 0}</b> new block(s) pushed,
-          {" "}<b>{syncResult.removed ?? 0}</b> cleared,
-          {" "}<b>{syncResult.unchanged ?? 0}</b> unchanged.
+          <div>
+            {syncResult.success ? "✓" : "⚠"}
+            {" "}<b>On {syncResult.syncedAt ? new Date(syncResult.syncedAt).toLocaleString() : "now"}</b>
+            {" — "}
+            <b>{syncResult.created ?? 0}</b> new block(s) pushed to Guesty,
+            {" "}<b>{syncResult.removed ?? 0}</b> cleared,
+            {" "}<b>{syncResult.unchanged ?? 0}</b> unchanged.
+          </div>
+          {syncResult.blockedWindows && syncResult.blockedWindows.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 11, color: "#4b5563" }}>
+              Blocked windows: {syncResult.blockedWindows.slice(0, 8).map((w: any) => `${fmtShort(w.startDate)}–${fmtShort(w.endDate)}`).join(", ")}
+              {syncResult.blockedWindows.length > 8 && ` … +${syncResult.blockedWindows.length - 8} more`}
+            </div>
+          )}
           {syncResult.failures && syncResult.failures.length > 0 && (
             <div style={{ marginTop: 4, color: "#92400e" }}>
               {syncResult.failures.length} failure(s): {syncResult.failures.slice(0, 3).map((f: any) => f.error).join(" · ")}
@@ -518,6 +558,68 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           )}
         </div>
       )}
+
+      {/* ── 24-month summary table ──────────────────────────────
+          Flat month-by-month view: one row per month over the scan
+          horizon. Makes it obvious at a glance which months have
+          blocks and which are clear, without scrolling through the
+          per-week heatmap below. */}
+      {results.length > 0 && (() => {
+        // Generate a row for every month in the scanned horizon — even if
+        // no windows land in it — so the table is dense, not sparse.
+        const firstDate = results[0]?.startDate;
+        const lastDate = results[results.length - 1]?.endDate ?? results[results.length - 1]?.startDate;
+        if (!firstDate || !lastDate) return null;
+        const start = new Date(firstDate + "T12:00:00");
+        const end = new Date(lastDate + "T12:00:00");
+        const months: string[] = [];
+        const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+        const stop = new Date(end.getFullYear(), end.getMonth(), 1);
+        while (cursor <= stop) {
+          months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+          cursor.setMonth(cursor.getMonth() + 1);
+        }
+        return (
+          <div style={{ marginBottom: 24, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
+            <div style={{ padding: "8px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              {months.length}-Month Summary — blocks pushed to Guesty
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Month</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Weeks</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#166534" }}>Open</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#92400e" }}>Tight</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#991b1b" }}>Blocked</th>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Block dates</th>
+                </tr>
+              </thead>
+              <tbody>
+                {months.map((monthKey) => {
+                  const [y, m] = monthKey.split("-");
+                  const monthName = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m) - 1];
+                  const rows = byMonth[monthKey] ?? [];
+                  const o = rows.filter((r) => r.verdict === "open").length;
+                  const t = rows.filter((r) => r.verdict === "tight").length;
+                  const b = rows.filter((r) => r.verdict === "blocked").length;
+                  const blockLabels = rows.filter((r) => r.verdict === "blocked").map((r) => fmtShort(r.startDate)).join(", ");
+                  return (
+                    <tr key={monthKey} style={{ borderTop: "1px solid #f3f4f6", background: b > 0 ? "#fef2f2" : "transparent" }}>
+                      <td style={{ padding: "6px 12px", fontWeight: 500 }}>{monthName} {y}</td>
+                      <td style={{ padding: "6px 12px", textAlign: "right", color: "#6b7280" }}>{rows.length}</td>
+                      <td style={{ padding: "6px 12px", textAlign: "right", color: o > 0 ? "#166534" : "#d1d5db" }}>{o}</td>
+                      <td style={{ padding: "6px 12px", textAlign: "right", color: t > 0 ? "#92400e" : "#d1d5db" }}>{t}</td>
+                      <td style={{ padding: "6px 12px", textAlign: "right", color: b > 0 ? "#991b1b" : "#d1d5db", fontWeight: b > 0 ? 600 : 400 }}>{b}</td>
+                      <td style={{ padding: "6px 12px", color: "#991b1b", fontSize: 11 }}>{blockLabels || <span style={{ color: "#d1d5db" }}>—</span>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
 
       {/* ── Heatmap ──────────────────────────────────────────── */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
