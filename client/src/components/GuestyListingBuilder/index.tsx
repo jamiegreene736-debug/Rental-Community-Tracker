@@ -2179,7 +2179,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
                     {t === "photos" ? (
                       <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {`Photos (${photos.length})`}
+                        {/* Tab badge reflects what the operator actually
+                            sees in the Photos tab: the local photo set
+                            (photos.length) PLUS the cover-collage tile
+                            when one is live on Guesty. Keeps the count
+                            honest — clicking "Auto-Set Cover Collage"
+                            bumps the badge by one, matching the extra
+                            tile that appears at the top of the grid. */}
+                        {`Photos (${photos.length + (guestyCoverCollageUrl ? 1 : 0)})`}
                         {selectedId && (
                           guestyPhotoCountLoading
                             ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
