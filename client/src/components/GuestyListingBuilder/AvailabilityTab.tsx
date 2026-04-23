@@ -102,19 +102,19 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
 
-  // Tracks whether the initial GET for the schedule has completed, so we
-  // can distinguish "still loading" from "server says no row exists".
-  // Both collapse to `schedule === null` in local state, which prevented
-  // the auto-enable useEffect from firing — it was waiting for a truthy
-  // schedule that never arrived because there was no row to fetch.
-  const scheduleFetchedRef = useRef(false);
+  // Tracks whether the initial GET for the schedule has completed. Uses
+  // state (not a ref) so the auto-enable useEffect below re-runs after
+  // the fetch resolves — a ref wouldn't trigger a re-render, and since
+  // `setSchedule(null)` when state is already null is a React bail-out,
+  // the useEffect would never fire for properties with no schedule row.
+  const [scheduleFetched, setScheduleFetched] = useState(false);
   const fetchSchedule = useCallback(async () => {
     if (!propertyId) return;
     try {
       const r = await fetch(`/api/availability/schedule/${propertyId}`);
       const d = await r.json();
       setSchedule(d.schedule);
-      scheduleFetchedRef.current = true;
+      setScheduleFetched(true);
     } catch { /* ignore */ }
   }, [propertyId]);
 
@@ -156,11 +156,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   useEffect(() => {
     if (autoEnableCheckedRef.current) return;
     if (!propertyId) return;
-    if (!scheduleFetchedRef.current) return;
+    if (!scheduleFetched) return;
     if (schedule?.enabled) { autoEnableCheckedRef.current = true; return; }
     autoEnableCheckedRef.current = true;
     updateSchedule({ enabled: true });
-  }, [schedule, propertyId, updateSchedule]);
+  }, [schedule, scheduleFetched, propertyId, updateSchedule]);
 
   const runNow = useCallback(async () => {
     if (!propertyId || runNowBusy) return;
