@@ -455,6 +455,89 @@ function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
   return out;
 }
 
+// Label bedroom photos in place — NO DROPPING. Groups by visual cluster
+// like coalesceBedrooms did, picks a master cluster (King bed preferred,
+// else largest cluster), and re-captions each photo as "Master Bedroom",
+// "Bedroom 2", etc. with the bed type appended when detected. Unlike
+// coalesceBedrooms this keeps every photo — user curates manually.
+async function labelBedroomsInPlace(items: LabeledResult[], folderPath: string): Promise<LabeledResult[]> {
+  if (items.length === 0) return items;
+  const hashes = await Promise.all(
+    items.map((it) => computeDHash(path.join(folderPath, it.tempName)))
+  );
+  const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
+  const clusters = new Map<number, LabeledResult[]>();
+  const clusterOrder: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const c = clusterOf[i];
+    if (!clusters.has(c)) { clusters.set(c, []); clusterOrder.push(c); }
+    clusters.get(c)!.push(items[i]);
+  }
+  const clusterBedType = (c: number): string | null => {
+    for (const it of clusters.get(c) ?? []) {
+      const bt = detectBedType(it.label ?? "");
+      if (bt) return bt;
+    }
+    return null;
+  };
+  const clusterSize = (c: number) => (clusters.get(c)?.length ?? 0);
+  const kingCluster = clusterOrder.find((c) => clusterBedType(c) === "King");
+  const twoKings = clusterOrder.find((c) => clusterBedType(c) === "Two Kings");
+  const masterCluster = kingCluster ?? twoKings ??
+    clusterOrder.slice().sort((a, b) => clusterSize(b) - clusterSize(a))[0];
+
+  const renderType = (bt: string | null) => bt ? ` — ${bt}` : "";
+  const labelCluster = (c: number, name: string) => {
+    const bt = clusterBedType(c);
+    const slice = clusters.get(c) ?? [];
+    slice.forEach((it, i) => {
+      it.label = i === 0 ? `${name}${renderType(bt)}` : `${name} — Alt View`;
+    });
+  };
+  labelCluster(masterCluster, "Master Bedroom");
+  let bedroomNum = 2;
+  for (const c of clusterOrder) {
+    if (c === masterCluster) continue;
+    labelCluster(c, `Bedroom ${bedroomNum}`);
+    bedroomNum++;
+  }
+  // Return every item (not just masters) — labels mutated in place above.
+  return items;
+}
+
+// Label bathroom photos in place — NO DROPPING. Buckets by fixture
+// fingerprint, labels first non-half group's photos as "Primary Bathroom",
+// numbered guest bathrooms thereafter. Keeps every photo.
+function labelBathroomsInPlace(items: LabeledResult[]): LabeledResult[] {
+  if (items.length === 0) return items;
+  const byFp = new Map<string, LabeledResult[]>();
+  const order: string[] = [];
+  for (const it of items) {
+    const fp = detectBathFingerprint(it.label ?? "");
+    if (!byFp.has(fp)) { byFp.set(fp, []); order.push(fp); }
+    byFp.get(fp)!.push(it);
+  }
+  const primaryFp = order.find((fp) => fp !== "Half") ?? order[0];
+  const renderFp = (fp: string) => fp === "Generic" ? "" : ` — ${fp}`;
+  (byFp.get(primaryFp) ?? []).forEach((it, i) => {
+    it.label = i === 0 ? `Primary Bathroom${renderFp(primaryFp)}` : `Primary Bathroom — Alt View`;
+  });
+  let bathNum = 2;
+  for (const fp of order) {
+    if (fp === primaryFp) continue;
+    const group = byFp.get(fp) ?? [];
+    if (fp === "Half") {
+      group.forEach((it, i) => { it.label = i === 0 ? "Half Bath" : "Half Bath — Alt View"; });
+      continue;
+    }
+    group.forEach((it, i) => {
+      it.label = i === 0 ? `Bathroom ${bathNum}${renderFp(fp)}` : `Bathroom ${bathNum} — Alt View`;
+    });
+    if (group.length > 0) bathNum++;
+  }
+  return items;
+}
+
 // Run an async mapper over items with bounded concurrency.
 async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T, idx: number) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -611,76 +694,49 @@ export async function downloadAndPrioritize(opts: {
     console.log(`[downloadAndPrioritize] ${folder}: dropped ${unlabeledResults.length} unlabeled photos (labeler returned null after retry)`);
   }
 
-  // Step 3a.5: Coalesce duplicate room shots by visual similarity.
+  // Step 3a.5: Bedroom/bathroom LABELING only — no photo dropping.
   //
-  // Bedrooms: dHash clustering + bed-type-aware Master/Bedroom 2/... naming.
-  // Bathrooms: fixture-fingerprint clustering + Primary/Bathroom 2/... naming.
-  // Kitchen, Living Areas, Dining: plain visual-cluster dedupe — labeler's
-  //   label is kept, but multiple angles of the same room collapse to one
-  //   photo (was the "4 Kitchen duplicates" bug).
+  // We still run coalesceBedrooms so the first bedroom gets captioned
+  // "Master Bedroom — King" etc., but we DON'T discard extras: every
+  // photo Zillow returned survives to the final set. The user reviews
+  // the resulting tile grid and deletes manually. That matches the
+  // explicit ask: "just want the tool to pull the photos from Zillow,
+  // all of them, in Zillow's order — that's it."
   //
-  // Other categories (Outdoor, Views, Exterior, Other) pass through unchanged
-  // — those are naturally varied shots where duplicates are much rarer and
-  // when they happen the per-category cap already handles them.
+  // Earlier revisions dropped identical-label photos (kitchen×4 angles
+  // → 1) and capped rooms to MAX_PER_ROOM=2. Both were helpful when
+  // Zillow's output was noisy, but now the scraper is scoped to only
+  // the listing's own responsivePhotos array — any duplicates that
+  // survive are Zillow's own doing, and the user wants to see them.
   const bedroomItems = survivors.filter((r) => r.category === "Bedrooms");
   const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
-  const livingItems = survivors.filter((r) => r.category === "Living Areas");
-  const kitchenItems = survivors.filter((r) => r.category === "Kitchen");
-  const diningItems = survivors.filter((r) => r.category === "Dining");
-  const coalescedInputs = new Set<string>([
-    ...bedroomItems, ...bathroomItems, ...livingItems, ...kitchenItems, ...diningItems,
-  ].map((r) => r.tempName));
-  const otherItems = survivors.filter((r) => !coalescedInputs.has(r.tempName));
-  const coalescedBedrooms = await coalesceBedrooms(bedroomItems, folderPath, requiredBedrooms);
-  const coalescedBathrooms = coalesceBathrooms(bathroomItems);
-  // For Living/Kitchen/Dining: 1 photo per distinct room is usually right.
-  // Living Areas allows 2 (many units have a separate family room or great
-  // room worth showing) — visual clustering still collapses alt angles.
-  const coalescedLiving = await coalesceByVisualCluster(livingItems, folderPath, 1);
-  const coalescedKitchen = await coalesceByVisualCluster(kitchenItems, folderPath, 1);
-  const coalescedDining = await coalesceByVisualCluster(diningItems, folderPath, 1);
-  const keptIds = new Set([
-    ...coalescedBedrooms, ...coalescedBathrooms,
-    ...coalescedLiving, ...coalescedKitchen, ...coalescedDining,
-  ].map((r) => r.tempName));
-  const coalesceDropped = [
-    ...bedroomItems, ...bathroomItems,
-    ...livingItems, ...kitchenItems, ...diningItems,
-  ].filter((r) => !keptIds.has(r.tempName));
-  for (const r of coalesceDropped) {
-    await fs.promises.unlink(path.join(folderPath, r.tempName)).catch(() => {});
-  }
-  if (coalesceDropped.length > 0) {
-    console.log(`[downloadAndPrioritize] ${folder}: coalesced ${coalesceDropped.length} duplicate-room shots across bedrooms/bathrooms/living/kitchen/dining`);
-  }
-  survivors = [
-    ...coalescedBedrooms, ...coalescedBathrooms,
-    ...coalescedLiving, ...coalescedKitchen, ...coalescedDining,
-    ...otherItems,
-  ];
+  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath);
+  const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
+  // Rebuild survivors by overlaying the re-labeled bedrooms/bathrooms
+  // into their original positions — labels change, order doesn't.
+  const labelByTemp = new Map<string, LabeledResult>();
+  for (const r of [...relabeledBedrooms, ...relabeledBathrooms]) labelByTemp.set(r.tempName, r);
+  survivors = survivors.map((r) => labelByTemp.get(r.tempName) ?? r);
 
-  // Step 3b: sort by category priority, ties broken by original scrape order.
-  survivors.sort((a, b) => {
-    const aPri = a.category ? (CATEGORY_PRIORITY[a.category] ?? UNKNOWN_PRIORITY) : UNKNOWN_PRIORITY;
-    const bPri = b.category ? (CATEGORY_PRIORITY[b.category] ?? UNKNOWN_PRIORITY) : UNKNOWN_PRIORITY;
-    if (aPri !== bPri) return aPri - bPri;
-    return a.originalIndex - b.originalIndex;
-  });
+  // Step 3b: preserve Zillow's own photo order. Earlier revisions sorted
+  // by CATEGORY_PRIORITY (Bedrooms first, Bathrooms next, …) — that was
+  // the right call when the listing might return photos in an arbitrary
+  // order, but users want to see the photos Zillow presents in the
+  // sequence Zillow presents them. The labeler still runs for captions;
+  // we just don't reorder based on it.
+  survivors.sort((a, b) => a.originalIndex - b.originalIndex);
 
-  // Step 4: keep top N with per-category caps. This prevents a kitchen-heavy
-  // listing (10 kitchen shots + 2 bedroom shots) from pushing the bedrooms
-  // off the end of the kept set. Caps are tuned in PER_CATEGORY_CAP above.
+  // Step 4: keep up to maxKeep photos in scrape order. No per-category
+  // caps — the user explicitly wants every photo the listing has (up to
+  // a reasonable ceiling). With the scrapers now scoped to the listing's
+  // own responsivePhotos array, we don't expect the set to be inflated
+  // by unrelated images, so the cap is just a safety rail for listings
+  // with unusually large photo counts.
   const kept: LabeledResult[] = [];
   const dropped: LabeledResult[] = [];
-  const perCategoryCounts: Record<string, number> = {};
   for (const r of survivors) {
     if (kept.length >= maxKeep) { dropped.push(r); continue; }
-    const cat = r.category ?? "Other";
-    const cap = PER_CATEGORY_CAP[cat] ?? 2;  // unknown categories cap at 2
-    const seen = perCategoryCounts[cat] ?? 0;
-    if (seen >= cap) { dropped.push(r); continue; }
     kept.push(r);
-    perCategoryCounts[cat] = seen + 1;
   }
   for (const d of dropped) {
     await fs.promises.unlink(path.join(folderPath, d.tempName)).catch(() => {});

@@ -177,6 +177,83 @@ function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts
   };
 }
 
+// Read photos from the specific known-good keys on a Zillow listing
+// payload, preserving the order the upstream actor returned them.
+// Looks at (in priority order):
+//   - item.responsivePhotos:    [{ mixedSources: { jpeg: [{ url, width }] } }]
+//   - item.originalPhotos:      same shape, alternate actor output
+//   - item.photos:              [{ url }] or [url]
+//   - item.hdpData.homeInfo.responsivePhotos (legacy hdpData wrapper)
+// Returns an ORDERED array of URLs — the best resolution variant of each
+// photo in the order Zillow itself presents them.
+function extractOrderedPhotosFromListingItem(item: any): string[] {
+  if (!item || typeof item !== "object") return [];
+  const pickBiggest = (jpegs: Array<{ url?: string; width?: number }>): string | null => {
+    if (!Array.isArray(jpegs) || jpegs.length === 0) return null;
+    const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+    return biggest.url ?? null;
+  };
+  const candidates = [
+    item.responsivePhotos,
+    item.originalPhotos,
+    item.hdpData?.homeInfo?.responsivePhotos,
+    item.hdpData?.homeInfo?.originalPhotos,
+  ];
+  for (const arr of candidates) {
+    if (!Array.isArray(arr) || arr.length === 0) continue;
+    const out: string[] = [];
+    for (const rp of arr) {
+      const jpegUrl = pickBiggest(rp?.mixedSources?.jpeg);
+      if (jpegUrl) out.push(jpegUrl);
+    }
+    if (out.length > 0) return out;
+  }
+  // Flat URL array fallback.
+  if (Array.isArray(item.photos) && item.photos.length > 0) {
+    const out: string[] = [];
+    for (const p of item.photos) {
+      const url = typeof p === "string" ? p : p?.url;
+      if (url && /zillowstatic\.com/.test(url)) out.push(url);
+    }
+    if (out.length > 0) return out;
+  }
+  return [];
+}
+
+// Depth-limited walker over a SINGLE listing item (not the whole dataset).
+// Used only as a last-resort fallback when the named paths above yield
+// nothing — a schema-change safety net. Still skips keys we know contain
+// side-panel content (similar homes, nearby schools, etc.).
+function walkForPhotosScoped(item: any, out: string[]): void {
+  const skipKeys = new Set([
+    "similarHomes", "nearbyHomes", "nearbySchools", "priceHistory",
+    "relatedHomes", "collections", "agentListings", "comparableHomes",
+  ]);
+  function walk(obj: any, depth: number): void {
+    if (depth > 8 || !obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+    if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+      const jpegs: Array<{ url?: string; width?: number }> = obj.mixedSources.jpeg;
+      if (jpegs.length > 0) {
+        const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+        if (biggest.url) out.push(biggest.url);
+      }
+      return;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (skipKeys.has(k)) continue;
+      if (typeof v === "string") {
+        if (/^https?:\/\/photos?\.zillowstatic\.com\//i.test(v) && /\.(jpg|jpeg|png|webp)/i.test(v)) {
+          out.push(v);
+        }
+      } else {
+        walk(v, depth + 1);
+      }
+    }
+  }
+  walk(item, 0);
+}
+
 // Fetch Zillow listing photos via Apify. Pay-per-result (~$0.005 each) is
 // 50-80× cheaper than ScrapingBee's credit model for our low volume.
 // Requires APIFY_API_TOKEN on the env. APIFY_ZILLOW_ACTOR picks which
@@ -211,63 +288,53 @@ async function scrapeZillowViaApify(url: string): Promise<{ urls: string[]; fact
     }
     const facts = extractListingFacts(items);
 
-    // Every Zillow actor uses a slightly different schema, so walk the whole
-    // dataset recursively and pull every string that looks like a real
-    // zillowstatic.com photo URL. Keep highest-resolution variant per photo.
-    const found: string[] = [];
-    function walk(obj: any, depth: number): void {
-      if (depth > 14 || !obj || typeof obj !== "object") return;
-      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
-      // Schema A: mixedSources.jpeg: [{url, width}, ...] (what __NEXT_DATA__ uses)
-      if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
-        const jpegs: Array<{ url?: string; width?: number }> = obj.mixedSources.jpeg;
-        if (jpegs.length > 0) {
-          const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
-          if (biggest.url) found.push(biggest.url);
-          return;
-        }
-      }
-      for (const v of Object.values(obj)) {
-        if (typeof v === "string") {
-          if (/^https?:\/\/photos?\.zillowstatic\.com\//i.test(v) && /\.(jpg|jpeg|png|webp)/i.test(v)) {
-            found.push(v);
-          }
-        } else {
-          walk(v, depth + 1);
-        }
-      }
+    // Read photos from the SPECIFIC known-good keys on the listing item,
+    // in the order the upstream actor returned them. The previous version
+    // walked the entire payload pulling any zillowstatic.com URL — which
+    // swept in photos from "similar homes", "nearby schools", map
+    // thumbnails, and other side-panel content, inflating a 16-photo
+    // listing to 21+. Photos are ORDERED here (preserving what Zillow
+    // itself presents as the photo carousel).
+    const found = extractOrderedPhotosFromListingItem(items[0]);
+    // Safety: if the primary paths came up empty, fall back to a scoped
+    // walk on the item (not the whole payload). Almost never triggers
+    // with the current actor but future schema churn stays behind a
+    // depth-limited, item-local crawl instead of a full-dataset dig.
+    if (found.length === 0) {
+      walkForPhotosScoped(items[0], found);
     }
-    walk(items, 0);
 
-    // Dedupe by photo hash. Every Zillow CDN URL is shaped:
-    //   https://photos.zillowstatic.com/fp/<32-hex-hash>-<variant>.jpg
-    // where <variant> ranges over size-suffixed (-cc_ft_1536) AND
-    // non-size-suffixed (-p_e, -p_f, -p_h, etc.) tokens for the same
-    // underlying photo. Earlier code keyed dedupe on the numeric size
-    // suffix, which meant non-size variants slipped through as
-    // "different" photos and got saved 2-4 times each. The hash is the
-    // canonical per-photo identifier — use it.
+    // Hash-dedupe only collapses SIZE VARIANTS of the same photo (same
+    // /fp/<hash>- prefix) — it never discards distinct listing photos,
+    // because Zillow's own photo list is already de-duplicated.
     const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
-    const byHash = new Map<string, { url: string; score: number }>();
+    const byHash = new Map<string, { url: string; score: number; pos: number }>();
     const scoreForUrl = (u: string): number => {
       const sizeMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d{3,4})\./i);
       if (sizeMatch) return parseInt(sizeMatch[1], 10);
-      // Non-size variants roughly ordered by the quality letter Zillow uses
-      if (/-p_h\./i.test(u)) return 1200; // large
+      if (/-p_h\./i.test(u)) return 1200;
       if (/-p_f\./i.test(u)) return 1024;
       if (/-p_e\./i.test(u)) return 800;
       if (/-p_d\./i.test(u)) return 600;
       return 0;
     };
-    for (const u of found) {
+    for (let i = 0; i < found.length; i++) {
+      const u = found[i];
       const m = u.match(hashRe);
       if (!m) continue;
       const hash = m[1];
       const score = scoreForUrl(u);
       const prev = byHash.get(hash);
-      if (!prev || score > prev.score) byHash.set(hash, { url: u, score });
+      if (!prev) {
+        byHash.set(hash, { url: u, score, pos: i });
+      } else if (score > prev.score) {
+        byHash.set(hash, { url: u, score, pos: prev.pos });  // keep original position
+      }
     }
-    const uniq = Array.from(byHash.values()).map((v) => v.url);
+    // Sort by original position so Zillow's ordering is preserved.
+    const uniq = Array.from(byHash.values())
+      .sort((a, b) => a.pos - b.pos)
+      .map((v) => v.url);
     console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
     return { urls: uniq, facts };
   } catch (e: any) {
@@ -308,25 +375,63 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
     const uniq: string[] = [];
 
     // Tier 1 (preferred): __NEXT_DATA__ — structured data from Next.js SSR.
+    // Narrow to the target listing's own photo array using the same
+    // extractor as the Apify path; only fall back to a scoped walk if
+    // the primary paths come up empty. This prevents pulling in photos
+    // from similar-homes / nearby / map side panels that live elsewhere
+    // in the same __NEXT_DATA__ payload.
     if (match) {
       try { nd = JSON.parse(match[1]); } catch {}
       if (nd) {
         const out: string[] = [];
-        function walk(obj: any, depth: number): void {
-          if (depth > 16 || !obj || typeof obj !== "object") return;
-          if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
-          if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
-            const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
-            if (jpegs.length > 0) {
-              const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
-              if (biggest.url) out.push(biggest.url);
-            }
-            return;
+        // Zillow's __NEXT_DATA__ embeds the listing under a few possible
+        // paths depending on page variant. Try them in order, then walk
+        // the first subtree that looks like a home-info object.
+        const candidatePaths = [
+          nd?.props?.pageProps?.componentProps?.gdpClientCache,
+          nd?.props?.pageProps?.initialData?.data?.homeInfo,
+          nd?.props?.pageProps?.initialData?.data,
+          nd?.props?.pageProps?.initialData,
+          nd?.props?.pageProps,
+        ];
+        for (const candidate of candidatePaths) {
+          if (!candidate) continue;
+          // gdpClientCache is sometimes JSON-stringified further; parse
+          // it if so. Keys inside look like "HomeDetailsQuery:..." with
+          // objects containing `property: { responsivePhotos: [...] }`.
+          let obj: any = candidate;
+          if (typeof candidate === "string") {
+            try { obj = JSON.parse(candidate); } catch { continue; }
           }
-          Object.values(obj).forEach((v) => walk(v, depth + 1));
+          // If it's the gdpClientCache shape, each top-level key maps to
+          // an entry with a `property` field.
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            for (const v of Object.values(obj)) {
+              const prop = (v as any)?.property ?? v;
+              const photos = extractOrderedPhotosFromListingItem(prop);
+              if (photos.length > 0) { out.push(...photos); break; }
+            }
+          }
+          if (out.length === 0) {
+            const direct = extractOrderedPhotosFromListingItem(obj);
+            if (direct.length > 0) out.push(...direct);
+          }
+          if (out.length > 0) break;
         }
-        walk(nd, 0);
-        for (const u of [...new Set(out)]) uniq.push(u);
+        // Safety net: scoped walk on nd if the named paths yielded
+        // nothing. Still better than walking the whole payload — at
+        // least it stops at skipKeys.
+        if (out.length === 0) walkForPhotosScoped(nd, out);
+
+        const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
+        const seenHashes = new Set<string>();
+        for (const u of out) {
+          const m2 = u.match(hashRe);
+          const key = m2 ? m2[1] : u;
+          if (seenHashes.has(key)) continue;
+          seenHashes.add(key);
+          uniq.push(u);
+        }
         facts = extractListingFacts(nd);
         if (facts.bedrooms != null || facts.bathrooms != null) factsMethod = "__NEXT_DATA__";
       }
@@ -389,57 +494,25 @@ async function scrapeListingPhotos(
   // Cost: ~$0.005 (Apify) + ~1 ScrapingBee credit per rescrape. Worth it —
   // scraper under-coverage was the top remaining cause of missing
   // bedrooms/bathrooms in the e2e tests.
+  // Apify first; ScrapingBee only as a fallback when Apify returns empty.
+  // The earlier parallel-union approach was meant to improve coverage but
+  // introduced the opposite problem: each scraper sometimes surfaces
+  // different photos (including side-panel content from the same page),
+  // so unioning inflated a 16-photo listing to 20+. With the walkers now
+  // narrowed to the listing's own `responsivePhotos` array, a single
+  // scraper returns exactly what Zillow shows — no need to union.
   if (/zillow\.com/i.test(primaryUrl)) {
-    const [apifyResult, sbResult] = await Promise.all([
-      scrapeZillowViaApify(primaryUrl),
-      process.env.SCRAPINGBEE_API_KEY
-        ? scrapeZillowViaScrapingBee(primaryUrl)
-        : Promise.resolve({ urls: [] as string[], facts: {} as ListingFacts }),
-    ]);
-
-    // Merge facts — prefer Apify (more trustworthy structured payload),
-    // fill gaps from ScrapingBee.
-    const mergedFacts: ListingFacts = {
-      bedrooms: apifyResult.facts.bedrooms ?? sbResult.facts.bedrooms,
-      bathrooms: apifyResult.facts.bathrooms ?? sbResult.facts.bathrooms,
-    };
+    let result = await scrapeZillowViaApify(primaryUrl);
+    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+      console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
+      result = await scrapeZillowViaScrapingBee(primaryUrl);
+    }
     if (listingFacts) {
-      if (mergedFacts.bedrooms != null) listingFacts.bedrooms = mergedFacts.bedrooms;
-      if (mergedFacts.bathrooms != null) listingFacts.bathrooms = mergedFacts.bathrooms;
+      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
+      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
     }
-
-    // Union URLs, deduped by the /fp/<hash>- photo hash that Zillow bakes
-    // into every CDN URL. Same photo served from Apify and ScrapingBee
-    // under different size variants collapses to one.
-    const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
-    const scoreForUrl = (u: string): number => {
-      const m = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d{3,4})\./i);
-      if (m) return parseInt(m[1], 10);
-      if (/-p_h\./i.test(u)) return 1200;
-      if (/-p_f\./i.test(u)) return 1024;
-      if (/-p_e\./i.test(u)) return 800;
-      if (/-p_d\./i.test(u)) return 600;
-      return 0;
-    };
-    const byHash = new Map<string, string>();
-    const hashScores = new Map<string, number>();
-    const nonZillowFallback: string[] = [];
-    for (const u of [...apifyResult.urls, ...sbResult.urls]) {
-      const m = u.match(hashRe);
-      if (!m) { nonZillowFallback.push(u); continue; }
-      const hash = m[1];
-      const score = scoreForUrl(u);
-      const prev = hashScores.get(hash) ?? -1;
-      if (score > prev) {
-        byHash.set(hash, u);
-        hashScores.set(hash, score);
-      }
-    }
-    const merged = [...byHash.values(), ...nonZillowFallback];
-    console.log(`[scrapeZillow] merged — Apify=${apifyResult.urls.length} + ScrapingBee=${sbResult.urls.length} → ${merged.length} unique (facts: ${mergedFacts.bedrooms ?? "?"}BR / ${mergedFacts.bathrooms ?? "?"}BA)`);
-
-    if (merged.length > 0) {
-      return merged.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
+    if (result.urls.length > 0) {
+      return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
