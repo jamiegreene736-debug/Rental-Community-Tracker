@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y chromium \
@@ -11,15 +12,20 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-COPY . .
-RUN npm run build
-
-# Bake a copy of the committed static photos to /app/photos-seed so the
-# startup script can populate the mounted volume on first boot. The volume
-# mount at /app/client/public/photos shadows the baked-in files at that
-# path, so we need a separate location that's never shadowed. See
+# Split the committed photo bundle from the rest of the source tree so
+# the image only ships it once. The main COPY excludes
+# client/public/photos; the second COPY places the same files at
+# /app/photos-seed — the backup location the CMD seeds the Railway
+# volume from on boot. Avoiding the duplicate keeps the image ~88MB
+# smaller, which matters for Railway's snapshot/upload step. See
 # Load-Bearing Decision #17 in AGENTS.md.
-RUN cp -R client/public/photos /app/photos-seed
+#
+# Requires the BuildKit Dockerfile 1.7 frontend (the `# syntax=` line
+# above) for the `--exclude` flag. Railway's builder supports this.
+COPY --exclude=client/public/photos . .
+COPY client/public/photos /app/photos-seed/
+
+RUN npm run build
 
 ENV NODE_ENV=production
 
