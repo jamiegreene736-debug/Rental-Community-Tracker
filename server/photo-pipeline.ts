@@ -67,7 +67,64 @@ type DownloadResult = {
 type LabeledResult = DownloadResult & {
   label: string | null;
   category: string | null;
+  confidence: number;
 };
+
+// High-precision filter applied to Claude's initial category. The vision
+// model occasionally misclassifies — a kitchen gets stamped "Bedrooms" when
+// the photo has a bar area, or an outdoor patio shot lands in "Bathrooms".
+// Two guards:
+//   1) Label-text must semantically match the category. A "Bedrooms" photo
+//      whose label is "Updated Kitchen" is a contradiction — the model's own
+//      descriptive label is a more trustworthy signal than its category
+//      choice, so we demote to "Other".
+//   2) Low-confidence Bedroom/Bathroom claims get demoted. Those categories
+//      carry the most downstream weight (Master Bedroom numbering, coverage
+//      checks) so the cost of a false positive is high.
+//
+// Demotion to "Other" (not rejection) keeps the photo visible in the gallery
+// but removes it from bedroom/bathroom coalesce inputs, preventing spurious
+// "Master Bedroom" labels on kitchen shots.
+const BEDROOM_KEYWORDS = /\b(bed|bedroom|suite|master|guest room|sleeping|primary|bunk|twin|queen|king|double|full)\b/i;
+const BATHROOM_KEYWORDS = /\b(bath|bathroom|shower|tub|toilet|vanity|powder|half bath|lavatory|washroom|ensuite|en-suite|jetted)\b/i;
+const KITCHEN_KEYWORDS = /\b(kitchen|cabinet|countertop|counter top|stove|oven|refrigerator|fridge|microwave|island|dishwasher|backsplash|pantry)\b/i;
+// Applied to bedrooms and bathrooms specifically — rooms whose misclassification
+// has expensive downstream consequences. 0.70 roughly matches "confident but
+// not unambiguous" per our prompt's confidence-scoring rubric.
+const MIN_CONFIDENCE_FOR_PRIVATE_ROOM = 0.70;
+
+function applyCategorySanityCheck(r: LabeledResult): LabeledResult {
+  if (!r.category || !r.label) return r;
+  const label = r.label;
+  const cat = r.category;
+
+  // If the label text mentions kitchen fixtures but the category claims
+  // Bedrooms/Bathrooms, the label wins — Claude saw a kitchen but picked
+  // the wrong bucket.
+  if ((cat === "Bedrooms" || cat === "Bathrooms") && KITCHEN_KEYWORDS.test(label)) {
+    console.log(`[sanity] demoting "${label}" from ${cat}→Kitchen (label contains kitchen keywords)`);
+    return { ...r, category: "Kitchen" };
+  }
+  // Category claims Bedrooms but label has no bed vocabulary anywhere.
+  // Vision models sometimes drop the room type into category while the
+  // descriptive label reflects what they actually saw.
+  if (cat === "Bedrooms" && !BEDROOM_KEYWORDS.test(label)) {
+    console.log(`[sanity] demoting "${label}" from Bedrooms→Other (label lacks bed keywords)`);
+    return { ...r, category: "Other" };
+  }
+  if (cat === "Bathrooms" && !BATHROOM_KEYWORDS.test(label)) {
+    console.log(`[sanity] demoting "${label}" from Bathrooms→Other (label lacks bath keywords)`);
+    return { ...r, category: "Other" };
+  }
+  // Low-confidence Bedroom/Bathroom — Airbnb-style: require ≥0.70 before
+  // we treat as authoritative. Below that, we'd rather surface the photo
+  // uncategorized than force a wrong label.
+  if ((cat === "Bedrooms" || cat === "Bathrooms") && r.confidence < MIN_CONFIDENCE_FOR_PRIVATE_ROOM) {
+    console.log(`[sanity] demoting "${label}" from ${cat}→Other (confidence ${r.confidence.toFixed(2)} < ${MIN_CONFIDENCE_FOR_PRIVATE_ROOM})`);
+    return { ...r, category: "Other" };
+  }
+  return r;
+}
 
 const LABEL_CONCURRENCY = 8;
 
@@ -475,13 +532,19 @@ export async function downloadAndPrioritize(opts: {
     labeledResults = await mapConcurrent(downloaded, LABEL_CONCURRENCY, async (d) => {
       try {
         const res = await labelPhoto(path.join(folderPath, d.tempName), kind, anthropicKey);
-        return { ...d, label: res?.label ?? null, category: res?.category ?? null };
+        const labeled: LabeledResult = {
+          ...d,
+          label: res?.label ?? null,
+          category: res?.category ?? null,
+          confidence: res?.confidence ?? 0,
+        };
+        return applyCategorySanityCheck(labeled);
       } catch {
-        return { ...d, label: null, category: null };
+        return { ...d, label: null, category: null, confidence: 0 };
       }
     });
   } else {
-    labeledResults = downloaded.map((d) => ({ ...d, label: null, category: null }));
+    labeledResults = downloaded.map((d) => ({ ...d, label: null, category: null, confidence: 0 }));
   }
 
   // Step 3a: drop explicitly-rejected photos (agent headshots, logos,
