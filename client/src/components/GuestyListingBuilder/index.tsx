@@ -998,6 +998,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [guestyPhotoCount, setGuestyPhotoCount] = useState<number | null>(null);
   const [guestyPhotoCountLoading, setGuestyPhotoCountLoading] = useState(false);
 
+  // The cover-collage picture URL on Guesty (by caption === "Cover Collage").
+  // Used to render the collage as a tile in the PhotoCurator so the
+  // operator can see what's currently set as the cover without leaving
+  // the Photos tab. Null when there's no collage on the listing.
+  const [guestyCoverCollageUrl, setGuestyCoverCollageUrl] = useState<string | null>(null);
+
+  // URLs successfully pushed in the most recent push-photos run, with
+  // captions preserved. The cover-collage push uses this (when non-
+  // empty) to prepend the collage on top of the caller's known-good
+  // list — side-stepping Guesty's read-after-write consistency lag on
+  // GET-after-PUT, which was losing ~3-5 photos in practice.
+  const [lastPushedPictures, setLastPushedPictures] = useState<Array<{ original: string; caption: string }>>([]);
+
   const savePushSummary = useCallback((summary: PushSummary) => {
     setLastPushSummary(summary);
     try { localStorage.setItem(`nexstay_push_${summary.listingId}`, JSON.stringify(summary)); } catch { /* non-fatal */ }
@@ -1005,7 +1018,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   // Load persisted summary & fetch live photo count when listing selection changes
   useEffect(() => {
-    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyLiveAmenities(null); return; }
+    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setLastPushedPictures([]); setGuestyLiveAmenities(null); return; }
     // Restore from localStorage
     try {
       const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
@@ -1023,21 +1036,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`).then(r => r.json()).catch(() => null),
     ])
       .then(([listing, amen]) => {
-        setGuestyPhotoCount(listing?.pictures?.length ?? 0);
+        const pictures: any[] = Array.isArray(listing?.pictures) ? listing.pictures : [];
+        setGuestyPhotoCount(pictures.length);
+        // Extract the cover-collage URL (first picture captioned
+        // "Cover Collage") so the PhotoCurator can render it as a tile.
+        const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
+        setGuestyCoverCollageUrl(collage?.original || collage?.url || null);
         const canonical: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
         const other: string[] = Array.isArray(amen?.otherAmenities) ? amen.otherAmenities : [];
         setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
       })
-      .catch(() => { setGuestyPhotoCount(null); setGuestyLiveAmenities(new Set()); })
+      .catch(() => { setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setGuestyLiveAmenities(new Set()); })
       .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
   }, [selectedId, guestyNamesToProfileKeys]);
 
-  // Refresh live count after a successful push
+  // Refresh live count + cover-collage URL after a successful push
   const refreshGuestyPhotoCount = useCallback(() => {
     if (!selectedId) return;
     fetch(`/api/guesty-proxy/listings/${selectedId}`)
       .then(r => r.json())
-      .then((d: any) => setGuestyPhotoCount(d?.pictures?.length ?? 0))
+      .then((d: any) => {
+        const pictures: any[] = Array.isArray(d?.pictures) ? d.pictures : [];
+        setGuestyPhotoCount(pictures.length);
+        const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
+        setGuestyCoverCollageUrl(collage?.original || collage?.url || null);
+      })
       .catch(() => {});
   }, [selectedId]);
 
@@ -1211,10 +1234,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // Upload to ImgBB + set as Guesty cover
     setCollagePhase("uploading");
     try {
+      // Prefer passing the URLs we know were just pushed (race-free
+      // against Guesty read-after-write lag). When we have no recent
+      // push on record the server falls back to a fresh GET.
       const resp = await fetch("/api/builder/upload-collage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base64: dataUrl, listingId: selectedId }),
+        body: JSON.stringify({
+          base64: dataUrl,
+          listingId: selectedId,
+          existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
+        }),
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({})) as any;
@@ -1222,11 +1252,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
       const result = await resp.json() as any;
       setGuestyPhotoCount(result.totalPhotos);
+      if (result.collageUrl) setGuestyCoverCollageUrl(result.collageUrl);
       setCollagePhase("done");
     } catch (e: any) {
       setCollageError(e.message); setCollagePhase("error");
     }
-  }, [selectedId]);
+  }, [selectedId, lastPushedPictures]);
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
     if (!selectedId || !photos?.length) return;
@@ -1238,6 +1269,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setPushResults([]);
     setSavingToGuesty(false);
     setCheckpointCount(0);
+    // Reset the known-pushed-pictures list at the start of each push so
+    // a follow-up cover-collage operation only sees URLs from THIS run.
+    setLastPushedPictures([]);
 
     const origin = window.location.origin;
 
@@ -1310,6 +1344,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 success: event.success ?? false,
                 error: event.error,
               }]);
+              // Accumulate the ImgBB URL + its caption for the follow-up
+              // cover-collage flow. Preserving the same 1-based index the
+              // server emits keeps the ordering intact, which is the order
+              // the push PUTs to Guesty — so the collage prepend gets
+              // added to a list that matches what's actually live.
+              if (event.success && event.url && typeof event.index === "number") {
+                const caption = photos[event.index - 1]?.caption ?? "";
+                setLastPushedPictures(prev => [...prev, { original: event.url!, caption }]);
+              }
             } else if (event.type === "checkpoint") {
               // Intermediate save — update Guesty photo count so user can see progress
               setCheckpointCount(c => c + 1);
@@ -3381,6 +3424,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           onOverridesChanged={onPhotoOverridesChanged}
                           coverCollageEnabled={photos.length >= 2}
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
+                          coverCollageCurrentUrl={guestyCoverCollageUrl}
                           onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
                           coverCollageStatus={{
                             phase: collagePhase === "upscaling" ? "generating" : collagePhase,
