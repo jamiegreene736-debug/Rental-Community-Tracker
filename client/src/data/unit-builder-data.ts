@@ -31,6 +31,32 @@ export type PropertyUnitBuilder = {
   bookingTitle: string;
   sampleDisclaimer: string;
   combinedDescription: string;
+  /**
+   * Guesty / OTA `propertyType`. SET THIS EXPLICITLY when adding a
+   * new property — do NOT rely on the fallback.
+   *
+   * Pick the value that matches the physical structure:
+   *   - "Condominium" → single-level unit in a multi-unit building
+   *     (Kaha Lani, Lae Nani, Mauna Kai, Regency at Poipu Kai, etc.)
+   *   - "Townhouse" → multi-level attached unit with its own entrance
+   *     (Pili Mai at Poipu)
+   *   - "House" → standalone single-family
+   *   - "Apartment" → single-level in a building without resort/HOA structure
+   *   - "Villa" → luxury standalone unit, often resort-style
+   *   - "Estate" → large standalone property, 4+ bedrooms with grounds
+   *     (Kekaha Beachfront, Keauhou Estates)
+   *   - Also accepted: "Cottage", "Bungalow", "Loft"
+   *
+   * Why this matters: the OTA channels filter listings by property
+   * type. A townhome labeled "Condominium" won't show up when guests
+   * filter Airbnb/VRBO/Booking for "Townhouse" — that's exactly what
+   * happened with Pili Mai, which shipped as Condominium for months.
+   *
+   * Until every property has been back-filled, the builder falls back
+   * to "Condominium" (current behavior). When you add a new property,
+   * confirm the type against photos + description before picking.
+   */
+  propertyType?: "House" | "Townhouse" | "Condominium" | "Apartment" | "Villa" | "Cottage" | "Bungalow" | "Estate" | "Loft";
   neighborhood?: string;
   transit?: string;
   // Hawaii Tax Map Key — format: ##-#-#-###-###-#### (12 digits, county-district-section-parcel)
@@ -1604,6 +1630,11 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     // practice: the listing disclaimer already tells guests the exact
     // unit is confirmed at check-in.
     address: "2253 Poipu Rd, Koloa, HI 96756",
+    // Pili Mai units are two-story attached townhomes — NOT flat
+    // condominium units — so the OTA propertyType needs to match.
+    // Shipped as the fallback "Condominium" for months, which excluded
+    // the listing from guests filtering Airbnb/VRBO for "Townhouse".
+    propertyType: "Townhouse",
     bookingTitle: "Pili Mai - 5BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and easy access to Poipu Beach.
@@ -1678,6 +1709,8 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     // record) — a ~5-minute walk from Pili Mai. See propertyId 32 above
     // for the representative-address rationale.
     address: "2360 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Same townhome-not-condo correction as propertyId 32 above.
+    propertyType: "Townhouse",
     bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
