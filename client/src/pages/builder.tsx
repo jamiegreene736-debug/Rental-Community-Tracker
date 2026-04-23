@@ -273,6 +273,11 @@ export default function Builder() {
       bookingSettings: {
         minNights: 4,
         maxNights: 60,
+        // 60-day advance notice: matches the portfolio's buy-in safety
+        // window. Must match the default in GuestyListingBuilder's
+        // bookingRules state so the Pricing-tab form and the full-build
+        // push can't diverge.
+        advanceNotice: 60,
         cancellationPolicy: "moderate",
         instantBooking: true,
       },

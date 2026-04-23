@@ -732,10 +732,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [propertyId]);
 
   // ── Booking rules state ────────────────────────────────────────────────────
+  // `advanceNotice: 60` is deliberate — the business model is "buy in
+  // after booking, then assign", and reliable buy-in inventory kicks in
+  // around the 60-day mark for the Poipu portfolio. 60 balances
+  // capturing mid-lead-time demand (30-60d out) with a safety buffer
+  // against inventory races. Tighten per-property in the Pricing tab's
+  // Booking Rules card if you want a specific listing to accept
+  // shorter-notice bookings.
   const [bookingRules, setBookingRules] = useState({
     minNights: 3,
     maxNights: 365,
-    advanceNotice: 1,   // days
+    advanceNotice: 60,  // days — see comment above
     preparationTime: 1, // days (cleaning buffer)
     instantBooking: true,
     cancellationPolicy: "flexible",
