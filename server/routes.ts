@@ -102,6 +102,69 @@ function extractListingFacts(payload: any): ListingFacts {
   return facts;
 }
 
+// Fallback 1: JSON-LD structured data. Many real-estate pages include a
+// schema.org SingleFamilyResidence / Apartment / House object with
+// numberOfRooms / numberOfBedrooms / numberOfBathroomsTotal fields. This is
+// independent of __NEXT_DATA__ — useful when the Next hydration payload is
+// missing (stripped by a proxy) but the JSON-LD block survived.
+function extractFactsFromJsonLd(html: string): ListingFacts {
+  const out: ListingFacts = {};
+  const matches = Array.from(html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi));
+  for (const m of matches) {
+    try {
+      const parsed = JSON.parse(m[1]);
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      for (const obj of items) {
+        if (!obj || typeof obj !== "object") continue;
+        const bd = obj.numberOfBedrooms ?? obj.numberOfRooms;
+        const ba = obj.numberOfBathroomsTotal ?? obj.numberOfFullBathrooms;
+        if (out.bedrooms == null && typeof bd === "number" && bd > 0 && bd < 50) {
+          out.bedrooms = Math.round(bd);
+        }
+        if (out.bathrooms == null && typeof ba === "number" && ba > 0 && ba < 50) {
+          out.bathrooms = Math.floor(ba);
+        }
+      }
+    } catch {}
+  }
+  return out;
+}
+
+// Fallback 2: regex on the visible HTML text. Last-resort layer — ignores
+// DOM structure entirely and just scans for Zillow's human-visible bed/bath
+// phrases. Works even if the page layout changes completely, as long as
+// Zillow still renders "3 bd" / "2 ba" / "3 beds" / "2 baths" somewhere.
+// Only run on HTML where the primary structured sources produced nothing,
+// because casual text matches can pick up prose like "2 bedroom suites
+// nearby" that aren't the subject property.
+function extractFactsFromText(html: string): ListingFacts {
+  // Strip HTML tags so we're matching against visible text, not attribute
+  // values. Simple regex is fine — false positives from stripped attribute
+  // text would have to coincidentally contain "N bed" / "N bath" phrasing.
+  const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const out: ListingFacts = {};
+  const bedMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:beds?\b|bd\b|bedrooms?\b)/i);
+  const bathMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:baths?\b|ba\b|bathrooms?\b)/i);
+  if (bedMatch) {
+    const n = parseFloat(bedMatch[1]);
+    if (n > 0 && n < 50) out.bedrooms = Math.round(n);
+  }
+  if (bathMatch) {
+    const n = parseFloat(bathMatch[1]);
+    if (n > 0 && n < 50) out.bathrooms = Math.floor(n);
+  }
+  return out;
+}
+
+// Merge facts from a higher-priority source into a lower-priority one
+// (primary wins on conflict; fill gaps from fallback).
+function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts {
+  return {
+    bedrooms: primary.bedrooms ?? fallback.bedrooms,
+    bathrooms: primary.bathrooms ?? fallback.bathrooms,
+  };
+}
+
 // Fetch Zillow listing photos via Apify. Pay-per-result (~$0.005 each) is
 // 50-80× cheaper than ScrapingBee's credit model for our low volume.
 // Requires APIFY_API_TOKEN on the env. APIFY_ZILLOW_ACTOR picks which
@@ -227,33 +290,66 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
     }
     const html = await r.text();
     const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-    if (!match) {
+    let nd: any = null;
+    let factsMethod = "none";
+    let facts: ListingFacts = {};
+    const uniq: string[] = [];
+
+    // Tier 1 (preferred): __NEXT_DATA__ — structured data from Next.js SSR.
+    if (match) {
+      try { nd = JSON.parse(match[1]); } catch {}
+      if (nd) {
+        const out: string[] = [];
+        function walk(obj: any, depth: number): void {
+          if (depth > 16 || !obj || typeof obj !== "object") return;
+          if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+          if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
+            const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
+            if (jpegs.length > 0) {
+              const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
+              if (biggest.url) out.push(biggest.url);
+            }
+            return;
+          }
+          Object.values(obj).forEach((v) => walk(v, depth + 1));
+        }
+        walk(nd, 0);
+        for (const u of [...new Set(out)]) uniq.push(u);
+        facts = extractListingFacts(nd);
+        if (facts.bedrooms != null || facts.bathrooms != null) factsMethod = "__NEXT_DATA__";
+      }
+    } else {
       console.warn(`[scrapeZillow:SB] ${url}: no __NEXT_DATA__ blob (html length ${html.length})`);
+    }
+
+    // Tier 2 (fallback): JSON-LD. Runs when __NEXT_DATA__ is absent or
+    // produced no bed/bath numbers. Fills gaps without overwriting.
+    if (facts.bedrooms == null || facts.bathrooms == null) {
+      const jsonLd = extractFactsFromJsonLd(html);
+      const merged = mergeFacts(facts, jsonLd);
+      if ((merged.bedrooms != null && facts.bedrooms == null) ||
+          (merged.bathrooms != null && facts.bathrooms == null)) {
+        factsMethod = factsMethod === "none" ? "json-ld" : `${factsMethod}+json-ld`;
+      }
+      facts = merged;
+    }
+
+    // Tier 3 (last resort): regex on visible HTML text. Bulletproof against
+    // DOM redesigns — matches any "3 beds / 2 baths" phrasing in the body.
+    if (facts.bedrooms == null || facts.bathrooms == null) {
+      const textFacts = extractFactsFromText(html);
+      const merged = mergeFacts(facts, textFacts);
+      if ((merged.bedrooms != null && facts.bedrooms == null) ||
+          (merged.bathrooms != null && facts.bathrooms == null)) {
+        factsMethod = factsMethod === "none" ? "text-regex" : `${factsMethod}+text-regex`;
+      }
+      facts = merged;
+    }
+
+    if (uniq.length === 0 && facts.bedrooms == null && facts.bathrooms == null) {
       return { urls: [], facts: {} };
     }
-    let nd: any;
-    try { nd = JSON.parse(match[1]); } catch { return { urls: [], facts: {} }; }
-
-    // Walk the NEXT_DATA tree for mixedSources.jpeg arrays — each is one
-    // photo with multiple resolutions; keep the widest.
-    const out: string[] = [];
-    function walk(obj: any, depth: number): void {
-      if (depth > 16 || !obj || typeof obj !== "object") return;
-      if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
-      if (obj.mixedSources?.jpeg && Array.isArray(obj.mixedSources.jpeg)) {
-        const jpegs: Array<{ url: string; width?: number }> = obj.mixedSources.jpeg;
-        if (jpegs.length > 0) {
-          const biggest = jpegs.reduce((a, b) => ((b.width ?? 0) > (a.width ?? 0) ? b : a), jpegs[0]);
-          if (biggest.url) out.push(biggest.url);
-        }
-        return;
-      }
-      Object.values(obj).forEach((v) => walk(v, depth + 1));
-    }
-    walk(nd, 0);
-    const uniq = [...new Set(out)];
-    const facts = extractListingFacts(nd);
-    console.log(`[scrapeZillow:SB] ${url} → ${uniq.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    console.log(`[scrapeZillow:SB] ${url} → ${uniq.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA via ${factsMethod})`);
     return { urls: uniq, facts };
   } catch (e: any) {
     console.warn(`[scrapeZillow:SB] ${url}: ${e?.message ?? e}`);
