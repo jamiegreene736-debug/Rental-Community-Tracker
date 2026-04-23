@@ -74,6 +74,22 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncResult, setSyncResult] = useState<any>(null);
+  // Weekly-pricing correlation state (populated after a scan + button click)
+  type WeeklyPricingRow = {
+    startDate: string;
+    endDate: string;
+    verdict: "open" | "tight" | "blocked";
+    baseNightly: number;
+    demandFactor: number;
+    baseOnlyRate: number;
+    targetRate: number;
+    deltaVsBase: number;
+  };
+  const [pricingRows, setPricingRows] = useState<WeeklyPricingRow[] | null>(null);
+  const [pricingBusy, setPricingBusy] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
+  const [ratesSyncBusy, setRatesSyncBusy] = useState(false);
+  const [ratesSyncResult, setRatesSyncResult] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Scheduler state (Phase 4)
   type Schedule = {
@@ -281,6 +297,59 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       setSyncBusy(false);
     }
   }, [propertyId, results, minSets]);
+
+  const computeWeeklyPricing = useCallback(async () => {
+    if (!propertyId || results.length === 0) return;
+    setPricingBusy(true);
+    setPricingError(null);
+    setPricingRows(null);
+    try {
+      const resp = await fetch(`/api/availability/weekly-pricing/${propertyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          windows: results.map((r) => ({
+            startDate: r.startDate,
+            endDate: r.endDate,
+            verdict: r.verdict,
+          })),
+          // 20% margin matches the scheduler default. If the scheduler row
+          // has a different target margin configured for this property,
+          // prefer that.
+          targetMargin: schedule?.targetMargin != null
+            ? parseFloat(String(schedule.targetMargin))
+            : 0.20,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      setPricingRows(data.rows);
+    } catch (e: any) {
+      setPricingError(e?.message ?? String(e));
+    } finally {
+      setPricingBusy(false);
+    }
+  }, [propertyId, results, schedule?.targetMargin]);
+
+  const syncWeeklyRates = useCallback(async () => {
+    if (!propertyId || !pricingRows || pricingRows.length === 0) return;
+    setRatesSyncBusy(true);
+    setRatesSyncResult(null);
+    try {
+      const resp = await fetch(`/api/availability/sync-weekly-rates/${propertyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: pricingRows }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      setRatesSyncResult(data);
+    } catch (e: any) {
+      setRatesSyncResult({ ok: false, error: e?.message ?? String(e) });
+    } finally {
+      setRatesSyncBusy(false);
+    }
+  }, [propertyId, pricingRows]);
 
   const applyOverride = useCallback(async (window: WindowResult, mode: "force-open" | "force-block" | null) => {
     if (!propertyId) return;
@@ -620,6 +689,136 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           </div>
         );
       })()}
+
+      {/* ── Weekly pricing correlation ──────────────────────────
+          Per-week rate forecast that reacts to the scanner's demand
+          signal. Tight weeks (inventory at or near the minSets floor)
+          get a +12% demand markup; open weeks stay at baseline; blocked
+          weeks are skipped (we're blocking, not pricing them). Push
+          button applies the final rates to Guesty's calendar per-week
+          instead of the coarser per-month push the scheduler does. */}
+      {results.length > 0 && (
+        <div style={{ marginBottom: 24, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
+          <div style={{
+            padding: "8px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb",
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Weekly Pricing Correlation
+            </span>
+            <span style={{ fontSize: 11, color: "#6b7280" }}>
+              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked weeks skipped.
+            </span>
+            <div style={{ flex: 1 }} />
+            {!pricingRows && (
+              <button
+                className="glb-btn"
+                onClick={computeWeeklyPricing}
+                disabled={pricingBusy}
+                style={{ fontSize: 11 }}
+              >
+                {pricingBusy ? "Computing…" : "▶ Compute weekly rates"}
+              </button>
+            )}
+            {pricingRows && (
+              <button
+                className="glb-btn"
+                onClick={syncWeeklyRates}
+                disabled={ratesSyncBusy || !listingId}
+                title={!listingId ? "Select a Guesty listing first" : `Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} weekly rates to Guesty`}
+                style={{ fontSize: 11 }}
+              >
+                {ratesSyncBusy ? "Pushing…" : `↑ Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} rates to Guesty`}
+              </button>
+            )}
+            {pricingRows && (
+              <button
+                className="glb-btn"
+                onClick={computeWeeklyPricing}
+                disabled={pricingBusy}
+                style={{ fontSize: 11 }}
+              >
+                {pricingBusy ? "Recomputing…" : "↺"}
+              </button>
+            )}
+          </div>
+
+          {pricingError && (
+            <div style={{ padding: "8px 12px", background: "#fee2e2", color: "#991b1b", fontSize: 12 }}>
+              {pricingError}
+            </div>
+          )}
+          {ratesSyncResult && (
+            <div style={{
+              padding: "8px 12px",
+              background: ratesSyncResult.ok ? "#f0fdf4" : "#fef3c7",
+              borderBottom: "1px solid #e5e7eb",
+              fontSize: 12,
+            }}>
+              {ratesSyncResult.ok ? "✓" : "⚠"}
+              {" "}<b>On {new Date(ratesSyncResult.syncedAt ?? Date.now()).toLocaleString()}</b>
+              {" — "}pushed <b>{ratesSyncResult.pushed ?? 0}</b> of <b>{ratesSyncResult.total ?? 0}</b> weekly rates to Guesty
+              {ratesSyncResult.failures && ratesSyncResult.failures.length > 0 && (
+                <span style={{ color: "#92400e" }}>, {ratesSyncResult.failures.length} failed</span>
+              )}
+              {ratesSyncResult.error && <span style={{ color: "#991b1b" }}> — {ratesSyncResult.error}</span>}
+            </div>
+          )}
+          {pricingRows && pricingRows.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Week</th>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Verdict</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Base cost / night</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Baseline rate</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Demand adj</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Final rate</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Δ vs base</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pricingRows.map((r) => {
+                  const isTight = r.verdict === "tight";
+                  const isBlocked = r.verdict === "blocked";
+                  const bgColor = isBlocked ? "#fef2f2" : isTight ? "#fef3c7" : "transparent";
+                  return (
+                    <tr key={r.startDate} style={{ borderTop: "1px solid #f3f4f6", background: bgColor }}>
+                      <td style={{ padding: "5px 12px", fontFamily: "ui-monospace, monospace", fontSize: 11 }}>
+                        {fmtShort(r.startDate)} → {fmtShort(r.endDate)}
+                      </td>
+                      <td style={{ padding: "5px 12px" }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 3,
+                          background: isBlocked ? "#fee2e2" : isTight ? "#fde68a" : "#d1fae5",
+                          color: isBlocked ? "#991b1b" : isTight ? "#92400e" : "#166534",
+                          textTransform: "uppercase", letterSpacing: "0.04em",
+                        }}>{r.verdict}</span>
+                      </td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", color: "#6b7280" }}>${r.baseNightly}</td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", color: "#6b7280" }}>${r.baseOnlyRate}</td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", color: isTight ? "#92400e" : "#6b7280", fontWeight: isTight ? 600 : 400 }}>
+                        {r.demandFactor === 0 ? "—" : r.demandFactor === 1 ? "1.00×" : `${r.demandFactor.toFixed(2)}×`}
+                      </td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", fontWeight: 600, color: isBlocked ? "#9ca3af" : "#111827" }}>
+                        {isBlocked ? "—" : `$${r.targetRate}`}
+                      </td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", fontWeight: 600, color: r.deltaVsBase > 0 ? "#b45309" : r.deltaVsBase < 0 ? "#166534" : "#9ca3af" }}>
+                        {isBlocked ? "—" : r.deltaVsBase === 0 ? "0%" : `${r.deltaVsBase > 0 ? "+" : ""}${(r.deltaVsBase * 100).toFixed(1)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {!pricingRows && !pricingBusy && (
+            <div style={{ padding: "12px 16px", fontSize: 12, color: "#6b7280", textAlign: "center" }}>
+              Click <b>Compute weekly rates</b> to see per-week pricing based on this scan's tightness signal.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Heatmap ──────────────────────────────────────────── */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

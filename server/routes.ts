@@ -5261,6 +5261,110 @@ export async function registerRoutes(
     res.json({ started: true });
   });
 
+  // ── Weekly pricing correlation ──────────────────────────────────────
+  // Takes the per-week scan verdicts the client sends in (usually from
+  // the last run of the availability scan) and emits a per-week pricing
+  // forecast that the UI renders side-by-side with the scanner output.
+  //
+  // Formula:
+  //   baseNightly     = sum over units of buy_in_rate[BR] × season_multiplier
+  //   demandFactor    = tight → 1.12  |  open → 1.00  |  blocked → 0 (skipped)
+  //   targetRate      = round(baseNightly × demandFactor × (1 + margin) / (1 - 0.03))
+  //   deltaVsBase     = (targetRate - baseOnlyRate) / baseOnlyRate
+  //
+  // The demand factor is the knob that turns "tight inventory at this
+  // resort this week" into a publishable price bump — when fewer
+  // competing listings are available the floor clears naturally and our
+  // own rate can move with it.
+  app.post("/api/availability/weekly-pricing/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) return res.status(404).json({ error: "property not in config" });
+    const body = (req.body ?? {}) as {
+      windows?: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked" }>;
+      targetMargin?: number;
+    };
+    const windows = body.windows ?? [];
+    if (windows.length === 0) return res.status(400).json({ error: "windows required — run scan first" });
+    const { totalNightlyBuyInForMonth } = await import("@shared/pricing-rates");
+    const targetMargin = typeof body.targetMargin === "number" ? body.targetMargin : 0.20;
+    const feeDirect = 0.03;
+    // Cache baseNightly per month-key so we only look it up once per month.
+    const baseByMonth = new Map<string, number>();
+    const rows = windows.map((w) => {
+      const monthKey = w.startDate.slice(0, 7);
+      let baseNightly = baseByMonth.get(monthKey);
+      if (baseNightly == null) {
+        baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey);
+        baseByMonth.set(monthKey, baseNightly);
+      }
+      const demandFactor = w.verdict === "tight" ? 1.12 : w.verdict === "blocked" ? 0 : 1.00;
+      const baseOnlyRate = Math.round(baseNightly * (1 + targetMargin) / (1 - feeDirect));
+      const targetRate = demandFactor > 0
+        ? Math.round(baseNightly * demandFactor * (1 + targetMargin) / (1 - feeDirect))
+        : 0;
+      const deltaVsBase = baseOnlyRate > 0 && targetRate > 0
+        ? (targetRate - baseOnlyRate) / baseOnlyRate
+        : 0;
+      return {
+        startDate: w.startDate,
+        endDate: w.endDate,
+        verdict: w.verdict,
+        baseNightly,
+        demandFactor,
+        baseOnlyRate,
+        targetRate,
+        deltaVsBase,
+      };
+    });
+    res.json({
+      community: config.community,
+      targetMargin,
+      feeDirect,
+      rows,
+    });
+  });
+
+  // Push the weekly rate ranges to Guesty's calendar. Body: the same
+  // shape the weekly-pricing endpoint returns (so the client can send
+  // exactly what it's displaying). Skips weeks where verdict=blocked
+  // (those get blocked, not re-priced).
+  app.post("/api/availability/sync-weekly-rates/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const guestyListingId = await storage.getGuestyListingId(propertyId);
+    if (!guestyListingId) return res.status(400).json({ error: "no Guesty listing mapped" });
+
+    const body = (req.body ?? {}) as {
+      rows?: Array<{ startDate: string; endDate: string; targetRate: number; verdict: string }>;
+    };
+    const rows = (body.rows ?? []).filter((r) => r.verdict !== "blocked" && r.targetRate > 0);
+    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
+    let pushed = 0;
+    const failures: Array<{ startDate: string; error: string }> = [];
+    for (const r of rows) {
+      try {
+        await guestyRequest("PUT", calPath, {
+          startDate: r.startDate,
+          endDate: r.endDate,
+          price: r.targetRate,
+        });
+        pushed++;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      } catch (e: any) {
+        failures.push({ startDate: r.startDate, error: e?.message ?? String(e) });
+      }
+    }
+    res.json({
+      ok: failures.length === 0,
+      pushed,
+      total: rows.length,
+      failures,
+      syncedAt: new Date().toISOString(),
+    });
+  });
+
   // POST /api/builder/normalize-photos
   // Fetch a listing's existing Guesty pictures, run each through validateAndFixPhoto,
   // re-upload the fixed ones to ImgBB, and PUT the listing back.
