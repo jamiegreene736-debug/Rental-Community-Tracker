@@ -207,7 +207,11 @@ function clusterByDHash(hashes: (Buffer | null)[], threshold: number): number[] 
   return clusterOf;
 }
 
-async function coalesceBedrooms(items: LabeledResult[], folderPath: string): Promise<LabeledResult[]> {
+async function coalesceBedrooms(
+  items: LabeledResult[],
+  folderPath: string,
+  maxRooms?: number,
+): Promise<LabeledResult[]> {
   if (items.length === 0) return items;
 
   // Step 1: compute dHash per photo from the on-disk file.
@@ -218,7 +222,7 @@ async function coalesceBedrooms(items: LabeledResult[], folderPath: string): Pro
   // Step 2: cluster by visual similarity — one cluster per distinct room.
   const clusterOf = clusterByDHash(hashes, DHASH_SIMILARITY_THRESHOLD);
   const clusters = new Map<number, LabeledResult[]>();
-  const clusterOrder: number[] = [];
+  let clusterOrder: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const c = clusterOf[i];
     if (!clusters.has(c)) { clusters.set(c, []); clusterOrder.push(c); }
@@ -243,6 +247,21 @@ async function coalesceBedrooms(items: LabeledResult[], folderPath: string): Pro
   } else {
     const twoKings = clusterOrder.find((c) => clusterBedType(c) === "Two Kings");
     masterCluster = twoKings ?? clusterOrder.slice().sort((a, b) => clusterSize(b) - clusterSize(a))[0];
+  }
+
+  // Step 3.5: enforce the listing's declared bedroom count as a hard cap.
+  // Vision models occasionally over-count — e.g. a daybed in a den, or dHash
+  // splits one room into two clusters when photos are taken from opposite
+  // ends. The listing's own bed count (from Zillow's structured data) is far
+  // more reliable than photo inference. If we have more clusters than the
+  // listing claims, drop the smallest non-master clusters until we match.
+  if (maxRooms != null && clusterOrder.length > maxRooms) {
+    const keep = new Set<number>([masterCluster]);
+    const others = clusterOrder
+      .filter((c) => c !== masterCluster)
+      .sort((a, b) => clusterSize(b) - clusterSize(a));  // largest first
+    for (const c of others.slice(0, maxRooms - 1)) keep.add(c);
+    clusterOrder = clusterOrder.filter((c) => keep.has(c));
   }
 
   // Step 4: number rooms — master first, then the rest in encounter order.
@@ -497,7 +516,7 @@ export async function downloadAndPrioritize(opts: {
     ...bedroomItems, ...bathroomItems, ...livingItems, ...kitchenItems, ...diningItems,
   ].map((r) => r.tempName));
   const otherItems = survivors.filter((r) => !coalescedInputs.has(r.tempName));
-  const coalescedBedrooms = await coalesceBedrooms(bedroomItems, folderPath);
+  const coalescedBedrooms = await coalesceBedrooms(bedroomItems, folderPath, requiredBedrooms);
   const coalescedBathrooms = coalesceBathrooms(bathroomItems);
   // For Living/Kitchen/Dining: 1 photo per distinct room is usually right.
   // Living Areas allows 2 (many units have a separate family room or great
