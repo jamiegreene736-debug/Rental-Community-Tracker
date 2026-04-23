@@ -102,6 +102,31 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
 
+  // 24-month cost forecast. Independent of any scan — this is just
+  // BUY_IN_RATES × SEASON_MULTIPLIERS math, so we can show it immediately
+  // when the tab mounts without burning API credits.
+  type CostForecastRow = {
+    yearMonth: string;
+    season: "LOW" | "HIGH" | "HOLIDAY";
+    baseNightly: number;
+    targetRate: number;
+    deltaVsAvg: number;
+  };
+  const [costForecast, setCostForecast] = useState<{ rows: CostForecastRow[]; avgBaseNightly: number; community: string } | null>(null);
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/availability/cost-forecast/${propertyId}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled) setCostForecast(d);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
   // Tracks whether the initial GET for the schedule has completed. Uses
   // state (not a ref) so the auto-enable useEffect below re-runs after
   // the fetch resolves — a ref wouldn't trigger a re-render, and since
@@ -405,6 +430,75 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
   return (
     <div>
+      {/* ── 24-month cost forecast ────────────────────────────
+          Pure math from BUY_IN_RATES × SEASON_MULTIPLIERS — no
+          external API calls — so it renders immediately when the
+          tab mounts, before any scan is run. Spikes (HOLIDAY) and
+          deals (LOW) are tinted so the eye catches them fast. */}
+      {costForecast && costForecast.rows.length > 0 && (() => {
+        const rows = costForecast.rows;
+        const avg = costForecast.avgBaseNightly;
+        return (
+          <div style={{ marginBottom: 16, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
+            <div style={{
+              padding: "8px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb",
+              display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap",
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                24-Month Cost Forecast — {costForecast.community}
+              </span>
+              <span style={{ fontSize: 11, color: "#6b7280" }}>
+                avg base cost <b>${avg}</b>/night ·
+                <span style={{ color: "#166534", marginLeft: 6 }}>■ LOW</span>
+                <span style={{ color: "#92400e", marginLeft: 6 }}>■ HIGH</span>
+                <span style={{ color: "#991b1b", marginLeft: 6 }}>■ HOLIDAY (spike)</span>
+              </span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Month</th>
+                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Season</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Base cost / night</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Target rate</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>vs avg</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const [y, m] = r.yearMonth.split("-");
+                  const monthName = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m) - 1];
+                  const bg = r.season === "HOLIDAY" ? "#fef2f2" : r.season === "HIGH" ? "#fffbeb" : r.season === "LOW" ? "#f0fdf4" : "transparent";
+                  const seasonColor = r.season === "HOLIDAY" ? "#991b1b" : r.season === "HIGH" ? "#92400e" : "#166534";
+                  const deltaPct = (r.deltaVsAvg * 100);
+                  const deltaColor = deltaPct > 5 ? "#b45309" : deltaPct < -5 ? "#166534" : "#6b7280";
+                  return (
+                    <tr key={r.yearMonth} style={{ borderTop: "1px solid #f3f4f6", background: bg }}>
+                      <td style={{ padding: "5px 12px", fontWeight: 500 }}>{monthName} {y}</td>
+                      <td style={{ padding: "5px 12px" }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 3,
+                          background: "#fff", color: seasonColor, border: `1px solid ${seasonColor}33`,
+                          textTransform: "uppercase", letterSpacing: "0.04em",
+                        }}>{r.season}</span>
+                      </td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", color: "#6b7280" }}>${r.baseNightly}</td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", fontWeight: 600, color: "#111827" }}>${r.targetRate}</td>
+                      <td style={{ padding: "5px 12px", textAlign: "right", fontWeight: 600, color: deltaColor }}>
+                        {deltaPct === 0 ? "—" : `${deltaPct > 0 ? "+" : ""}${deltaPct.toFixed(1)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{ padding: "6px 12px", background: "#f9fafb", borderTop: "1px solid #e5e7eb", fontSize: 10, color: "#9ca3af" }}>
+              Uses the static buy-in rate × season multiplier per month. Run a scan below to layer in live demand (tight weeks add +12%).
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Scheduler card (Phase 4) ─────────────────────────── */}
       <div style={{
         marginBottom: 16, padding: "12px 14px",

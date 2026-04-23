@@ -5253,6 +5253,64 @@ export async function registerRoutes(
 
   // POST /api/availability/run-now/:propertyId — trigger the full pipeline
   // on demand (user clicked "Run now" in the UI).
+  // Cheap 24-month cost forecast. Zero external API calls — just looks up
+  // BUY_IN_RATES × SEASON_MULTIPLIERS for the property's community and
+  // emits a month-by-month row with the target rate and a
+  // "vs. 12-month rolling average" delta so spikes are obvious.
+  //
+  // Rendered on the Availability tab BEFORE the user runs a scan, so they
+  // can eyeball expensive months at a glance. ~1 ms per call server-side.
+  app.get("/api/availability/cost-forecast/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) return res.status(404).json({ error: "property not in config" });
+
+    const { totalNightlyBuyInForMonth, getSeasonForMonth, getCommunityRegion } = await import("@shared/pricing-rates");
+    const targetMargin = 0.20;
+    const feeDirect = 0.03;
+    const region = getCommunityRegion(config.community);
+
+    const now = new Date();
+    const rows: Array<{
+      yearMonth: string;
+      season: string;
+      baseNightly: number;
+      targetRate: number;
+    }> = [];
+    for (let m = 0; m < 24; m++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
+      const yearMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const baseNightly = totalNightlyBuyInForMonth(config.community, config.units, yearMonth);
+      const targetRate = baseNightly > 0
+        ? Math.round((baseNightly * (1 + targetMargin)) / (1 - feeDirect))
+        : 0;
+      rows.push({
+        yearMonth,
+        season: getSeasonForMonth(yearMonth, region),
+        baseNightly,
+        targetRate,
+      });
+    }
+    // Compute delta vs. the full-24-month average. Gives a stable, centered
+    // baseline that makes HIGH months read as +X% and LOW months as -Y%
+    // across the whole forecast window.
+    const avgBase = rows.reduce((a, r) => a + r.baseNightly, 0) / Math.max(1, rows.length);
+    const enriched = rows.map((r) => ({
+      ...r,
+      deltaVsAvg: avgBase > 0 ? (r.baseNightly - avgBase) / avgBase : 0,
+    }));
+
+    res.json({
+      community: config.community,
+      units: config.units,
+      targetMargin,
+      feeDirect,
+      avgBaseNightly: Math.round(avgBase),
+      rows: enriched,
+    });
+  });
+
   app.post("/api/availability/run-now/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
