@@ -1,23 +1,21 @@
-// Interactive curation grid for the Photos tab.
+// Simplified photo review surface for the Photos tab.
 //
-// The prior gallery was read-only — photos flowed straight from the scraper
-// + Claude labeler onto the page with no human correction step. Vision
-// models misclassify often enough (a living room tagged "Bedroom", a
-// kitchen tagged "Lanai") that a hands-on review step is required before
-// pushing to Guesty / Airbnb / VRBO / Booking.com.
+// Prior iteration grouped photos by AI-inferred category with a ⚠ flag on
+// uncertain tiles — too much UI for a manual-review workflow. The user
+// verifies against the source listing (Zillow) directly, so the tiles
+// just need to flow in listing order with:
 //
-// This component:
-//   - Groups photos by *effective* category (user override if set, else the
-//     labeler's category), with the expected-per-unit count in each header.
-//   - Surfaces low-confidence and missing-category tiles with a ⚠ badge.
-//   - Lets you inline-edit a caption, reassign a category, or hide a photo
-//     without leaving the builder flow.
-//   - Persists every change to /api/photo-labels/:folder/:filename via the
-//     new PUT endpoint. Hidden photos are skipped on push.
+//   1. Editable caption (click to edit)
+//   2. Delete button (soft-delete via the `hidden` flag)
+//   3. Per-unit source link so they can cross-check against the Zillow
+//      page when a unit looks short on photos
+//   4. A channel-limits banner at the top showing total photo count vs.
+//      Airbnb / VRBO / Booking.com maximums with green check / red X
 //
-// The URLs flowing in here look like /photos/<folder>/<filename>.jpg — we
-// parse folder+filename out of the URL rather than threading extra props
-// through the builder, which keeps the integration tiny.
+// Photos flow in via the builder.tsx assembly step, which already orders
+// them as: cover → community-begin → unit A → community-middle → unit B →
+// … → community-end. This component renders sections keyed by the `source`
+// field each photo carries.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -32,35 +30,19 @@ type LabelMeta = {
   hidden: boolean;
 };
 
-// Ordered to match the display priority we want on the page: bedrooms
-// first, then bathrooms, then shared rooms, outdoor, and the long tail.
-const CATEGORIES = [
-  "Bedrooms",
-  "Bathrooms",
-  "Living Areas",
-  "Kitchen",
-  "Dining",
-  "Outdoor & Lanai",
-  "Views",
-  "Building Exterior",
-  "Pool & Spa",
-  "Grounds & Landscaping",
-  "Common Areas",
-  "Beach Access",
-  "Activities",
-  "Other",
-] as const;
+// Published maxes per channel. Source: platform help docs as of 2026-04.
+// If any channel changes its limit the value gets updated here — the UI
+// pulls straight from this map.
+const CHANNEL_LIMITS: Array<{ key: string; label: string; max: number }> = [
+  { key: "airbnb",  label: "Airbnb",       max: 100 },
+  { key: "vrbo",    label: "VRBO",          max: 50 },
+  { key: "booking", label: "Booking.com",   max: 30 },
+];
 
-type Category = (typeof CATEGORIES)[number];
-
-// Parse "/photos/<folder>/<filename>" out of a URL. Returns null for
-// external URLs (Guesty CDN, Zillow CDN, etc.) — those aren't in our DB
-// so they can't be edited here.
 function parseLocalPath(url: string): { folder: string; filename: string } | null {
   try {
-    // Support both absolute ("https://...") and site-relative ("/photos/...")
     const path = url.startsWith("/") ? url : new URL(url).pathname;
-    const m = path.match(/^\/photos\/([^/]+)\/([^/?#]+)$/);
+    const m = path.match(/^\/photos\/([^/?#]+)\/([^/?#]+)$/);
     if (!m) return null;
     return { folder: m[1], filename: m[2] };
   } catch {
@@ -68,47 +50,25 @@ function parseLocalPath(url: string): { folder: string; filename: string } | nul
   }
 }
 
-function groupPhotosByUnit(photos: PhotoIn[]): Map<string, PhotoIn[]> {
-  const out = new Map<string, PhotoIn[]>();
-  for (const p of photos) {
-    const src = p.source || "Other";
-    if (!out.has(src)) out.set(src, []);
-    out.get(src)!.push(p);
-  }
-  return out;
-}
-
 export type PhotoCuratorProps = {
   photos: PhotoIn[];
-  // Called when the user hides/unhides a photo — lets the parent refresh
-  // its internal "photo count" indicators.
+  // folder → source URL on Zillow/Airbnb/VRBO. Populated by the parent
+  // from each unit's _source.json so we can render a "View on Zillow"
+  // link next to each section header. Optional — links just won't
+  // render for folders missing a source URL.
+  sourceUrlsByFolder?: Record<string, string>;
   onOverridesChanged?: () => void;
-  // Called when the user clicks "Generate Cover Collage" — the parent owns
-  // the Canvas + upload flow (restored from commit 106f15a).
-  onRequestCoverCollage?: () => void;
-  // Whether the cover-collage restore is available (i.e. there's at least
-  // one photo + a selected Guesty listing).
-  coverCollageEnabled?: boolean;
-  // UI-only feedback strings driven by the parent.
-  coverCollageStatus?: { phase: "idle" | "generating" | "uploading" | "done" | "error"; error?: string | null; preview?: string | null };
 };
 
 export default function PhotoCurator({
   photos,
+  sourceUrlsByFolder,
   onOverridesChanged,
-  onRequestCoverCollage,
-  coverCollageEnabled,
-  coverCollageStatus,
 }: PhotoCuratorProps) {
-  // folder/filename → metadata loaded from DB
   const [meta, setMeta] = useState<Map<string, LabelMeta>>(new Map());
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
-  const [showHidden, setShowHidden] = useState(false);
-  const [filterSuspicious, setFilterSuspicious] = useState(false);
 
-  // Extract every local folder we need to load labels for.
   const localFolders = useMemo(() => {
     const set = new Set<string>();
     for (const p of photos) {
@@ -118,7 +78,6 @@ export default function PhotoCurator({
     return Array.from(set);
   }, [photos]);
 
-  // Fetch labels for each folder.
   useEffect(() => {
     let cancelled = false;
     if (localFolders.length === 0) {
@@ -127,32 +86,29 @@ export default function PhotoCurator({
       return;
     }
     setLoading(true);
-    setLoadError(null);
     Promise.all(
       localFolders.map((folder) =>
         fetch(`/api/photo-labels/${encodeURIComponent(folder)}`)
           .then((r) => r.json().then((j) => ({ folder, ok: r.ok, body: j })))
-          .catch((e) => ({ folder, ok: false, body: { error: e.message } })),
+          .catch(() => ({ folder, ok: false, body: {} })),
       ),
     ).then((results) => {
       if (cancelled) return;
       const next = new Map<string, LabelMeta>();
-      const errs: string[] = [];
       for (const r of results) {
-        if (!r.ok || !r.body?.labels) { errs.push(`${r.folder}: ${r.body?.error ?? "unknown"}`); continue; }
+        if (!r.ok || !r.body?.labels) continue;
         for (const [filename, row] of Object.entries(r.body.labels as Record<string, LabelMeta>)) {
           next.set(`${r.folder}/${filename}`, row);
         }
       }
       setMeta(next);
-      setLoadError(errs.length > 0 ? errs.join(" · ") : null);
       setLoading(false);
     });
     return () => { cancelled = true; };
   }, [localFolders.join("|")]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const patchLabel = useCallback(
-    async (folder: string, filename: string, patch: Partial<Pick<LabelMeta, "userLabel" | "userCategory" | "hidden">>) => {
+    async (folder: string, filename: string, patch: Partial<Pick<LabelMeta, "userLabel" | "hidden">>) => {
       const key = `${folder}/${filename}`;
       setSavingKey(key);
       try {
@@ -163,9 +119,8 @@ export default function PhotoCurator({
         });
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({}));
-          throw new Error(body?.error || `HTTP ${resp.status}`);
+          throw new Error((body as any)?.error || `HTTP ${resp.status}`);
         }
-        // Optimistically merge into local state.
         setMeta((prev) => {
           const next = new Map(prev);
           const existing = next.get(key) ?? {
@@ -185,186 +140,147 @@ export default function PhotoCurator({
     [onOverridesChanged],
   );
 
-  // Build the grouped view. For each (folder, photo), resolve the effective
-  // category and caption from the override fallthrough chain.
-  type TileData = {
-    key: string;
-    photo: PhotoIn;
-    folder: string | null;
-    filename: string | null;
-    meta: LabelMeta | null;
-    effectiveCategory: string;
-    effectiveCaption: string;
-    suspicious: boolean;
-  };
-
-  const tiles: TileData[] = useMemo(() => {
-    return photos.map((p, i) => {
-      const parsed = parseLocalPath(p.url);
-      const key = parsed ? `${parsed.folder}/${parsed.filename}` : `external/${i}`;
-      const m = parsed ? meta.get(key) ?? null : null;
-      const effectiveCaption = m?.userLabel ?? m?.label ?? p.caption ?? "";
-      const effectiveCategory = m?.userCategory ?? m?.category ?? "Other";
-      // Flag a tile as suspicious when:
-      //   - labeler confidence is low (<0.70 — the old hard floor)
-      //   - OR it ended up in "Other" (either a sanity-check demotion or
-      //     the labeler genuinely had no idea)
-      //   - OR the user hasn't picked a category and the labeler didn't
-      //     assign one either.
-      const suspicious = !!m && (
-        (m.confidence != null && m.confidence < 0.70) ||
-        effectiveCategory === "Other"
-      );
-      return {
-        key,
-        photo: p,
-        folder: parsed?.folder ?? null,
-        filename: parsed?.filename ?? null,
-        meta: m,
-        effectiveCategory,
-        effectiveCaption,
-        suspicious,
-      };
+  // Build the render sections. Each consecutive run of photos with the
+  // same `source` becomes one section. Hidden photos are excluded from
+  // the displayed count but still render (dimmed) so the user can
+  // unhide them.
+  type Section = { source: string; photos: Array<PhotoIn & { key: string; folder: string | null; filename: string | null; meta: LabelMeta | null }> };
+  const sections: Section[] = [];
+  let current: Section | null = null;
+  for (const p of photos) {
+    const parsed = parseLocalPath(p.url);
+    const key = parsed ? `${parsed.folder}/${parsed.filename}` : `ext:${p.url.slice(-80)}`;
+    const m = parsed ? meta.get(key) ?? null : null;
+    const src = p.source || "Other";
+    if (!current || current.source !== src) {
+      current = { source: src, photos: [] };
+      sections.push(current);
+    }
+    current.photos.push({
+      ...p,
+      key,
+      folder: parsed?.folder ?? null,
+      filename: parsed?.filename ?? null,
+      meta: m,
     });
-  }, [photos, meta]);
-
-  // Group tiles by (unit source → category) for the section headers.
-  // Units are expected to appear in the same order the photos array
-  // presents them.
-  const unitOrder: string[] = [];
-  const unitMap = new Map<string, TileData[]>();
-  for (const t of tiles) {
-    const src = t.photo.source || "Other";
-    if (!unitMap.has(src)) { unitMap.set(src, []); unitOrder.push(src); }
-    unitMap.get(src)!.push(t);
   }
 
-  const byCategory = (items: TileData[]): Map<string, TileData[]> => {
-    const m = new Map<string, TileData[]>();
-    for (const cat of CATEGORIES) m.set(cat, []);
-    for (const t of items) {
-      if (t.meta?.hidden && !showHidden) continue;
-      if (filterSuspicious && !t.suspicious && !t.meta?.hidden) continue;
-      const cat = CATEGORIES.includes(t.effectiveCategory as Category) ? t.effectiveCategory : "Other";
-      if (!m.has(cat)) m.set(cat, []);
-      m.get(cat)!.push(t);
-    }
-    return m;
-  };
+  // Tally visible photos (all sections combined, excluding hidden). The
+  // banner at the top compares this against each channel's cap.
+  const visibleCount = photos.reduce((acc, p) => {
+    const parsed = parseLocalPath(p.url);
+    if (!parsed) return acc + 1;  // external photos (Guesty CDN) count as visible
+    const m = meta.get(`${parsed.folder}/${parsed.filename}`);
+    return m?.hidden ? acc : acc + 1;
+  }, 0);
 
   return (
     <div style={{ marginBottom: 16 }}>
-      {/* Toolbar */}
+      {/* Channel-limits banner — quick visual check against each
+          platform's photo cap. Green ✓ when visibleCount ≤ max, red ✗
+          when over. */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
-        padding: "10px 12px", background: "#f9fafb", border: "1px solid #e5e7eb",
-        borderRadius: 6, marginBottom: 12, fontSize: 12,
+        display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
+        padding: "10px 14px", background: "#f9fafb", border: "1px solid #e5e7eb",
+        borderRadius: 6, marginBottom: 14, fontSize: 12,
       }}>
-        <div style={{ fontWeight: 600, color: "#111827" }}>Photo Curation</div>
-        <div style={{ color: "#6b7280" }}>
-          {loading ? "Loading labels…" :
-            loadError ? `⚠ ${loadError}` :
-              `${tiles.length} photos · ${tiles.filter((t) => t.meta?.hidden).length} hidden · ${tiles.filter((t) => t.suspicious && !t.meta?.hidden).length} flagged`}
+        <div>
+          <span style={{ fontWeight: 600, color: "#111827" }}>
+            {visibleCount} photo{visibleCount === 1 ? "" : "s"}
+          </span>
+          <span style={{ color: "#6b7280", marginLeft: 6 }}>total</span>
         </div>
-
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
-            <input type="checkbox" checked={filterSuspicious} onChange={(e) => setFilterSuspicious(e.target.checked)} />
-            Show only flagged
-          </label>
-          <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
-            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
-            Show hidden
-          </label>
-        </div>
+        <div style={{ color: "#d1d5db" }}>|</div>
+        {CHANNEL_LIMITS.map((ch) => {
+          const ok = visibleCount <= ch.max;
+          return (
+            <div key={ch.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 18, height: 18, borderRadius: "50%",
+                background: ok ? "#dcfce7" : "#fee2e2",
+                color: ok ? "#166534" : "#991b1b",
+                fontWeight: 700, fontSize: 11,
+              }}>{ok ? "✓" : "✗"}</span>
+              <span>
+                <b>{ch.label}</b>
+                <span style={{ color: "#6b7280" }}> · max {ch.max}</span>
+                {!ok && (
+                  <span style={{ color: "#991b1b", marginLeft: 4 }}>
+                    (over by {visibleCount - ch.max})
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+        {loading && <span style={{ marginLeft: "auto", color: "#9ca3af" }}>Loading labels…</span>}
       </div>
 
-      {/* Cover collage */}
-      {coverCollageEnabled && onRequestCoverCollage && (
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-          padding: "8px 12px", background: "#f0f9ff", border: "1px solid #bae6fd",
-          borderRadius: 6, marginBottom: 12, fontSize: 12,
-        }}>
-          <button
-            onClick={onRequestCoverCollage}
-            disabled={coverCollageStatus?.phase === "generating" || coverCollageStatus?.phase === "uploading"}
-            style={{
-              padding: "6px 12px", background: "#0369a1", color: "white",
-              border: 0, borderRadius: 4, fontSize: 12, fontWeight: 500,
-              cursor: "pointer",
-            }}
-          >
-            {coverCollageStatus?.phase === "done" ? "↺ Regenerate Cover Collage" : "🖼 Auto-Set Cover Collage"}
-          </button>
-          <span style={{ color: "#0369a1" }}>
-            Picks the best outdoor + best indoor photo, stitches them into a 2400×1200 cover, uploads to Guesty.
-          </span>
-          {coverCollageStatus?.phase === "generating" && <span style={{ color: "#2563eb" }}>⏳ Generating…</span>}
-          {coverCollageStatus?.phase === "uploading" && <span style={{ color: "#2563eb" }}>⏳ Uploading…</span>}
-          {coverCollageStatus?.phase === "done" && <span style={{ color: "#16a34a" }}>✓ Set as cover</span>}
-          {coverCollageStatus?.phase === "error" && <span style={{ color: "#dc2626" }}>✗ {coverCollageStatus.error}</span>}
-          {coverCollageStatus?.preview && (
-            <img src={coverCollageStatus.preview} alt="Cover preview" style={{ height: 36, borderRadius: 3, border: "1px solid #bae6fd" }} />
-          )}
-        </div>
-      )}
-
-      {/* Per-unit category grids */}
-      {unitOrder.map((unit) => {
-        const unitTiles = unitMap.get(unit) ?? [];
-        const byCat = byCategory(unitTiles);
-        const hasContent = Array.from(byCat.values()).some((arr) => arr.length > 0);
-        if (!hasContent) return null;
+      {/* Sections — one block per contiguous run of same-source photos. */}
+      {sections.map((section, i) => {
+        // All photos in this section should share a folder, but parsed
+        // URLs handle the edge case of mixed sources gracefully.
+        const firstFolder = section.photos.find((p) => p.folder)?.folder ?? null;
+        const sourceUrl = firstFolder ? sourceUrlsByFolder?.[firstFolder] : undefined;
+        const sectionVisible = section.photos.filter((p) => !p.meta?.hidden).length;
 
         return (
-          <div key={unit} style={{ marginBottom: 24 }}>
+          <div key={`${section.source}-${i}`} style={{ marginBottom: 20 }}>
             <div style={{
-              fontSize: 11, fontWeight: 700, color: "#6b7280",
-              textTransform: "uppercase", letterSpacing: "0.05em",
-              padding: "10px 0 8px", borderBottom: "2px solid #111827",
-              marginBottom: 10,
+              display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
+              padding: "8px 0 6px", borderBottom: "1px solid #e5e7eb", marginBottom: 10,
             }}>
-              {unit} — {unitTiles.filter((t) => !t.meta?.hidden).length} visible photo{unitTiles.filter((t) => !t.meta?.hidden).length !== 1 ? "s" : ""}
+              <div style={{
+                fontSize: 12, fontWeight: 600, color: "#6b7280",
+                textTransform: "uppercase", letterSpacing: "0.05em",
+              }}>
+                {section.source} — {sectionVisible} photo{sectionVisible === 1 ? "" : "s"}
+              </div>
+              {sourceUrl && (
+                <a
+                  href={sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    fontSize: 11, color: "#2563eb", textDecoration: "none",
+                    padding: "2px 8px", background: "#eff6ff", border: "1px solid #bfdbfe",
+                    borderRadius: 3,
+                  }}
+                  title="Open source listing in a new tab to verify photo coverage"
+                >
+                  ↗ View source listing
+                </a>
+              )}
             </div>
-
-            {CATEGORIES.map((cat) => {
-              const items = byCat.get(cat) ?? [];
-              if (items.length === 0) return null;
-              return (
-                <div key={cat} style={{ marginBottom: 12 }}>
-                  <div style={{
-                    fontSize: 11, fontWeight: 600, color: "#111827",
-                    padding: "4px 0 4px", marginBottom: 6,
-                  }}>
-                    {cat} <span style={{ color: "#6b7280", fontWeight: 400 }}>({items.length})</span>
-                  </div>
-                  <div style={{
-                    display: "grid", gap: 8,
-                    gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
-                  }}>
-                    {items.map((tile) => (
-                      <PhotoTile
-                        key={tile.key}
-                        tile={tile}
-                        saving={savingKey === tile.key}
-                        onPatch={(patch) => {
-                          if (!tile.folder || !tile.filename) return;
-                          patchLabel(tile.folder, tile.filename, patch);
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+            <div style={{
+              display: "grid", gap: 8,
+              gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+            }}>
+              {section.photos.map((tile, tileIdx) => (
+                <PhotoTile
+                  key={tile.key}
+                  tile={tile}
+                  index={tileIdx + 1}
+                  saving={savingKey === tile.key}
+                  onEditCaption={(caption) => {
+                    if (!tile.folder || !tile.filename) return;
+                    patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
+                  }}
+                  onDelete={() => {
+                    if (!tile.folder || !tile.filename) return;
+                    patchLabel(tile.folder, tile.filename, { hidden: !tile.meta?.hidden });
+                  }}
+                />
+              ))}
+            </div>
           </div>
         );
       })}
 
-      {tiles.length === 0 && !loading && (
+      {photos.length === 0 && !loading && (
         <div style={{ padding: 24, textAlign: "center", color: "#6b7280", fontSize: 13 }}>
-          No photos to curate yet. Rescrape a unit to populate this view.
+          No photos to review. Rescrape a unit to populate this view.
         </div>
       )}
     </div>
@@ -373,70 +289,61 @@ export default function PhotoCurator({
 
 function PhotoTile({
   tile,
+  index,
   saving,
-  onPatch,
+  onEditCaption,
+  onDelete,
 }: {
   tile: {
     key: string;
-    photo: { url: string; caption?: string; source?: string };
+    url: string;
+    caption?: string;
     folder: string | null;
     filename: string | null;
     meta: LabelMeta | null;
-    effectiveCategory: string;
-    effectiveCaption: string;
-    suspicious: boolean;
   };
+  index: number;
   saving: boolean;
-  onPatch: (patch: Partial<Pick<LabelMeta, "userLabel" | "userCategory" | "hidden">>) => void;
+  onEditCaption: (caption: string) => void;
+  onDelete: () => void;
 }) {
+  // Effective caption — user override wins, else labeler output, else
+  // whatever the parent passed in (static label fallback), else blank.
+  const effectiveCaption = tile.meta?.userLabel ?? tile.meta?.label ?? tile.caption ?? "";
+
   const [editing, setEditing] = useState(false);
-  const [draftCaption, setDraftCaption] = useState(tile.effectiveCaption);
+  const [draft, setDraft] = useState(effectiveCaption);
+  useEffect(() => { setDraft(effectiveCaption); }, [effectiveCaption]);
 
-  useEffect(() => {
-    // Reset draft when the underlying caption changes (e.g. rescrape)
-    setDraftCaption(tile.effectiveCaption);
-  }, [tile.effectiveCaption]);
-
-  const confidence = tile.meta?.confidence ?? null;
-  const hasOverride = !!(tile.meta?.userLabel || tile.meta?.userCategory);
   const hidden = !!tile.meta?.hidden;
-  const cannotEdit = !tile.folder;  // external (Guesty CDN) photos aren't in our DB
+  const cannotEdit = !tile.folder;
 
   return (
     <div style={{
       position: "relative",
-      border: tile.suspicious ? "2px solid #d97706" : hasOverride ? "2px solid #16a34a" : "1px solid #e5e7eb",
+      border: tile.meta?.userLabel ? "2px solid #16a34a" : "1px solid #e5e7eb",
       borderRadius: 6, background: "#fff",
-      overflow: "hidden", opacity: hidden ? 0.5 : 1,
+      overflow: "hidden", opacity: hidden ? 0.4 : 1,
     }}>
       <div style={{ position: "relative", aspectRatio: "4/3", background: "#f3f4f6" }}>
         <img
-          src={tile.photo.url}
-          alt={tile.effectiveCaption}
+          src={tile.url}
+          alt={effectiveCaption}
           loading="lazy"
           style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
         />
-        {tile.suspicious && !hidden && (
-          <div style={{
-            position: "absolute", top: 4, left: 4,
-            background: "#d97706", color: "white", fontSize: 10, fontWeight: 600,
-            padding: "2px 6px", borderRadius: 3,
-          }}>⚠ check</div>
-        )}
-        {hasOverride && (
-          <div style={{
-            position: "absolute", top: 4, right: 4,
-            background: "#16a34a", color: "white", fontSize: 10, fontWeight: 600,
-            padding: "2px 6px", borderRadius: 3,
-          }}>edited</div>
-        )}
+        <div style={{
+          position: "absolute", top: 4, left: 4,
+          background: "rgba(17,24,39,0.7)", color: "white", fontSize: 10, fontWeight: 600,
+          padding: "2px 6px", borderRadius: 3,
+        }}>{index}</div>
         {hidden && (
           <div style={{
             position: "absolute", inset: 0, display: "flex",
             alignItems: "center", justifyContent: "center",
-            background: "rgba(0,0,0,0.4)", color: "white",
-            fontSize: 12, fontWeight: 600, letterSpacing: "0.05em",
-          }}>HIDDEN</div>
+            background: "rgba(0,0,0,0.5)", color: "white",
+            fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
+          }}>DELETED</div>
         )}
       </div>
 
@@ -444,17 +351,15 @@ function PhotoTile({
         {editing && !cannotEdit ? (
           <input
             autoFocus
-            value={draftCaption}
-            onChange={(e) => setDraftCaption(e.target.value)}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
             onBlur={() => {
               setEditing(false);
-              if (draftCaption.trim() !== (tile.effectiveCaption || "")) {
-                onPatch({ userLabel: draftCaption.trim() || null });
-              }
+              if (draft.trim() !== (effectiveCaption || "")) onEditCaption(draft);
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              if (e.key === "Escape") { setDraftCaption(tile.effectiveCaption); setEditing(false); }
+              if (e.key === "Escape") { setDraft(effectiveCaption); setEditing(false); }
             }}
             style={{
               fontSize: 11, padding: "4px 6px",
@@ -472,44 +377,21 @@ function PhotoTile({
               whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
             }}
           >
-            {tile.effectiveCaption || <span style={{ color: "#9ca3af" }}>(no caption)</span>}
+            {effectiveCaption || <span style={{ color: "#9ca3af" }}>(click to add caption)</span>}
           </div>
         )}
-
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <select
-            value={tile.effectiveCategory}
-            disabled={cannotEdit || saving}
-            onChange={(e) => onPatch({ userCategory: e.target.value === (tile.meta?.category ?? "") ? null : e.target.value })}
-            style={{
-              fontSize: 10, padding: "2px 4px",
-              border: "1px solid #d1d5db", borderRadius: 3,
-              flex: 1, minWidth: 0,
-            }}
-          >
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <button
-            disabled={cannotEdit || saving}
-            onClick={() => onPatch({ hidden: !hidden })}
-            title={hidden ? "Restore to published set" : "Hide from published set"}
-            style={{
-              fontSize: 10, padding: "2px 6px",
-              background: hidden ? "#16a34a" : "#fee2e2",
-              color: hidden ? "white" : "#dc2626",
-              border: 0, borderRadius: 3, cursor: "pointer", fontWeight: 600,
-            }}
-          >{hidden ? "restore" : "hide"}</button>
-        </div>
-
-        {confidence != null && (
-          <div style={{ color: "#9ca3af", fontSize: 10 }}>
-            conf {confidence.toFixed(2)}
-            {tile.meta?.category && tile.meta.category !== tile.effectiveCategory && (
-              <> · was <em>{tile.meta.category}</em></>
-            )}
-          </div>
-        )}
+        <button
+          disabled={cannotEdit || saving}
+          onClick={onDelete}
+          title={hidden ? "Restore this photo to the published set" : "Remove this photo from the published set"}
+          style={{
+            fontSize: 10, padding: "3px 6px",
+            background: hidden ? "#dcfce7" : "#fee2e2",
+            color: hidden ? "#166534" : "#991b1b",
+            border: 0, borderRadius: 3, cursor: "pointer", fontWeight: 600,
+            alignSelf: "flex-start",
+          }}
+        >{hidden ? "↺ restore" : "✕ delete"}</button>
       </div>
     </div>
   );

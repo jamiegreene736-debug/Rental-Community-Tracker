@@ -108,6 +108,29 @@ export default function Builder() {
     return () => { cancelled = true; };
   }, [allFolders]);
 
+  // Fetch the source URL (Zillow / Airbnb / VRBO) stamped into each
+  // folder's _source.json by the last rescrape. PhotoCurator renders a
+  // "View source listing" link per section so the user can cross-check
+  // the photo set against the upstream page directly.
+  const [sourceUrlsByFolder, setSourceUrlsByFolder] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const out: Record<string, string> = {};
+      await Promise.all(allFolders.map(async (f) => {
+        try {
+          const r = await fetch(`/api/builder/photo-source/${encodeURIComponent(f)}`);
+          if (!r.ok) return;
+          const data = await r.json() as { source?: { sourceListing?: { url?: string } } | null };
+          const url = data?.source?.sourceListing?.url;
+          if (url) out[f] = url;
+        } catch {}
+      }));
+      if (!cancelled) setSourceUrlsByFolder(out);
+    })();
+    return () => { cancelled = true; };
+  }, [allFolders]);
+
   const propertyData = useMemo<GuestyPropertyData | null>(() => {
     if (!property) return null;
 
@@ -138,24 +161,36 @@ export default function Builder() {
 
     const photos: Array<{ url: string; caption: string; source: string }> = [];
 
-    // Community (beginning)
+    // Community photo bucket. Split into begin / end based on the static
+    // position hint (when we have one) and partition the "begin" list so we
+    // can thread one community tile between each unit's run — the published
+    // channels render better with a visual break between unit A and unit B.
     const communityFiles = folderFiles[property.communityPhotoFolder] ?? property.communityPhotos.map((p) => p.filename);
-    // Preserve the "beginning vs end" split the static data defines; for
-    // unknown filenames we treat them as "beginning" by default.
     const knownComm = new Map(property.communityPhotos.map((p) => [p.filename, p]));
-    const communityBegin = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
-    const communityEnd   = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
+    const communityBeginAll = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
+    const communityEnd      = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
+    const communityBeginVisible = communityBeginAll.filter((f) => !isHidden(property.communityPhotoFolder, f));
 
-    // Skip photos the user marked as hidden in the curator — they're kept
-    // in the DB (and in the folder on disk) but excluded from the published
-    // set sent to Guesty / Airbnb / VRBO / Booking.com.
-    for (const filename of communityBegin) {
-      if (isHidden(property.communityPhotoFolder, filename)) continue;
+    // Reserve N-1 tiles to sit between units (one separator per gap), and
+    // put the rest up-front as the "community opener" block. For the common
+    // 2-unit case with 6 community photos, that's 5 opener + 1 separator.
+    const unitCount = property.units.length;
+    const separatorsNeeded = Math.max(0, unitCount - 1);
+    const communityOpenerCount = Math.max(0, communityBeginVisible.length - separatorsNeeded);
+    const communityOpener    = communityBeginVisible.slice(0, communityOpenerCount);
+    const communitySeparators = communityBeginVisible.slice(communityOpenerCount);
+
+    const pushCommunity = (filename: string, bandLabel: string) => {
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
         caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
-        source: `Community — ${property.complexName}`,
+        source: bandLabel,
       });
+    };
+
+    // Opener: community photos before the first unit.
+    for (const filename of communityOpener) {
+      pushCommunity(filename, `Community — ${property.complexName}`);
     }
 
     property.units.forEach((u, i) => {
@@ -169,6 +204,11 @@ export default function Builder() {
           caption: labelFor(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         });
+      }
+      // After each unit (except the last one), insert one community
+      // separator so the published feed has a visual break between units.
+      if (i < property.units.length - 1 && communitySeparators[i]) {
+        pushCommunity(communitySeparators[i], `Community — ${property.complexName}`);
       }
     });
 
@@ -271,6 +311,7 @@ export default function Builder() {
       <GuestyListingBuilder
         propertyData={propertyData}
         propertyId={propertyId}
+        sourceUrlsByFolder={sourceUrlsByFolder}
         onBuildComplete={(result) => {
           if (result.listingId) {
             toast({
