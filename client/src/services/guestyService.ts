@@ -43,7 +43,19 @@ export type GuestyPricing = {
 export type GuestyBookingSettings = {
   minNights?: number;
   maxNights?: number;
+  // Legacy single-policy field. Kept for callers that haven't migrated
+  // to per-channel policies. When `cancellationPolicies` is also set,
+  // the per-channel values win.
   cancellationPolicy?: string;
+  // Per-channel cancellation policies. Each channel has its own enum
+  // of accepted values — see GuestyListingBuilder's dropdowns for the
+  // options. Pushed via `integrations.{airbnb2|homeaway2|bookingCom}`
+  // alongside the top-level `terms.cancellationPolicy` fallback.
+  cancellationPolicies?: {
+    airbnb?: string;
+    vrbo?: string;
+    booking?: string;
+  };
   instantBooking?: boolean;
   advanceNotice?: number;    // days before check-in that booking must be made (0 = same day)
   preparationTime?: number;  // buffer/cleaning days blocked after checkout
@@ -272,11 +284,23 @@ class GuestyService {
   }
 
   async updateBookingSettings(id: string, settings: GuestyBookingSettings) {
+    // Top-level `terms.cancellationPolicy` is the fallback applied when a
+    // channel-specific policy isn't set. We default it to the Airbnb
+    // value (most listings publish on Airbnb) so the listing has a sane
+    // universal policy even if the operator only cared about one channel.
+    const perChannel = settings.cancellationPolicies;
+    const universalPolicy =
+      settings.cancellationPolicy ??
+      perChannel?.airbnb ??
+      perChannel?.vrbo ??
+      perChannel?.booking ??
+      "firm";
+
     const terms: Record<string, unknown> = {
-      minNights:          settings.minNights          ?? 3,
-      maxNights:          settings.maxNights          ?? 365,
-      cancellationPolicy: settings.cancellationPolicy ?? "flexible",
-      instantBooking:     settings.instantBooking     ?? true,
+      minNights:          settings.minNights  ?? 3,
+      maxNights:          settings.maxNights  ?? 365,
+      cancellationPolicy: universalPolicy,
+      instantBooking:     settings.instantBooking ?? true,
     };
     // Guesty stores advanceNotice in hours (0 = same day, 24 = 1 day, 48 = 2 days…)
     if (settings.advanceNotice !== undefined) {
@@ -286,7 +310,31 @@ class GuestyService {
     if (settings.preparationTime !== undefined) {
       terms.preparationTime = settings.preparationTime;
     }
-    return this.request("PUT", `/listings/${id}`, { terms });
+
+    const body: Record<string, unknown> = { terms };
+
+    // Per-channel overrides via the Guesty integrations payload. Following
+    // the same multi-shape defensive approach as channel markup (see
+    // server/routes.ts /push-channel-markups) — Guesty's schema for these
+    // fields has drifted across API versions; we send the current
+    // canonical shape. If a channel isn't selected it stays untouched.
+    if (perChannel) {
+      const integrations: Record<string, Record<string, unknown>> = {};
+      if (perChannel.airbnb) {
+        integrations.airbnb2 = { cancellationPolicy: perChannel.airbnb };
+      }
+      if (perChannel.vrbo) {
+        integrations.homeaway2 = { cancellationPolicy: perChannel.vrbo };
+      }
+      if (perChannel.booking) {
+        integrations.bookingCom = { cancellationPolicy: perChannel.booking };
+      }
+      if (Object.keys(integrations).length > 0) {
+        body.integrations = integrations;
+      }
+    }
+
+    return this.request("PUT", `/listings/${id}`, body);
   }
 
   async blockCalendarDates(listingId: string, startDate: string, endDate: string) {

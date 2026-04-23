@@ -745,13 +745,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // against inventory races. Tighten per-property in the Pricing tab's
   // Booking Rules card if you want a specific listing to accept
   // shorter-notice bookings.
+  //
+  // Cancellation is split per-channel because Airbnb, VRBO, and
+  // Booking.com each have their own enum of accepted policy IDs —
+  // the old single "flexible|moderate|..." field couldn't express
+  // channel-specific policies cleanly. Defaults hit the operator's
+  // requested floor: "30+ days notice for a full refund, 50%+ penalty
+  // for late cancellation."
   const [bookingRules, setBookingRules] = useState({
     minNights: 3,
     maxNights: 365,
     advanceNotice: 60,  // days — see comment above
     preparationTime: 1, // days (cleaning buffer)
     instantBooking: true,
-    cancellationPolicy: "flexible",
+    cancellationPolicies: {
+      airbnb: "firm",     // 30d full refund · 14d 50% refund · <14d no refund
+      vrbo: "FIRM",       // 60d full refund · 30d 50% refund · <30d no refund
+      booking: "non_refundable", // Booking.com custom schedules are operator-defined in the Extranet
+    },
   });
   const [pushingBooking, setPushingBooking] = useState(false);
 
@@ -2923,7 +2934,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               advanceNotice: bookingRules.advanceNotice,
                               preparationTime: bookingRules.preparationTime,
                               instantBooking: bookingRules.instantBooking,
-                              cancellationPolicy: bookingRules.cancellationPolicy,
+                              cancellationPolicies: bookingRules.cancellationPolicies,
                             });
                             toast({
                               title: "Booking rules pushed to Guesty",
@@ -3009,26 +3020,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>365 = no cap</span>
                       </label>
 
-                      {/* Cancellation policy */}
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
-                          Cancellation Policy
-                        </span>
-                        <select
-                          value={bookingRules.cancellationPolicy}
-                          onChange={e => setBookingRules(r => ({ ...r, cancellationPolicy: e.target.value }))}
-                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 13, background: "var(--background)", width: "100%" }}
-                          data-testid="select-cancellation-policy"
-                        >
-                          <option value="flexible">Flexible (full refund 24h before)</option>
-                          <option value="moderate">Moderate (full refund 5 days before)</option>
-                          <option value="strict">Strict (50% refund up to 1 week)</option>
-                          <option value="super_strict_30">Super Strict 30 days</option>
-                          <option value="super_strict_60">Super Strict 60 days</option>
-                          <option value="non_refundable">Non-refundable</option>
-                        </select>
-                      </label>
-
                       {/* Instant booking toggle */}
                       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
@@ -3054,6 +3045,72 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         </div>
                         <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Off = guests must request, you approve</span>
                       </label>
+                    </div>
+
+                    {/* Cancellation policies — one per channel.
+                        Airbnb / VRBO / Booking.com each have their own
+                        enum of accepted policy IDs. The defaults hit
+                        "30+ days notice for full refund, 50%+ penalty
+                        for late cancellation" where each channel's
+                        vocabulary allows it (see state defaults above). */}
+                    <div style={{ marginTop: 14, padding: "12px 14px", background: "var(--muted)", borderRadius: 6, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-foreground)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+                        Cancellation policies by channel
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+                        {/* Airbnb */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#FF385C" }}>Airbnb</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.airbnb}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, airbnb: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-airbnb"
+                          >
+                            <option value="flexible">Flexible — full refund 24h before</option>
+                            <option value="moderate">Moderate — full refund 5 days before</option>
+                            <option value="firm">Firm — 30d full / 14d 50% / &lt;14d none</option>
+                            <option value="strict">Strict — 50% up to 7 days / no refund after</option>
+                            <option value="super_strict_30">Super Strict 30 — 50% up to 30 days / none after</option>
+                            <option value="super_strict_60">Super Strict 60 — 50% up to 60 days / none after</option>
+                            <option value="non_refundable">Non-refundable</option>
+                          </select>
+                        </label>
+
+                        {/* VRBO */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#245ABC" }}>VRBO</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.vrbo}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, vrbo: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-vrbo"
+                          >
+                            <option value="RELAXED">Relaxed — 14d full / 7d 50%</option>
+                            <option value="MODERATE">Moderate — 30d full / 14d 50%</option>
+                            <option value="FIRM">Firm — 60d full / 30d 50% / &lt;30d none</option>
+                            <option value="STRICT">Strict — 60d full / 30d 50% / &lt;30d none (stricter enforcement)</option>
+                            <option value="NO_REFUND">No refund</option>
+                          </select>
+                        </label>
+
+                        {/* Booking.com */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#003580" }}>Booking.com</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.booking}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, booking: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-booking"
+                          >
+                            <option value="flexible">Flexible — free cancellation until X days</option>
+                            <option value="moderate">Moderate — partial refund</option>
+                            <option value="strict">Strict — limited refund</option>
+                            <option value="non_refundable">Non-refundable</option>
+                          </select>
+                          <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Exact day thresholds are configured in the Booking Extranet — this picks the shape.</span>
+                        </label>
+                      </div>
                     </div>
                   </div>
                 )}
