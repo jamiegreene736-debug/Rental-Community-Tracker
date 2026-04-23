@@ -5312,13 +5312,21 @@ export async function registerRoutes(
       await page.fill("#tat_number-text", tatLicense);
 
       // Attestation checkbox — selector has a generated-id suffix, so target by
-      // prefix. If it's already checked we leave it; otherwise click it.
+      // prefix. The native <input> is hidden under a styled label on Airbnb's
+      // React form, so .click() on the input often fires but doesn't toggle
+      // the controlled state. Verify post-click and fall back to the label.
       const attestationHandle = await page.$('input[id^="attestation-attestation-row"]');
       if (attestationHandle) {
-        const isChecked = await attestationHandle.isChecked().catch(() => false);
-        if (!isChecked) {
-          await attestationHandle.click();
-          trace.push({ step: "checked-attestation" });
+        const attestationId = await attestationHandle.getAttribute("id").catch(() => null);
+        const startChecked = await attestationHandle.isChecked().catch(() => false);
+        if (!startChecked) {
+          await attestationHandle.check({ force: true }).catch(() => {});
+          let nowChecked = await attestationHandle.isChecked().catch(() => false);
+          if (!nowChecked && attestationId) {
+            await page.click(`label[for="${attestationId}"]`, { force: true }).catch(() => {});
+            nowChecked = await attestationHandle.isChecked().catch(() => false);
+          }
+          trace.push({ step: nowChecked ? "checked-attestation" : "attestation-click-did-not-toggle" });
         } else {
           trace.push({ step: "attestation-already-checked" });
         }
@@ -5339,7 +5347,8 @@ export async function registerRoutes(
 
       // Click Next. The button lives at the top-level of the form; match by visible text.
       trace.push({ step: "clicking-next" });
-      await page.click('button:has-text("Next")', { timeout: 8000 }).catch(() => { /* surface in trace below */ });
+      const nextClickError = await page.click('button:has-text("Next")', { timeout: 8000 }).then(() => null).catch((err: Error) => err.message);
+      if (nextClickError) trace.push({ step: "next-click-failed", detail: nextClickError });
       // Wait for navigation OR for a new heading/form that indicates we moved to the next step.
       await page.waitForTimeout(4000);
 
@@ -5351,6 +5360,27 @@ export async function registerRoutes(
       const postBodyPreview = await page
         .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500))
         .catch(() => "");
+      // Scrape visible validation errors so the UI can show the actual reason
+      // rather than a generic "didn't advance" message.
+      const errorMessages = await page.evaluate(() => {
+        const out = new Set<string>();
+        document.querySelectorAll('[role="alert"], [aria-live="polite"], [aria-live="assertive"]').forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          if (txt && txt.length > 0 && txt.length < 300) out.add(txt);
+        });
+        // Airbnb's inline field errors are rendered adjacent to aria-invalid inputs.
+        document.querySelectorAll('[aria-invalid="true"]').forEach((el) => {
+          const describedBy = el.getAttribute("aria-describedby");
+          if (describedBy) {
+            describedBy.split(/\s+/).forEach((id) => {
+              const target = id && document.getElementById(id);
+              const txt = target && (target.textContent || "").trim();
+              if (txt && txt.length < 300) out.add(txt);
+            });
+          }
+        });
+        return Array.from(out).slice(0, 5);
+      }).catch(() => [] as string[]);
       const advanced = postSubmitUrl !== targetUrl;
 
       // Pull the saved status from Guesty — airbnb2.permits.regulations is
@@ -5358,6 +5388,9 @@ export async function registerRoutes(
       // submit worked we'll see status:"success" there (may take a
       // moment to propagate; caller can re-check).
       trace.push({ step: advanced ? "submission-advanced" : "submission-maybe-stuck", detail: postSubmitUrl });
+      if (!advanced) {
+        console.log(`[airbnb-compliance] listing ${listingId} did not advance. errors=${JSON.stringify(errorMessages)} headings=${JSON.stringify(postHeadings)} trace=${JSON.stringify(trace)}`);
+      }
 
       const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
       return res.json({
@@ -5367,6 +5400,7 @@ export async function registerRoutes(
         finalUrl: postSubmitUrl,
         postSubmitHeadings: postHeadings,
         postBodyPreview,
+        errorMessages,
         screenshot: screenshot ? screenshot.toString("base64") : null,
       });
     } catch (e: any) {

@@ -2101,12 +2101,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           });
                           const data = await r.json();
                           if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          const airbnbErrors: string[] = Array.isArray(data.errorMessages) ? data.errorMessages : [];
                           toast({
                             title: data.advanced ? "Airbnb compliance submitted" : "Compliance form filled",
                             description: data.advanced
                               ? "Form accepted and advanced. Re-check Channel Status in a minute — Guesty will reflect the success status."
-                              : `Submitted but page didn't advance — there may be a validation error. Final URL: ${data.finalUrl}. Check your Airbnb dashboard manually.`,
-                            duration: 10000,
+                              : airbnbErrors.length > 0
+                                ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}`
+                                : `Submitted but page didn't advance — no visible Airbnb error captured. Check your Airbnb dashboard manually. Final URL: ${data.finalUrl}`,
+                            variant: data.advanced ? "default" : "destructive",
+                            duration: 12000,
                           });
                           // Kick a channel-status refresh so the badge flips if the status updated.
                           refreshChannelStatus?.();
