@@ -22,6 +22,7 @@ export type PhotoKind = "community" | "unit";
 export type PhotoLabelResult = {
   label: string;
   category: string;
+  confidence: number;
   model: string;
 };
 
@@ -59,50 +60,59 @@ function promptFor(kind: PhotoKind): string {
       "- Describe the dominant subject. If the photo shows a rocky shoreline, DO NOT label it \"Tennis Court\" even if tennis is an amenity.",
       "- If ambiguous, prefer generic over specific (\"Resort Grounds\" over \"Infinity Pool\").",
       "",
-      "Also pick one category from this exact list:",
+      "Pick one category from this exact list:",
       "Pool & Spa | Beach Access | Grounds & Landscaping | Building Exterior | Common Areas | Dining | Activities | Views",
       "",
+      "Include a confidence score 0.0-1.0 for the category. Below 0.60 means you're unsure.",
+      "",
       "Respond with ONLY a single line of minified JSON — no code fences, no prose:",
-      "{\"label\":\"Oceanfront Pool\",\"category\":\"Pool & Spa\"}",
+      "{\"label\":\"Oceanfront Pool\",\"category\":\"Pool & Spa\",\"confidence\":0.95}",
     ].join("\n");
   }
   // Unit = interior rooms + private outdoor space (lanai, balcony).
   return [
     "This is a photo from a vacation rental unit (interior or private outdoor space).",
-    "Generate a short caption describing what the photo ACTUALLY SHOWS.",
+    "Your job: classify the DOMINANT subject of the photo and give a short caption.",
     "",
-    "Requirements:",
+    "## STEP 1 — Identify the primary subject",
+    "Look at the photo and ask: what is the PRIMARY, DOMINANT object filling most of the frame?",
+    "- Bed (mattress + headboard + bedding) → Bedrooms",
+    "- Toilet / shower / bathtub / bathroom vanity → Bathrooms",
+    "- Kitchen cabinets / countertops / stove / oven / refrigerator / kitchen island → Kitchen",
+    "- Dining table with chairs as the main subject → Dining",
+    "- Sofa / TV / coffee table in an enclosed indoor room → Living Areas",
+    "- Open-air patio / balcony / deck / lanai with sky or plants visible → Outdoor & Lanai",
+    "- Building facade / entrance / street view → Building Exterior",
+    "- Aerial / landscape / wide property shot → Views",
+    "- A person's face / logo / floorplan / stock image → Reject",
+    "",
+    "## STEP 2 — Self-check (critical)",
+    "Before you commit to a category, VERIFY:",
+    "- If you picked \"Bedrooms\": can you see an actual bed that takes up a meaningful portion of the frame? A daybed, pull-out sofa, or couch does NOT count. If you cannot clearly see a bed, pick a different category.",
+    "- If you picked \"Bathrooms\": can you see a toilet, shower, tub, or bathroom vanity? A kitchen sink is NOT a bathroom sink.",
+    "- If the photo shows kitchen cabinets, counters, an island, or appliances, the category MUST be Kitchen — even if there is some adjacent bar seating or a window.",
+    "- If the photo shows outdoor space (sky, plants, open air), the category MUST be Outdoor & Lanai, not Bedrooms or Living Areas.",
+    "",
+    "## STEP 3 — Write the label",
     "- 2-5 words, Title Case.",
-    "- Lead with the room type. Add one concrete distinguishing feature when clearly visible.",
-    "- **For Bedrooms**: identify the bed type in the label so downstream tooling can distinguish rooms.",
-    "  Examples: \"King Bedroom\" (one king bed), \"Queen Bedroom\" (one queen bed), \"Twin Bedroom\" (two twin beds), \"Two Queens Bedroom\" (two queen beds), \"Bunk Bed Bedroom\". Do NOT label every bedroom \"Master Bedroom\" — that's post-processed.",
-    "- **For Bathrooms**: note the distinguishing feature. Examples: \"Bathroom with Shower\", \"Bathroom with Tub\", \"Bathroom with Jetted Tub\", \"Half Bath\", \"Double Vanity Bathroom\".",
-    "- For other rooms: \"Living Room with Ocean View\", \"Updated Kitchen\", \"Lanai with Ocean View\", etc.",
+    "- Lead with the SAME room type as your category — if category is \"Kitchen\", the label must start with \"Kitchen\" (e.g., \"Updated Kitchen\", \"Kitchen With Island\"). If category is \"Bedrooms\", the label must contain \"Bedroom\" or a bed type word.",
+    "- **Bedrooms label format**: include the bed type. Examples: \"King Bedroom\", \"Queen Bedroom\", \"Twin Bedroom\", \"Two Queens Bedroom\", \"Bunk Bed Bedroom\". Do NOT use \"Master Bedroom\" — that's post-processed.",
+    "- **Bathrooms label format**: include the distinguishing feature. Examples: \"Bathroom With Shower\", \"Bathroom With Tub\", \"Bathroom With Jetted Tub\", \"Half Bath\", \"Double Vanity Bathroom\".",
+    "- Other rooms: \"Living Room With Ocean View\", \"Updated Kitchen\", \"Lanai With Ocean View\", etc.",
     "",
-    "STRICT CATEGORY RULES — follow these exactly, do not infer rooms that aren't visible:",
-    "- \"Reject\": **IMPORTANT** — use this category for photos that should NOT appear in a vacation rental listing:",
-    "    • Portraits or headshots of people (real estate agents, hosts, property managers)",
-    "    • Logos, watermarks, text-only images, floor plans, maps",
-    "    • Generic stock photos (city skylines, food, unrelated scenery)",
-    "    • Heavily branded marketing photos with overlaid text",
-    "  If the photo shows a PERSON'S FACE as the primary subject, pick Reject. No exceptions.",
-    "- \"Bedrooms\": ONLY if you can see an actual BED with a mattress, headboard, or bedding. A loveseat, couch, chaise, or day-bed alone is NOT a bedroom.",
-    "- \"Bathrooms\": ONLY if you can see a toilet, shower, bathtub, or bathroom sink/vanity. A kitchen sink is NOT a bathroom.",
-    "- \"Outdoor & Lanai\": covered/uncovered patios, balconies, decks, lanais — any space where you can see the outdoor environment (plants, trees, railings, open sky). Wicker outdoor furniture, ceiling fans over open-air spaces, and covered porches ALL belong here, NOT in Bedrooms.",
-    "- \"Living Areas\": indoor living rooms, family rooms, great rooms with sofas and TVs, enclosed by indoor walls.",
-    "- \"Kitchen\": cabinets, stove, fridge, prep space clearly visible.",
-    "- \"Dining\": dining table as the main subject in an indoor setting.",
-    "- \"Views\": aerial shots, property overviews, landscape-dominant exteriors without a specific room as subject.",
-    "- \"Building Exterior\": photo of the outside of a building — facade, entrance, street view.",
-    "- \"Other\": anything that genuinely doesn't fit the above.",
+    "## STEP 4 — Confidence score",
+    "Rate how certain you are of the category on a 0.0–1.0 scale:",
+    "- 0.95+: the dominant subject is unambiguous (e.g., a clear bed in a bedroom).",
+    "- 0.80–0.94: confident but a minor ambiguity (e.g., open-plan kitchen with adjacent living area).",
+    "- 0.60–0.79: some doubt (the room type is partially visible or obscured).",
+    "- Below 0.60: you are unsure — USE THE \"Other\" category instead.",
     "",
-    "When in doubt between Bedrooms and Outdoor & Lanai: if you cannot identify a real bed, it is NOT a Bedroom.",
-    "",
-    "Also pick one category from this exact list:",
+    "## Categories (pick exactly one)",
     "Reject | Living Areas | Bedrooms | Kitchen | Bathrooms | Dining | Outdoor & Lanai | Views | Building Exterior | Other",
     "",
+    "## Response format",
     "Respond with ONLY a single line of minified JSON — no code fences, no prose:",
-    "{\"label\":\"Master Bedroom\",\"category\":\"Bedrooms\"}",
+    "{\"label\":\"King Bedroom\",\"category\":\"Bedrooms\",\"confidence\":0.97}",
   ].join("\n");
 }
 
@@ -146,11 +156,15 @@ async function labelPhotoOnce(
     const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown };
+    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown; confidence?: unknown };
     const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
     const category = typeof parsed.category === "string" ? parsed.category.trim() : "";
+    // Default to 0.85 when confidence is missing — treats legacy responses
+    // as "reasonably confident" so we don't regress previously-working labels.
+    const rawConf = typeof parsed.confidence === "number" ? parsed.confidence : 0.85;
+    const confidence = Math.max(0, Math.min(1, rawConf));
     if (!label) return null;
-    return { label, category: category || "Other", model: MODEL };
+    return { label, category: category || "Other", confidence, model: MODEL };
   } catch (e: any) {
     console.warn(`[photo-labeler] ${filenameForLog}: ${e?.message ?? e}`);
     return null;
@@ -235,11 +249,13 @@ export async function labelPhotoFromUrl(
     const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown };
+    const parsed = JSON.parse(jsonMatch[0]) as { label?: unknown; category?: unknown; confidence?: unknown };
     const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
     const category = typeof parsed.category === "string" ? parsed.category.trim() : "";
+    const rawConf = typeof parsed.confidence === "number" ? parsed.confidence : 0.85;
+    const confidence = Math.max(0, Math.min(1, rawConf));
     if (!label) return null;
-    return { label, category: category || "Other", model: MODEL };
+    return { label, category: category || "Other", confidence, model: MODEL };
   } catch {
     return null;
   }
