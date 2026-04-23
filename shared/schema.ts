@@ -329,6 +329,24 @@ export const scannerSchedule = pgTable("scanner_schedule", {
 export type ScannerSchedule = typeof scannerSchedule.$inferSelect;
 export type InsertScannerSchedule = typeof scannerSchedule.$inferInsert;
 
+// ── Per-run history for the scheduler (Phase 4.1) ──
+// One row per scanner run (scheduled tick OR manual "Run now"). The
+// `scannerSchedule` row holds only the latest run; this table keeps the
+// full trail so the UI can render "last N runs" without losing
+// intermediate state every time the next run overwrites `lastRunAt`.
+// Pruning is handled by `getRecentScannerRuns` (LIMIT N) — no TTL yet.
+export const scannerRunHistory = pgTable("scanner_run_history", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  ranAt: timestamp("ran_at").defaultNow().notNull(),
+  status: text("status").notNull(),          // "ok" | "error"
+  summary: text("summary").notNull(),        // same format as scannerSchedule.lastRunSummary
+  durationMs: integer("duration_ms"),        // optional — how long the run took
+  trigger: text("trigger").notNull(),        // "scheduled" | "manual"
+});
+export type ScannerRunHistory = typeof scannerRunHistory.$inferSelect;
+export type InsertScannerRunHistory = typeof scannerRunHistory.$inferInsert;
+
 // ── Photo labels ──
 // Claude-vision-generated captions for property photos. The static
 // unit-builder-data.ts had hardcoded labels that drifted from reality

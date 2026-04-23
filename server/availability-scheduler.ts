@@ -281,6 +281,7 @@ async function tick() {
       if (!row.enabled) continue;
       const due = !row.lastRunAt || (now - row.lastRunAt.getTime()) >= row.intervalHours * 60 * 60 * 1000;
       if (!due) continue;
+      const startedAt = Date.now();
       try {
         const summary = await runFullScanForProperty(row.propertyId, {
           minSets: row.minSets,
@@ -289,11 +290,21 @@ async function tick() {
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
         });
+        const durationMs = Date.now() - startedAt;
         await storage.markScannerScheduleRan(row.propertyId, "ok", summary);
+        await storage.recordScannerRun({
+          propertyId: row.propertyId,
+          status: "ok", summary, durationMs, trigger: "scheduled",
+        }).catch(() => {});
         console.log(`[availability-scheduler] property ${row.propertyId} ok · ${summary}`);
       } catch (e: any) {
+        const durationMs = Date.now() - startedAt;
         const msg = e?.message ?? String(e);
         await storage.markScannerScheduleRan(row.propertyId, "error", msg.slice(0, 200)).catch(() => {});
+        await storage.recordScannerRun({
+          propertyId: row.propertyId,
+          status: "error", summary: msg.slice(0, 200), durationMs, trigger: "scheduled",
+        }).catch(() => {});
         console.error(`[availability-scheduler] property ${row.propertyId} FAILED: ${msg}`);
       }
     }
@@ -311,6 +322,7 @@ export function startAvailabilityScheduler() {
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.
 export async function runFullScanNow(propertyId: number): Promise<{ summary: string; status: "ok" | "error" }> {
+  const startedAt = Date.now();
   try {
     const sched = await storage.getScannerSchedule(propertyId);
     const summary = await runFullScanForProperty(propertyId, {
@@ -320,11 +332,19 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
       runPricing: sched?.runPricing ?? true,
       runSyncBlocks: sched?.runSyncBlocks ?? true,
     });
+    const durationMs = Date.now() - startedAt;
     await storage.markScannerScheduleRan(propertyId, "ok", summary).catch(() => {});
+    await storage.recordScannerRun({
+      propertyId, status: "ok", summary, durationMs, trigger: "manual",
+    }).catch(() => {});
     return { summary, status: "ok" };
   } catch (e: any) {
+    const durationMs = Date.now() - startedAt;
     const msg = e?.message ?? String(e);
     await storage.markScannerScheduleRan(propertyId, "error", msg.slice(0, 200)).catch(() => {});
+    await storage.recordScannerRun({
+      propertyId, status: "error", summary: msg.slice(0, 200), durationMs, trigger: "manual",
+    }).catch(() => {});
     return { summary: msg, status: "error" };
   }
 }

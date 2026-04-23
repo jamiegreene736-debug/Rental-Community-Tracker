@@ -14,7 +14,8 @@ import {
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides, scannerSchedule,
+  type ScannerRunHistory, type InsertScannerRunHistory,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -608,6 +609,20 @@ export class DatabaseStorage implements IStorage {
     await db.update(scannerSchedule)
       .set({ lastRunAt: new Date(), lastRunStatus: status, lastRunSummary: summary, updatedAt: new Date() })
       .where(eq(scannerSchedule.propertyId, propertyId));
+  }
+
+  // Append one row per scanner run (scheduled tick or manual "Run now").
+  // `scannerSchedule.lastRunSummary` holds only the latest; this table
+  // keeps the trail the UI renders as "Last N runs".
+  async recordScannerRun(data: InsertScannerRunHistory): Promise<void> {
+    await db.insert(scannerRunHistory).values(data);
+  }
+
+  async getRecentScannerRuns(propertyId: number, limit: number): Promise<ScannerRunHistory[]> {
+    return db.select().from(scannerRunHistory)
+      .where(eq(scannerRunHistory.propertyId, propertyId))
+      .orderBy(desc(scannerRunHistory.ranAt))
+      .limit(limit);
   }
 }
 

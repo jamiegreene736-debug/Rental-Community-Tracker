@@ -59,6 +59,44 @@ function fmtShort(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+// Parses the server-side `lastRunSummary` string into typed pieces the
+// UI can render as individual badges. The scheduler builds this string
+// in `server/availability-scheduler.ts` by joining segments with ` · `:
+//
+//   inventory 3 sets (tight) · market-snapshot 3/3 seasons ·
+//   blocks +2/-1/×0 · rates 24/24 months
+//
+// Any segment can be missing if the operator disabled that phase (e.g.
+// `runInventory: false`). Anything we don't recognize stays in `raw`
+// so nothing is silently lost — it just renders as plain text.
+type RunBadges = {
+  inventory?: { sets: number; verdict: "open" | "tight" | "blocked" };
+  marketSnapshot?: { seen: number; total: number };
+  blocks?: { added: number; removed: number; failed: number };
+  rates?: { pushed: number; total: number };
+  raw: string[];
+};
+function parseScanSummary(summary: string | null | undefined): RunBadges {
+  const out: RunBadges = { raw: [] };
+  if (!summary) return out;
+  const parts = summary.split(" · ").map((s) => s.trim()).filter(Boolean);
+  for (const p of parts) {
+    let m;
+    if ((m = p.match(/^inventory\s+(\d+)\s+sets\s+\((open|tight|blocked)\)$/i))) {
+      out.inventory = { sets: parseInt(m[1], 10), verdict: m[2].toLowerCase() as "open" | "tight" | "blocked" };
+    } else if ((m = p.match(/^market-snapshot\s+(\d+)\/(\d+)\s+seasons$/i))) {
+      out.marketSnapshot = { seen: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+    } else if ((m = p.match(/^blocks\s+\+(\d+)\/-(\d+)(?:\/\xD7(\d+))?$/i))) {
+      out.blocks = { added: parseInt(m[1], 10), removed: parseInt(m[2], 10), failed: parseInt(m[3] ?? "0", 10) };
+    } else if ((m = p.match(/^rates\s+(\d+)\/(\d+)\s+months$/i))) {
+      out.rates = { pushed: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+    } else {
+      out.raw.push(p);
+    }
+  }
+  return out;
+}
+
 export default function AvailabilityTab({ propertyId, listingId }: { propertyId: number | undefined; listingId: string | null }) {
   // Default to 24 months — matches how Guesty's calendar horizon is typically
   // set, and gives the scanner enough lookahead to catch high-season buy-in
@@ -101,6 +139,36 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   };
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
+
+  // Recent scanner runs — scheduled + manual, newest first. Rendered as
+  // a compact table under the scheduler card so the operator can spot
+  // patterns (recurring errors, duration creep, etc) at a glance.
+  type RunHistoryRow = {
+    id: number;
+    ranAt: string;
+    status: "ok" | "error";
+    summary: string;
+    durationMs: number | null;
+    trigger: "scheduled" | "manual";
+  };
+  const [runHistory, setRunHistory] = useState<RunHistoryRow[]>([]);
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    const fetchHistory = async () => {
+      try {
+        const r = await fetch(`/api/availability/scanner-history/${propertyId}?limit=5`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled && Array.isArray(d?.runs)) setRunHistory(d.runs);
+      } catch { /* ignore */ }
+    };
+    fetchHistory();
+    // Re-fetch when a run just finished (schedule.lastRunAt changed) —
+    // that's the cheapest signal we have without polling on a timer.
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, schedule?.lastRunAt]);
 
   // Tracks whether the initial GET for the schedule has completed. Uses
   // state (not a ref) so the auto-enable useEffect below re-runs after
@@ -426,12 +494,63 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                   ({schedule.lastRunStatus})
                 </span>
               )}
-              {schedule?.lastRunSummary && (
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
-                  ↳ {schedule.lastRunSummary}
-                </div>
-              )}
             </div>
+            {/* Structured badges for the last run. Parses the summary
+                string so each phase renders as its own labeled chip,
+                making it easy to tell "scan happened, 2 blocks pushed"
+                at a glance. On error the full message gets a red box
+                so the operator can see what went wrong without
+                opening the server logs. */}
+            {schedule?.lastRunStatus === "error" && schedule?.lastRunSummary && (
+              <div style={{
+                marginTop: 6, padding: "6px 10px",
+                background: "#fef2f2", border: "1px solid #fecaca",
+                borderRadius: 4, fontSize: 11, color: "#991b1b",
+                wordBreak: "break-word",
+              }}>
+                <b>Error:</b> {schedule.lastRunSummary}
+              </div>
+            )}
+            {schedule?.lastRunStatus === "ok" && schedule?.lastRunSummary && (() => {
+              const b = parseScanSummary(schedule.lastRunSummary);
+              const chipStyle = {
+                fontSize: 11, padding: "2px 8px", borderRadius: 3,
+                background: "#fff", border: "1px solid #e5e7eb",
+                color: "#374151", whiteSpace: "nowrap" as const,
+              };
+              const verdictChipBg = (v: "open" | "tight" | "blocked") =>
+                v === "open" ? "#dcfce7" : v === "tight" ? "#fef3c7" : "#fee2e2";
+              const verdictChipColor = (v: "open" | "tight" | "blocked") =>
+                v === "open" ? "#166534" : v === "tight" ? "#92400e" : "#991b1b";
+              return (
+                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {b.inventory && (
+                    <span style={{ ...chipStyle, background: verdictChipBg(b.inventory.verdict), color: verdictChipColor(b.inventory.verdict), borderColor: "transparent" }}>
+                      Inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
+                    </span>
+                  )}
+                  {b.marketSnapshot && (
+                    <span style={chipStyle}>
+                      Market snapshot: <b>{b.marketSnapshot.seen}/{b.marketSnapshot.total}</b> seasons
+                    </span>
+                  )}
+                  {b.blocks && (
+                    <span style={chipStyle}>
+                      Blocks: <b style={{ color: "#166534" }}>+{b.blocks.added}</b>
+                      {" / "}
+                      <b style={{ color: "#991b1b" }}>−{b.blocks.removed}</b>
+                      {b.blocks.failed > 0 && <span style={{ color: "#b45309" }}> · {b.blocks.failed} failed</span>}
+                    </span>
+                  )}
+                  {b.rates && (
+                    <span style={chipStyle}>
+                      Rates: <b>{b.rates.pushed}/{b.rates.total}</b> months pushed
+                    </span>
+                  )}
+                  {b.raw.map((r, i) => <span key={i} style={chipStyle}>{r}</span>)}
+                </div>
+              );
+            })()}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <label style={{ fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
@@ -507,6 +626,72 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           </div>
         )}
       </div>
+
+      {/* ── Recent run history ─────────────────────────────────
+          Last 5 scheduler runs (mixed scheduled + manual) so the
+          operator can see patterns — repeated errors, duration
+          creep, etc — without opening server logs. Re-fetches
+          whenever a new run lands (schedule.lastRunAt changes). */}
+      {runHistory.length > 0 && (
+        <div style={{ marginBottom: 16, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
+          <div style={{
+            padding: "6px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb",
+            fontSize: 11, fontWeight: 600, color: "#374151",
+            textTransform: "uppercase", letterSpacing: "0.05em",
+          }}>
+            Recent runs — last {runHistory.length}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 170 }}>When</th>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 60 }}>Trigger</th>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 60 }}>Status</th>
+                <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600 }}>Summary</th>
+                <th style={{ textAlign: "right", padding: "5px 12px", fontWeight: 600, width: 70 }}>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runHistory.map((r) => {
+                const parsed = parseScanSummary(r.summary);
+                const durSec = r.durationMs != null ? (r.durationMs / 1000).toFixed(1) : null;
+                return (
+                  <tr key={r.id} style={{ borderTop: "1px solid #f3f4f6" }}>
+                    <td style={{ padding: "5px 12px", color: "#374151", whiteSpace: "nowrap" }}>
+                      {new Date(r.ranAt).toLocaleString()}
+                    </td>
+                    <td style={{ padding: "5px 12px", color: "#6b7280" }}>{r.trigger}</td>
+                    <td style={{ padding: "5px 12px" }}>
+                      <span style={{
+                        fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 3,
+                        background: r.status === "ok" ? "#dcfce7" : "#fee2e2",
+                        color: r.status === "ok" ? "#166534" : "#991b1b",
+                        textTransform: "uppercase", letterSpacing: "0.04em",
+                      }}>{r.status}</span>
+                    </td>
+                    <td style={{ padding: "5px 12px", color: "#374151" }}>
+                      {r.status === "error"
+                        ? <span style={{ color: "#991b1b" }}>{r.summary}</span>
+                        : (
+                          <span style={{ color: "#6b7280" }}>
+                            {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
+                            {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
+                            {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
+                            {!parsed.inventory && !parsed.blocks && !parsed.rates && r.summary}
+                          </span>
+                        )
+                      }
+                    </td>
+                    <td style={{ padding: "5px 12px", textAlign: "right", color: "#6b7280" }}>
+                      {durSec ? `${durSec}s` : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
