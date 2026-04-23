@@ -5335,6 +5335,18 @@ export async function registerRoutes(
     res.json({ runs: rows });
   });
 
+  // GET /api/availability/scanner-blocks/:propertyId — returns the active
+  // (non-removed) blocks the scanner has pushed to Guesty for the given
+  // property. The availability-scheduler summary reports aggregate counts
+  // (e.g. "blocks +2/-1"); this endpoint surfaces the actual date ranges
+  // so the UI can list which weeks got blocked.
+  app.get("/api/availability/scanner-blocks/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const rows = await storage.getActiveScannerBlocks(propertyId);
+    res.json({ blocks: rows });
+  });
+
   // POST /api/availability/run-now/:propertyId — trigger the full pipeline
   // on demand (user clicked "Run now" in the UI).
   app.post("/api/availability/run-now/:propertyId", async (req, res) => {
