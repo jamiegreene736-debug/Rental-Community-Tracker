@@ -8702,16 +8702,34 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     // makai/mauka when geographically relevant) but doesn't
     // over-season — sounds like a local host, not a tourist brochure.
     // Standard tone: friendly + professional, no Hawaiian vocabulary.
+    //
+    // Shared signature block — always the same three lines at the
+    // end, regardless of tone variant. This is going into guest email
+    // and in-channel messages, so plain text only (no Markdown).
+    const SIGNATURE = `Thank You,
+John Carpenter
+Magical Island Rentals`;
+
+    const PLAIN_TEXT_RULES = `FORMATTING RULES (strict — these replies go into email and OTA messaging channels that render plain text):
+  - Plain text only. Do NOT use Markdown of any kind — no asterisks for bold or italics, no underscores, no backticks, no bullet markers like "*" or "-" at line starts, no headings.
+  - If you need a list, write it as short sentences or a comma-separated line, not as bullets.
+  - No em-dashes-with-asterisks or decorative characters. Natural prose.
+  - End every reply with exactly this three-line signature (no extra punctuation around it):
+${SIGNATURE}`;
+
     const tonePreamble = isHawaii
-      ? `You are writing as a NexStay host in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
+      ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
   - Open with "Aloha [Name]," or a similar welcoming phrase
-  - Use "mahalo" (thank you) instead of "thanks" when signing off or thanking the guest
+  - Use "mahalo" (thank you) naturally in the body when thanking the guest for a question
   - Use "'ohana" (family/group) when referring to the guest's party, if natural
   - Use "makai" (toward the ocean) / "mauka" (toward the mountains) only if geographically relevant to the answer
-  - Sign off with a warm Hawaiian closing (e.g. "Mahalo, and we can't wait to welcome you to the islands!") then "The NexStay Team"
 
-Avoid over-using Hawaiian words — one or two per reply max. The goal is authentic local warmth, not a caricature. Write in natural American English for the rest of the message.`
-      : `You are writing as a NexStay host. Tone is warm, personable, and professional. Sign off as "The NexStay Team".`;
+Avoid over-using Hawaiian words — one or two per reply max. The goal is authentic local warmth, not a caricature. Write in natural American English for the rest of the message.
+
+${PLAIN_TEXT_RULES}`
+      : `You are writing as a host for Magical Island Rentals. Tone is warm, personable, and professional.
+
+${PLAIN_TEXT_RULES}`;
 
     // System prompt tells the model HOW to behave. Adjusted to make it
     // ground answers in the provided facts when we have them, and say
@@ -8788,11 +8806,28 @@ Write a helpful, friendly reply. Keep it 3-5 sentences — longer is OK if the g
         return res.json({ draft: "", error: `Anthropic error: ${upstreamMsg}` });
       }
 
-      const draft: string = claudeData?.content?.[0]?.text ?? "";
-      if (!draft.trim()) {
+      const rawDraft: string = claudeData?.content?.[0]?.text ?? "";
+      if (!rawDraft.trim()) {
         console.error(`[ai-draft] Empty draft from Anthropic — raw response:`, JSON.stringify(claudeData).slice(0, 500));
         return res.json({ draft: "", error: "Anthropic returned an empty response" });
       }
+
+      // Defensive Markdown strip. The system prompt tells the model to
+      // return plain text, but Haiku occasionally emits **bold** or
+      // bullet "*" prefixes out of habit. The messaging channels we
+      // pipe into (Airbnb / VRBO / Booking.com / email) don't render
+      // Markdown — asterisks show up literally. Strip them so the
+      // draft is clean in the textarea before the host reviews.
+      //
+      //   1. **bold** / *italic* → inner text only
+      //   2. `code` → inner text only
+      //   3. "- " or "* " at line starts → stripped bullet prefix
+      const draft = rawDraft
+        .replace(/\*\*([^\n*]+?)\*\*/g, "$1")   // **bold** → bold
+        .replace(/\*([^\n*]+?)\*/g, "$1")       // *italic* → italic
+        .replace(/`([^\n`]+?)`/g, "$1")         // `code` → code
+        .replace(/^[ \t]*[*\-•][ \t]+/gm, "")   // bullet line prefixes
+        .trim();
 
       res.json({ draft });
     } catch (err: any) {
