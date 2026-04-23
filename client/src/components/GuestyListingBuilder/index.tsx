@@ -171,6 +171,12 @@ type Props = {
   sourceUrlsByFolder?: Record<string, string>;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
+  // Fired after the user mutates a photo label (delete/restore/rename) in
+  // the PhotoCurator. The builder page uses this to re-fetch
+  // `usePhotoLabels` so the page's isHidden filter picks up the new state
+  // and `propertyData.photos` rebuilds without a full page reload — the
+  // tab badge "Photos (N)" and the deleted tile disappear immediately.
+  onPhotoOverridesChanged?: () => void;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -625,7 +631,7 @@ function ChannelMarkupCard({
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
@@ -3274,6 +3280,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <PhotoCurator
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
+                          onOverridesChanged={onPhotoOverridesChanged}
                           coverCollageEnabled={photos.length >= 2}
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
                           onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}

@@ -53,7 +53,7 @@ export default function Builder() {
     for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
     return Array.from(folders);
   }, [property]);
-  const { labelFor, isHidden } = usePhotoLabels(allFolders);
+  const { labelFor, isHidden, refresh: refreshPhotoLabels } = usePhotoLabels(allFolders);
 
   // Walking-distance between units. Only meaningful for multi-unit
   // properties. Uses the shared fallback (per-resort minute defaults)
@@ -317,6 +317,7 @@ export default function Builder() {
         propertyData={propertyData}
         propertyId={propertyId}
         sourceUrlsByFolder={sourceUrlsByFolder}
+        onPhotoOverridesChanged={refreshPhotoLabels}
         onBuildComplete={(result) => {
           if (result.listingId) {
             toast({
