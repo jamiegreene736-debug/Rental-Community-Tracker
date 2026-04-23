@@ -87,40 +87,50 @@ type LabeledResult = DownloadResult & {
 // "Master Bedroom" labels on kitchen shots.
 const BEDROOM_KEYWORDS = /\b(bed|bedroom|suite|master|guest room|sleeping|primary|bunk|twin|queen|king|double|full)\b/i;
 const BATHROOM_KEYWORDS = /\b(bath|bathroom|shower|tub|toilet|vanity|powder|half bath|lavatory|washroom|ensuite|en-suite|jetted)\b/i;
-const KITCHEN_KEYWORDS = /\b(kitchen|cabinet|countertop|counter top|stove|oven|refrigerator|fridge|microwave|island|dishwasher|backsplash|pantry)\b/i;
-// Applied to bedrooms and bathrooms specifically — rooms whose misclassification
-// has expensive downstream consequences. 0.70 roughly matches "confident but
-// not unambiguous" per our prompt's confidence-scoring rubric.
-const MIN_CONFIDENCE_FOR_PRIVATE_ROOM = 0.70;
+// Narrowed deliberately. Earlier regex included `cabinet` / `island` /
+// `countertop` / `stove` which gave false positives — a "Bedroom With
+// Built-In Cabinet" got wrongly demoted to Kitchen. Only keep words that
+// are unambiguously kitchen-specific.
+const KITCHEN_KEYWORDS = /\b(kitchen|kitchenette|pantry|breakfast bar)\b/i;
+// Very-low-confidence threshold: below this, demote regardless of
+// keywords — Claude is flagging that it has no idea. Above this we
+// trust the keyword signal. Previously 0.70 was demoting legitimate
+// bedroom photos that Claude captioned correctly ("King Bedroom")
+// but with modest confidence (0.65), which under-counted rooms.
+const HARD_CONFIDENCE_FLOOR = 0.40;
 
 function applyCategorySanityCheck(r: LabeledResult): LabeledResult {
   if (!r.category || !r.label) return r;
   const label = r.label;
   const cat = r.category;
+  const labelHasBed = BEDROOM_KEYWORDS.test(label);
+  const labelHasBath = BATHROOM_KEYWORDS.test(label);
+  const labelHasKitchen = KITCHEN_KEYWORDS.test(label);
 
-  // If the label text mentions kitchen fixtures but the category claims
-  // Bedrooms/Bathrooms, the label wins — Claude saw a kitchen but picked
-  // the wrong bucket.
-  if ((cat === "Bedrooms" || cat === "Bathrooms") && KITCHEN_KEYWORDS.test(label)) {
-    console.log(`[sanity] demoting "${label}" from ${cat}→Kitchen (label contains kitchen keywords)`);
+  // Label → category contradicts (kitchen words in a Bedrooms/Bathrooms
+  // pick). Label wins — Claude saw a kitchen but picked the wrong bucket.
+  if ((cat === "Bedrooms" || cat === "Bathrooms") && labelHasKitchen && !labelHasBed && !labelHasBath) {
+    console.log(`[sanity] demoting "${label}" from ${cat}→Kitchen (kitchen keywords, no bed/bath keywords)`);
     return { ...r, category: "Kitchen" };
   }
-  // Category claims Bedrooms but label has no bed vocabulary anywhere.
-  // Vision models sometimes drop the room type into category while the
-  // descriptive label reflects what they actually saw.
-  if (cat === "Bedrooms" && !BEDROOM_KEYWORDS.test(label)) {
-    console.log(`[sanity] demoting "${label}" from Bedrooms→Other (label lacks bed keywords)`);
+  // Bedrooms category but label has no bed vocabulary at all. Vision
+  // models sometimes drop the room type into the category field while
+  // the descriptive label reflects what they actually saw.
+  if (cat === "Bedrooms" && !labelHasBed) {
+    console.log(`[sanity] demoting "${label}" from Bedrooms→Other (no bed keywords)`);
     return { ...r, category: "Other" };
   }
-  if (cat === "Bathrooms" && !BATHROOM_KEYWORDS.test(label)) {
-    console.log(`[sanity] demoting "${label}" from Bathrooms→Other (label lacks bath keywords)`);
+  if (cat === "Bathrooms" && !labelHasBath) {
+    console.log(`[sanity] demoting "${label}" from Bathrooms→Other (no bath keywords)`);
     return { ...r, category: "Other" };
   }
-  // Low-confidence Bedroom/Bathroom — Airbnb-style: require ≥0.70 before
-  // we treat as authoritative. Below that, we'd rather surface the photo
-  // uncategorized than force a wrong label.
-  if ((cat === "Bedrooms" || cat === "Bathrooms") && r.confidence < MIN_CONFIDENCE_FOR_PRIVATE_ROOM) {
-    console.log(`[sanity] demoting "${label}" from ${cat}→Other (confidence ${r.confidence.toFixed(2)} < ${MIN_CONFIDENCE_FOR_PRIVATE_ROOM})`);
+  // Label backs up the category (bed keywords for Bedrooms, bath for
+  // Bathrooms) — trust it even at moderate confidence. Only demote when
+  // Claude is REALLY unsure (< 0.40). The earlier 0.70 threshold was
+  // under-counting bedroom photos that the model labeled correctly but
+  // scored with modest confidence.
+  if ((cat === "Bedrooms" || cat === "Bathrooms") && r.confidence < HARD_CONFIDENCE_FLOOR) {
+    console.log(`[sanity] demoting "${label}" from ${cat}→Other (confidence ${r.confidence.toFixed(2)} < ${HARD_CONFIDENCE_FLOOR})`);
     return { ...r, category: "Other" };
   }
   return r;
