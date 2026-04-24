@@ -115,18 +115,34 @@ async function fetchGuestyMfaCodeFromGmail(
 
             const body = msg.source?.toString("utf8") ?? "";
             const flat = body.replace(/=\r?\n/g, "").replace(/=3D/g, "=");
-            const near = flat.match(/(?:code|verification|one[-\s]?time)[^0-9]{0,80}(\d{6})\b/i);
-            if (near?.[1]) {
-              lock.release();
-              trace.push({ step: "mfa-code-extracted-near", detail: `mb=${mbName} from=${fromAddr}` });
-              return near[1];
+            // Extract HTML/text body section (skip MIME headers + transport
+            // metadata) so our regex isn't matching random Message-IDs etc.
+            // Also strip HTML tags so nearby-text regex sees visible content.
+            const afterHeaders = flat.split(/\r?\n\r?\n/).slice(1).join("\n\n");
+            const visible = afterHeaders.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+            // Try increasingly specific patterns. Report which one hit so we
+            // can keep tightening if Guesty's format shifts.
+            const patterns: Array<{ label: string; re: RegExp }> = [
+              { label: "code-is", re: /\bcode\s*(?:is|:)\s*(\d{6})\b/i },
+              { label: "verification-is", re: /\bverification\s*code\s*(?:is|:)\s*(\d{6})\b/i },
+              { label: "one-time-is", re: /\bone[-\s]?time\s*(?:code|password|pin)?\s*(?:is|:)\s*(\d{6})\b/i },
+              { label: "enter-this-code", re: /\benter\s*(?:this|the)\s*code[^0-9]{0,40}(\d{6})\b/i },
+              { label: "standalone-in-visible", re: /(?:^|[>\s])(\d{6})(?:[<\s]|$)/ },
+            ];
+            for (const { label, re } of patterns) {
+              const m = visible.match(re);
+              if (m?.[1]) {
+                lock.release();
+                trace.push({ step: "mfa-code-extracted", detail: `pattern=${label} code=${m[1]} mb=${mbName} from=${fromAddr}` });
+                return m[1];
+              }
             }
-            const any = flat.match(/\b(\d{6})\b/);
-            if (any?.[1]) {
-              lock.release();
-              trace.push({ step: "mfa-code-extracted-any", detail: `mb=${mbName} from=${fromAddr}` });
-              return any[1];
-            }
+            // No match yet — log a body preview so we can diagnose the
+            // actual format of Guesty's email next run.
+            trace.push({
+              step: "mfa-code-not-in-body",
+              detail: `from=${fromAddr} subj=${subject.slice(0,60)} visiblePreview=${visible.slice(0, 400).replace(/\s+/g, " ")}`,
+            });
           }
         } finally {
           lock.release();
