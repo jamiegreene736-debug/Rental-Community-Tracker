@@ -5669,31 +5669,39 @@ export async function registerRoutes(
       const page = await ctx.newPage();
 
       // Guesty uses Okta's JS SDK which stores the bearer token in
-      // localStorage (key "okta-token-storage"), not a cookie. To auth,
-      // we first navigate to any app.guesty.com page (to bind the
-      // localStorage origin), inject the token, then navigate to the
-      // target URL. GUESTY_LOCAL_STORAGE is a JSON object of key→value
-      // pairs — the operator pastes the okta-token-storage value (and
-      // anything else that looks auth-related) from DevTools Application
-      // → Local Storage → app.guesty.com.
-      const localStorageJson = process.env.GUESTY_LOCAL_STORAGE;
-      if (localStorageJson) {
+      // localStorage (key "okta-token-storage"), not a cookie. Two ways
+      // to set it:
+      //   - GUESTY_OKTA_TOKEN_STORAGE: raw value of the localStorage entry
+      //     (easier — operator runs `copy(localStorage.getItem('okta-token-storage'))`
+      //     in DevTools Console on app.guesty.com, pastes the result here).
+      //   - GUESTY_LOCAL_STORAGE: JSON object of arbitrary key→value pairs.
+      // Both are supported; when both are present the object is merged first,
+      // then GUESTY_OKTA_TOKEN_STORAGE overrides the okta-token-storage slot.
+      const toInject: Record<string, string> = {};
+      const lsObjRaw = process.env.GUESTY_LOCAL_STORAGE;
+      if (lsObjRaw) {
         try {
-          const ls = JSON.parse(localStorageJson) as Record<string, string>;
-          trace.push({ step: "priming-localstorage", detail: `${Object.keys(ls).length} keys` });
-          // Navigate to a lightweight app.guesty.com page so the localStorage
-          // origin matches before we set keys.
-          await page.goto("https://app.guesty.com/", { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
-          await page.evaluate((entries: Array<[string, string]>) => {
-            for (const [k, v] of entries) {
-              try { window.localStorage.setItem(k, v); } catch { /* ignored */ }
-            }
-          }, Object.entries(ls));
+          const parsed = JSON.parse(lsObjRaw) as Record<string, string>;
+          Object.assign(toInject, parsed);
         } catch (e) {
-          trace.push({ step: "localstorage-parse-failed", detail: (e as Error).message });
+          trace.push({ step: "localstorage-json-parse-failed", detail: (e as Error).message });
         }
+      }
+      const oktaRaw = process.env.GUESTY_OKTA_TOKEN_STORAGE;
+      if (oktaRaw) toInject["okta-token-storage"] = oktaRaw;
+
+      if (Object.keys(toInject).length > 0) {
+        trace.push({ step: "priming-localstorage", detail: `${Object.keys(toInject).length} keys` });
+        // Navigate to a lightweight app.guesty.com page so the localStorage
+        // origin matches before we set keys.
+        await page.goto("https://app.guesty.com/", { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+        await page.evaluate((entries: Array<[string, string]>) => {
+          for (const [k, v] of entries) {
+            try { window.localStorage.setItem(k, v); } catch { /* ignored */ }
+          }
+        }, Object.entries(toInject));
       } else {
-        trace.push({ step: "no-localstorage-env", detail: "set GUESTY_LOCAL_STORAGE to inject Okta tokens" });
+        trace.push({ step: "no-localstorage-env", detail: "set GUESTY_OKTA_TOKEN_STORAGE (raw) or GUESTY_LOCAL_STORAGE (JSON object) to inject Okta tokens" });
       }
 
       const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
@@ -5718,12 +5726,17 @@ export async function registerRoutes(
         // what was exported. Values are never logged.
         const cookieNames = cookies.map((c) => `${c.name}@${c.domain}`).sort();
         const lsKeys = (() => {
-          try { return Object.keys(JSON.parse(process.env.GUESTY_LOCAL_STORAGE ?? "{}")); }
-          catch { return ["<invalid JSON>"]; }
+          const keys: string[] = [];
+          try {
+            const parsed = JSON.parse(process.env.GUESTY_LOCAL_STORAGE ?? "{}");
+            keys.push(...Object.keys(parsed));
+          } catch { keys.push("<GUESTY_LOCAL_STORAGE invalid JSON>"); }
+          if (process.env.GUESTY_OKTA_TOKEN_STORAGE) keys.push("okta-token-storage (from GUESTY_OKTA_TOKEN_STORAGE)");
+          return keys;
         })();
         return res.json({
           ok: false,
-          error: "Guesty redirected to the Okta login page — auth didn't carry through. Guesty uses Okta JS SDK which stores the bearer token in localStorage (key 'okta-token-storage'), not a cookie. Set GUESTY_LOCAL_STORAGE env var: DevTools on app.guesty.com → Application → Local Storage → app.guesty.com → copy the full JSON of {'okta-token-storage': '<value>', ...} and paste as the env var value.",
+          error: "Guesty redirected to the Okta login page — auth didn't carry through. Set GUESTY_OKTA_TOKEN_STORAGE env var to the raw value from DevTools Console on app.guesty.com: `copy(localStorage.getItem('okta-token-storage'))`.",
           finalUrl: postLoginUrl,
           cookieNames,
           cookieCount: cookies.length,
