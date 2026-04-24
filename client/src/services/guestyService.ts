@@ -375,11 +375,16 @@ class GuestyService {
       return entry[key] as Record<string, string> | undefined;
     };
 
+    // Guesty has versioned its integration platform keys over the years —
+    // the current keys are "airbnb2" / "homeaway2" (with "bookingCom" still
+    // being the booking platform as of 2026-04). List both the current and
+    // legacy keys so we don't miss older accounts that still hold the old
+    // platform name.
     const airbnbData = findIntegration(["airbnb2", "airbnb"])
       ?? (listing.airBnb || (listing.channels as Record<string, unknown>)?.airbnb) as Record<string, string> | undefined;
-    const vrboData = findIntegration(["homeaway", "vrbo"])
+    const vrboData = findIntegration(["homeaway2", "homeaway", "vrbo"])
       ?? (listing.homeAway || (listing.channels as Record<string, unknown>)?.homeAway) as Record<string, string> | undefined;
-    const bookingComData = findIntegration(["bookingCom", "booking_com"])
+    const bookingComData = findIntegration(["bookingCom2", "bookingCom", "booking_com"])
       ?? (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
 
     // Look for the public listing URL across the various field names
@@ -397,12 +402,16 @@ class GuestyService {
 
     const toInfo = (data: Record<string, unknown> | undefined): ChannelInfo => {
       const d = data as Record<string, string> | undefined;
-      const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId);
+      // Channel ID fields vary by platform: Airbnb uses `id`, Booking.com
+      // typically `hotelId`, and VRBO (homeaway2) uses `advertiserId` — no
+      // single convention. Look across all of them so connection detection
+      // doesn't hinge on a specific vendor's naming.
+      const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId || d?.advertiserId);
       const isCompleted = d?.status === "COMPLETED" || d?.status === "connected";
       return {
         connected: hasId || isCompleted,
         live: (hasId || isCompleted) && isListed,
-        id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || null,
+        id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || d?.advertiserId || null,
         status: d?.status || null,
         publicUrl: pickChannelUrl(data),
       };
