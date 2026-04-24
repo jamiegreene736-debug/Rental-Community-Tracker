@@ -5860,7 +5860,7 @@ export async function registerRoutes(
       // Check if we've been redirected to the login page.
       const isLoginPage = async (): Promise<boolean> => {
         const u = page.url();
-        if (/\/auth\/login|\/login|\/signin/i.test(u)) return true;
+        if (/\/auth\//i.test(u)) return true;
         return /okta-signin-username|okta-signin-password|Please enter your details to sign in/i
           .test(await page.content().catch(() => ""));
       };
@@ -5956,7 +5956,7 @@ export async function registerRoutes(
             page.waitForURL(
               (u) => {
                 const s = u.toString();
-                return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
+                return /app\.guesty\.com/i.test(s) && !/\/auth\//i.test(s);
               },
               { timeout: 30000 },
             ),
@@ -6025,7 +6025,7 @@ export async function registerRoutes(
               await page.waitForURL(
                 (u) => {
                   const s = u.toString();
-                  return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
+                  return /app\.guesty\.com/i.test(s) && !/\/auth\//i.test(s);
                 },
                 { timeout: 30000 },
               );
