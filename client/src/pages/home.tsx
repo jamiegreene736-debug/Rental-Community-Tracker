@@ -47,6 +47,7 @@ import {
   Camera,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -462,7 +463,7 @@ export default function Home() {
   // the worst across that property's folders (priority: found > unknown > clean).
   // `null` = no data yet for any of this property's folders (never scanned).
   type PhotoAggStatus = PhotoStatus | null;
-  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number } };
+  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number }; hasScannableFolders: boolean };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
     const worst = (a: PhotoAggStatus, b: PhotoStatus): PhotoAggStatus => {
@@ -473,16 +474,21 @@ export default function Home() {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
       if (builder) {
-        // Unit folders only — `communityPhotoFolder` holds shared
-        // amenity photos (pool, lobby, grounds) that many hosts at
-        // the resort legitimately use, so reverse-image hits on them
-        // aren't theft signals. Excluded from both scan (server
-        // side) and aggregation (here) so the Photo Match column
-        // reflects ONLY unit-level matches.
-        for (const u of builder.units) if (u.photoFolder) folderSet.add(u.photoFolder);
+        // Unit folders only, AND only ones that are actually
+        // scannable. communityPhotoFolder is excluded (shared
+        // amenities, no unit signal). Placeholder unit folders like
+        // pili-mai-unit-a are also excluded — without a real unit
+        // number, the scanner can't cross-validate matches and would
+        // false-positive on visually similar units in the same
+        // building. Both sides of the wire share isScannableFolder
+        // so the dashboard aggregation matches what the scanner
+        // actually scanned.
+        for (const u of builder.units) {
+          if (u.photoFolder && isScannableFolder(u.photoFolder)) folderSet.add(u.photoFolder);
+        }
       }
       const folders = Array.from(folderSet);
-      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 } };
+      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, hasScannableFolders: folders.length > 0 };
       for (const f of folders) {
         const row = photoCheckByFolder.get(f);
         if (!row) continue;
@@ -937,8 +943,17 @@ export default function Home() {
                       //                Check back after the weekly scan,
                       //                or click "Run Photo Scan".
                       const agg = photoByProperty.get(property.id);
-                      type Tone = "ok" | "warn" | "bad";
+                      type Tone = "ok" | "warn" | "bad" | "na";
+                      // "na" = the property has no scannable folders
+                      // (all unit photoFolders are placeholders or
+                      // community-*). The scanner won't write rows for
+                      // these, so showing amber "never scanned" would
+                      // be misleading — render grey + clarify in the
+                      // tooltip that the unit folder name needs a
+                      // real unit number to enable scanning.
+                      const noFolders = agg ? !agg.hasScannableFolders : false;
                       const toneOf = (s: PhotoAggStatus): Tone => {
+                        if (noFolders) return "na";
                         if (s === "clean") return "ok";
                         if (s === "found") return "bad";
                         return "warn"; // unknown or null
@@ -947,6 +962,7 @@ export default function Home() {
                         ok:   { bg: "#16a34a", glyph: "✓" },
                         warn: { bg: "#f59e0b", glyph: "⚠" },
                         bad:  { bg: "#dc2626", glyph: "✗" },
+                        na:   { bg: "#9ca3af", glyph: "–" },
                       };
                       const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number }> = [
                         { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0 },
@@ -960,6 +976,7 @@ export default function Home() {
                             const tone = toneOf(it.status);
                             const p = PAL[tone];
                             const tip =
+                              noFolders ? `${it.name}: no scannable units — backfill real unit numbers in unit-builder-data to enable scanning` :
                               it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                               it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found (last checked ${stamp})` :
                               it.status === "unknown" ? `${it.name}: Lens error on last run (${stamp}) — will retry` :

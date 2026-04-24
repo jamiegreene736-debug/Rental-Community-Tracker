@@ -41,6 +41,7 @@
 
 import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
+import { unitHintFromFolder, isScannableFolder } from "@shared/photo-folder-utils";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
@@ -93,28 +94,6 @@ async function callGoogleLens(imageUrl: string): Promise<any[] | null> {
     console.error(`[photo-listing-scanner] Lens error for ${imageUrl}: ${e?.message}`);
     return null;
   }
-}
-
-// Pull a unit-number hint from a folder name so we can cross-validate
-// Lens results. Returns null for community/placeholder folders we
-// can't meaningfully verify (community-*, pili-mai-unit-a, etc.). The
-// hint must contain at least one digit — otherwise a single letter
-// or a non-unit word would produce too many false negatives during
-// verification ("A" would match almost any Airbnb URL).
-//
-// Examples:
-//   "unit-721"          → "721"
-//   "kaha-lani-123"     → "123"
-//   "mauna-kai-6a"      → "6a"
-//   "kaiulani-52"       → "52"
-//   "pili-mai-unit-a"   → null  (placeholder)
-//   "community-kaha-lani" → null  (amenity photos, no unit)
-export function unitHintFromFolder(folder: string): string | null {
-  const m = folder.match(/-unit-([a-z0-9]+)$/i);
-  if (m && /\d/.test(m[1])) return m[1];
-  const tail = folder.split("-").pop() || "";
-  if (/^[a-z0-9]{2,}$/i.test(tail) && /\d/.test(tail)) return tail;
-  return null;
 }
 
 // Confirm that a Lens-matched listing URL actually references the unit
@@ -205,14 +184,17 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     lensCalls: 0,
   };
 
-  // Community folders are shared amenity photos — every Lens match
-  // will be a legitimate listing using the same resort shot. Nothing
-  // to extract here, so short-circuit without writing a row and
-  // without spending Lens calls. (Callers that pass a specific
-  // folder list, e.g. the manual Run-Now endpoint, get filtered
-  // upstream too, but this guard protects direct invocations.)
-  if (isCommunityFolder(folder)) {
-    result.errorMessage = "Community folder skipped — amenity photos are shared across all hosts at the resort";
+  // Skip folders we can't cross-validate. Without a real unit-number
+  // hint, every Lens match is accepted blindly — and in a condo
+  // complex with similar interiors, that produces false positives by
+  // matching to OTHER unit owners' legitimate listings. Examples:
+  //   community-* (shared amenity photos)
+  //   pili-mai-unit-a / pili-mai-unit-b (placeholder unit IDs)
+  //   kekaha-main, keauhou-estate (no digit in name)
+  // Once these folders are renamed to include a real unit number
+  // (e.g. pili-mai-12c), they'll start scanning automatically.
+  if (!isScannableFolder(folder)) {
+    result.errorMessage = "Folder has no unit-number identifier — verification disabled, scan skipped to avoid false positives";
     return result;
   }
 
@@ -356,22 +338,18 @@ async function persist(r: ScanResult): Promise<PhotoListingCheck> {
   });
 }
 
-// Returns the list of folders that have any labeled photos in the DB.
-// The dashboard caller uses this as the universe of "scanable" folders.
-//
-// `community-*` folders are deliberately excluded: they hold shared
-// amenity shots (pool, lobby, grounds, exterior) that every host at
-// the resort legitimately uses, so Lens matches on them are expected
-// and produce no signal. Scanning them wasted ~30% of the SearchAPI
-// budget per tick and filled the alert inbox with one-time noise.
-export function isCommunityFolder(folder: string): boolean {
-  return folder.startsWith("community-");
-}
-
+// Returns the list of folders that have any labeled photos in the DB
+// AND can be meaningfully cross-validated. The latter excludes
+// community-* (shared amenity shots that every host uses) and any
+// folder whose unit identifier is a placeholder ("a", "b", "main",
+// "estate", "cottage") — both produce nothing but false positives,
+// because we can't ask Google "does this URL mention Unit a" and get
+// a useful answer. See `isScannableFolder` in shared/photo-folder-
+// utils.ts for the exact rule.
 export async function listScanableFolders(): Promise<string[]> {
   const rows = await storage.getAllPhotoLabels();
   const set = new Set<string>();
-  for (const r of rows) if (!isCommunityFolder(r.folder)) set.add(r.folder);
+  for (const r of rows) if (isScannableFolder(r.folder)) set.add(r.folder);
   return Array.from(set).sort();
 }
 
