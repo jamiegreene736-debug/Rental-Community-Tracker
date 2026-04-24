@@ -71,49 +71,71 @@ async function fetchGuestyMfaCodeFromGmail(
       trace.push({ step: "imap-connect-failed", detail: `${(e as Error).message} — recentLog=${recent}` });
       throw new Error(`IMAP connect failed: ${(e as Error).message}. Recent log: ${recent}`);
     }
-    let lock: Awaited<ReturnType<typeof client.getMailboxLock>>;
-    try {
-      lock = await client.getMailboxLock("INBOX");
-    } catch (e) {
-      trace.push({ step: "imap-mailbox-lock-failed", detail: (e as Error).message });
-      throw new Error(`IMAP mailbox open failed: ${(e as Error).message}`);
-    }
-    try {
-      // Poll for ~90s. Guesty's code emails typically land within 5-15s but
-      // we leave headroom for slow days.
-      for (let attempt = 0; attempt < 18; attempt++) {
-        // IMAP SEARCH with a loose 10-min window centered on "afterTimestamp"
-        // so we don't miss emails due to minor clock drift between Railway
-        // and Gmail's servers.
-        const searchStart = new Date(afterTimestamp - 60 * 1000);
-        const uids = await client.search({
-          since: searchStart,
-          from: "guesty.com",
-        });
-        if (uids && uids.length > 0) {
-          // Newest-first to prefer the fresh code on resends/retries.
-          for (const uid of uids.slice().reverse()) {
-            const msg = await client.fetchOne(uid as number, { envelope: true, source: true });
-            const dateMs = msg.envelope?.date?.getTime() ?? 0;
-            if (dateMs < afterTimestamp - 60 * 1000) continue;
-            const body = msg.source?.toString("utf8") ?? "";
-            // Strip MIME quoted-printable soft breaks before regexing.
-            const flat = body.replace(/=\r?\n/g, "").replace(/=3D/g, "=");
-            // Prefer a 6-digit code adjacent to "code" / "verification" text.
-            const near = flat.match(/(?:code|verification|one[-\s]?time)[^0-9]{0,80}(\d{6})\b/i);
-            if (near?.[1]) return near[1];
-            // Fallback: first standalone 6-digit run in the body.
-            const any = flat.match(/\b(\d{6})\b/);
-            if (any?.[1]) return any[1];
-          }
+    // Search INBOX first, fall back to All Mail if nothing matches —
+    // Gmail's IMAP puts everything in "[Gmail]/All Mail" even when
+    // filters auto-archive the message out of INBOX.
+    const mailboxesToTry = ["INBOX", "[Gmail]/All Mail"];
+    const afterCutoff = afterTimestamp - 60 * 1000;
+    const loggedSubjects = new Set<string>();
+
+    for (let attempt = 0; attempt < 18; attempt++) {
+      for (const mbName of mailboxesToTry) {
+        let lock: Awaited<ReturnType<typeof client.getMailboxLock>>;
+        try {
+          lock = await client.getMailboxLock(mbName);
+        } catch {
+          continue; // Skip mailboxes that don't exist on this account.
         }
-        trace.push({ step: "mfa-code-poll", detail: `attempt ${attempt + 1}/18 uids=${uids?.length ?? 0}` });
-        await new Promise((r) => setTimeout(r, 5000));
+        try {
+          // Broad search — recent messages from any Guesty-related sender.
+          // We include Okta since Okta sometimes sends the code on behalf of
+          // enterprise tenants under a login.<brand>.com domain.
+          const uids = await client.search({ since: new Date(afterCutoff) });
+          if (!uids || uids.length === 0) continue;
+
+          // Fetch newest-first so we prefer fresh codes on resends.
+          for (const uid of uids.slice().reverse().slice(0, 25)) {
+            const msg = await client.fetchOne(uid as number, { envelope: true, source: true });
+            const fromAddr = (msg.envelope?.from?.[0]?.address || "").toLowerCase();
+            const subject = msg.envelope?.subject || "";
+            const dateMs = msg.envelope?.date?.getTime() ?? 0;
+
+            // Log every recent subject at most once so we can see what
+            // Gmail sees, even if we skip it as non-matching.
+            const logKey = `${mbName}|${subject}|${dateMs}`;
+            if (!loggedSubjects.has(logKey) && dateMs >= afterCutoff) {
+              loggedSubjects.add(logKey);
+              trace.push({ step: "mfa-inbox-peek", detail: `mb=${mbName} from=${fromAddr} subj=${subject.slice(0, 80)} date=${new Date(dateMs).toISOString()}` });
+            }
+
+            if (dateMs < afterCutoff) continue;
+            const isGuesty = /guesty\.com|okta\.com|login\.guesty/i.test(fromAddr)
+              || /guesty|verification/i.test(subject);
+            if (!isGuesty) continue;
+
+            const body = msg.source?.toString("utf8") ?? "";
+            const flat = body.replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+            const near = flat.match(/(?:code|verification|one[-\s]?time)[^0-9]{0,80}(\d{6})\b/i);
+            if (near?.[1]) {
+              lock.release();
+              trace.push({ step: "mfa-code-extracted-near", detail: `mb=${mbName} from=${fromAddr}` });
+              return near[1];
+            }
+            const any = flat.match(/\b(\d{6})\b/);
+            if (any?.[1]) {
+              lock.release();
+              trace.push({ step: "mfa-code-extracted-any", detail: `mb=${mbName} from=${fromAddr}` });
+              return any[1];
+            }
+          }
+        } finally {
+          lock.release();
+        }
       }
-      return null;
-    } finally {
-      lock.release();
+      trace.push({ step: "mfa-code-poll", detail: `attempt ${attempt + 1}/18 no-match-yet` });
+      await new Promise((r) => setTimeout(r, 5000));
     }
+    return null;
   } finally {
     await client.logout().catch(() => {});
   }
