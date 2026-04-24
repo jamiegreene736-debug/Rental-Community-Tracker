@@ -2026,7 +2026,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 // "FAILED" means the listing still exists on the channel but
                 // Guesty's most recent push errored out — the page is live
                 // but Guesty and the channel are out of sync until the user
-                // retries via Push Updates.
+                // re-publishes from Guesty's Distribution page directly
+                // (our Push Updates writes data to Guesty but does NOT
+                // retry Guesty's queued channel sync, which is what has
+                // actually failed).
                 const lastSyncFailed = isLive && info?.status === "FAILED";
                 const cardClass = `glb-ch ${isLive ? "live" : isConnected ? "dead" : ""}`;
                 const badgeClass = `glb-badge ${isLive ? (lastSyncFailed ? "live-warn" : "live") : isConnected ? "not-live" : "no-account"}`;
@@ -2036,7 +2039,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     ? (lastSyncFailed ? "LIVE ⚠" : "LIVE")
                     : isConnected ? "Not Live" : "No Account";
                 const badgeTitle = lastSyncFailed
-                  ? "Listing is on the channel, but Guesty's last sync operation failed. Use Push Updates to retry."
+                  ? "Listing is on the channel, but Guesty's last sync to Airbnb failed. Fix: open app.guesty.com → this listing → Distribution → Airbnb row → click PUBLISH TO CHANNEL to retry. Push Updates here won't do it."
                   : undefined;
                 // Click-to-open: when the listing is live AND we have a
                 // public URL (Airbnb: constructed from ID; VRBO/Booking:
@@ -2123,21 +2126,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           // Both false:         form filled but step 1 didn't advance
                           const fullySubmitted = !!data.submissionComplete;
                           const step1Only = !fullySubmitted && !!data.advanced;
+                          // On success Guesty won't auto-sync the regulation back — the
+                          // operator has to open Guesty's Distribution page and click
+                          // PUBLISH TO CHANNEL on the Airbnb row. Without that, permits
+                          // stay empty and the "Compliance not submitted" badge persists.
+                          const republishReminder = fullySubmitted
+                            ? " ⚠ NEXT STEP: open app.guesty.com → this listing → Distribution → Airbnb row → click PUBLISH TO CHANNEL. Guesty will NOT sync on its own."
+                            : "";
                           toast({
                             title: fullySubmitted
-                              ? "Airbnb compliance submitted"
+                              ? "Airbnb compliance submitted — now re-publish from Guesty"
                               : step1Only
                                 ? "Stuck on review page"
                                 : "Compliance form filled",
                             description: fullySubmitted
-                              ? `Both steps completed. Guesty will reflect the registration on its next Airbnb sync.${shotSuffix}`
+                              ? `Both steps on Airbnb completed.${republishReminder}${shotSuffix}`
                               : step1Only
                                 ? `Filled + advanced to Airbnb's review page, but Submit didn't finalize. Check the screenshot.${shotSuffix}`
                                 : airbnbErrors.length > 0
                                   ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}${shotSuffix}`
                                   : `Submitted but page didn't advance — no visible Airbnb error captured. Final URL: ${data.finalUrl}${shotSuffix}`,
                             variant: fullySubmitted ? "default" : "destructive",
-                            duration: 15000,
+                            duration: 20000,
                           });
                           // Kick a channel-status refresh so the badge flips if the status updated.
                           refreshChannelStatus?.();
@@ -2187,6 +2197,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               >
                                 {complianceBusy ? "⏳ Submitting…" : "↗ Push Compliance to Airbnb"}
                               </button>
+                              {/* Persistent reminder about the mandatory follow-up step.
+                                  Airbnb's compliance submission succeeds on its own, but
+                                  Guesty won't pull the new regulation state until the
+                                  operator re-publishes from Guesty Distribution. Without
+                                  this step the "Compliance not submitted" badge persists
+                                  indefinitely. */}
+                              <div style={{ marginTop: 8, fontSize: 10, color: "#92400e", lineHeight: 1.5, background: "#fef3c7", padding: "6px 8px", borderRadius: 4, border: "1px dashed #d97706" }}>
+                                <div style={{ fontWeight: 600, marginBottom: 2 }}>After this succeeds — one more manual step</div>
+                                Open <a href="https://app.guesty.com/" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: "#92400e", textDecoration: "underline" }}>app.guesty.com</a> → this listing → Distribution → Airbnb row → click <strong>PUBLISH TO CHANNEL</strong>. Guesty won't re-sync on its own; this badge stays stuck until you do.
+                              </div>
                             </div>
                           )}
                         </div>
