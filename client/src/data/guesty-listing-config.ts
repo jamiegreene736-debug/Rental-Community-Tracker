@@ -189,7 +189,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 32,
-    publicAddress: "2253 Poipu Rd, Koloa, HI 96756",
+    publicAddress: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
     units: [
       { unitId: "prop32-kia-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "prop32-kia-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
@@ -197,7 +197,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 33,
-    publicAddress: "2253 Poipu Rd, Koloa, HI 96756",
+    publicAddress: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
     units: [
       { unitId: "prop33-kia-3br-a", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "prop33-kia-3br-b", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },

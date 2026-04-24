@@ -4,7 +4,7 @@
   "referencedBy": [
     {
       "propertyId": 32,
-      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756",
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
       "unitId": "prop32-kia-2br",
       "unitNumber": "Building 2",
       "bedrooms": 2,
@@ -12,14 +12,14 @@
     },
     {
       "propertyId": 33,
-      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756",
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
       "unitId": "prop33-kia-3br-b",
       "unitNumber": "Building 26",
       "bedrooms": 3,
       "bathrooms": "3"
     }
   ],
-  "verificationStatus": "needs-review",
+  "verificationStatus": "INCORRECT-NEEDS-RESCRAPE",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Folder is shared by 2 units across propertyIds [32, 33]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "notes": "KNOWN BAD: contents are Kiahuna Plantation Resort photos (caused by the prior dedupe workaround). Rescrape from a real Pili Mai source to replace. Also note this folder is referenced by BOTH a 2BR unit (property 32) and a 3BR unit (property 33) — the shared-folder assumption is wrong; split into pili-mai-unit-b-2br and pili-mai-unit-b-3br during the rescrape.",
   "bedrooms": 2,
   "bathrooms": "2"
 }
