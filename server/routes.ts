@@ -5349,8 +5349,18 @@ export async function registerRoutes(
       trace.push({ step: "clicking-next" });
       const nextClickError = await page.click('button:has-text("Next")', { timeout: 8000 }).then(() => null).catch((err: Error) => err.message);
       if (nextClickError) trace.push({ step: "next-click-failed", detail: nextClickError });
-      // Wait for navigation OR for a new heading/form that indicates we moved to the next step.
-      await page.waitForTimeout(4000);
+      // Wait for the URL to change rather than a fixed timeout — Airbnb's form
+      // sometimes takes 8-12s to process + navigate, and the earlier 4s wait
+      // was racy (caught the button mid-spinner). 15s ceiling is generous
+      // enough to ride out slow responses without hanging indefinitely.
+      try {
+        await page.waitForURL((u) => u.toString() !== targetUrl, { timeout: 15000 });
+        trace.push({ step: "url-advanced-after-next" });
+      } catch {
+        trace.push({ step: "url-did-not-advance-within-15s" });
+      }
+      // Small post-navigation buffer for React hydration on the new page.
+      await page.waitForTimeout(1500);
 
       // If we landed somewhere that isn't the same form, assume progress.
       const postSubmitUrl = page.url();
@@ -5435,7 +5445,15 @@ export async function registerRoutes(
             trace.push({ step: "submit-click-retrying-force", detail: submitErr });
             await page.click('button:has-text("Submit")', { timeout: 5000, force: true }).catch(() => {});
           }
-          await page.waitForTimeout(5000);
+          // Same pattern as the Next click: wait for the URL to actually
+          // change, not a fixed timeout.
+          try {
+            await page.waitForURL((u) => u.toString() !== postSubmitUrl, { timeout: 15000 });
+            trace.push({ step: "url-advanced-after-submit" });
+          } catch {
+            trace.push({ step: "url-did-not-advance-after-submit-within-15s" });
+          }
+          await page.waitForTimeout(1500);
           finalUrl = page.url();
           submissionComplete = finalUrl !== postSubmitUrl;
           trace.push({
