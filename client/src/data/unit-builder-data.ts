@@ -681,7 +681,11 @@ Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shop
     propertyId: 4,
     propertyName: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
     complexName: "Regency at Poipu Kai",
-    address: "1831 Poipu Rd, Koloa, HI 96756",
+    // Unique within Regency at Poipu Kai by representative unit.
+    // Regency properties share 1831 Poipu Rd; OTA dedupe pivots on
+    // street + unit. First unit (423) disambiguates from prop 27's
+    // 114 without introducing a fake address.
+    address: "1831 Poipu Rd, Unit 423, Koloa, HI 96756",
     bookingTitle: "Poipu Kai - 6BR Villas, Pool - Sleeps 16",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups exploring Kauai's sunny south shore.
@@ -1063,7 +1067,10 @@ From the casita, enjoy views of the tropical gardens, pool area, and ocean beyon
     propertyId: 19,
     propertyName: "Gorgeous Princeville 5 bedroom condos for 14!",
     complexName: "Mauna Kai Princeville",
-    address: "3920 Wyllie Rd, Princeville, HI 96722",
+    // Unique within Mauna Kai by representative unit 9. Prop 19 and
+    // prop 20 both share 3920 Wyllie Rd; unit-suffixing the address
+    // keeps OTA dedupe happy without inventing a fake street.
+    address: "3920 Wyllie Rd, Unit 9, Princeville, HI 96722",
     bookingTitle: "Princeville - 5BR Condos - Sleeps 14",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Mauna Kai. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two comfortable condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, providing a wonderful home base for exploring Kauai's spectacular North Shore.
@@ -1135,7 +1142,8 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
     propertyId: 20,
     propertyName: "Gorgeous Princeville 6 bedroom condos for 18!",
     complexName: "Mauna Kai Princeville",
-    address: "3920 Wyllie Rd, Princeville, HI 96722",
+    // Unique within Mauna Kai by representative unit 7B (see prop 19).
+    address: "3920 Wyllie Rd, Unit 7B, Princeville, HI 96722",
     bookingTitle: "Princeville - 6BR Condos - Sleeps 18",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Mauna Kai. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
@@ -1621,15 +1629,13 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     propertyId: 32,
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     complexName: "Pili Mai",
-    // Real Pili Mai address. An earlier "dedupe workaround" set this to
-    // 2253 Poipu Rd (Kiahuna Plantation Resort's mailing address, 3
-    // minutes away) so OTAs wouldn't collapse multiple Pili Mai listings
-    // at 2611 onto one. That workaround was misleading: guest map pins
-    // landed at a beachfront resort and guests arrived inland at an
-    // entirely different complex. Distinction between the two Pili Mai
-    // listings (propertyId 32 vs 33) is carried by unit numbers and
-    // property name, not street address.
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Real Pili Mai address. An earlier "dedupe workaround" set this
+    // to 2253 Poipu Rd (Kiahuna Plantation Resort's mailing address)
+    // to avoid OTA dedupe; that caused guests to land at a beachfront
+    // resort instead of inland Pili Mai. Street address is now real;
+    // uniqueness between propertyId 32 and 33 is carried by the
+    // building suffix (Bldg 38 vs Bldg 10).
+    address: "2611 Kiahuna Plantation Dr, Bldg 38, Koloa, HI 96756",
     // Pili Mai units are two-story attached townhomes — NOT flat
     // condominium units — so the OTA propertyType needs to match.
     // Shipped as the fallback "Condominium" for months, which excluded
@@ -1702,12 +1708,10 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     propertyId: 33,
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     complexName: "Pili Mai",
-    // Real Pili Mai address. See propertyId 32 above — the same
-    // "dedupe workaround" pointed this listing at 2360 Kiahuna
-    // Plantation Dr (a commercial office address, not Pili Mai).
-    // Both Pili Mai listings now share 2611; listing distinction is
-    // carried by name + unit numbers.
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Real Pili Mai address with a unique building suffix — see
+    // propertyId 32 for the workaround history. Bldg 10 disambiguates
+    // this listing from prop 32's Bldg 38 for OTA dedupe.
+    address: "2611 Kiahuna Plantation Dr, Bldg 10, Koloa, HI 96756",
     // Same townhome-not-condo correction as propertyId 32 above.
     propertyType: "Townhouse",
     bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 12",
@@ -1781,7 +1785,9 @@ Poipu's south shore offers year-round sunshine, world-class snorkeling, and the 
     propertyId: 27,
     propertyName: "Beautiful 4 bedroom Poipu Kai Condo!",
     complexName: "Regency at Poipu Kai",
-    address: "1831 Poipu Rd, Koloa, HI 96756",
+    // Unique within Regency at Poipu Kai by representative unit 114
+    // (first of the paired units — see prop 4 comment above).
+    address: "1831 Poipu Rd, Unit 114, Koloa, HI 96756",
     bookingTitle: "Poipu Kai - 4BR Condos, Pool - Sleeps 8",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two 2-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 4 bedrooms and can accommodate up to 8 guests, an ideal setup for families or friends traveling together on Kauai's sunny south shore.
