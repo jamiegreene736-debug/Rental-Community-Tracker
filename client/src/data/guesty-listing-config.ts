@@ -141,7 +141,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 24,
-    publicAddress: "Makahuena at Poipu, 2640 Puuholo Rd, Koloa, HI 96756",
+    publicAddress: "Makahuena at Poipu, 1661 Pe'e Rd, Koloa, HI 96756",
     units: [
       { unitId: "prop24-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "prop24-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },

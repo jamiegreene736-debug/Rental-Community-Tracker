@@ -4,17 +4,17 @@
   "referencedBy": [
     {
       "propertyId": 24,
-      "address": "2640 Puuholo Rd, Koloa, HI 96756",
+      "address": "1661 Pe'e Rd, Koloa, HI 96756",
       "unitId": "prop24-mk-3br",
-      "unitNumber": "Clubhouse",
+      "unitNumber": "3301",
       "bedrooms": 3,
       "bathrooms": "2"
     },
     {
       "propertyId": 24,
-      "address": "2640 Puuholo Rd, Koloa, HI 96756",
+      "address": "1661 Pe'e Rd, Koloa, HI 96756",
       "unitId": "prop24-mk-2br",
-      "unitNumber": "Pool Pavilion",
+      "unitNumber": "2205",
       "bedrooms": 2,
       "bathrooms": "2"
     }
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Folder is mis-named. Kept the lae-nani-335 name to avoid breaking filesystem references / photoLabels DB rows, but propertyId 24 has been corrected from Lae Nani Resort (Kapaa) to Makahuena at Poipu (Koloa) on 2026-04-24. Audit these photos: visually confirm they're actually Makahuena interiors (south shore Poipu) and not Lae Nani interiors (east shore Kapaa). If wrong, rescrape from a real Makahuena listing (see parrishkauai.com/kauai-condos/makahuena/) and consider renaming the folder to makahuena-<unit#>. Unit numbers Clubhouse / Pool Pavilion are common-area SAMPLE labels — replace with real Makahuena unit numbers.",
+  "notes": "Folder is mis-named. Kept the lae-nani-335 name to avoid breaking filesystem references / photoLabels DB rows, but propertyId 24 has been corrected from Lae Nani Resort (Kapaa) to Makahuena at Poipu (Koloa, 1661 Pe'e Rd) on 2026-04-24. Audit these photos: visually confirm they're actually Makahuena interiors (south shore Poipu) and not Lae Nani interiors (east shore Kapaa). If wrong, rescrape from a real Makahuena listing (see parrishkauai.com/kauai-condos/makahuena/) and rename the folder to makahuena-<unit#>. Unit numbers 3301 and 2205 are format-plausible SAMPLES — replace with real Makahuena unit numbers.",
   "bedrooms": 3,
   "bathrooms": "2"
 }
