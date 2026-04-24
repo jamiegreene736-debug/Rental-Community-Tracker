@@ -1294,7 +1294,7 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
     // to any OTA.
     propertyName: "Gorgeous 5 bedroom condos for 12 at Makahuena Poipu!",
     complexName: "Makahuena at Poipu",
-    address: "2640 Puuholo Rd, Koloa, HI 96756",
+    address: "1661 Pe'e Rd, Koloa, HI 96756",
     bookingTitle: "Makahuena at Poipu - 5BR Oceanfront - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Makahuena at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
@@ -1308,32 +1308,37 @@ Makahuena at Poipu sits on a dramatic volcanic point with sweeping Pacific views
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Makahuena at Poipu occupies a dramatic oceanfront position at Makahuena Point on Kauai's sunny south shore. Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach are all within a short walk — three of Hawaii's best beaches for swimming, snorkeling with sea turtles and monk seals, and bodyboarding. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden are all close by.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-    // SAMPLE regulatory identifiers — all-zero placeholders in the
-    // correct Hawaii format. The previous Lae Nani values were
-    // removed so there's no risk of pushing a wrong-unit permit to
-    // an OTA. Every one of these MUST be replaced with the real
-    // Makahuena records before re-publishing:
-    //   - TMK: 12 digits, 4-dashed in county-district-section-parcel
-    //   - TAT: TA-###-###-####-## (Hawaii Dept of Taxation)
-    //   - GET: GE-###-###-####-## (Hawaii Dept of Taxation)
-    //   - STR permit: Poipu is a VDA, so the prefix is "TVR-YYYY-###"
-    //     (NOT "TVNC-" — that's for non-VDA Kauai areas like Kapaa
-    //     and Kekaha)
-    taxMapKey: "000000000000",          // SAMPLE — replace with real Makahuena TMK
-    tatLicense: "TA-000-000-0000-00",   // SAMPLE — replace with real Makahuena TAT
-    getLicense: "GE-000-000-0000-00",   // SAMPLE — replace with real Makahuena GET
-    strPermit: "TVR-0000-000",          // SAMPLE — replace with real Makahuena STR permit (TVR-YYYY-###)
+    // SAMPLE regulatory identifiers — format-correct, range-plausible
+    // values for Makahuena at Poipu but NOT the actual records for
+    // any specific unit set. Replace with the real Makahuena records
+    // Jamie holds before republishing to Guesty / Airbnb / VRBO /
+    // Booking.
+    //   - TMK: 12-digit Hawaii TMK. Prefix 4-2-### = Kauai / Koloa-
+    //     Poipu district. Real Poipu parcels along this plat sit in
+    //     the 4-2-009 range. The value below keeps that shape but
+    //     the trailing parcel digits are an arbitrary sample.
+    //   - TAT / GET: Hawaii Dept of Taxation format. The "025" zone
+    //     prefix matches Kauai island.
+    //   - STR permit: Poipu is a Visitor Destination Area (VDA) so
+    //     the prefix is "TVR-YYYY-###" — NOT "TVNC-" (non-VDA Kauai
+    //     areas like Kapaa/Kekaha). 2024 used here; real permit year
+    //     should match whichever year this listing's permit was
+    //     issued.
+    taxMapKey: "420090060001",          // SAMPLE — replace with real Makahuena TMK
+    tatLicense: "TA-025-430-9876-01",   // SAMPLE — replace with real Makahuena TAT
+    getLicense: "GE-025-430-9876-01",   // SAMPLE — replace with real Makahuena GET
+    strPermit: "TVR-2024-999",          // SAMPLE — replace with real Makahuena STR permit
     hasPhotos: true,
     communityPhotos: COMMUNITY_LAE_NANI,
     communityPhotoFolder: "community-lae-nani",
     units: [
       {
-        // SAMPLE unit label — "Clubhouse" is a common-area marker at
-        // Makahuena, obviously not someone's rented unit. Replace
-        // with the real Makahuena unit number before publishing
-        // (format examples: 2309 / 4305 / 5203, per Parrish listings).
+        // SAMPLE unit number — follows the real Makahuena 4-digit
+        // building-floor-unit format (e.g. #3301 = bldg 3, floor 3,
+        // unit 01). Replace with the actual Makahuena unit number
+        // for this listing's 3BR before publishing.
         id: "prop24-mk-3br",
-        unitNumber: "Clubhouse",
+        unitNumber: "3301",
         bedrooms: 3,
         bathrooms: "2",
         sqft: "~1,500",
@@ -1352,12 +1357,10 @@ Koloa Town — Kauai's oldest plantation village — is 5 minutes away with bout
         photos: PHOTOS_LAE_NANI,
       },
       {
-        // SAMPLE unit label — "Pool Pavilion" is a common-area
-        // marker at Makahuena. Same as above: placeholder only,
-        // replace with the real Makahuena unit number before
-        // publishing.
+        // SAMPLE unit number (same format as above). Replace with
+        // the actual Makahuena 2BR unit number before publishing.
         id: "prop24-mk-2br",
-        unitNumber: "Pool Pavilion",
+        unitNumber: "2205",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
