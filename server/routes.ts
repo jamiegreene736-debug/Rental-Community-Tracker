@@ -8691,35 +8691,107 @@ export async function registerRoutes(
 
     console.error(`[find-unit] Found ${candidates.length} candidate URLs`);
 
-    // Step 2 — For each candidate, do an Airbnb TEXT search for the specific address+unit
-    // This avoids all Zillow page fetching (which returns 403) and photo reverse-searching
+    // Step 2 — Per-candidate platform check across Airbnb, VRBO, and
+    // Booking.com. Two complementary queries per platform:
+    //   (a) address + unit number — catches listings that include the
+    //       street address in their title/snippet (most common case)
+    //   (b) community/resort name + unit number — catches listings that
+    //       only mention the resort (e.g. "Oceanview Kaha Lani 3BR #228")
+    //
+    // Each query returns one of three verdicts:
+    //   clean   — SearchAPI responded and no platform hits were found
+    //   found   — SearchAPI responded and at least one hit matched
+    //   unknown — SearchAPI errored / timed out. Previously this was
+    //             silently treated as "clean", which is how a live unit
+    //             could slip through. We now surface UNKNOWN to the UI
+    //             so the user can decide whether to trust the result.
+    //
+    // Candidates with any FOUND verdict are skipped. Candidates with
+    // all CLEAN or a mix of CLEAN/UNKNOWN fall through to the photo
+    // and vision gates and are surfaced to the UI with the verdict.
+    type PlatformStatus = "clean" | "found" | "unknown";
+    type PlatformCheck = { airbnb: PlatformStatus; vrbo: PlatformStatus; bookingCom: PlatformStatus };
+
+    const platformHosts: Array<{ key: keyof PlatformCheck; host: string }> = [
+      { key: "airbnb",     host: "airbnb.com" },
+      { key: "vrbo",       host: "vrbo.com" },
+      { key: "bookingCom", host: "booking.com" },
+    ];
+
+    async function runSearch(q: string): Promise<any[] | null> {
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
+        );
+        if (!resp.ok) {
+          console.error(`[find-unit] SearchAPI HTTP ${resp.status} for "${q}"`);
+          return null;
+        }
+        const data = await resp.json() as any;
+        return data.organic_results || [];
+      } catch (e: any) {
+        console.error(`[find-unit] SearchAPI error for "${q}": ${e?.message}`);
+        return null;
+      }
+    }
+
+    async function checkOnePlatform(host: string, queries: string[]): Promise<PlatformStatus> {
+      // Fire both queries in parallel; combine verdicts.
+      const hitLists = await Promise.all(queries.map((q) => runSearch(q)));
+      let anyResponded = false;
+      for (const hits of hitLists) {
+        if (hits === null) continue;
+        anyResponded = true;
+        const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
+        if (matches.length > 0) return "found";
+      }
+      // All queries errored → we genuinely don't know.
+      return anyResponded ? "clean" : "unknown";
+    }
+
+    async function checkAllPlatforms(
+      address: string,
+      resort: string,
+      unit: string,
+    ): Promise<PlatformCheck> {
+      if (!unit) {
+        // Without a unit number there's no way to run a meaningfully
+        // specific query — mark every platform as unknown and let the
+        // UI surface that to the user.
+        return { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
+      }
+      const results = await Promise.all(
+        platformHosts.map((p) =>
+          checkOnePlatform(p.host, [
+            `site:${p.host} "${address}" "${unit}"`,
+            `site:${p.host} "${resort}" "${unit}"`,
+          ]),
+        ),
+      );
+      return {
+        airbnb:     results[0],
+        vrbo:       results[1],
+        bookingCom: results[2],
+      };
+    }
+
     for (const candidate of candidates) {
       try {
         const { zillowUrl, address, unitNumber, thumbnail } = candidate;
 
-        // Check Airbnb using the STREET ADDRESS + unit number only.
-        // The community-name query (e.g. "Kaha Lani Resort" + "228") causes false positives
-        // because "228" can match review counts, square footage, etc. on any listing page.
-        // The address query is specific enough: if the unit is on Airbnb it will mention the address.
-        let foundOnAirbnb = false;
-        if (unitNumber) {
-          const q = `site:airbnb.com "${communityAddress}" "${unitNumber}"`;
-          console.error(`[find-unit] Airbnb text check: ${q}`);
-          try {
-            const resp = await fetch(
-              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
-            );
-            if (resp.ok) {
-              const data = await resp.json() as any;
-              const hits: any[] = data.organic_results || [];
-              const airbnbHits = hits.filter((h: any) => (h.link || "").includes("airbnb.com"));
-              console.error(`[find-unit] Airbnb hits for "${q}": ${airbnbHits.length}`);
-              if (airbnbHits.length > 0) foundOnAirbnb = true;
-            }
-          } catch {}
+        const platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
+        console.error(
+          `[find-unit] ${zillowUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
+        );
+        const foundOn = platformHosts.find((p) => platformCheck[p.key] === "found");
+        if (foundOn) {
+          console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping`);
+          continue;
         }
+        // All CLEAN, or a mix of CLEAN and UNKNOWN. Fall through to the
+        // photo+vision gates and surface the verdict in the response.
 
-        if (!foundOnAirbnb) {
+        {
           // Two-stage quality filter before suggesting this candidate:
           //
           //   Stage 1 — photo-count floor (MIN_PHOTOS). Skips sparse
@@ -8771,10 +8843,10 @@ export async function registerRoutes(
               photos,
               photoCount,
               sampledCategories,
+              platformCheck,
             },
           });
         }
-        console.error(`[find-unit] Unit ${unitNumber} found on Airbnb — skipping`);
       } catch (err: any) {
         console.error(`[find-unit] Candidate error: ${err?.message}`);
       }
