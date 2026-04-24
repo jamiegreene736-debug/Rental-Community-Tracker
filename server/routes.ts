@@ -5668,6 +5668,34 @@ export async function registerRoutes(
       await ctx.addCookies(cookies);
       const page = await ctx.newPage();
 
+      // Guesty uses Okta's JS SDK which stores the bearer token in
+      // localStorage (key "okta-token-storage"), not a cookie. To auth,
+      // we first navigate to any app.guesty.com page (to bind the
+      // localStorage origin), inject the token, then navigate to the
+      // target URL. GUESTY_LOCAL_STORAGE is a JSON object of key→value
+      // pairs — the operator pastes the okta-token-storage value (and
+      // anything else that looks auth-related) from DevTools Application
+      // → Local Storage → app.guesty.com.
+      const localStorageJson = process.env.GUESTY_LOCAL_STORAGE;
+      if (localStorageJson) {
+        try {
+          const ls = JSON.parse(localStorageJson) as Record<string, string>;
+          trace.push({ step: "priming-localstorage", detail: `${Object.keys(ls).length} keys` });
+          // Navigate to a lightweight app.guesty.com page so the localStorage
+          // origin matches before we set keys.
+          await page.goto("https://app.guesty.com/", { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+          await page.evaluate((entries: Array<[string, string]>) => {
+            for (const [k, v] of entries) {
+              try { window.localStorage.setItem(k, v); } catch { /* ignored */ }
+            }
+          }, Object.entries(ls));
+        } catch (e) {
+          trace.push({ step: "localstorage-parse-failed", detail: (e as Error).message });
+        }
+      } else {
+        trace.push({ step: "no-localstorage-env", detail: "set GUESTY_LOCAL_STORAGE to inject Okta tokens" });
+      }
+
       const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
       trace.push({ step: "navigating", detail: targetUrl });
       await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
@@ -5689,12 +5717,17 @@ export async function registerRoutes(
         // Return the cookie names we had so the operator can sanity-check
         // what was exported. Values are never logged.
         const cookieNames = cookies.map((c) => `${c.name}@${c.domain}`).sort();
+        const lsKeys = (() => {
+          try { return Object.keys(JSON.parse(process.env.GUESTY_LOCAL_STORAGE ?? "{}")); }
+          catch { return ["<invalid JSON>"]; }
+        })();
         return res.json({
           ok: false,
-          error: "Guesty redirected to the Okta login page — the session cookies in GUESTY_SESSION_COOKIES are either expired, missing, or exported from the wrong domain. Re-export from a logged-in app.guesty.com tab with Cookie-Editor.",
+          error: "Guesty redirected to the Okta login page — auth didn't carry through. Guesty uses Okta JS SDK which stores the bearer token in localStorage (key 'okta-token-storage'), not a cookie. Set GUESTY_LOCAL_STORAGE env var: DevTools on app.guesty.com → Application → Local Storage → app.guesty.com → copy the full JSON of {'okta-token-storage': '<value>', ...} and paste as the env var value.",
           finalUrl: postLoginUrl,
           cookieNames,
           cookieCount: cookies.length,
+          localStorageKeys: lsKeys,
           beforeShotUrl: beforeShot,
           trace,
         });
