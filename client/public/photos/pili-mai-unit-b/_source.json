@@ -19,7 +19,7 @@
       "bathrooms": "3"
     }
   ],
-  "verificationStatus": "INCORRECT-NEEDS-RESCRAPE",
+  "verificationStatus": "needs-review",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "KNOWN BAD: contents are Kiahuna Plantation Resort photos (caused by the prior dedupe workaround). Rescrape from a real Pili Mai source to replace. Also note this folder is referenced by BOTH a 2BR unit (property 32) and a 3BR unit (property 33) — the shared-folder assumption is wrong; split into pili-mai-unit-b-2br and pili-mai-unit-b-3br during the rescrape.",
+  "notes": "Photos confirmed by operator (2026-04-24) to be actual Pili Mai interiors. `sourceListing.url` is null — worth backfilling when the original source URL can be identified. Note: this folder is referenced by BOTH a 2BR unit (property 32) and a 3BR unit (property 33); the shared-folder assumption works only if photos are visually generic enough to fit both layouts. Consider splitting into pili-mai-unit-b-2br and pili-mai-unit-b-3br if any unit-specific shots are found.",
   "bedrooms": 2,
   "bathrooms": "2"
 }

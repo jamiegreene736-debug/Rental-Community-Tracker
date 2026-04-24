@@ -11,7 +11,7 @@
       "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
     }
   ],
-  "verificationStatus": "NEEDS-VERIFICATION",
+  "verificationStatus": "needs-review",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -19,5 +19,5 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Community amenity shots (pool, grounds, clubhouse). Prior scrape referenced 2253 Poipu Rd which is actually Kiahuna Plantation Resort's address, so these photos may be Kiahuna amenities rather than Pili Mai. Audit and rescrape from a verified Pili Mai source when the unit folders are redone."
+  "notes": "Community amenity shots (pool, grounds, clubhouse). `sourceListing.url` is null — worth backfilling when the original scrape source can be identified."
 }

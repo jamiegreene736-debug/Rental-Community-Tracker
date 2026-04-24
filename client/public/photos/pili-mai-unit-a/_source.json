@@ -19,7 +19,7 @@
       "bathrooms": "3"
     }
   ],
-  "verificationStatus": "INCORRECT-NEEDS-RESCRAPE",
+  "verificationStatus": "needs-review",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "KNOWN BAD: contents are Kiahuna Plantation Resort photos (caused by the prior dedupe workaround that set the property address to 2253 Poipu Rd, which is actually Kiahuna's mailing address). Rescrape from a real Pili Mai source (a Pili Mai Zillow or VRBO listing at 2611 Kiahuna Plantation Dr) to replace. Also re-evaluate whether a single folder can legitimately serve both propertyId 32 and 33 — currently shared because both were 3BR/3BA, but any unit-specific shots will be wrong for one of them.",
+  "notes": "Photos confirmed by operator (2026-04-24) to be actual Pili Mai interiors. `sourceListing.url` is still null because the original scrape source wasn't recorded — worth backfilling if the Zillow/VRBO URL it was pulled from can be identified, so future audits have a verifiable trail. Folder is shared by 2 units across propertyIds [32, 33]; photos remain representative.",
   "bedrooms": 3,
   "bathrooms": "3"
 }
