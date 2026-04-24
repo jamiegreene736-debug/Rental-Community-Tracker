@@ -4,14 +4,14 @@
   "referencedBy": [
     {
       "propertyId": 32,
-      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756"
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
     },
     {
       "propertyId": 33,
-      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756"
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
     }
   ],
-  "verificationStatus": "needs-review",
+  "verificationStatus": "NEEDS-VERIFICATION",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -19,5 +19,5 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+  "notes": "Community amenity shots (pool, grounds, clubhouse). Prior scrape referenced 2253 Poipu Rd which is actually Kiahuna Plantation Resort's address, so these photos may be Kiahuna amenities rather than Pili Mai. Audit and rescrape from a verified Pili Mai source when the unit folders are redone."
 }
