@@ -369,3 +369,32 @@ export const photoLabels = pgTable("photo_labels", {
 });
 export type PhotoLabel = typeof photoLabels.$inferSelect;
 export type InsertPhotoLabel = typeof photoLabels.$inferInsert;
+
+// Reverse-image-search results per photo folder. One row per folder;
+// upserted each time the scanner runs. The dashboard aggregates these
+// rows by property (a single property may span multiple folders) when
+// rendering the "Photo Match" column.
+//
+// status values: "clean" | "found" | "unknown" — same contract as the
+// unit-replacement platform check.
+//
+// *_matches columns store an array of { photoUrl, listingUrl, title,
+// source } objects — the photos of ours that matched, and the external
+// listing URLs they were found on. Capped at 20 per platform to keep
+// the column sane.
+export const photoListingChecks = pgTable("photo_listing_checks", {
+  id: serial("id").primaryKey(),
+  photoFolder: text("photo_folder").notNull().unique(),
+  airbnbStatus: text("airbnb_status").notNull().default("unknown"),
+  vrboStatus: text("vrbo_status").notNull().default("unknown"),
+  bookingStatus: text("booking_status").notNull().default("unknown"),
+  airbnbMatches: text("airbnb_matches"),   // JSON-encoded array
+  vrboMatches: text("vrbo_matches"),       // JSON-encoded array
+  bookingMatches: text("booking_matches"), // JSON-encoded array
+  photosChecked: integer("photos_checked").default(0).notNull(),
+  lensCalls: integer("lens_calls").default(0).notNull(),
+  errorMessage: text("error_message"),
+  checkedAt: timestamp("checked_at").defaultNow().notNull(),
+});
+export type PhotoListingCheck = typeof photoListingChecks.$inferSelect;
+export type InsertPhotoListingCheck = typeof photoListingChecks.$inferInsert;

@@ -44,8 +44,10 @@ import {
   Star,
   TrendingUp,
   MessageSquare,
+  Camera,
 } from "lucide-react";
-import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
+import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
@@ -387,6 +389,93 @@ export default function Home() {
     refetchOnWindowFocus: false,
   });
 
+  // Reverse-image-search status for the Photo Match column. One row
+  // per photo folder. The per-property status is the WORST across that
+  // property's folders (FOUND beats UNKNOWN beats CLEAN) — a match on
+  // any one folder is what Jamie cares about.
+  type PhotoStatus = "clean" | "found" | "unknown";
+  type PhotoCheckRow = {
+    folder: string;
+    airbnbStatus: PhotoStatus;
+    vrboStatus: PhotoStatus;
+    bookingStatus: PhotoStatus;
+    airbnbMatches: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    vrboMatches:   Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    bookingMatches:Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    photosChecked: number;
+    checkedAt: string | null;
+    errorMessage: string | null;
+  };
+  const { data: photoCheckData } = useQuery<{ checks: PhotoCheckRow[] }>({
+    queryKey: ["/api/photo-listing-check"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const photoCheckByFolder = useMemo(() => {
+    const map = new Map<string, PhotoCheckRow>();
+    for (const r of photoCheckData?.checks ?? []) map.set(r.folder, r);
+    return map;
+  }, [photoCheckData]);
+
+  // Aggregate folder-level rows into property-level status.
+  // Returns { airbnb, vrbo, booking } for each property; each value is
+  // the worst across that property's folders (priority: found > unknown > clean).
+  // `null` = no data yet for any of this property's folders (never scanned).
+  type PhotoAggStatus = PhotoStatus | null;
+  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number } };
+  const photoByProperty = useMemo(() => {
+    const out = new Map<number, PhotoAgg>();
+    const worst = (a: PhotoAggStatus, b: PhotoStatus): PhotoAggStatus => {
+      const rank = (s: PhotoAggStatus) => s === "found" ? 3 : s === "unknown" ? 2 : s === "clean" ? 1 : 0;
+      return rank(b) > rank(a) ? b : a;
+    };
+    for (const p of properties) {
+      const builder = getUnitBuilderByPropertyId(p.id);
+      const folderSet = new Set<string>();
+      if (builder) {
+        for (const u of builder.units) if (u.photoFolder) folderSet.add(u.photoFolder);
+        if (builder.communityPhotoFolder) folderSet.add(builder.communityPhotoFolder);
+      }
+      const folders = Array.from(folderSet);
+      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 } };
+      for (const f of folders) {
+        const row = photoCheckByFolder.get(f);
+        if (!row) continue;
+        agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
+        agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
+        agg.booking = worst(agg.booking, row.bookingStatus);
+        agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
+        agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
+        agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
+        if (row.checkedAt && (!agg.lastCheckedAt || row.checkedAt > agg.lastCheckedAt)) {
+          agg.lastCheckedAt = row.checkedAt;
+        }
+      }
+      out.set(p.id, agg);
+    }
+    return out;
+  }, [photoCheckByFolder]);
+
+  const { toast } = useToast();
+  const [runningPhotoScan, setRunningPhotoScan] = useState(false);
+  const runPhotoScan = async () => {
+    setRunningPhotoScan(true);
+    try {
+      const resp = await apiRequest("POST", "/api/photo-listing-check/run", {});
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Failed to start scan");
+      toast({
+        title: "Photo scan started",
+        description: `Scanning ${data.folders?.length ?? "?"} folders in the background. Refresh in a few minutes.`,
+      });
+    } catch (e: any) {
+      toast({ title: "Couldn't start photo scan", description: e?.message, variant: "destructive" });
+    } finally {
+      setRunningPhotoScan(false);
+    }
+  };
+
   const queryClient = useQueryClient();
 
   const deleteDraftMutation = useMutation({
@@ -444,6 +533,16 @@ export default function Home() {
                 Operations
               </Button>
             </Link>
+            <Button
+              variant="outline"
+              onClick={runPhotoScan}
+              disabled={runningPhotoScan}
+              data-testid="button-run-photo-scan"
+              title="Reverse-image-search every property's photos on Airbnb, VRBO, and Booking.com"
+            >
+              <Camera className="h-4 w-4 mr-2" />
+              {runningPhotoScan ? "Starting…" : "Run Photo Scan"}
+            </Button>
           </div>
         </div>
 
@@ -544,6 +643,7 @@ export default function Home() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
+                <TableHead className="w-[84px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, amber = not yet checked / Lens error">Photo Match</TableHead>
                 <TableHead className="w-[180px] max-w-[180px] px-2">
                   <Button
                     variant="ghost"
@@ -729,6 +829,60 @@ export default function Home() {
                       );
                     })()}
                   </TableCell>
+                  <TableCell className="text-center px-1">
+                    {(() => {
+                      // Photo-match indicators mirror the Channels column:
+                      // three badges per row with the same color palette.
+                      //   - green ✓  → photos not found on that platform
+                      //   - red ✗    → photos matched to ≥2 other listings
+                      //                on that platform (likely re-post)
+                      //   - amber ⚠  → not yet scanned OR Lens errored.
+                      //                Check back after the weekly scan,
+                      //                or click "Run Photo Scan".
+                      const agg = photoByProperty.get(property.id);
+                      type Tone = "ok" | "warn" | "bad";
+                      const toneOf = (s: PhotoAggStatus): Tone => {
+                        if (s === "clean") return "ok";
+                        if (s === "found") return "bad";
+                        return "warn"; // unknown or null
+                      };
+                      const PAL: Record<Tone, { bg: string; glyph: string }> = {
+                        ok:   { bg: "#16a34a", glyph: "✓" },
+                        warn: { bg: "#f59e0b", glyph: "⚠" },
+                        bad:  { bg: "#dc2626", glyph: "✗" },
+                      };
+                      const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number }> = [
+                        { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0 },
+                        { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0 },
+                        { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0 },
+                      ];
+                      const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
+                      return (
+                        <div className="flex gap-0.5 justify-center items-center" data-testid={`photo-match-${property.id}`}>
+                          {items.map((it) => {
+                            const tone = toneOf(it.status);
+                            const p = PAL[tone];
+                            const tip =
+                              it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
+                              it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found (last checked ${stamp})` :
+                              it.status === "unknown" ? `${it.name}: Lens error on last run (${stamp}) — will retry` :
+                              `${it.name}: never scanned — click Run Photo Scan`;
+                            return (
+                              <span
+                                key={it.letter}
+                                title={tip}
+                                className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
+                                style={{ background: p.bg, color: "white", minWidth: 22 }}
+                                data-testid={`photo-match-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                              >
+                                {it.letter}{p.glyph}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </TableCell>
                   <TableCell className="max-w-[180px] px-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
@@ -830,7 +984,7 @@ export default function Home() {
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={12} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
