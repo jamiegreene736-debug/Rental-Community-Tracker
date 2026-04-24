@@ -5721,39 +5721,147 @@ export async function registerRoutes(
       trace.push({ step: "navigating", detail: targetUrl });
       await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
       // Guesty's admin SPA is heavy — give it time to hydrate before scraping.
-      await page.waitForTimeout(6000);
+      await page.waitForTimeout(5000);
 
-      const postLoginUrl = page.url();
-      // Guesty's Okta login lives at app.guesty.com/auth/login — so the
-      // earlier "not on app.guesty.com" heuristic falsely called that a
-      // success. Check the path specifically, and also sanity-check that
-      // the rendered page has the target section's content.
-      const landedOnLogin = /\/auth\/login/i.test(postLoginUrl)
-        || /okta-signin-username|okta-signin-password/i.test(await page.content().catch(() => ""));
-      trace.push({ step: landedOnLogin ? "redirected-to-login" : "on-owners-and-license", detail: postLoginUrl });
+      // Check if we've been redirected to the login page.
+      const isLoginPage = async (): Promise<boolean> => {
+        const u = page.url();
+        if (/\/auth\/login|\/login|\/signin/i.test(u)) return true;
+        return /okta-signin-username|okta-signin-password|Please enter your details to sign in/i
+          .test(await page.content().catch(() => ""));
+      };
+
+      if (await isLoginPage()) {
+        // Fall through to the email/password flow. Storage injection
+        // alone doesn't cut it — Guesty has server-side session
+        // validation that redirects before the SPA ever reads our
+        // localStorage.
+        const guestyEmail = process.env.GUESTY_EMAIL;
+        const guestyPassword = process.env.GUESTY_PASSWORD;
+        if (!guestyEmail || !guestyPassword) {
+          const beforeShot = await saveShot(page, "needs-login-no-creds");
+          return res.json({
+            ok: false,
+            error: "Guesty redirected to login and GUESTY_EMAIL / GUESTY_PASSWORD env vars are not set. Token/storage injection doesn't bypass Guesty's server-side session check — set the email+password env vars to enable the Playwright login flow.",
+            finalUrl: page.url(),
+            beforeShotUrl: beforeShot,
+            trace,
+          });
+        }
+
+        trace.push({ step: "starting-login-flow" });
+
+        // STEP 1: Email. Guesty's branded login accepts either the email
+        // input on its own page or the Okta single-form widget.
+        const emailInput = await page.waitForSelector(
+          'input[type="email"], input[name="username"], input[name="email"], input[id*="okta-signin-username"], input[placeholder*="@"]',
+          { timeout: 10000 },
+        ).catch(() => null);
+        if (!emailInput) {
+          const shot = await saveShot(page, "no-email-input");
+          return res.json({
+            ok: false,
+            error: "Login page loaded but no email input was found. Guesty may have changed their login form — check the screenshot.",
+            finalUrl: page.url(),
+            beforeShotUrl: shot,
+            trace,
+          });
+        }
+        await emailInput.fill(guestyEmail);
+        trace.push({ step: "filled-email" });
+
+        // Keep "Remember me" checked so subsequent runs can potentially
+        // reuse the device-trust cookie and skip MFA.
+        const rememberMe = await page.$(
+          'input[type="checkbox"][name*="remember" i], input[type="checkbox"][id*="remember" i]',
+        ).catch(() => null);
+        if (rememberMe) {
+          const checked = await rememberMe.isChecked().catch(() => false);
+          if (!checked) await rememberMe.check({ force: true }).catch(() => {});
+        }
+
+        // Submit the first step. The button label varies ("Continue" /
+        // "Sign In" / "Next") so try any visible submit button.
+        await page.click(
+          'button[type="submit"], input[type="submit"], button:has-text("Continue"), button:has-text("Sign In"), button:has-text("Next"), button:has-text("Log In")',
+          { timeout: 8000 },
+        ).catch(() => {});
+        trace.push({ step: "clicked-email-submit" });
+
+        // STEP 2: Password — either on same page (Okta widget) or next page.
+        const passwordInput = await page.waitForSelector(
+          'input[type="password"], input[name="password"], input[id*="okta-signin-password"]',
+          { timeout: 20000 },
+        ).catch(() => null);
+        if (!passwordInput) {
+          const shot = await saveShot(page, "no-password-input");
+          return res.json({
+            ok: false,
+            error: "Couldn't find password input after email submit. Guesty may be using Google SSO-only for this account, or the form changed.",
+            finalUrl: page.url(),
+            beforeShotUrl: shot,
+            trace,
+          });
+        }
+        await passwordInput.fill(guestyPassword);
+        trace.push({ step: "filled-password" });
+
+        await page.click(
+          'button[type="submit"], input[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Verify"), button:has-text("Submit")',
+          { timeout: 8000 },
+        ).catch(() => {});
+        trace.push({ step: "clicked-password-submit" });
+
+        // Wait for auth to complete — URL should leave /auth/login back
+        // to an app.guesty.com/{something} path. 30s ceiling covers slow
+        // Okta round-trips without hanging indefinitely.
+        try {
+          await page.waitForURL(
+            (u) => {
+              const s = u.toString();
+              return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
+            },
+            { timeout: 30000 },
+          );
+          trace.push({ step: "login-redirected", detail: page.url() });
+        } catch {
+          // Still stuck on login. Likely MFA, bad creds, or a new
+          // verification step we haven't wired up. Return what we see.
+          const html = await page.content().catch(() => "");
+          const mfaHint = /mfa|authenticator|enter the code|security key|push notification|verify it.s you|verification code/i.test(html);
+          const badCreds = /invalid|incorrect|try again|doesn.?t match|not recognized/i.test(html);
+          const shot = await saveShot(page, "login-stuck");
+          return res.json({
+            ok: false,
+            error: mfaHint
+              ? "Login reached the MFA step — automated login can't complete that. Disable MFA for this account, or set up a 'trust this device' cookie by logging in manually once with Remember Me, then re-running."
+              : badCreds
+              ? "Login failed — email or password rejected by Guesty. Verify GUESTY_EMAIL / GUESTY_PASSWORD values."
+              : "Login didn't complete within 30s. Check the screenshot for what Guesty is showing.",
+            finalUrl: page.url(),
+            beforeShotUrl: shot,
+            trace,
+          });
+        }
+
+        // Login worked — navigate to the target URL if we're not already
+        // there (post-login redirect usually lands on the dashboard).
+        if (!page.url().includes("owners-and-license")) {
+          trace.push({ step: "navigating-to-target-after-login", detail: targetUrl });
+          await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+          await page.waitForTimeout(5000);
+        }
+      }
 
       const beforeShot = await saveShot(page, "before");
 
-      if (landedOnLogin) {
-        // Return the cookie names we had so the operator can sanity-check
-        // what was exported. Values are never logged.
-        const cookieNames = cookies.map((c) => `${c.name}@${c.domain}`).sort();
-        const lsKeys = (() => {
-          const keys: string[] = [];
-          try {
-            const parsed = JSON.parse(process.env.GUESTY_LOCAL_STORAGE ?? "{}");
-            keys.push(...Object.keys(parsed));
-          } catch { keys.push("<GUESTY_LOCAL_STORAGE invalid JSON>"); }
-          if (process.env.GUESTY_OKTA_TOKEN_STORAGE) keys.push("okta-token-storage (from GUESTY_OKTA_TOKEN_STORAGE)");
-          return keys;
-        })();
+      // Final sanity check — if we're still on login after the flow,
+      // bail out with the same diagnostics so the operator can see.
+      if (await isLoginPage()) {
         return res.json({
           ok: false,
-          error: "Guesty redirected to the Okta login page — auth didn't carry through. Set GUESTY_OKTA_TOKEN_STORAGE env var to the raw value from DevTools Console on app.guesty.com: `copy(localStorage.getItem('okta-token-storage'))`.",
-          finalUrl: postLoginUrl,
-          cookieNames,
-          cookieCount: cookies.length,
-          localStorageKeys: lsKeys,
+          error: "Still on login page after Playwright login flow — something failed silently.",
+          finalUrl: page.url(),
           beforeShotUrl: beforeShot,
           trace,
         });
