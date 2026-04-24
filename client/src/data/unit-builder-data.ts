@@ -1283,67 +1283,88 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
   },
   {
     propertyId: 24,
-    propertyName: "Gorgeous 5 bedroom condos for 10 on Kapaa coast!",
-    complexName: "Lae Nani Resort",
-    address: "410 Papaloa Rd, Kapaa, HI 96746",
-    bookingTitle: "Lae Nani - 5BR Oceanfront - Sleeps 10",
-    sampleDisclaimer: "This listing represents a managed portfolio of similar units within Lae Nani Resort. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
-    combinedDescription: `This listing is comprised of two oceanfront condos within the Lae Nani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with ocean views and access to the resort's own private sandy beach cove.
+    // CORRECTED 2026-04-24: this entry was previously wired up as
+    // "Lae Nani Resort" at 410 Papaloa Rd, Kapaa (east shore) — a
+    // completely different complex from what the dashboard and the
+    // VRE source URL describe. The actual property is Makahuena at
+    // Poipu (south shore). Text fields have been rewritten below.
+    // See TODO comments on the permit / unit-number fields — those
+    // still hold the old Lae Nani values and must be replaced with
+    // the real Makahuena records before this listing re-publishes
+    // to any OTA.
+    propertyName: "Gorgeous 5 bedroom condos for 12 at Makahuena Poipu!",
+    complexName: "Makahuena at Poipu",
+    address: "2640 Puuholo Rd, Koloa, HI 96756",
+    bookingTitle: "Makahuena at Poipu - 5BR Oceanfront - Sleeps 12",
+    sampleDisclaimer: "This listing represents a managed portfolio of similar units within Makahuena at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
+    combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
 
 Unit A is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. AC and ceiling fans throughout.
 
-Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set in a tropical garden with ocean views, a full kitchen, and a private lanai. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa. AC and ceiling fans included.
+Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set within the tropical resort grounds with ocean views, a full kitchen, and a private lanai. Sleeps 4 with a King master, Queen second bedroom. AC and ceiling fans included.
 
-Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area round out the amenities. On the Coconut Coast with easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Kapaa's vibrant town center is walking distance with its coastal bike path, boutiques, and diverse restaurants.
+Makahuena at Poipu sits on a dramatic volcanic point with sweeping Pacific views. The resort pool, BBQ area, and landscaped grounds round out the amenities. Walk to Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach — three of Kauai's best south-shore beaches. Koloa Town's historic plantation district is 5 minutes away with boutique shops and restaurants. Poipu Shopping Village and Kukui'ula Village (dining/shops) are nearby, along with Spouting Horn blowhole and the National Tropical Botanical Garden.
 
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
-    neighborhood: "Lae Nani Resort occupies a prime oceanfront position on the Coconut Coast in Kapaa, with a private tidal pool area and direct ocean access. The Kauai Path coastal bike trail passes by the property. Kapaa Town — minutes away — offers diverse restaurants, the Saturday morning farmers market, boutique shopping, and a lively local vibe. Wailua River kayaking, Wailua Falls, and Opaeka'a Falls scenic overlook are 10-15 minutes inland. Coconut Marketplace and Kauai Village Shopping Center are nearby for convenience.",
-    transit: "Lihue Airport is about 15 minutes south. The Coconut Coast sits midway between Kauai's North Shore and South Shore — each roughly 35-40 minutes by car. A rental car is recommended. The Kauai Path bike trail connects the coastal area for car-free exploring. Rideshare (Lyft) and The Kauai Bus are both accessible from Kapaa.",
-        taxMapKey: "440080010001",
-    tatLicense: "TA-025-110-4567-01",
-    getLicense: "GE-025-110-4567-01",
-    strPermit: "TVNC-0489",
+    neighborhood: "Makahuena at Poipu occupies a dramatic oceanfront position at Makahuena Point on Kauai's sunny south shore. Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach are all within a short walk — three of Hawaii's best beaches for swimming, snorkeling with sea turtles and monk seals, and bodyboarding. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden are all close by.",
+    transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
+    // TODO (Makahuena): the four regulatory identifiers below still hold
+    // the OLD Lae Nani values from when this entry was mislabelled.
+    // Poipu sits in a VDA so the STR permit prefix should be "TVR-"
+    // (year-sequence), NOT "TVNC-". Before re-publishing this listing
+    // to Guesty / Airbnb / VRBO / Booking, replace all four with the
+    // actual Makahuena records for this unit set.
+    taxMapKey: "440080010001",          // TODO: real Makahuena TMK
+    tatLicense: "TA-025-110-4567-01",   // TODO: real Makahuena TAT
+    getLicense: "GE-025-110-4567-01",   // TODO: real Makahuena GET
+    strPermit: "TVNC-0489",             // TODO: real Makahuena STR permit (Poipu uses TVR-YYYY-###)
     hasPhotos: true,
     communityPhotos: COMMUNITY_LAE_NANI,
     communityPhotoFolder: "community-lae-nani",
     units: [
       {
-        id: "prop24-ln-3br",
+        // TODO (Makahuena): "314" is the old Lae Nani unit number.
+        // Replace with the actual Makahuena unit number (e.g.
+        // 4305 / 5203 / 2309 — see parrishkauai.com Makahuena
+        // listings for the format).
+        id: "prop24-mk-3br",
         unitNumber: "314",
         bedrooms: 3,
         bathrooms: "2",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Oceanfront 3BR/2BA condo at Lae Nani Resort. Open living with ocean views, full kitchen, private lanai, pool and tennis. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to a private sandy beach cove.",
-        longDescription: `Welcome to this oceanfront 3-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa on Kauai's beautiful Coconut Coast.
+        shortDescription: "Oceanfront 3BR/2BA condo at Makahuena at Poipu. Open living with ocean views, full kitchen, private lanai, resort pool. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to Shipwreck Beach and Poipu Beach Park.",
+        longDescription: `Welcome to this oceanfront 3-bedroom, 2-bathroom condominium at Makahuena at Poipu on Kauai's sunny south shore.
 
-This corner unit offers expansive ocean views from the living area and private lanai. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
+This corner unit offers expansive ocean views from the living area and private lanai, set at the dramatic Makahuena Point. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
 
 The fully equipped kitchen features modern appliances and plenty of counter space. The king-bedded master suite has an en-suite bath and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds. A queen sleeper sofa in the living area provides additional sleeping for two more guests. AC and ceiling fans keep all rooms comfortable.
 
-Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
+Makahuena at Poipu sits on a rugged volcanic point with sweeping Pacific views. The resort pool, BBQ area, and landscaped grounds provide a relaxing base for your Kauai vacation. Walk to three of Kauai's best south-shore beaches: Shipwreck, Poipu Beach Park, and Brennecke's.
 
-Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Central Kauai location makes day trips to any part of the island easy and convenient.`,
+Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden. Snorkel with sea turtles and monk seals at Poipu Beach Park. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },
       {
-        id: "prop24-ln-2br",
+        // TODO (Makahuena): "225" is the old Lae Nani unit number.
+        // Replace with the actual Makahuena unit number.
+        id: "prop24-mk-2br",
         unitNumber: "225",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
         maxGuests: 6,
-        shortDescription: "Charming 2BR/2BA condo at Lae Nani Resort with ocean views, tropical garden setting, full kitchen, and lanai. King and queen bedrooms plus queen sleeper sofa. Private beach cove, pool, and tennis court.",
-        longDescription: `Welcome to this charming 2-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa.
+        shortDescription: "Charming 2BR/2BA condo at Makahuena at Poipu with ocean views, full kitchen, and private lanai. King and queen bedrooms plus queen sleeper sofa. Resort pool and easy walk to Shipwreck Beach.",
+        longDescription: `Welcome to this charming 2-bedroom, 2-bathroom condominium at Makahuena at Poipu on Kauai's south shore.
 
-Set in a tropical garden with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
+Set within the resort's landscaped grounds with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer/dryer adds convenience.
 
-Lae Nani's private beach cove offers some of the best swimming on Kauai's east side. The resort pool, tennis court, and landscaped grounds provide a relaxing base for your Kauai vacation.
+Makahuena at Poipu's resort pool, BBQ area, and manicured grounds provide a peaceful base for your Kauai vacation. Walk to Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach — three of Kauai's best south-shore beaches.
 
-Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
+Walk to Koloa Town for shopping, dining, and the historic plantation village. Easy access to Spouting Horn blowhole, the National Tropical Botanical Garden, and the entire Poipu resort corridor. The central south-shore location makes exploring Waimea Canyon, the North Shore, and the rest of Kauai easy and convenient.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },

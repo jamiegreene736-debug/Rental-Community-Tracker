@@ -4,22 +4,22 @@
   "referencedBy": [
     {
       "propertyId": 24,
-      "address": "410 Papaloa Rd, Kapaa, HI 96746",
-      "unitId": "prop24-ln-3br",
+      "address": "2640 Puuholo Rd, Koloa, HI 96756",
+      "unitId": "prop24-mk-3br",
       "unitNumber": "314",
       "bedrooms": 3,
       "bathrooms": "2"
     },
     {
       "propertyId": 24,
-      "address": "410 Papaloa Rd, Kapaa, HI 96746",
-      "unitId": "prop24-ln-2br",
+      "address": "2640 Puuholo Rd, Koloa, HI 96756",
+      "unitId": "prop24-mk-2br",
       "unitNumber": "225",
       "bedrooms": 2,
       "bathrooms": "2"
     }
   ],
-  "verificationStatus": "needs-review",
+  "verificationStatus": "needs-audit",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Folder is shared by 2 units across propertyIds [24, 24]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "notes": "Folder is mis-named. Kept the lae-nani-335 name to avoid breaking filesystem references / photoLabels DB rows, but propertyId 24 has been corrected from Lae Nani Resort (Kapaa) to Makahuena at Poipu (Koloa) on 2026-04-24. Audit these photos: visually confirm they're actually Makahuena interiors (south shore Poipu) and not Lae Nani interiors (east shore Kapaa). If wrong, rescrape from a real Makahuena listing (see parrishkauai.com/kauai-condos/makahuena/) and consider renaming the folder to makahuena-<unit#>. Unit numbers 314 and 225 are also stale Lae Nani values — replace with real Makahuena unit numbers.",
   "bedrooms": 3,
   "bathrooms": "2"
 }

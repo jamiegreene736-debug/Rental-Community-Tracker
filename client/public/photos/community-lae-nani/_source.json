@@ -4,10 +4,10 @@
   "referencedBy": [
     {
       "propertyId": 24,
-      "address": "410 Papaloa Rd, Kapaa, HI 96746"
+      "address": "2640 Puuholo Rd, Koloa, HI 96756"
     }
   ],
-  "verificationStatus": "needs-review",
+  "verificationStatus": "needs-audit",
   "verifiedDate": "2026-04-16",
   "verifiedBy": "auto-generated-stub",
   "sourceListing": {
@@ -15,5 +15,5 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+  "notes": "Folder is mis-named. PropertyId 24 has been corrected from Lae Nani Resort (Kapaa) to Makahuena at Poipu (Koloa) on 2026-04-24. Audit these amenity shots: if they're Lae Nani pool/grounds photos, rescrape from a Makahuena source and rename the folder to community-makahuena."
 }
