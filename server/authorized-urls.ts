@@ -43,9 +43,13 @@ export function normalizeListingUrl(raw: string | null | undefined): string | nu
 
 // Pluck the public URL out of a channel integration sub-object. Mirrors
 // the ordering used by the client's guestyService.pickChannelUrl.
-// For Airbnb we fall back to constructing a URL from the numeric id
-// because Guesty does not always stamp the listingUrl even when the
-// channel is live.
+//
+// Guesty doesn't always stamp `listingUrl` even on live channels, so
+// for each platform we fall back to constructing a canonical URL from
+// the platform-specific id. Without this, the scanner couldn't
+// recognise our own VRBO/Booking listings and would flag them as
+// theft on the dashboard (the Pili Mai red ✗ on VRBO/Booking that
+// Jamie hit was exactly this gap).
 function pickChannelUrl(
   sub: Record<string, unknown> | undefined,
   platform: "airbnb" | "vrbo" | "booking",
@@ -55,10 +59,35 @@ function pickChannelUrl(
     const v = sub[k];
     if (typeof v === "string" && /^https?:\/\//i.test(v)) return v;
   }
+  // Coerce a numeric / numeric-string id without flattening the type.
+  const numericId = (val: unknown): string | null => {
+    if (typeof val === "number" && Number.isFinite(val)) return String(val);
+    if (typeof val === "string" && /^\d+$/.test(val)) return val;
+    return null;
+  };
   if (platform === "airbnb") {
-    const id = sub["id"] ?? sub["listingId"];
-    if (typeof id === "string" && /^\d+$/.test(id)) return `https://www.airbnb.com/rooms/${id}`;
-    if (typeof id === "number") return `https://www.airbnb.com/rooms/${id}`;
+    const id = numericId(sub["id"]) ?? numericId(sub["listingId"]);
+    if (id) return `https://www.airbnb.com/rooms/${id}`;
+  }
+  if (platform === "vrbo") {
+    // VRBO canonical permalink: vrbo.com/<advertiserId>. Other id
+    // fields (`id`, `listingId`) are tried as fallbacks because
+    // Guesty's exact field name has shifted across integration
+    // generations.
+    const id = numericId(sub["advertiserId"]) ?? numericId(sub["id"]) ?? numericId(sub["listingId"]);
+    if (id) return `https://www.vrbo.com/${id}`;
+  }
+  if (platform === "booking") {
+    // Booking.com URLs are slug-based (e.g. /hotel/us/<slug>.html).
+    // The numeric `hotelId` alone won't render a working canonical
+    // URL, but a Guesty-stamped URL field like `propertyUrl` usually
+    // exists when a slug is known. If neither a stamped URL nor a
+    // usable slug field is present, we return null and accept that
+    // we can't suppress this listing's matches.
+    const slugCandidate = sub["hotelSlug"] ?? sub["slug"];
+    if (typeof slugCandidate === "string" && /^[a-z0-9-]+$/i.test(slugCandidate)) {
+      return `https://www.booking.com/hotel/us/${slugCandidate}.html`;
+    }
   }
   return null;
 }
