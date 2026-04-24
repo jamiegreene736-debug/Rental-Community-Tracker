@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   XCircle,
   ShieldCheck,
+  ShieldAlert,
   Home,
   ExternalLink,
   Search as SearchIcon,
@@ -30,6 +31,20 @@ export type UnitStub = {
   replacementLabel?: string;   // e.g. "Unit #13D" — set if this unit already has an active swap.
 };
 
+// Per-platform verdict from the server's SERP-based availability check.
+//   clean   — SearchAPI responded and no matching listing was found
+//   found   — SearchAPI responded and a listing for this unit was found
+//             (candidates with `found` are rejected server-side and never
+//             reach the UI, so in practice this value will not appear)
+//   unknown — the SearchAPI call errored, so we genuinely don't know.
+//             Previously treated as "clean" silently; now surfaced.
+export type PlatformStatus = "clean" | "found" | "unknown";
+export type PlatformCheck = {
+  airbnb: PlatformStatus;
+  vrbo: PlatformStatus;
+  bookingCom: PlatformStatus;
+};
+
 export type ReplacementUnitData = {
   url: string;
   address: string;
@@ -48,6 +63,7 @@ export type ReplacementUnitData = {
   // this so the UI can show a "✓ Bedrooms · ✓ Bathrooms" style badge
   // as proof the listing actually has interior photography.
   sampledCategories?: string[];
+  platformCheck?: PlatformCheck;
 };
 
 export function UnitReplacementFlow({
@@ -140,7 +156,7 @@ export function UnitReplacementFlow({
     }
   }
 
-  const steps = ["Search Zillow", "Check Airbnb", "Confirm Clean"];
+  const steps = ["Search Zillow", "Check platforms", "Confirm Clean"];
   const stepDone = stage === "checking"
     ? [true, false, false]
     : (stage === "found" || stage === "replacing")
@@ -202,7 +218,7 @@ export function UnitReplacementFlow({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
-                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb for conflicts…"}
+                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
                 </span>
               </div>
               <div className="flex gap-1.5">
@@ -245,12 +261,77 @@ export function UnitReplacementFlow({
       )}
 
       {/* Found unit — confirm replacement */}
-      {(stage === "found" || stage === "replacing") && result && (
+      {(stage === "found" || stage === "replacing") && result && (() => {
+        // Platform-check header: all three platforms must report
+        // "clean" for a full green shield. Any "unknown" downgrades to
+        // amber (SearchAPI couldn't confirm on that platform, so the
+        // user should treat the result as "probably clean, not proven").
+        // We never surface "found" — the server filters those out.
+        const pc = result.platformCheck;
+        const statuses: Array<[label: string, key: keyof PlatformCheck]> = [
+          ["Airbnb",      "airbnb"],
+          ["VRBO",        "vrbo"],
+          ["Booking.com", "bookingCom"],
+        ];
+        const allClean = pc ? statuses.every(([, k]) => pc[k] === "clean") : false;
+        const anyUnknown = pc ? statuses.some(([, k]) => pc[k] === "unknown") : true;
+        const headerTone = allClean
+          ? "green"
+          : anyUnknown
+            ? "amber"
+            : "green"; // no platformCheck field at all → treat as old-behavior green
+        return (
         <div className="space-y-2.5">
-          <p className="text-xs font-medium text-green-700 dark:text-green-400 flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Clean replacement found — not on Airbnb
-          </p>
+          <div className="space-y-1.5">
+            <p
+              className={`text-xs font-medium flex items-center gap-1.5 ${
+                headerTone === "green"
+                  ? "text-green-700 dark:text-green-400"
+                  : "text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {headerTone === "green" ? (
+                <ShieldCheck className="h-3.5 w-3.5" />
+              ) : (
+                <ShieldAlert className="h-3.5 w-3.5" />
+              )}
+              {allClean
+                ? "Clean on Airbnb, VRBO, and Booking.com"
+                : anyUnknown
+                  ? "Partial check — one or more platforms couldn't be verified"
+                  : "Clean replacement found"}
+            </p>
+            {pc && (
+              <div className="flex items-center gap-1 flex-wrap">
+                {statuses.map(([label, key]) => {
+                  const s = pc[key];
+                  const cls =
+                    s === "clean"
+                      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"
+                      : s === "found"
+                        ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300"
+                        : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
+                  const glyph = s === "clean" ? "✓" : s === "found" ? "✗" : "⚠";
+                  const title =
+                    s === "clean"
+                      ? `${label}: no listing found`
+                      : s === "found"
+                        ? `${label}: listing found`
+                        : `${label}: SearchAPI error — could not verify`;
+                  return (
+                    <span
+                      key={key}
+                      title={title}
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
+                      data-testid={`platform-status-${key}`}
+                    >
+                      {glyph} {label}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <div className="rounded border border-border bg-background px-3 py-2.5 space-y-2">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-start gap-2 min-w-0">
@@ -381,7 +462,8 @@ export function UnitReplacementFlow({
             </Button>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
