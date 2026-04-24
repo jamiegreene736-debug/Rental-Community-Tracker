@@ -205,6 +205,17 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     lensCalls: 0,
   };
 
+  // Community folders are shared amenity photos — every Lens match
+  // will be a legitimate listing using the same resort shot. Nothing
+  // to extract here, so short-circuit without writing a row and
+  // without spending Lens calls. (Callers that pass a specific
+  // folder list, e.g. the manual Run-Now endpoint, get filtered
+  // upstream too, but this guard protects direct invocations.)
+  if (isCommunityFolder(folder)) {
+    result.errorMessage = "Community folder skipped — amenity photos are shared across all hosts at the resort";
+    return result;
+  }
+
   // Capture the prior status row BEFORE upserting so we can emit
   // state-worsen alerts after the new row lands. Null → never scanned.
   const priorRow = await storage.getPhotoListingCheckByFolder(folder);
@@ -347,10 +358,20 @@ async function persist(r: ScanResult): Promise<PhotoListingCheck> {
 
 // Returns the list of folders that have any labeled photos in the DB.
 // The dashboard caller uses this as the universe of "scanable" folders.
+//
+// `community-*` folders are deliberately excluded: they hold shared
+// amenity shots (pool, lobby, grounds, exterior) that every host at
+// the resort legitimately uses, so Lens matches on them are expected
+// and produce no signal. Scanning them wasted ~30% of the SearchAPI
+// budget per tick and filled the alert inbox with one-time noise.
+export function isCommunityFolder(folder: string): boolean {
+  return folder.startsWith("community-");
+}
+
 export async function listScanableFolders(): Promise<string[]> {
   const rows = await storage.getAllPhotoLabels();
   const set = new Set<string>();
-  for (const r of rows) set.add(r.folder);
+  for (const r of rows) if (!isCommunityFolder(r.folder)) set.add(r.folder);
   return Array.from(set).sort();
 }
 

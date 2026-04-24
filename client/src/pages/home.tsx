@@ -434,7 +434,13 @@ export default function Home() {
     staleTime: 2 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
-  const alerts = photoAlertsData?.alerts ?? [];
+  // Hide community-* alerts from the banner. They fire one-time when
+  // a shared amenity photo legitimately appears on another host's
+  // listing — no signal value. The scanner stopped writing new ones
+  // as of the "skip community folders" change, but a few old rows
+  // remain in the DB; filter them out client-side rather than
+  // running a destructive DB cleanup.
+  const alerts = (photoAlertsData?.alerts ?? []).filter((a) => !a.folder.startsWith("community-"));
   const acknowledgeAlert = async (id: number) => {
     try {
       const resp = await apiRequest("POST", `/api/photo-listing-alerts/${id}/acknowledge`, {});
@@ -467,8 +473,13 @@ export default function Home() {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
       if (builder) {
+        // Unit folders only — `communityPhotoFolder` holds shared
+        // amenity photos (pool, lobby, grounds) that many hosts at
+        // the resort legitimately use, so reverse-image hits on them
+        // aren't theft signals. Excluded from both scan (server
+        // side) and aggregation (here) so the Photo Match column
+        // reflects ONLY unit-level matches.
         for (const u of builder.units) if (u.photoFolder) folderSet.add(u.photoFolder);
-        if (builder.communityPhotoFolder) folderSet.add(builder.communityPhotoFolder);
       }
       const folders = Array.from(folderSet);
       let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 } };
