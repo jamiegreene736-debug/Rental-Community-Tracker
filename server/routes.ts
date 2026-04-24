@@ -34,12 +34,32 @@ async function fetchGuestyMfaCodeFromGmail(
   trace: Array<{ step: string; detail?: string }>,
 ): Promise<string | null> {
   const { ImapFlow } = await import("imapflow");
+  // Collect a short ring buffer of log lines so we can surface IMAP's
+  // underlying failure reason on a connect error — "Command failed" from
+  // IMAPflow's top-level throw hides what actually happened (bad auth,
+  // TLS reset, rate-limit, etc.).
+  const logBuffer: string[] = [];
+  const pushLog = (entry: Record<string, unknown>) => {
+    try {
+      const short = JSON.stringify({ t: entry.t, msg: entry.msg, err: (entry.err as any)?.code ?? (entry.err as any)?.message })
+        .slice(0, 200);
+      logBuffer.push(short);
+      if (logBuffer.length > 20) logBuffer.shift();
+    } catch { /* noop */ }
+  };
+  // Normalize the app password — Google displays it with spaces
+  // ("xxxx xxxx xxxx xxxx") and Railway sometimes preserves or strips them
+  // inconsistently. IMAP servers accept the flat form, so strip whitespace
+  // defensively.
+  const cleanPass = (appPassword || "").replace(/\s+/g, "");
   const client = new ImapFlow({
     host: "imap.gmail.com",
     port: 993,
     secure: true,
-    auth: { user, pass: appPassword },
-    logger: false,
+    auth: { user, pass: cleanPass },
+    logger: {
+      debug: pushLog, info: pushLog, warn: pushLog, error: pushLog,
+    },
   });
 
   try {
@@ -47,8 +67,9 @@ async function fetchGuestyMfaCodeFromGmail(
       await client.connect();
       trace.push({ step: "imap-connected", detail: `as ${user}` });
     } catch (e) {
-      trace.push({ step: "imap-connect-failed", detail: (e as Error).message });
-      throw new Error(`IMAP connect failed: ${(e as Error).message}`);
+      const recent = logBuffer.slice(-8).join(" | ");
+      trace.push({ step: "imap-connect-failed", detail: `${(e as Error).message} — recentLog=${recent}` });
+      throw new Error(`IMAP connect failed: ${(e as Error).message}. Recent log: ${recent}`);
     }
     let lock: Awaited<ReturnType<typeof client.getMailboxLock>>;
     try {
