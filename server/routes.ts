@@ -8145,6 +8145,24 @@ export async function registerRoutes(
     const resultText = (r: any): string =>
       `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
 
+    // ── Helper: is this a "short" unit number (1-2 digits) whose bare
+    // appearance in a snippet is too ambiguous to trust? Short numeric
+    // IDs like "9" collide with review scores (9.2), counts ("9 guests"),
+    // distances ("9 miles"), and any other stray digit on the page.
+    // For these, we require an explicit unit marker everywhere — both
+    // in the Google query and in snippet validation. "721", "228",
+    // "13B" etc. are specific enough that they don't need marker-gating.
+    const isShortUnitNumber = (n: string): boolean => /^\d{1,2}$/.test((n || "").trim());
+
+    // Build the unit term for a Google query. Short units get an OR of
+    // explicit marker forms; long/alphanumeric units use the bare term.
+    const unitQueryTerm = (unitNumber: string): string => {
+      const n = (unitNumber || "").trim();
+      if (!n) return "";
+      if (!isShortUnitNumber(n)) return `"${n}"`;
+      return `("Unit ${n}" OR "#${n}" OR "Apt ${n}" OR "Suite ${n}")`;
+    };
+
     // ── Helper: does the snippet mention the unit number with a marker strong
     // enough to distinguish it from a random "122" in a price / zip / review
     // count? We require either an explicit unit marker (Unit 122, #122, Apt
@@ -8152,6 +8170,12 @@ export async function registerRoutes(
     // the street (e.g. "Nehe Rd 122" or "Rd, 122"). Bare "122" anywhere is
     // rejected — it was the source of the Unit 122 / VRBO villa false
     // positive where the snippet mentioned the digits in an unrelated field.
+    //
+    // For short units (1-2 digits) the street-adjacency fallback is ALSO
+    // disabled: "3920 Wyllie Rd 9" collides with snippets like "3920
+    // Wyllie Rd · 9.2 rating" that Google serves for shared-building
+    // listings. Short units must have an explicit marker or they
+    // don't count.
     const snippetMentionsUnit = (r: any, unitNumber: string, streetTail?: string): boolean => {
       const text = resultText(r);
       const num = unitNumber.toLowerCase().replace(/^0+/, ""); // strip leading zeros
@@ -8165,8 +8189,10 @@ export async function registerRoutes(
       ];
       if (markerPatterns.some((re) => re.test(text))) return true;
       // Weaker: number immediately after the street name ("Nehe Rd 122").
-      // Only count when the street is also visible in the same text.
-      if (streetTail) {
+      // Only count when the street is also visible in the same text AND
+      // the unit number is long enough that accidental collisions are
+      // unlikely. For short units, this fallback is disabled entirely.
+      if (streetTail && !isShortUnitNumber(unitNumber)) {
         const tail = streetTail.toLowerCase();
         const adjacent = new RegExp(`\\b${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*,?\\s*#?\\s*${num}\\b`, "i");
         if (adjacent.test(text)) return true;
@@ -8219,10 +8245,15 @@ export async function registerRoutes(
       // dedicated unit-number term of the query, never in the street term.
       const cleanedAddr = stripUnitFromAddress(unit.address || "", unit.unitNumber);
       const street = extractStreet(cleanedAddr);
-      // Run address-based query (primary) and name+city query (fallback) in parallel
+      // Run address-based query (primary) and name+city query (fallback)
+      // in parallel. For short (1-2 digit) units we wrap the unit term
+      // in an explicit-marker OR so Google only returns pages that
+      // actually position the number as a unit identifier — not as a
+      // review score / guest count / distance.
+      const unitTerm = unitQueryTerm(unit.unitNumber);
       const queries = [
-        street ? `site:${domain} "${street}" "${unit.unitNumber}"` : null,
-        `site:${domain} "${name}" "${city}" "${unit.unitNumber}"`,
+        street && unitTerm ? `site:${domain} "${street}" ${unitTerm}` : null,
+        unitTerm ? `site:${domain} "${name}" "${city}" ${unitTerm}` : null,
       ].filter(Boolean) as string[];
       try {
         const searchResults = await Promise.all(queries.map(async (q) => {
@@ -8282,10 +8313,45 @@ export async function registerRoutes(
       } catch { return { listed: null, url: null, titleMatch: false }; }
     };
 
+    // ── Helper: after Google Lens returns a candidate listing URL,
+    // verify that URL's page actually mentions OUR unit number.
+    // Shared-building listings (3920 Wyllie Rd has ~20 units) are
+    // visually similar — unit 2A's photos look enough like unit 9's
+    // that Lens cheerfully returns unit 2A's URL when we query with
+    // unit 9's photos. This helper reconfirms via a Google site: query
+    // scoped to the candidate's path: if that specific listing doesn't
+    // mention our unit number with a marker, it's a different unit in
+    // the same building → reject.
+    const verifyUrlMentionsUnit = async (url: string, unitNumber: string): Promise<boolean> => {
+      const n = (unitNumber || "").trim();
+      if (!n || !url) return false;
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { return false; }
+      const host = parsed.hostname.replace(/^www\./, "");
+      // Strip file extensions (.html, .zh-cn.html) and trailing slashes
+      // so Google indexes the listing as one canonical path.
+      const pathClean = parsed.pathname.replace(/\.[a-z0-9.-]+$/i, "").replace(/\/+$/, "");
+      if (!pathClean) return false;
+      const markers = [`"Unit ${n}"`, `"#${n}"`, `"Apt ${n}"`, `"Suite ${n}"`].join(" OR ");
+      const q = `site:${host}${pathClean} (${markers})`;
+      try {
+        const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "3" });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+          headers: { "User-Agent": "NexStay/1.0" },
+        });
+        if (!resp.ok) return false; // API error → treat as unverified → reject
+        const data = await resp.json() as any;
+        const results = (data.organic_results || []) as any[];
+        return results.length > 0;
+      } catch {
+        return false;
+      }
+    };
+
     // ── Helper: photo reverse image search for a unit (caps at 3 photos) ──────
     type PhotoSignals = Record<string, boolean>; // platform key → found
     type PhotoMatchedUrls = Record<string, string | null>; // platform key → URL of the FIRST listing-page hit
-    const photoSearch = async (photoFolder: string): Promise<{
+    const photoSearch = async (photoFolder: string, unitNumber: string): Promise<{
       signals: PhotoSignals;
       matchedUrls: PhotoMatchedUrls;
       matchCount: number;
@@ -8330,17 +8396,26 @@ export async function registerRoutes(
               .filter((l) => l);
             for (const cfg of PLATFORM_CONFIGS) {
               const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
+              if (signals[cfg.key]) continue;
               // Find the first link that's an actual listing page on this platform.
               const matchedLink = sourceLinks.find((l: string) => {
                 const ll = l.toLowerCase();
                 if (!ll.includes(domain)) return false;
                 return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
               });
-              if (matchedLink && !signals[cfg.key]) {
-                signals[cfg.key] = true;
-                matchedUrls[cfg.key] = matchedLink;
-                matchCount++;
-              }
+              if (!matchedLink) continue;
+              // Cross-validate: confirm the matched page actually names
+              // our unit number. For shared-building addresses the same
+              // Lens result set can contain listings for many units —
+              // without this check, the first one "wins" even if it's
+              // the wrong unit (e.g. 3920 Wyllie Rd unit 2A returned
+              // for a unit 9 query). A Google site: scoped to the
+              // listing's path must surface an explicit unit marker.
+              const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
+              if (!verified) continue;
+              signals[cfg.key] = true;
+              matchedUrls[cfg.key] = matchedLink;
+              matchCount++;
             }
           }
         } catch { /* best effort */ }
@@ -8382,7 +8457,7 @@ export async function registerRoutes(
       units.map(async (unit) => {
         const [textResults, photoResult] = await Promise.all([
           Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
-          unit.photoFolder ? photoSearch(unit.photoFolder) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCount: 0, totalChecked: 0 }),
+          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCount: 0, totalChecked: 0 }),
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchedUrls, matchCount, totalChecked } = photoResult;
