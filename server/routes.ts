@@ -43,8 +43,20 @@ async function fetchGuestyMfaCodeFromGmail(
   });
 
   try {
-    await client.connect();
-    const lock = await client.getMailboxLock("INBOX");
+    try {
+      await client.connect();
+      trace.push({ step: "imap-connected", detail: `as ${user}` });
+    } catch (e) {
+      trace.push({ step: "imap-connect-failed", detail: (e as Error).message });
+      throw new Error(`IMAP connect failed: ${(e as Error).message}`);
+    }
+    let lock: Awaited<ReturnType<typeof client.getMailboxLock>>;
+    try {
+      lock = await client.getMailboxLock("INBOX");
+    } catch (e) {
+      trace.push({ step: "imap-mailbox-lock-failed", detail: (e as Error).message });
+      throw new Error(`IMAP mailbox open failed: ${(e as Error).message}`);
+    }
     try {
       // Poll for ~90s. Guesty's code emails typically land within 5-15s but
       // we leave headroom for slow days.
@@ -5911,7 +5923,19 @@ export async function registerRoutes(
               });
             }
             const mfaStartedAt = Date.now();
-            const code = await fetchGuestyMfaCodeFromGmail(gmailUser, gmailPass, mfaStartedAt, trace);
+            let code: string | null = null;
+            try {
+              code = await fetchGuestyMfaCodeFromGmail(gmailUser, gmailPass, mfaStartedAt, trace);
+            } catch (imapErr: any) {
+              const shot = await saveShot(page, "mfa-imap-error");
+              return res.json({
+                ok: false,
+                error: `IMAP failed while fetching Guesty MFA code: ${imapErr?.message ?? String(imapErr)}. Check GMAIL_APP_PASSWORD is a valid app password for GMAIL_USER, that IMAP is enabled in Gmail settings, and that the account isn't blocking "less secure apps" (app passwords bypass that but 2FA must be on).`,
+                finalUrl: page.url(),
+                beforeShotUrl: shot,
+                trace,
+              });
+            }
             if (!code) {
               const shot = await saveShot(page, "mfa-code-not-found");
               return res.json({
