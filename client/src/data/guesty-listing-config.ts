@@ -43,7 +43,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 4,
-    publicAddress: "1941 Poipu Rd, Koloa, HI 96756",
+    publicAddress: "1941 Poipu Rd, Unit 423, Koloa, HI 96756",
     units: [
       { unitId: "unit-423", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "unit-621", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
@@ -108,7 +108,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 19,
-    publicAddress: "3920 Wyllie Rd, Princeville, HI 96722",
+    publicAddress: "3920 Wyllie Rd, Unit 9, Princeville, HI 96722",
     units: [
       { unitId: "prop19-3br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
       { unitId: "prop19-2br", rooms: [room(1, q()), living(sofa())] },
@@ -116,7 +116,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 20,
-    publicAddress: "3920 Wyllie Rd, Princeville, HI 96722",
+    publicAddress: "3920 Wyllie Rd, Unit 7B, Princeville, HI 96722",
     units: [
       { unitId: "prop20-3br-a", rooms: [room(1, k()), room(2, q()), living(sofa())] },
       { unitId: "prop20-3br-b", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
@@ -157,7 +157,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 27,
-    publicAddress: "1941 Poipu Rd, Koloa, HI 96756",
+    publicAddress: "1941 Poipu Rd, Unit 114, Koloa, HI 96756",
     units: [
       { unitId: "prop27-unit-a", rooms: [room(1, k()), room(2, q()), living(sofa())] },
       { unitId: "prop27-unit-b", rooms: [room(1, k()), room(2, k()), living(sofa())] },
@@ -189,7 +189,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 32,
-    publicAddress: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    publicAddress: "2611 Kiahuna Plantation Dr, Bldg 38, Koloa, HI 96756",
     units: [
       { unitId: "prop32-kia-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "prop32-kia-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
@@ -197,7 +197,7 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   },
   {
     propertyId: 33,
-    publicAddress: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    publicAddress: "2611 Kiahuna Plantation Dr, Bldg 10, Koloa, HI 96756",
     units: [
       { unitId: "prop33-kia-3br-a", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
       { unitId: "prop33-kia-3br-b", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
