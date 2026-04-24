@@ -12,11 +12,12 @@ import {
   type AutoReplyLog, type InsertAutoReplyLog,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
+  type PhotoListingAlert, type InsertPhotoListingAlert,
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, photoListingChecks, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -656,6 +657,31 @@ export class DatabaseStorage implements IStorage {
 
   async getPhotoListingCheckByFolder(folder: string): Promise<PhotoListingCheck | undefined> {
     const [row] = await db.select().from(photoListingChecks).where(eq(photoListingChecks.photoFolder, folder));
+    return row;
+  }
+
+  async createPhotoListingAlert(data: InsertPhotoListingAlert): Promise<PhotoListingAlert> {
+    const [row] = await db.insert(photoListingAlerts).values(data).returning();
+    return row;
+  }
+
+  async getUnacknowledgedPhotoListingAlerts(): Promise<PhotoListingAlert[]> {
+    return db.select().from(photoListingAlerts)
+      .where(sql`${photoListingAlerts.acknowledgedAt} IS NULL`)
+      .orderBy(desc(photoListingAlerts.detectedAt));
+  }
+
+  async getRecentPhotoListingAlerts(limit: number): Promise<PhotoListingAlert[]> {
+    return db.select().from(photoListingAlerts)
+      .orderBy(desc(photoListingAlerts.detectedAt))
+      .limit(limit);
+  }
+
+  async acknowledgePhotoListingAlert(id: number): Promise<PhotoListingAlert | undefined> {
+    const [row] = await db.update(photoListingAlerts)
+      .set({ acknowledgedAt: new Date() })
+      .where(eq(photoListingAlerts.id, id))
+      .returning();
     return row;
   }
 

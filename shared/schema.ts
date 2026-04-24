@@ -398,3 +398,26 @@ export const photoListingChecks = pgTable("photo_listing_checks", {
 });
 export type PhotoListingCheck = typeof photoListingChecks.$inferSelect;
 export type InsertPhotoListingCheck = typeof photoListingChecks.$inferInsert;
+
+// State-change alerts derived from photo_listing_checks. One row per
+// platform per transition (e.g. airbnb flipping from "clean" to
+// "found"). Written by the scanner when it detects a status getting
+// worse; dismissed by the operator via POST /api/photo-listing-alerts/
+// :id/acknowledge.
+//
+// Rank of "worse": found > unknown > clean. Only transitions TO
+// "found" are alert-worthy — `unknown` is routine (API hiccup) and
+// `clean` is obviously fine. `found → clean` is silent (problem
+// resolved) to avoid alert spam.
+export const photoListingAlerts = pgTable("photo_listing_alerts", {
+  id: serial("id").primaryKey(),
+  photoFolder: text("photo_folder").notNull(),
+  platform: text("platform").notNull(),            // "airbnb" | "vrbo" | "booking"
+  priorStatus: text("prior_status").notNull(),     // "clean" | "unknown" | "found"
+  newStatus: text("new_status").notNull(),         // always "found" today
+  matchedUrls: text("matched_urls"),               // JSON-encoded array
+  detectedAt: timestamp("detected_at").defaultNow().notNull(),
+  acknowledgedAt: timestamp("acknowledged_at"),
+});
+export type PhotoListingAlert = typeof photoListingAlerts.$inferSelect;
+export type InsertPhotoListingAlert = typeof photoListingAlerts.$inferInsert;

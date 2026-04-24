@@ -412,6 +412,39 @@ export default function Home() {
     refetchOnWindowFocus: false,
   });
 
+  // Unacknowledged photo-theft alerts. Each alert is one platform
+  // transitioning from clean/unknown → found. Dismissed from the
+  // banner below via POST /api/photo-listing-alerts/:id/acknowledge.
+  type PhotoAlert = {
+    id: number;
+    folder: string;
+    platform: "airbnb" | "vrbo" | "booking";
+    priorStatus: PhotoStatus;
+    newStatus: PhotoStatus;
+    matchedUrls: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    detectedAt: string;
+  };
+  const { data: photoAlertsData, refetch: refetchAlerts } = useQuery<{ alerts: PhotoAlert[] }>({
+    queryKey: ["/api/photo-listing-alerts?unacknowledged=1"],
+    queryFn: async () => {
+      const resp = await fetch("/api/photo-listing-alerts?unacknowledged=1");
+      if (!resp.ok) throw new Error("Failed to load alerts");
+      return resp.json();
+    },
+    staleTime: 2 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const alerts = photoAlertsData?.alerts ?? [];
+  const acknowledgeAlert = async (id: number) => {
+    try {
+      const resp = await apiRequest("POST", `/api/photo-listing-alerts/${id}/acknowledge`, {});
+      if (!resp.ok) throw new Error("Acknowledge failed");
+      refetchAlerts();
+    } catch (e: any) {
+      toast({ title: "Couldn't acknowledge alert", description: e?.message, variant: "destructive" });
+    }
+  };
+
   const photoCheckByFolder = useMemo(() => {
     const map = new Map<string, PhotoCheckRow>();
     for (const r of photoCheckData?.checks ?? []) map.set(r.folder, r);
@@ -569,6 +602,59 @@ export default function Home() {
             <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
           </Card>
         </div>
+
+        {alerts.length > 0 && (
+          <Card className="p-3 mb-4 border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30" data-testid="photo-alert-banner">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+                ⚠ {alerts.length} photo-listing alert{alerts.length === 1 ? "" : "s"} detected
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Your photos appear on a listing you don't control. Review and dismiss once actioned.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              {alerts.slice(0, 5).map((a) => {
+                const platformLabel = a.platform === "airbnb" ? "Airbnb" : a.platform === "vrbo" ? "VRBO" : "Booking.com";
+                const firstUrl = a.matchedUrls?.[0]?.listingUrl;
+                return (
+                  <div key={a.id} className="flex items-center gap-2 text-xs" data-testid={`photo-alert-${a.id}`}>
+                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 font-medium">
+                      {platformLabel}
+                    </span>
+                    <span className="font-mono text-[11px]">{a.folder}</span>
+                    <span className="text-muted-foreground">{a.priorStatus} → {a.newStatus}</span>
+                    {firstUrl && (
+                      <a
+                        href={firstUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline"
+                      >
+                        view listing ↗
+                      </a>
+                    )}
+                    <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-xs px-2"
+                      onClick={() => acknowledgeAlert(a.id)}
+                      data-testid={`button-acknowledge-alert-${a.id}`}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                );
+              })}
+              {alerts.length > 5 && (
+                <p className="text-xs text-muted-foreground pt-1">
+                  … and {alerts.length - 5} more.
+                </p>
+              )}
+            </div>
+          </Card>
+        )}
 
         <Card className="p-4 mb-4">
           <div className="flex flex-wrap items-center gap-3">

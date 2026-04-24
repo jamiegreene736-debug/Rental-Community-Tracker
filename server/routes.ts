@@ -9235,6 +9235,47 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/photo-listing-alerts?unacknowledged=1
+  // Returns alert rows the scanner wrote when a platform status
+  // worsened to "found". Dashboard shows a banner when unacknowledged
+  // alerts exist; the operator dismisses each via the acknowledge
+  // endpoint below.
+  app.get("/api/photo-listing-alerts", async (req, res) => {
+    try {
+      const onlyUnacked = String(req.query.unacknowledged ?? "") === "1";
+      const rows = onlyUnacked
+        ? await storage.getUnacknowledgedPhotoListingAlerts()
+        : await storage.getRecentPhotoListingAlerts(50);
+      res.json({
+        alerts: rows.map((r) => ({
+          id: r.id,
+          folder: r.photoFolder,
+          platform: r.platform,
+          priorStatus: r.priorStatus,
+          newStatus: r.newStatus,
+          matchedUrls: r.matchedUrls ? tryParseJson(r.matchedUrls) : [],
+          detectedAt: r.detectedAt,
+          acknowledgedAt: r.acknowledgedAt,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to load alerts" });
+    }
+  });
+
+  // POST /api/photo-listing-alerts/:id/acknowledge
+  app.post("/api/photo-listing-alerts/:id/acknowledge", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+    try {
+      const row = await storage.acknowledgePhotoListingAlert(id);
+      if (!row) return res.status(404).json({ error: "Alert not found" });
+      res.json({ ok: true, alert: row });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to acknowledge alert" });
+    }
+  });
+
   // POST /api/photo-listing-check/run
   // Manual "Run now". Body: { folders?: string[] }
   //   - folders omitted → scans every folder with labeled photos in DB
