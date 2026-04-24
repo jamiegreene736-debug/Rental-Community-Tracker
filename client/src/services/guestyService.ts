@@ -622,6 +622,20 @@ class GuestyService {
       }
     }
 
+    // Final step: flip isListed from false → true so the listing goes live
+    // across connected channels (Airbnb/VRBO/Booking.com) immediately. The
+    // createListing call above sets isListed:false so the listing exists as
+    // a draft while we populate it; without this step the operator has to
+    // open Guesty admin → this listing → List on channels → Edit → toggle
+    // Status to Listed, which is easy to miss after a build.
+    try {
+      log("list_on_channels", "pending");
+      await this.listOnChannels(listingId);
+      log("list_on_channels", "success");
+    } catch (e) {
+      log("list_on_channels", "error", { error: (e as Error).message });
+    }
+
     return { listingId, steps, errors, success: errors.length === 0 };
   }
 }

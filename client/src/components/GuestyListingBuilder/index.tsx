@@ -1546,7 +1546,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({ title: "Listing creation failed", description: msg, variant: "destructive" });
     } else {
       setBuildSuccess(true);
-      toast({ title: "✓ Listing created on Guesty!", description: `ID: ${result.listingId} — it now appears in the dropdown above as a draft.` });
+      // The build sequence ends with list_on_channels (flips isListed:false →
+      // true), so the listing is live on connected channels by default. If
+      // that step failed, the build log shows it and the user can flip it
+      // manually in Guesty admin.
+      const listStep = result.steps.find((s) => s.step === "list_on_channels");
+      const listed = listStep?.status === "success";
+      toast({
+        title: "✓ Listing created on Guesty!",
+        description: listed
+          ? `ID: ${result.listingId} — listed on connected channels. It now appears in the dropdown above.`
+          : `ID: ${result.listingId} — created as a draft (list-on-channels step didn't complete, check the build log). It now appears in the dropdown above.`,
+      });
       const fresh = await guestyService.getListings(50, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
@@ -1934,9 +1945,45 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           )}
 
           {selectedId && (
-            <button className="glb-btn glb-btn-danger" onClick={() => guestyService.unlistFromChannels(selectedId)} disabled={building} data-testid="btn-unlist">
-              Unlist
-            </button>
+            channelStatus?.isListed === false ? (
+              // Draft state — show an affordance to flip isListed:true so the
+              // operator doesn't have to go into Guesty admin's List-on-channels
+              // page to activate a draft built here or elsewhere.
+              <button
+                className="glb-btn glb-btn-secondary"
+                onClick={async () => {
+                  try {
+                    await guestyService.listOnChannels(selectedId);
+                    toast({ title: "Listed on channels", description: "Guesty will start distributing this listing to connected channels." });
+                    refreshChannelStatus?.();
+                  } catch (e: any) {
+                    toast({ title: "Couldn't list on channels", description: e?.message ?? "Unknown error", variant: "destructive" });
+                  }
+                }}
+                disabled={building}
+                data-testid="btn-list-on-channels"
+                title="Flip this listing from draft to listed so channels distribute it"
+              >
+                ↑ List on Channels
+              </button>
+            ) : (
+              <button
+                className="glb-btn glb-btn-danger"
+                onClick={async () => {
+                  try {
+                    await guestyService.unlistFromChannels(selectedId);
+                    toast({ title: "Unlisted", description: "Listing is no longer distributed to channels." });
+                    refreshChannelStatus?.();
+                  } catch (e: any) {
+                    toast({ title: "Couldn't unlist", description: e?.message ?? "Unknown error", variant: "destructive" });
+                  }
+                }}
+                disabled={building}
+                data-testid="btn-unlist"
+              >
+                Unlist
+              </button>
+            )
           )}
         </div>
 
