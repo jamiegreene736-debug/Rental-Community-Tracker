@@ -5675,16 +5675,26 @@ export async function registerRoutes(
       await page.waitForTimeout(6000);
 
       const postLoginUrl = page.url();
-      const landedOnLogin = /login|auth|signin/i.test(postLoginUrl) && !/app\.guesty\.com/i.test(postLoginUrl);
+      // Guesty's Okta login lives at app.guesty.com/auth/login — so the
+      // earlier "not on app.guesty.com" heuristic falsely called that a
+      // success. Check the path specifically, and also sanity-check that
+      // the rendered page has the target section's content.
+      const landedOnLogin = /\/auth\/login/i.test(postLoginUrl)
+        || /okta-signin-username|okta-signin-password/i.test(await page.content().catch(() => ""));
       trace.push({ step: landedOnLogin ? "redirected-to-login" : "on-owners-and-license", detail: postLoginUrl });
 
       const beforeShot = await saveShot(page, "before");
 
       if (landedOnLogin) {
+        // Return the cookie names we had so the operator can sanity-check
+        // what was exported. Values are never logged.
+        const cookieNames = cookies.map((c) => `${c.name}@${c.domain}`).sort();
         return res.json({
           ok: false,
-          error: "Guesty rejected the session cookies — landed on a login page. Re-export GUESTY_SESSION_COOKIES from app.guesty.com.",
+          error: "Guesty redirected to the Okta login page — the session cookies in GUESTY_SESSION_COOKIES are either expired, missing, or exported from the wrong domain. Re-export from a logged-in app.guesty.com tab with Cookie-Editor.",
           finalUrl: postLoginUrl,
+          cookieNames,
+          cookieCount: cookies.length,
           beforeShotUrl: beforeShot,
           trace,
         });
