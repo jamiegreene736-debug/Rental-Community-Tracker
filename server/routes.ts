@@ -5785,20 +5785,106 @@ export async function registerRoutes(
       } catch { return null; }
     };
     try {
-      browser = await chromium.launch({
+      // rebrowser-playwright is a drop-in Playwright replacement that
+      // patches the CDP Runtime.Enable leak that every detection service
+      // (CreepJS, FingerprintJS Pro, Okta ThreatInsight) uses to identify
+      // headless/automated browsers. Vanilla playwright exposes this leak
+      // no matter what stealth scripts you inject. Only used here, not in
+      // the Airbnb endpoint (which already works with vanilla Playwright).
+      const { chromium: rbChromium } = await import("rebrowser-playwright");
+      browser = await rbChromium.launch({
         headless: true,
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
-      });
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-features=IsolateOrigins,site-per-process",
+        ],
+      }) as unknown as Awaited<ReturnType<typeof chromium.launch>>;
       const ctx = await browser.newContext({
-        viewport: { width: 1440, height: 1200 },
+        viewport: { width: 1440, height: 900 },
         locale: "en-US",
         timezoneId: "Pacific/Honolulu",
-        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
       });
+      // Comprehensive stealth init — covers the vectors Okta JS is known
+      // to probe: webdriver flag, plugins array, languages, permissions
+      // API oddities, WebGL renderer, Chrome runtime shape.
       await ctx.addInitScript(() => {
+        // 1. webdriver flag
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+
+        // 2. Plugins — return a realistic non-empty array. Detection code
+        //    checks navigator.plugins.length > 0 as a basic signal.
+        const fakePlugins = [
+          { name: "PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format" },
+          { name: "Chrome PDF Viewer", filename: "internal-pdf-viewer", description: "" },
+          { name: "Chromium PDF Viewer", filename: "internal-pdf-viewer", description: "" },
+          { name: "Microsoft Edge PDF Viewer", filename: "internal-pdf-viewer", description: "" },
+          { name: "WebKit built-in PDF", filename: "internal-pdf-viewer", description: "" },
+        ];
+        Object.defineProperty(navigator, "plugins", {
+          get: () => {
+            const arr = fakePlugins.map((p) => Object.assign(Object.create(Plugin.prototype), p));
+            Object.defineProperty(arr, "item", { value: (i: number) => arr[i] });
+            Object.defineProperty(arr, "namedItem", { value: (n: string) => arr.find((p: any) => p.name === n) || null });
+            Object.defineProperty(arr, "refresh", { value: () => {} });
+            return arr;
+          },
+        });
+
+        // 3. Languages — ensure array matches Accept-Language header shape.
+        Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+
+        // 4. Permissions query — headless Chromium returns "denied" for
+        //    notifications; real Chrome typically returns "default" / "prompt".
+        //    Fake the mismatch Okta watches for.
+        const origQuery = navigator.permissions.query.bind(navigator.permissions);
+        (navigator.permissions as any).query = (params: { name: string }) =>
+          params?.name === "notifications"
+            ? Promise.resolve({ state: "prompt" } as unknown as PermissionStatus)
+            : origQuery(params as PermissionDescriptor);
+
+        // 5. WebGL renderer — headless Chrome reports "SwiftShader" or
+        //    "ANGLE (llvmpipe)", both dead giveaways. Spoof to a common
+        //    Intel integrated GPU string.
+        const getParamProto = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function (param: number) {
+          // 37445 = UNMASKED_VENDOR_WEBGL, 37446 = UNMASKED_RENDERER_WEBGL
+          if (param === 37445) return "Intel Inc.";
+          if (param === 37446) return "Intel Iris OpenGL Engine";
+          return getParamProto.call(this, param);
+        };
+
+        // 6. window.chrome shape — real Chrome has a `chrome` object with
+        //    specific runtime / loadTimes / csi properties. Headless
+        //    Chromium has none of these.
+        if (!(window as any).chrome) {
+          (window as any).chrome = {};
+        }
+        if (!(window as any).chrome.runtime) {
+          (window as any).chrome.runtime = {
+            OnInstalledReason: {},
+            OnRestartRequiredReason: {},
+            PlatformArch: {},
+            PlatformOs: {},
+            RequestUpdateCheckStatus: {},
+          };
+        }
+
+        // 7. Hide the CDP Runtime.Enable / MAIN-world isolated-world
+        //    boundary. rebrowser-playwright handles most of this at the
+        //    patch layer, but also nullify document.$cdc_asdjflasutopfhvcZLmcfl_
+        //    and similar webdriver property leaks seen in some builds.
+        for (const key of Object.keys(document)) {
+          if (/^\$[cC]dc_|^\$[wW]dc_/.test(key)) {
+            delete (document as any)[key];
+          }
+        }
       });
+
       await ctx.addCookies(cookies);
       const page = await ctx.newPage();
 
