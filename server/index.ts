@@ -6,6 +6,7 @@ import { startWeeklyScheduler, cleanupStaleRuns } from "./availability-scanner";
 import { startAutoApproveScheduler } from "./auto-approve";
 import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
+import { startPhotoListingScheduler } from "./photo-listing-scanner";
 
 const app = express();
 const httpServer = createServer(app);
@@ -108,6 +109,7 @@ app.use((req, res, next) => {
       startAutoApproveScheduler();
       startAutoReplyScheduler();
       startAvailabilityScheduler();
+      startPhotoListingScheduler();
     },
   );
 })();

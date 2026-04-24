@@ -18,6 +18,7 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage 
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
+import { runPhotoListingCheckForFolders, listScanableFolders } from "./photo-listing-scanner";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
@@ -9124,6 +9125,63 @@ export async function registerRoutes(
   // Returns the curated seed list so the UI can show a preview / checkboxes.
   app.get("/api/community/top-markets/seeds", (_req, res) => {
     res.json({ seeds: TOP_MARKET_SEEDS });
+  });
+
+  // ============================================================
+  // Photo listing check (reverse image search across Airbnb/VRBO/Booking.com)
+  // ============================================================
+
+  const tryParseJson = (s: string): unknown => {
+    try { return JSON.parse(s); } catch { return []; }
+  };
+
+  // GET /api/photo-listing-check
+  // Returns the latest status row per folder. The dashboard aggregates
+  // these by property (one property → many folders → worst status wins).
+  app.get("/api/photo-listing-check", async (_req, res) => {
+    try {
+      const rows = await storage.getAllPhotoListingChecks();
+      res.json({
+        checks: rows.map((r) => ({
+          folder: r.photoFolder,
+          airbnbStatus:  r.airbnbStatus,
+          vrboStatus:    r.vrboStatus,
+          bookingStatus: r.bookingStatus,
+          airbnbMatches:  r.airbnbMatches  ? tryParseJson(r.airbnbMatches)  : [],
+          vrboMatches:    r.vrboMatches    ? tryParseJson(r.vrboMatches)    : [],
+          bookingMatches: r.bookingMatches ? tryParseJson(r.bookingMatches) : [],
+          photosChecked: r.photosChecked,
+          checkedAt: r.checkedAt,
+          errorMessage: r.errorMessage,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to load photo-listing checks" });
+    }
+  });
+
+  // POST /api/photo-listing-check/run
+  // Manual "Run now". Body: { folders?: string[] }
+  //   - folders omitted → scans every folder with labeled photos in DB
+  //   - folders provided → scans exactly those
+  // Runs asynchronously (kicks off, returns immediately with the list
+  // it's scanning). The dashboard polls GET /api/photo-listing-check.
+  app.post("/api/photo-listing-check/run", async (req, res) => {
+    try {
+      const requested = Array.isArray((req.body as any)?.folders) ? (req.body as any).folders as string[] : null;
+      const known = await listScanableFolders();
+      const folders = requested && requested.length > 0
+        ? requested.filter((f) => known.includes(f))
+        : known;
+      if (folders.length === 0) {
+        return res.status(400).json({ error: "No scanable folders found (no photo labels in DB)" });
+      }
+      // Fire-and-forget. Completes in the background; status polled via GET.
+      void runPhotoListingCheckForFolders(folders);
+      res.json({ started: true, folders });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to start photo-listing scan" });
+    }
   });
 
 

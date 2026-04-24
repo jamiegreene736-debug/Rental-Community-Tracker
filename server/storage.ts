@@ -11,11 +11,12 @@ import {
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
   type PhotoLabel, type InsertPhotoLabel,
+  type PhotoListingCheck, type InsertPhotoListingCheck,
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, photoListingChecks, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -623,6 +624,53 @@ export class DatabaseStorage implements IStorage {
       .where(eq(scannerRunHistory.propertyId, propertyId))
       .orderBy(desc(scannerRunHistory.ranAt))
       .limit(limit);
+  }
+
+  // ── Photo listing (reverse-image) checks ──
+  async upsertPhotoListingCheck(data: InsertPhotoListingCheck): Promise<PhotoListingCheck> {
+    const [row] = await db
+      .insert(photoListingChecks)
+      .values(data)
+      .onConflictDoUpdate({
+        target: photoListingChecks.photoFolder,
+        set: {
+          airbnbStatus: data.airbnbStatus,
+          vrboStatus: data.vrboStatus,
+          bookingStatus: data.bookingStatus,
+          airbnbMatches: data.airbnbMatches ?? null,
+          vrboMatches: data.vrboMatches ?? null,
+          bookingMatches: data.bookingMatches ?? null,
+          photosChecked: data.photosChecked ?? 0,
+          lensCalls: data.lensCalls ?? 0,
+          errorMessage: data.errorMessage ?? null,
+          checkedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getAllPhotoListingChecks(): Promise<PhotoListingCheck[]> {
+    return db.select().from(photoListingChecks);
+  }
+
+  async getPhotoListingCheckByFolder(folder: string): Promise<PhotoListingCheck | undefined> {
+    const [row] = await db.select().from(photoListingChecks).where(eq(photoListingChecks.photoFolder, folder));
+    return row;
+  }
+
+  async getStalePhotoListingFolders(olderThanMs: number, knownFolders: string[]): Promise<string[]> {
+    // Returns a list of folders that EITHER have no row yet OR were
+    // last checked more than `olderThanMs` ago. Caller supplies the
+    // `knownFolders` list (derived from unit-builder) so the scheduler
+    // doesn't scan folders that no longer belong to any property.
+    if (knownFolders.length === 0) return [];
+    const rows = await db.select().from(photoListingChecks);
+    const cutoff = new Date(Date.now() - olderThanMs);
+    const fresh = new Set(
+      rows.filter((r) => r.checkedAt && r.checkedAt > cutoff).map((r) => r.photoFolder),
+    );
+    return knownFolders.filter((f) => !fresh.has(f));
   }
 }
 
