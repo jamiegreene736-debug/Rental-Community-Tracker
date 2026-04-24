@@ -152,6 +152,46 @@ async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boo
   }
 }
 
+// Emit alerts for every platform whose status just worsened to
+// "found" (from "clean" or "unknown"). We deliberately ignore
+// "found → found" (already alerted) and "found → anything else"
+// (problem resolved — no need to raise a new flag). Alerts are one-
+// row-per-transition so operators can walk the history of events
+// instead of just seeing the current state.
+async function alertOnStateWorsen(
+  prior: { airbnbStatus: PlatformStatus; vrboStatus: PlatformStatus; bookingStatus: PlatformStatus } | null,
+  next: ScanResult,
+): Promise<void> {
+  const platforms: Array<{
+    key: "airbnb" | "vrbo" | "booking";
+    prior: PlatformStatus;
+    newStatus: PlatformStatus;
+    matches: Match[];
+  }> = [
+    { key: "airbnb",  prior: prior?.airbnbStatus  ?? "unknown", newStatus: next.airbnbStatus,  matches: next.airbnbMatches },
+    { key: "vrbo",    prior: prior?.vrboStatus    ?? "unknown", newStatus: next.vrboStatus,    matches: next.vrboMatches },
+    { key: "booking", prior: prior?.bookingStatus ?? "unknown", newStatus: next.bookingStatus, matches: next.bookingMatches },
+  ];
+  for (const p of platforms) {
+    if (p.newStatus !== "found") continue;
+    if (p.prior === "found") continue; // already alerted last run
+    try {
+      await storage.createPhotoListingAlert({
+        photoFolder: next.folder,
+        platform: p.key,
+        priorStatus: p.prior,
+        newStatus: p.newStatus,
+        matchedUrls: p.matches.length ? JSON.stringify(p.matches.slice(0, 5)) : null,
+      });
+      console.error(
+        `[photo-listing-scanner] ALERT: ${next.folder} ${p.key} flipped ${p.prior} → found (${p.matches.length} match${p.matches.length === 1 ? "" : "es"})`,
+      );
+    } catch (e: any) {
+      console.error(`[photo-listing-scanner] failed to record alert for ${next.folder}/${p.key}: ${e?.message}`);
+    }
+  }
+}
+
 export async function runPhotoListingCheckForFolder(folder: string): Promise<ScanResult> {
   const result: ScanResult = {
     folder,
@@ -164,6 +204,15 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     photosChecked: 0,
     lensCalls: 0,
   };
+
+  // Capture the prior status row BEFORE upserting so we can emit
+  // state-worsen alerts after the new row lands. Null → never scanned.
+  const priorRow = await storage.getPhotoListingCheckByFolder(folder);
+  const prior = priorRow ? {
+    airbnbStatus:  priorRow.airbnbStatus  as PlatformStatus,
+    vrboStatus:    priorRow.vrboStatus    as PlatformStatus,
+    bookingStatus: priorRow.bookingStatus as PlatformStatus,
+  } : null;
 
   if (!SEARCHAPI_KEY) {
     result.errorMessage = "SEARCHAPI_API_KEY not configured";
@@ -277,6 +326,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   result.bookingMatches = tally.booking.matches.slice(0, 20);
 
   await persist(result);
+  await alertOnStateWorsen(prior, result);
   return result;
 }
 
