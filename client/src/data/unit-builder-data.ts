@@ -1308,27 +1308,32 @@ Makahuena at Poipu sits on a dramatic volcanic point with sweeping Pacific views
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
     neighborhood: "Makahuena at Poipu occupies a dramatic oceanfront position at Makahuena Point on Kauai's sunny south shore. Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach are all within a short walk — three of Hawaii's best beaches for swimming, snorkeling with sea turtles and monk seals, and bodyboarding. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden are all close by.",
     transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-    // TODO (Makahuena): the four regulatory identifiers below still hold
-    // the OLD Lae Nani values from when this entry was mislabelled.
-    // Poipu sits in a VDA so the STR permit prefix should be "TVR-"
-    // (year-sequence), NOT "TVNC-". Before re-publishing this listing
-    // to Guesty / Airbnb / VRBO / Booking, replace all four with the
-    // actual Makahuena records for this unit set.
-    taxMapKey: "440080010001",          // TODO: real Makahuena TMK
-    tatLicense: "TA-025-110-4567-01",   // TODO: real Makahuena TAT
-    getLicense: "GE-025-110-4567-01",   // TODO: real Makahuena GET
-    strPermit: "TVNC-0489",             // TODO: real Makahuena STR permit (Poipu uses TVR-YYYY-###)
+    // SAMPLE regulatory identifiers — all-zero placeholders in the
+    // correct Hawaii format. The previous Lae Nani values were
+    // removed so there's no risk of pushing a wrong-unit permit to
+    // an OTA. Every one of these MUST be replaced with the real
+    // Makahuena records before re-publishing:
+    //   - TMK: 12 digits, 4-dashed in county-district-section-parcel
+    //   - TAT: TA-###-###-####-## (Hawaii Dept of Taxation)
+    //   - GET: GE-###-###-####-## (Hawaii Dept of Taxation)
+    //   - STR permit: Poipu is a VDA, so the prefix is "TVR-YYYY-###"
+    //     (NOT "TVNC-" — that's for non-VDA Kauai areas like Kapaa
+    //     and Kekaha)
+    taxMapKey: "000000000000",          // SAMPLE — replace with real Makahuena TMK
+    tatLicense: "TA-000-000-0000-00",   // SAMPLE — replace with real Makahuena TAT
+    getLicense: "GE-000-000-0000-00",   // SAMPLE — replace with real Makahuena GET
+    strPermit: "TVR-0000-000",          // SAMPLE — replace with real Makahuena STR permit (TVR-YYYY-###)
     hasPhotos: true,
     communityPhotos: COMMUNITY_LAE_NANI,
     communityPhotoFolder: "community-lae-nani",
     units: [
       {
-        // TODO (Makahuena): "314" is the old Lae Nani unit number.
-        // Replace with the actual Makahuena unit number (e.g.
-        // 4305 / 5203 / 2309 — see parrishkauai.com Makahuena
-        // listings for the format).
+        // SAMPLE unit label — "Clubhouse" is a common-area marker at
+        // Makahuena, obviously not someone's rented unit. Replace
+        // with the real Makahuena unit number before publishing
+        // (format examples: 2309 / 4305 / 5203, per Parrish listings).
         id: "prop24-mk-3br",
-        unitNumber: "314",
+        unitNumber: "Clubhouse",
         bedrooms: 3,
         bathrooms: "2",
         sqft: "~1,500",
@@ -1347,10 +1352,12 @@ Koloa Town — Kauai's oldest plantation village — is 5 minutes away with bout
         photos: PHOTOS_LAE_NANI,
       },
       {
-        // TODO (Makahuena): "225" is the old Lae Nani unit number.
-        // Replace with the actual Makahuena unit number.
+        // SAMPLE unit label — "Pool Pavilion" is a common-area
+        // marker at Makahuena. Same as above: placeholder only,
+        // replace with the real Makahuena unit number before
+        // publishing.
         id: "prop24-mk-2br",
-        unitNumber: "225",
+        unitNumber: "Pool Pavilion",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
