@@ -5404,10 +5404,53 @@ export async function registerRoutes(
       // moment to propagate; caller can re-check).
       trace.push({ step: advanced ? "submission-advanced" : "submission-maybe-stuck", detail: postSubmitUrl });
 
-      // Always persist a screenshot of the post-Next page so we can inspect
-      // what step 2 of Airbnb's flow looks like. Saved to the photos volume
-      // under /photos/debug/ so it's reachable via public URL without any
-      // extra routing. Keeps last ~20 files to stay bounded.
+      // Step 2 of Airbnb's flow: "Review your information" page with a single
+      // Submit button. Without this click, Airbnb discards the registration
+      // silently (Guesty's permits object stays empty). Order of operations:
+      //   1. Dismiss the "Help us improve your experience" cookie banner,
+      //      which can overlay the Submit button on some viewports. Picking
+      //      "Only necessary" avoids opting into tracking cookies.
+      //   2. Confirm we're on the review page by looking for its heading.
+      //   3. Click Submit (with force: true as a fallback in case the banner
+      //      re-renders mid-dismiss).
+      //   4. Verify URL changed — if yes, the registration was committed.
+      let submissionComplete = false;
+      let finalUrl = postSubmitUrl;
+      if (advanced) {
+        const hasCookieBanner = await page.$('text=/Help us improve your experience/i').catch(() => null);
+        if (hasCookieBanner) {
+          trace.push({ step: "dismissing-cookie-banner" });
+          await page.click('button:has-text("Only necessary")', { timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(500);
+        }
+
+        const hasReviewHeading = await page.$('text=/Review your information/i').catch(() => null);
+        if (hasReviewHeading) {
+          trace.push({ step: "on-review-page" });
+          const submitErr = await page
+            .click('button:has-text("Submit")', { timeout: 8000 })
+            .then(() => null)
+            .catch((err: Error) => err.message);
+          if (submitErr) {
+            trace.push({ step: "submit-click-retrying-force", detail: submitErr });
+            await page.click('button:has-text("Submit")', { timeout: 5000, force: true }).catch(() => {});
+          }
+          await page.waitForTimeout(5000);
+          finalUrl = page.url();
+          submissionComplete = finalUrl !== postSubmitUrl;
+          trace.push({
+            step: submissionComplete ? "submission-completed" : "submit-clicked-no-advance",
+            detail: finalUrl,
+          });
+        } else {
+          trace.push({ step: "review-heading-not-found" });
+        }
+      }
+
+      // Screenshot reflects whichever step we ended up on (step 2 review page
+      // if Submit never clicked, step 3 confirmation if it did). Saved to the
+      // photos volume under /photos/debug/ so it's reachable via public URL.
+      // Keeps last ~20 files to stay bounded.
       const screenshotBuf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => null);
       let screenshotUrl: string | null = null;
       if (screenshotBuf) {
@@ -5417,7 +5460,6 @@ export async function registerRoutes(
           const fname = `compliance-${listingId}-${Date.now()}.jpg`;
           fs.writeFileSync(path.join(debugDir, fname), screenshotBuf);
           screenshotUrl = `/photos/debug/${fname}`;
-          // Prune oldest files beyond the 20 most recent so the volume doesn't fill up.
           try {
             const all = fs.readdirSync(debugDir)
               .filter((f) => f.startsWith("compliance-") && f.endsWith(".jpg"))
@@ -5430,13 +5472,15 @@ export async function registerRoutes(
         }
       }
 
-      console.log(`[airbnb-compliance] listing=${listingId} advanced=${advanced} finalUrl=${postSubmitUrl} screenshot=${screenshotUrl} headings=${JSON.stringify(postHeadings)} buttons=${JSON.stringify(buttonTexts)} errors=${JSON.stringify(errorMessages)} trace=${JSON.stringify(trace)}`);
+      console.log(`[airbnb-compliance] listing=${listingId} advanced=${advanced} submissionComplete=${submissionComplete} finalUrl=${finalUrl} screenshot=${screenshotUrl} headings=${JSON.stringify(postHeadings)} buttons=${JSON.stringify(buttonTexts)} errors=${JSON.stringify(errorMessages)} trace=${JSON.stringify(trace)}`);
 
       return res.json({
         ok: true,
         advanced,
+        submissionComplete,
         trace,
-        finalUrl: postSubmitUrl,
+        finalUrl,
+        reviewPageUrl: postSubmitUrl,
         postSubmitHeadings: postHeadings,
         postBodyPreview,
         errorMessages,

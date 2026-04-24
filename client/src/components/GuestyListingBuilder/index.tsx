@@ -2118,14 +2118,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           const airbnbErrors: string[] = Array.isArray(data.errorMessages) ? data.errorMessages : [];
                           const screenshotUrl: string | null = typeof data.screenshotUrl === "string" ? data.screenshotUrl : null;
                           const shotSuffix = screenshotUrl ? ` · Screenshot: ${window.location.origin}${screenshotUrl}` : "";
+                          // submissionComplete: Submit clicked on review page AND URL advanced
+                          // advanced:           Next clicked on step 1 AND URL advanced
+                          // Both false:         form filled but step 1 didn't advance
+                          const fullySubmitted = !!data.submissionComplete;
+                          const step1Only = !fullySubmitted && !!data.advanced;
                           toast({
-                            title: data.advanced ? "Compliance step 1 submitted" : "Compliance form filled",
-                            description: data.advanced
-                              ? `Step 1 advanced. Airbnb's flow may have more steps — Guesty currently shows permits empty for this listing. Inspect the step-2 screenshot to confirm.${shotSuffix}`
-                              : airbnbErrors.length > 0
-                                ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}${shotSuffix}`
-                                : `Submitted but page didn't advance — no visible Airbnb error captured. Check your Airbnb dashboard manually. Final URL: ${data.finalUrl}${shotSuffix}`,
-                            variant: data.advanced ? "default" : "destructive",
+                            title: fullySubmitted
+                              ? "Airbnb compliance submitted"
+                              : step1Only
+                                ? "Stuck on review page"
+                                : "Compliance form filled",
+                            description: fullySubmitted
+                              ? `Both steps completed. Guesty will reflect the registration on its next Airbnb sync.${shotSuffix}`
+                              : step1Only
+                                ? `Filled + advanced to Airbnb's review page, but Submit didn't finalize. Check the screenshot.${shotSuffix}`
+                                : airbnbErrors.length > 0
+                                  ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}${shotSuffix}`
+                                  : `Submitted but page didn't advance — no visible Airbnb error captured. Final URL: ${data.finalUrl}${shotSuffix}`,
+                            variant: fullySubmitted ? "default" : "destructive",
                             duration: 15000,
                           });
                           // Kick a channel-status refresh so the badge flips if the status updated.
