@@ -23,6 +23,69 @@ import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 
+// Fetch the latest Guesty login verification code from the operator's Gmail
+// inbox via IMAP. Polls for up to 90s (checking every 5s) so the server can
+// tolerate some email-delivery lag. Only considers messages received AFTER
+// `afterTimestamp` so we don't grab a stale code from a prior login.
+async function fetchGuestyMfaCodeFromGmail(
+  user: string,
+  appPassword: string,
+  afterTimestamp: number,
+  trace: Array<{ step: string; detail?: string }>,
+): Promise<string | null> {
+  const { ImapFlow } = await import("imapflow");
+  const client = new ImapFlow({
+    host: "imap.gmail.com",
+    port: 993,
+    secure: true,
+    auth: { user, pass: appPassword },
+    logger: false,
+  });
+
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock("INBOX");
+    try {
+      // Poll for ~90s. Guesty's code emails typically land within 5-15s but
+      // we leave headroom for slow days.
+      for (let attempt = 0; attempt < 18; attempt++) {
+        // IMAP SEARCH with a loose 10-min window centered on "afterTimestamp"
+        // so we don't miss emails due to minor clock drift between Railway
+        // and Gmail's servers.
+        const searchStart = new Date(afterTimestamp - 60 * 1000);
+        const uids = await client.search({
+          since: searchStart,
+          from: "guesty.com",
+        });
+        if (uids && uids.length > 0) {
+          // Newest-first to prefer the fresh code on resends/retries.
+          for (const uid of uids.slice().reverse()) {
+            const msg = await client.fetchOne(uid as number, { envelope: true, source: true });
+            const dateMs = msg.envelope?.date?.getTime() ?? 0;
+            if (dateMs < afterTimestamp - 60 * 1000) continue;
+            const body = msg.source?.toString("utf8") ?? "";
+            // Strip MIME quoted-printable soft breaks before regexing.
+            const flat = body.replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+            // Prefer a 6-digit code adjacent to "code" / "verification" text.
+            const near = flat.match(/(?:code|verification|one[-\s]?time)[^0-9]{0,80}(\d{6})\b/i);
+            if (near?.[1]) return near[1];
+            // Fallback: first standalone 6-digit run in the body.
+            const any = flat.match(/\b(\d{6})\b/);
+            if (any?.[1]) return any[1];
+          }
+        }
+        trace.push({ step: "mfa-code-poll", detail: `attempt ${attempt + 1}/18 uids=${uids?.length ?? 0}` });
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      return null;
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
 // Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
 // All other communities fall back to Google Images search.
 const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string }> = {
@@ -5812,36 +5875,103 @@ export async function registerRoutes(
         ).catch(() => {});
         trace.push({ step: "clicked-password-submit" });
 
-        // Wait for auth to complete — URL should leave /auth/login back
-        // to an app.guesty.com/{something} path. 30s ceiling covers slow
-        // Okta round-trips without hanging indefinitely.
+        // Wait for either auth completion OR an MFA email-code screen.
+        // Guesty's flow sends a 6-digit code to the account email whenever
+        // the login is from a new device — which is always the case for us
+        // since Railway's browsers are ephemeral.
+        const mfaInputSelector = 'input[type="text"][inputmode="numeric"], input[maxlength="6"], input[placeholder*="000000"], input[id*="code" i][type="text"], input[name*="code" i]';
         try {
-          await page.waitForURL(
-            (u) => {
-              const s = u.toString();
-              return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
-            },
-            { timeout: 30000 },
-          );
+          await Promise.race([
+            page.waitForURL(
+              (u) => {
+                const s = u.toString();
+                return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
+              },
+              { timeout: 30000 },
+            ),
+            page.waitForSelector(mfaInputSelector, { timeout: 30000 }).then(() => {
+              throw new Error("MFA_PROMPT");
+            }),
+          ]);
           trace.push({ step: "login-redirected", detail: page.url() });
-        } catch {
-          // Still stuck on login. Likely MFA, bad creds, or a new
-          // verification step we haven't wired up. Return what we see.
-          const html = await page.content().catch(() => "");
-          const mfaHint = /mfa|authenticator|enter the code|security key|push notification|verify it.s you|verification code/i.test(html);
-          const badCreds = /invalid|incorrect|try again|doesn.?t match|not recognized/i.test(html);
-          const shot = await saveShot(page, "login-stuck");
-          return res.json({
-            ok: false,
-            error: mfaHint
-              ? "Login reached the MFA step — automated login can't complete that. Disable MFA for this account, or set up a 'trust this device' cookie by logging in manually once with Remember Me, then re-running."
-              : badCreds
-              ? "Login failed — email or password rejected by Guesty. Verify GUESTY_EMAIL / GUESTY_PASSWORD values."
-              : "Login didn't complete within 30s. Check the screenshot for what Guesty is showing.",
-            finalUrl: page.url(),
-            beforeShotUrl: shot,
-            trace,
-          });
+        } catch (err: any) {
+          if (err?.message === "MFA_PROMPT") {
+            trace.push({ step: "mfa-email-code-prompt" });
+            // Fetch the latest code from the Gmail inbox via IMAP.
+            const gmailUser = process.env.GMAIL_USER;
+            const gmailPass = process.env.GMAIL_APP_PASSWORD;
+            if (!gmailUser || !gmailPass) {
+              const shot = await saveShot(page, "mfa-no-gmail");
+              return res.json({
+                ok: false,
+                error: "Guesty sent an email verification code but GMAIL_USER / GMAIL_APP_PASSWORD env vars aren't set. Add them so the server can fetch the code automatically.",
+                finalUrl: page.url(),
+                beforeShotUrl: shot,
+                trace,
+              });
+            }
+            const mfaStartedAt = Date.now();
+            const code = await fetchGuestyMfaCodeFromGmail(gmailUser, gmailPass, mfaStartedAt, trace);
+            if (!code) {
+              const shot = await saveShot(page, "mfa-code-not-found");
+              return res.json({
+                ok: false,
+                error: "Couldn't find a Guesty verification code in the Gmail inbox within 90s. Either the email didn't arrive, GMAIL_APP_PASSWORD is wrong, or the sender/subject heuristics need updating.",
+                finalUrl: page.url(),
+                beforeShotUrl: shot,
+                trace,
+              });
+            }
+            trace.push({ step: "mfa-code-fetched", detail: `${code.length} digits` });
+
+            const codeInput = await page.$(mfaInputSelector);
+            if (!codeInput) {
+              const shot = await saveShot(page, "mfa-no-input");
+              return res.json({ ok: false, error: "MFA prompt detected earlier but code input isn't there now.", finalUrl: page.url(), beforeShotUrl: shot, trace });
+            }
+            await codeInput.fill(code);
+            trace.push({ step: "mfa-code-filled" });
+
+            await page.click(
+              'button[type="submit"], input[type="submit"], button:has-text("Verify"), button:has-text("Submit"), button:has-text("Continue")',
+              { timeout: 8000 },
+            ).catch(() => {});
+            trace.push({ step: "mfa-code-submitted" });
+
+            try {
+              await page.waitForURL(
+                (u) => {
+                  const s = u.toString();
+                  return /app\.guesty\.com/i.test(s) && !/\/auth\/login|\/login|\/signin/i.test(s);
+                },
+                { timeout: 30000 },
+              );
+              trace.push({ step: "mfa-verified-login-redirected", detail: page.url() });
+            } catch {
+              const shot = await saveShot(page, "mfa-verify-stuck");
+              return res.json({
+                ok: false,
+                error: "MFA code was filled + submitted but Guesty didn't redirect. The code may have been wrong/stale or Guesty added another verification step.",
+                finalUrl: page.url(),
+                beforeShotUrl: shot,
+                trace,
+              });
+            }
+          } else {
+            // No MFA — something else stalled.
+            const html = await page.content().catch(() => "");
+            const badCreds = /invalid|incorrect|try again|doesn.?t match|not recognized/i.test(html);
+            const shot = await saveShot(page, "login-stuck");
+            return res.json({
+              ok: false,
+              error: badCreds
+                ? "Login failed — email or password rejected by Guesty. Verify GUESTY_EMAIL / GUESTY_PASSWORD values."
+                : `Login didn't complete within 30s: ${err?.message ?? "unknown"}. Check the screenshot for what Guesty is showing.`,
+              finalUrl: page.url(),
+              beforeShotUrl: shot,
+              trace,
+            });
+          }
         }
 
         // Login worked — navigate to the target URL if we're not already
