@@ -5595,6 +5595,207 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // POST /api/admin/guesty/inspect-vrbo-compliance
+  //
+  // Loads Guesty's Owner & license page for a listing
+  // (app.guesty.com/properties/{id}/owners-and-license), scrolls to the
+  // "Vrbo license requirements" section, clicks its Edit affordance, and
+  // returns a diagnostic snapshot of the resulting form: visible text,
+  // form fields, dropdown options, and a screenshot saved under
+  // /photos/debug/.
+  //
+  // This is inspection-only — does NOT save anything. Use it to discover
+  // the form's exact field names + valid dropdown values so the companion
+  // submit endpoint can wire them up correctly.
+  //
+  // Body: { listingId }  — 24-char hex Guesty listing ID.
+  // Env:  GUESTY_SESSION_COOKIES  — JSON array (Cookie-Editor export
+  //       format) of cookies for app.guesty.com.
+  // ============================================================
+  app.post("/api/admin/guesty/inspect-vrbo-compliance", async (req: Request, res: Response) => {
+    const cookieJson = process.env.GUESTY_SESSION_COOKIES;
+    if (!cookieJson) return res.status(500).json({ error: "GUESTY_SESSION_COOKIES not set" });
+
+    const { listingId } = (req.body ?? {}) as { listingId?: string };
+    if (!listingId || !/^[a-f0-9]{24}$/i.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (24-char hex Guesty listing ID)" });
+    }
+
+    type RawCookie = { name?: string; value?: string; domain?: string; path?: string; expirationDate?: number; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string };
+    const raw: RawCookie[] = JSON.parse(cookieJson);
+    const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
+    const cookies = raw
+      .filter((c) => c.name && c.value && c.domain)
+      .map((c) => ({
+        name: c.name!, value: c.value!,
+        domain: c.domain!.startsWith(".") ? c.domain! : `.${c.domain!}`,
+        path: c.path ?? "/",
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate)
+              : typeof c.expires === "number" ? Math.floor(c.expires) : -1,
+        httpOnly: c.httpOnly ?? false, secure: c.secure ?? true,
+        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax" as "Strict" | "Lax" | "None",
+      }));
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    const trace: Array<{ step: string; detail?: string }> = [];
+    const saveShot = async (page: any, tag: string): Promise<string | null> => {
+      const buf = await page.screenshot({ type: "jpeg", quality: 70, fullPage: true }).catch(() => null);
+      if (!buf) return null;
+      try {
+        const debugDir = path.resolve(process.cwd(), "client/public/photos/debug");
+        if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+        const fname = `guesty-vrbo-${tag}-${listingId}-${Date.now()}.jpg`;
+        fs.writeFileSync(path.join(debugDir, fname), buf);
+        return `/photos/debug/${fname}`;
+      } catch { return null; }
+    };
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1200 },
+        locale: "en-US",
+        timezoneId: "Pacific/Honolulu",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await ctx.addCookies(cookies);
+      const page = await ctx.newPage();
+
+      const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
+      trace.push({ step: "navigating", detail: targetUrl });
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+      // Guesty's admin SPA is heavy — give it time to hydrate before scraping.
+      await page.waitForTimeout(6000);
+
+      const postLoginUrl = page.url();
+      const landedOnLogin = /login|auth|signin/i.test(postLoginUrl) && !/app\.guesty\.com/i.test(postLoginUrl);
+      trace.push({ step: landedOnLogin ? "redirected-to-login" : "on-owners-and-license", detail: postLoginUrl });
+
+      const beforeShot = await saveShot(page, "before");
+
+      if (landedOnLogin) {
+        return res.json({
+          ok: false,
+          error: "Guesty rejected the session cookies — landed on a login page. Re-export GUESTY_SESSION_COOKIES from app.guesty.com.",
+          finalUrl: postLoginUrl,
+          beforeShotUrl: beforeShot,
+          trace,
+        });
+      }
+
+      // Scroll through the page so lazy-rendered sections mount.
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(500);
+
+      // Dump the top-level structure: heading texts + visible button texts.
+      const structure = await page.evaluate(() => {
+        const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,[role='heading']"))
+          .map((h) => (h.textContent || "").trim().replace(/\s+/g, " "))
+          .filter((t) => t.length > 0 && t.length < 200)
+          .slice(0, 50);
+        const buttons = Array.from(document.querySelectorAll("button, a[role='button']"))
+          .map((b) => ({
+            text: (b.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100),
+            ariaLabel: b.getAttribute("aria-label"),
+            dataTestId: b.getAttribute("data-testid"),
+          }))
+          .filter((b) => b.text.length > 0 || b.ariaLabel)
+          .slice(0, 60);
+        return { headings, buttons };
+      }).catch(() => ({ headings: [], buttons: [] }));
+
+      // Find the VRBO heading and its nearest Edit button.
+      const clickResult = await page.evaluate(() => {
+        const all = Array.from(document.querySelectorAll("*"));
+        const vrboEl = all.find((el) => {
+          const t = (el.textContent || "").trim().toLowerCase();
+          return t.includes("vrbo license requirements") && t.length < 60;
+        });
+        if (!vrboEl) return { found: false, reason: "no 'Vrbo license requirements' text element" };
+        // Walk up the DOM looking for a section container that also contains an Edit button.
+        let container: Element | null = vrboEl;
+        for (let depth = 0; depth < 8 && container; depth++) {
+          const editBtn = Array.from(container.querySelectorAll("button")).find((b) => /^\s*edit\s*$/i.test(b.textContent || ""));
+          if (editBtn) {
+            (editBtn as HTMLElement).scrollIntoView({ block: "center" });
+            (editBtn as HTMLElement).click();
+            return { found: true, depth, buttonText: (editBtn.textContent || "").trim() };
+          }
+          container = container.parentElement;
+        }
+        return { found: false, reason: "no Edit button within 8 ancestors of VRBO heading" };
+      });
+      trace.push({ step: "clicked-edit", detail: JSON.stringify(clickResult) });
+
+      await page.waitForTimeout(2500);
+
+      // Scrape the form that appeared — could be inline, modal, or drawer.
+      const formSnapshot = await page.evaluate(() => {
+        const fields: Array<{ tag: string; type?: string; id?: string; name?: string; ariaLabel?: string; placeholder?: string; value?: string; required?: boolean; textContext?: string }> = [];
+        document.querySelectorAll("input, select, textarea, [role='combobox'], [role='listbox']").forEach((el) => {
+          const parent = el.closest("label,[class*='field'],[class*='form'],div");
+          const textContext = parent ? (parent.textContent || "").trim().slice(0, 120) : "";
+          fields.push({
+            tag: el.tagName,
+            type: (el as HTMLInputElement).type,
+            id: el.id || undefined,
+            name: el.getAttribute("name") || undefined,
+            ariaLabel: el.getAttribute("aria-label") || undefined,
+            placeholder: el.getAttribute("placeholder") || undefined,
+            value: (el as HTMLInputElement).value || undefined,
+            required: (el as HTMLInputElement).required || undefined,
+            textContext,
+          });
+        });
+        const nativeSelects = Array.from(document.querySelectorAll("select")).map((s) => ({
+          id: s.id,
+          name: s.name,
+          ariaLabel: s.getAttribute("aria-label"),
+          options: Array.from(s.querySelectorAll("option")).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+        }));
+        // Many React UIs render dropdowns as role="combobox" buttons that
+        // trigger a role="listbox" popup on click. Grab any currently-visible
+        // listbox options as a fallback snapshot.
+        const openListboxItems = Array.from(document.querySelectorAll("[role='option'],[role='listbox'] [role='option']"))
+          .map((el) => ({ text: (el.textContent || "").trim().slice(0, 80), value: el.getAttribute("data-value") || el.getAttribute("data-option-value") || null }));
+        // Button texts currently on screen (Save / Cancel / etc).
+        const activeButtons = Array.from(document.querySelectorAll("button, a[role='button']"))
+          .map((b) => ({ text: (b.textContent || "").trim().slice(0, 80), ariaLabel: b.getAttribute("aria-label") }))
+          .filter((b) => b.text.length > 0 || b.ariaLabel)
+          .slice(0, 40);
+        return { fields, nativeSelects, openListboxItems, activeButtons };
+      }).catch(() => null);
+
+      const afterShot = await saveShot(page, "after-edit");
+
+      console.log(`[guesty-vrbo-inspect] listing=${listingId} click=${JSON.stringify(clickResult)} shots=${beforeShot}|${afterShot} fields=${formSnapshot?.fields?.length ?? 0} selects=${formSnapshot?.nativeSelects?.length ?? 0}`);
+
+      return res.json({
+        ok: true,
+        trace,
+        clickResult,
+        structure,
+        formSnapshot,
+        beforeShotUrl: beforeShot,
+        afterShotUrl: afterShot,
+        finalUrl: page.url(),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
