@@ -31,7 +31,6 @@ import {
   ArrowUp,
   ArrowDown,
   Search,
-  ExternalLink,
   Building2,
   BedDouble,
   DollarSign,
@@ -351,6 +350,17 @@ export default function Home() {
     return new Set(guestyMapData.map((m) => m.propertyId));
   }, [guestyMapData]);
 
+  // Per-property channel status for the Channels column. Single server call
+  // that batches all mapped listings into one Guesty read. Refetches every
+  // ~5 min so the dashboard stays roughly current without hammering Guesty.
+  type ChannelFlag = { connected: boolean; live: boolean };
+  type ChannelStatusMap = Record<number, { airbnb: ChannelFlag; vrbo: ChannelFlag; bookingCom: ChannelFlag }>;
+  const { data: channelStatusData } = useQuery<ChannelStatusMap>({
+    queryKey: ["/api/dashboard/channel-status"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
   const queryClient = useQueryClient();
 
   const deleteDraftMutation = useMutation({
@@ -504,9 +514,10 @@ export default function Home() {
           <Table id="list-properties" style={{ minWidth: 0 }}>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[140px] sticky left-0 bg-background z-10">Actions</TableHead>
-                <TableHead className="w-[30px] text-center">#</TableHead>
-                <TableHead className="w-[28px] text-center px-1" title="Guesty listing connected">G</TableHead>
+                <TableHead className="w-[70px] sticky left-0 bg-background z-10">Actions</TableHead>
+                <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
+                <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
+                <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
                 <TableHead className="w-[180px] max-w-[180px]">
                   <Button
                     variant="ghost"
@@ -591,40 +602,25 @@ export default function Home() {
             <TableBody>
               {filtered.map((property, idx) => (
                 <TableRow key={property.id} data-testid={`row-property-${property.id}`} id={`item-property-${property.id}`}>
-                  <TableCell className="sticky left-0 bg-background z-10">
-                    <div className="flex items-center gap-1 flex-wrap">
-                      {unitBuilderIds.has(property.id) && (
-                        <Link href={`/builder/${property.id}/preflight`}>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs px-2 gap-1"
-                            data-testid={`button-unit-builder-${property.id}`}
-                            id={`btn-build-${property.id}`}
-                            aria-label={`Build property ${property.name}`}
-                          >
-                            <Hammer className="h-3 w-3" />
-                            Build
-                          </Button>
-                        </Link>
-                      )}
-                      <a
-                        href={property.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        data-testid={`link-property-${property.id}`}
-                        id={`link-view-${property.id}`}
-                        aria-label={`View ${property.name} listing`}
-                      >
-                        <Button size="sm" variant="ghost" className="h-7 text-xs px-2 gap-1">
-                          <ExternalLink className="h-3 w-3" />
-                          View
+                  <TableCell className="sticky left-0 bg-background z-10 px-2">
+                    {unitBuilderIds.has(property.id) ? (
+                      <Link href={`/builder/${property.id}/preflight`}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs px-2 gap-1"
+                          data-testid={`button-unit-builder-${property.id}`}
+                          id={`btn-build-${property.id}`}
+                          aria-label={`Build property ${property.name}`}
+                        >
+                          <Hammer className="h-3 w-3" />
+                          Build
                         </Button>
-                      </a>
-                    </div>
+                      </Link>
+                    ) : null}
                   </TableCell>
                   <TableCell className="text-center text-muted-foreground text-xs">{idx + 1}</TableCell>
-                  <TableCell className="text-center px-1">
+                  <TableCell className="text-center px-0">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -639,6 +635,41 @@ export default function Home() {
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
+                  </TableCell>
+                  <TableCell className="text-center px-1">
+                    {(() => {
+                      // Dashboard channel indicators: three badges per row.
+                      // Green = Guesty integration exists AND listing.isListed
+                      // (ready for bookings). Red = either not integrated or
+                      // not listed. Lettered so the three channels are
+                      // distinguishable at a glance — tooltip spells out the
+                      // full name and state.
+                      const s = channelStatusData?.[property.id];
+                      const items: Array<{ letter: string; name: string; live: boolean }> = [
+                        { letter: "A", name: "Airbnb",       live: !!s?.airbnb?.live },
+                        { letter: "V", name: "VRBO",         live: !!s?.vrbo?.live },
+                        { letter: "B", name: "Booking.com",  live: !!s?.bookingCom?.live },
+                      ];
+                      return (
+                        <div className="flex gap-0.5 justify-center items-center" data-testid={`channels-${property.id}`}>
+                          {items.map((it) => (
+                            <span
+                              key={it.letter}
+                              title={`${it.name}: ${it.live ? "Live & bookable" : "Not live"}`}
+                              className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
+                              style={{
+                                background: it.live ? "#16a34a" : "#dc2626",
+                                color: "white",
+                                minWidth: 22,
+                              }}
+                              data-testid={`channel-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                            >
+                              {it.letter}{it.live ? "✓" : "✗"}
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell className="max-w-[180px]">
                     <div className="min-w-0">

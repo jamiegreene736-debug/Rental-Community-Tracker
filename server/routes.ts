@@ -1491,6 +1491,78 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/dashboard/channel-status
+  //
+  // Returns per-propertyId channel status for every mapped property in one
+  // Guesty call, so the home dashboard can render Airbnb/VRBO/Booking.com
+  // live/not-live indicators without N separate listing fetches.
+  //
+  // Response: { [propertyId: number]: {
+  //   airbnb: { connected: boolean; live: boolean },
+  //   vrbo:   { connected: boolean; live: boolean },
+  //   bookingCom: { connected: boolean; live: boolean },
+  // }}
+  //
+  // "connected" = integration exists with either an ID field or status ==
+  //               COMPLETED / connected. "live" = connected AND listing.
+  //               isListed == true (matches the client-side ChannelInfo
+  //               semantics in services/guestyService.ts toInfo).
+  app.get("/api/dashboard/channel-status", async (_req, res) => {
+    try {
+      const map = await storage.getGuestyPropertyMap();
+      if (map.length === 0) return res.json({});
+      // Single Guesty read across all mapped listings. fields= limits
+      // payload so we don't ship full listing bodies back.
+      const resp = await guestyRequest(
+        "GET",
+        `/listings?limit=200&fields=_id%20integrations%20isListed`,
+      ) as { results?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+      const listings = Array.isArray(resp) ? resp : (resp.results ?? []);
+      const byId = new Map<string, Record<string, unknown>>(
+        listings.map((l) => [l._id as string, l]),
+      );
+
+      const evalChannel = (d: Record<string, unknown> | undefined, isListed: boolean) => {
+        const idFields = ["id", "listingId", "propertyId", "hotelId", "advertiserId"];
+        const hasId = !!d && idFields.some((k) => !!d[k]);
+        const status = d?.status as string | undefined;
+        const isCompleted = status === "COMPLETED" || status === "connected";
+        const connected = hasId || isCompleted;
+        return { connected, live: connected && isListed };
+      };
+
+      const findIntegration = (
+        integrations: Array<Record<string, unknown>>,
+        platformKeys: string[],
+      ): Record<string, unknown> | undefined => {
+        const entry = integrations.find((i) =>
+          platformKeys.includes(i.platform as string),
+        );
+        if (!entry) return undefined;
+        const key = entry.platform as string;
+        return entry[key] as Record<string, unknown> | undefined;
+      };
+
+      const result: Record<number, { airbnb: ReturnType<typeof evalChannel>; vrbo: ReturnType<typeof evalChannel>; bookingCom: ReturnType<typeof evalChannel> }> = {};
+      for (const m of map) {
+        const listing = byId.get(m.guestyListingId);
+        if (!listing) continue;
+        const integrations = Array.isArray(listing.integrations)
+          ? (listing.integrations as Array<Record<string, unknown>>)
+          : [];
+        const isListed = !!listing.isListed;
+        result[m.propertyId] = {
+          airbnb:     evalChannel(findIntegration(integrations, ["airbnb2", "airbnb"]), isListed),
+          vrbo:       evalChannel(findIntegration(integrations, ["homeaway2", "homeaway", "vrbo"]), isListed),
+          bookingCom: evalChannel(findIntegration(integrations, ["bookingCom2", "bookingCom", "booking_com"]), isListed),
+        };
+      }
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch channel status", message: err.message });
+    }
+  });
+
   app.post("/api/guesty-token", async (_req, res) => {
     try {
       const token = await getGuestyToken();
