@@ -5668,40 +5668,53 @@ export async function registerRoutes(
       await ctx.addCookies(cookies);
       const page = await ctx.newPage();
 
-      // Guesty uses Okta's JS SDK which stores the bearer token in
-      // localStorage (key "okta-token-storage"), not a cookie. Two ways
-      // to set it:
-      //   - GUESTY_OKTA_TOKEN_STORAGE: raw value of the localStorage entry
-      //     (easier — operator runs `copy(localStorage.getItem('okta-token-storage'))`
-      //     in DevTools Console on app.guesty.com, pastes the result here).
-      //   - GUESTY_LOCAL_STORAGE: JSON object of arbitrary key→value pairs.
-      // Both are supported; when both are present the object is merged first,
-      // then GUESTY_OKTA_TOKEN_STORAGE overrides the okta-token-storage slot.
-      const toInject: Record<string, string> = {};
+      // Guesty uses Okta's JS SDK which stores auth state in localStorage
+      // and possibly sessionStorage. Inputs (any combination):
+      //   - GUESTY_OKTA_TOKEN_STORAGE: raw value for the okta-token-storage key
+      //   - GUESTY_LOCAL_STORAGE: JSON object { key: value, ... } for localStorage
+      //   - GUESTY_SESSION_STORAGE: JSON object for sessionStorage
+      // Use addInitScript so storage is primed BEFORE the SPA's first auth
+      // check runs — setting after page.goto is too late, the route guard
+      // already redirected to /auth/login before our page.evaluate fires.
+      const toInjectLocal: Record<string, string> = {};
       const lsObjRaw = process.env.GUESTY_LOCAL_STORAGE;
       if (lsObjRaw) {
         try {
-          const parsed = JSON.parse(lsObjRaw) as Record<string, string>;
-          Object.assign(toInject, parsed);
+          Object.assign(toInjectLocal, JSON.parse(lsObjRaw) as Record<string, string>);
         } catch (e) {
           trace.push({ step: "localstorage-json-parse-failed", detail: (e as Error).message });
         }
       }
       const oktaRaw = process.env.GUESTY_OKTA_TOKEN_STORAGE;
-      if (oktaRaw) toInject["okta-token-storage"] = oktaRaw;
+      if (oktaRaw) toInjectLocal["okta-token-storage"] = oktaRaw;
 
-      if (Object.keys(toInject).length > 0) {
-        trace.push({ step: "priming-localstorage", detail: `${Object.keys(toInject).length} keys` });
-        // Navigate to a lightweight app.guesty.com page so the localStorage
-        // origin matches before we set keys.
-        await page.goto("https://app.guesty.com/", { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
-        await page.evaluate((entries: Array<[string, string]>) => {
-          for (const [k, v] of entries) {
-            try { window.localStorage.setItem(k, v); } catch { /* ignored */ }
-          }
-        }, Object.entries(toInject));
+      const toInjectSession: Record<string, string> = {};
+      const ssObjRaw = process.env.GUESTY_SESSION_STORAGE;
+      if (ssObjRaw) {
+        try {
+          Object.assign(toInjectSession, JSON.parse(ssObjRaw) as Record<string, string>);
+        } catch (e) {
+          trace.push({ step: "sessionstorage-json-parse-failed", detail: (e as Error).message });
+        }
+      }
+
+      const localKeys = Object.keys(toInjectLocal);
+      const sessionKeys = Object.keys(toInjectSession);
+      if (localKeys.length > 0 || sessionKeys.length > 0) {
+        trace.push({ step: "priming-storage-via-init-script", detail: `localStorage=${localKeys.length} sessionStorage=${sessionKeys.length}` });
+        // Run on every new document so storage is ready before the SPA's
+        // route guard fires. Wrapped in try/catch because about:blank /
+        // chrome-error:// pages will refuse storage access.
+        await ctx.addInitScript((payload: { local: Array<[string, string]>; session: Array<[string, string]> }) => {
+          try {
+            for (const [k, v] of payload.local) window.localStorage.setItem(k, v);
+          } catch { /* storage blocked on this origin */ }
+          try {
+            for (const [k, v] of payload.session) window.sessionStorage.setItem(k, v);
+          } catch { /* storage blocked on this origin */ }
+        }, { local: Object.entries(toInjectLocal), session: Object.entries(toInjectSession) });
       } else {
-        trace.push({ step: "no-localstorage-env", detail: "set GUESTY_OKTA_TOKEN_STORAGE (raw) or GUESTY_LOCAL_STORAGE (JSON object) to inject Okta tokens" });
+        trace.push({ step: "no-storage-env", detail: "set GUESTY_OKTA_TOKEN_STORAGE (raw) or GUESTY_LOCAL_STORAGE / GUESTY_SESSION_STORAGE (JSON objects)" });
       }
 
       const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
