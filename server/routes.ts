@@ -3235,6 +3235,17 @@ export async function registerRoutes(
       }
 
       // ── Step 4: publicDescription.notes (OTA-facing compliance block) ────────
+      // NOTE: Intentionally DO NOT write the Tax Map Key here. TMK is a bare
+      // 12-digit number and Airbnb's content moderation flags it as contact
+      // info ("Links and contact info can't be shared"), which rejects the
+      // entire Guesty→Airbnb sync and leaves the channel stuck in FAILED
+      // status. GET and TAT are safe because they carry letter prefixes
+      // (GE- / TA-) that phone-number filters skip.
+      //
+      // TMK still flows through tags (Step 1), licenseNumber/taxId (Step 2),
+      // VRBO parcelNumber (Step 3), Booking.com tmk_number (Step 3b), and
+      // Airbnb's regulation form directly — none of which are OTA-scanned
+      // content fields. Keeping it out of the public notes is safe.
       const COMPLIANCE_MARKER = "=== Hawaii Tax Compliance ===";
       const pubDesc = (current.publicDescription || {}) as Record<string, string>;
       const existingNotes: string = pubDesc.notes || "";
@@ -3242,7 +3253,6 @@ export async function registerRoutes(
       const complianceLines: string[] = [COMPLIANCE_MARKER];
       if (getLicense) complianceLines.push(`General Excise Tax ID (GET): ${getLicense}`);
       if (tatLicense) complianceLines.push(`Transient Accommodations Tax ID (TAT): ${tatLicense}`);
-      if (taxMapKey)  complianceLines.push(`Parcel Number (Tax Map Key): ${taxMapKey}`);
       const newNotes = [notesWithoutOldBlock, complianceLines.join("\n")].filter(Boolean).join("\n\n");
       await guestyRequest("PUT", `/listings/${listingId}`, { publicDescription: { notes: newNotes } });
 
