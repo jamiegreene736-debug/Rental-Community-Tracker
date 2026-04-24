@@ -46,7 +46,8 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { getMultiUnitPropertyIds } from "@/data/unit-builder-data";
-import { computeQualityScore, gradeColor, gradeBg } from "@/data/quality-score";
+import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
+import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft, GuestyPropertyMap } from "@shared/schema";
 
@@ -240,7 +241,19 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality";
+type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality" | "baseRate";
+
+// Total nightly buy-in cost across all units (sum of per-unit rates from
+// shared/pricing-rates). Multi-unit properties get parsed from unitDetails
+// (e.g. "3BR + 2BR" → sum of 3BR and 2BR rates); falls back to a single-unit
+// lookup when parsing returns nothing useful.
+function computeBaseRate(property: Property): number {
+  const brs = property.multiUnit ? extractBRList(property.unitDetails) : [];
+  if (brs.length >= 2 && brs.reduce((s, n) => s + n, 0) === property.bedrooms) {
+    return brs.reduce((sum, br) => sum + getBuyInRate(property.community, br), 0);
+  }
+  return getBuyInRate(property.community, property.bedrooms);
+}
 type SortDir = "asc" | "desc";
 
 export default function Home() {
@@ -255,6 +268,14 @@ export default function Home() {
     const map = new Map<number, ReturnType<typeof computeQualityScore>>();
     for (const p of properties) {
       map.set(p.id, computeQualityScore(p));
+    }
+    return map;
+  }, []);
+
+  const baseRates = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const p of properties) {
+      map.set(p.id, computeBaseRate(p));
     }
     return map;
   }, []);
@@ -297,6 +318,11 @@ export default function Home() {
         const bScore = qualityScores.get(b.id)?.total ?? 0;
         return sortDir === "asc" ? aScore - bScore : bScore - aScore;
       }
+      if (sortField === "baseRate") {
+        const aRate = baseRates.get(a.id) ?? 0;
+        const bRate = baseRates.get(b.id) ?? 0;
+        return sortDir === "asc" ? aRate - bRate : bRate - aRate;
+      }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
@@ -309,7 +335,7 @@ export default function Home() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores]);
+  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores, baseRates]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -518,10 +544,10 @@ export default function Home() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[180px] max-w-[180px]">
+                <TableHead className="w-[180px] max-w-[180px] px-2">
                   <Button
                     variant="ghost"
-                    className="font-medium"
+                    className="font-medium px-1"
                     onClick={() => handleSort("name")}
                     data-testid="button-sort-name"
                     id="button-sort-name"
@@ -531,10 +557,10 @@ export default function Home() {
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead className="min-w-[130px]">
+                <TableHead className="w-[120px] px-2">
                   <Button
                     variant="ghost"
-                    className="font-medium"
+                    className="font-medium px-1"
                     onClick={() => handleSort("community")}
                     data-testid="button-sort-community"
                     id="button-sort-community"
@@ -544,10 +570,23 @@ export default function Home() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead className="min-w-[80px]">
+                <TableHead className="text-right w-[95px] px-2">
                   <Button
                     variant="ghost"
-                    className="font-medium"
+                    className="font-medium px-1"
+                    onClick={() => handleSort("baseRate")}
+                    data-testid="button-sort-base-rate"
+                    id="button-sort-base-rate"
+                    aria-label="Sort by base rate"
+                  >
+                    Base Rate
+                    <SortIcon field="baseRate" />
+                  </Button>
+                </TableHead>
+                <TableHead className="w-[80px] px-2">
+                  <Button
+                    variant="ghost"
+                    className="font-medium px-1"
                     onClick={() => handleSort("island")}
                     data-testid="button-sort-island"
                     id="button-sort-island"
@@ -690,7 +729,7 @@ export default function Home() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="max-w-[180px]">
+                  <TableCell className="max-w-[180px] px-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
                         {property.name}
@@ -698,7 +737,7 @@ export default function Home() {
                       <p className="text-xs text-muted-foreground mt-0.5 truncate">{property.unitDetails}</p>
                     </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-2">
                     <Badge
                       variant={communityVariant(property.community)}
                       className="no-default-hover-elevate no-default-active-elevate text-xs"
@@ -707,7 +746,10 @@ export default function Home() {
                       {property.community}
                     </Badge>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="text-right px-2 tabular-nums text-sm" data-testid={`text-base-rate-${property.id}`}>
+                    ${(baseRates.get(property.id) ?? 0).toLocaleString()}
+                  </TableCell>
+                  <TableCell className="px-2">
                     <span className="text-sm text-muted-foreground">{property.island}</span>
                   </TableCell>
                   <TableCell className="text-center">
@@ -788,7 +830,7 @@ export default function Home() {
               ))}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={11} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>

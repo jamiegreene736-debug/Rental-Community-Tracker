@@ -87,7 +87,7 @@ function clamp(val: number, min: number, max: number): number {
  *      "3BR + 2BR" → [3, 2]
  *      "5BR main home + 2BR guest quarters" → [5, 2]
  */
-function extractBRList(text: string): number[] {
+export function extractBRList(text: string): number[] {
   const lower = text.toLowerCase();
 
   // Pattern: "N adjacent/side-by-side/x N2BR" → N copies of N2
