@@ -185,12 +185,31 @@ established it so you can read the rationale in the commit message.
     and writes only weeks that actually failed. Do NOT reintroduce
     baseline-to-52-weeks fanout. See PR #38.
 
+### Compliance & channel sync
+
+20. **Tax Map Key (TMK) is NEVER written to
+    `publicDescription.notes`.** The TMK is a bare 12-digit number
+    (e.g. `420140050001`) and Airbnb's content moderation flags it
+    as contact info ("Links and contact info can't be shared"),
+    which rejects the entire Guesty→Airbnb sync and leaves the
+    channel stuck with `integration.status: FAILED`. The Guesty UI
+    surfaces the rejection as *"We can't save your info yet.
+    Please remove this info to continue: '420140050001'"* on the
+    listing's Airbnb distribution row. TMK still flows through
+    Guesty tags, `licenseNumber`/`taxId` fields, VRBO's
+    `channels.homeaway.parcelNumber`, Booking.com's `tmk_number`,
+    and Airbnb's regulation form — all non-OTA-scanned routes. GET
+    and TAT licenses DO stay in notes because their letter prefixes
+    (`GE-` / `TA-`) skip phone-number filters. See PR that added
+    this entry for the full diagnosis flow.
+
 ## Conventions
 
 ### Branches
 - Feature branches: `claude/<slug>` (e.g. `claude/cover-community-patio`)
 - Hotfixes: same prefix, descriptive slug
-- Only human merges to `main`
+- Only the human merges to `main` normally; Claude Code self-merges
+  its own PRs via `gh pr merge --admin` (see Roles section above).
 
 ### Commits
 - Conventional prefixes: `feat:` / `fix:` / `refactor:` / `chore:` / `docs:`
