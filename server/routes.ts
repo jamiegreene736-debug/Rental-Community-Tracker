@@ -1662,7 +1662,14 @@ export async function registerRoutes(
         const status = d?.status as string | undefined;
         const isCompleted = status === "COMPLETED" || status === "connected";
         const connected = hasId || isCompleted;
-        return { connected, live: connected && isListed };
+        // `syncFailed` means the integration record exists (so the listing
+        // technically has a presence on the channel) but Guesty's most
+        // recent sync attempt errored out. From the operator's POV that
+        // means the channel isn't reliably bookable — Airbnb/VRBO may be
+        // serving stale or partial listing data. Rendered amber on the
+        // dashboard so it stands out from a clean green "live" cell.
+        const syncFailed = connected && status === "FAILED";
+        return { connected, live: connected && isListed, syncFailed };
       };
 
       const findIntegration = (

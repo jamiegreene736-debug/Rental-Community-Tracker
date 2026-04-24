@@ -353,7 +353,7 @@ export default function Home() {
   // Per-property channel status for the Channels column. Single server call
   // that batches all mapped listings into one Guesty read. Refetches every
   // ~5 min so the dashboard stays roughly current without hammering Guesty.
-  type ChannelFlag = { connected: boolean; live: boolean };
+  type ChannelFlag = { connected: boolean; live: boolean; syncFailed?: boolean };
   type ChannelStatusMap = Record<number, { airbnb: ChannelFlag; vrbo: ChannelFlag; bookingCom: ChannelFlag }>;
   const { data: channelStatusData } = useQuery<ChannelStatusMap>({
     queryKey: ["/api/dashboard/channel-status"],
@@ -638,35 +638,54 @@ export default function Home() {
                   </TableCell>
                   <TableCell className="text-center px-1">
                     {(() => {
-                      // Dashboard channel indicators: three badges per row.
-                      // Green = Guesty integration exists AND listing.isListed
-                      // (ready for bookings). Red = either not integrated or
-                      // not listed. Lettered so the three channels are
-                      // distinguishable at a glance — tooltip spells out the
-                      // full name and state.
+                      // Dashboard channel indicators: three badges per row
+                      // with three states:
+                      //   - green ✓  → Guesty + channel reporting live AND
+                      //                last sync succeeded (cleanly bookable)
+                      //   - amber ⚠  → listed on channel, but Guesty's last
+                      //                sync FAILED. Listing probably exists
+                      //                but has stale/partial data — needs
+                      //                operator attention (e.g. re-publish
+                      //                from Guesty Distribution)
+                      //   - red ✗    → not integrated / not listed at all
+                      // The amber "partially live" state catches listings
+                      // like Pili Mai on VRBO where Guesty shows LIVE ⚠ in
+                      // the builder — before this, the dashboard rendered
+                      // that as a clean green tick, which misled.
                       const s = channelStatusData?.[property.id];
-                      const items: Array<{ letter: string; name: string; live: boolean }> = [
-                        { letter: "A", name: "Airbnb",       live: !!s?.airbnb?.live },
-                        { letter: "V", name: "VRBO",         live: !!s?.vrbo?.live },
-                        { letter: "B", name: "Booking.com",  live: !!s?.bookingCom?.live },
+                      type Tone = "ok" | "warn" | "bad";
+                      const toneOf = (f?: ChannelFlag): Tone => {
+                        if (!f) return "bad";
+                        if (f.live && f.syncFailed) return "warn";
+                        if (f.live) return "ok";
+                        return "bad";
+                      };
+                      const items: Array<{ letter: string; name: string; tone: Tone }> = [
+                        { letter: "A", name: "Airbnb",       tone: toneOf(s?.airbnb) },
+                        { letter: "V", name: "VRBO",         tone: toneOf(s?.vrbo) },
+                        { letter: "B", name: "Booking.com",  tone: toneOf(s?.bookingCom) },
                       ];
+                      const PAL: Record<Tone, { bg: string; glyph: string; desc: string }> = {
+                        ok:   { bg: "#16a34a", glyph: "✓", desc: "Live & bookable" },
+                        warn: { bg: "#f59e0b", glyph: "⚠", desc: "Listed, but Guesty's last sync failed — may be stale" },
+                        bad:  { bg: "#dc2626", glyph: "✗", desc: "Not live" },
+                      };
                       return (
                         <div className="flex gap-0.5 justify-center items-center" data-testid={`channels-${property.id}`}>
-                          {items.map((it) => (
-                            <span
-                              key={it.letter}
-                              title={`${it.name}: ${it.live ? "Live & bookable" : "Not live"}`}
-                              className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
-                              style={{
-                                background: it.live ? "#16a34a" : "#dc2626",
-                                color: "white",
-                                minWidth: 22,
-                              }}
-                              data-testid={`channel-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
-                            >
-                              {it.letter}{it.live ? "✓" : "✗"}
-                            </span>
-                          ))}
+                          {items.map((it) => {
+                            const p = PAL[it.tone];
+                            return (
+                              <span
+                                key={it.letter}
+                                title={`${it.name}: ${p.desc}`}
+                                className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
+                                style={{ background: p.bg, color: "white", minWidth: 22 }}
+                                data-testid={`channel-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                              >
+                                {it.letter}{p.glyph}
+                              </span>
+                            );
+                          })}
                         </div>
                       );
                     })()}
