@@ -28,6 +28,12 @@
 //     that fail verification are dropped. Folders without a unit
 //     hint (community-*, placeholder A/B) skip verification — a
 //     match on a resort amenity photo is expected anyway.
+//   - Authorized-URL suppression (see authorized-urls.ts): Lens will
+//     happily return OUR own published listings when we search with
+//     OUR own photos. Guesty knows which Airbnb/VRBO/Booking URLs we
+//     own, so every Lens hit whose URL matches one of those is
+//     dropped before it reaches the tally. No more red "FOUND" for a
+//     listing that's legitimately ours.
 //
 // The result is upserted one row per folder into photo_listing_checks.
 // The dashboard aggregates those rows by property-ID via the client's
@@ -35,6 +41,7 @@
 
 import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
+import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
 const PUBLIC_HOST = (() => {
@@ -190,6 +197,13 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   let anyLensSucceeded = false;
 
   const unitHint = unitHintFromFolder(folder);
+  // "Our own" listings — Guesty-authorized URLs for every property we
+  // manage. A Lens hit that resolves to one of these is us, not a
+  // thief, and gets suppressed before the tally. Cached across runs
+  // inside authorized-urls.ts; empty set if Guesty is unreachable
+  // (scanner proceeds without suppression rather than silently
+  // skipping).
+  const authorizedUrls = await getAuthorizedChannelUrls();
   // Per-run cache so a listing URL that shows up for multiple photos
   // only costs ONE verification SERP, not N.
   const verifyCache = new Map<string, boolean>();
@@ -218,7 +232,13 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     for (const host of HOSTS) {
       const hits = matches.filter((m: any) => {
         const link = String(m.link || "").toLowerCase();
-        return link.includes(host.host);
+        if (!link.includes(host.host)) return false;
+        // Drop OUR own listings right at the filter stage so they
+        // never consume a verification budget slot below. A Lens hit
+        // on our published Airbnb/VRBO/Booking URL is the expected
+        // outcome — not a theft signal.
+        if (isAuthorizedUrl(link, authorizedUrls)) return false;
+        return true;
       });
       if (hits.length === 0) continue;
       // Cross-validate up to MAX_VERIFY_PER_HOST_PER_PHOTO hits.
