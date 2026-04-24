@@ -49,3 +49,68 @@ export function getUnitConfig(propertyId: number, unitId: string): UnitConfig | 
 export function totalBedroomsForProperty(propertyId: number): number {
   return getPropertyUnits(propertyId).reduce((s, u) => s + u.bedrooms, 0);
 }
+
+// ── Cross-property duplicate-unit guard ─────────────────────────────
+// Invariant: within a single community, a physical unit (by `unitId`)
+// may belong to at most one listing. Two listings claiming the same
+// unit means a double-booking risk — both listings would believe they
+// control the same physical Airbnb.
+//
+// Exception: generic placeholder ids ("A", "B", "main") are unit labels
+// used before a real resort unit number has been captured. They do NOT
+// denote identity — "Unit A" in property 8 and "Unit A" in property 9
+// are different physical units that happen to share a placeholder
+// letter. The validator skips them. Once a property's placeholders are
+// backfilled with real unit numbers, the guard kicks in for that
+// property automatically.
+
+function isPlaceholderUnitId(id: string): boolean {
+  const trimmed = id.trim().toLowerCase();
+  if (trimmed === "main") return true;
+  if (/^[a-z]$/.test(trimmed)) return true;
+  return false;
+}
+
+export type UnitDuplicate = {
+  community: string;
+  unitId: string;
+  propertyIds: number[];
+};
+
+export function findDuplicateUnitsInCommunity(
+  configs: Record<number, PropertyUnitConfig> = PROPERTY_UNIT_CONFIGS,
+): UnitDuplicate[] {
+  // community → unitId → list of propertyIds claiming it
+  const index: Record<string, Record<string, number[]>> = {};
+  for (const pidStr of Object.keys(configs)) {
+    const pid = Number(pidStr);
+    const cfg = configs[pid];
+    if (!cfg) continue;
+    for (const unit of cfg.units) {
+      if (isPlaceholderUnitId(unit.unitId)) continue;
+      const byUnit = (index[cfg.community] ||= {});
+      (byUnit[unit.unitId] ||= []).push(pid);
+    }
+  }
+  const dupes: UnitDuplicate[] = [];
+  for (const community of Object.keys(index)) {
+    const byUnit = index[community];
+    for (const unitId of Object.keys(byUnit)) {
+      const propertyIds = byUnit[unitId];
+      if (propertyIds.length > 1) {
+        dupes.push({ community, unitId, propertyIds });
+      }
+    }
+  }
+  return dupes;
+}
+
+const _bootDupes = findDuplicateUnitsInCommunity();
+if (_bootDupes.length > 0) {
+  const lines = _bootDupes.map(
+    (d) => `  ${d.community} · unit "${d.unitId}" claimed by properties ${d.propertyIds.join(", ")}`,
+  );
+  throw new Error(
+    `Duplicate units detected across properties in the same community:\n${lines.join("\n")}`,
+  );
+}

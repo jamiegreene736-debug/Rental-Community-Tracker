@@ -308,4 +308,79 @@ assert.deepEqual(
 );
 console.log("  ✓ finds nested list data");
 
+// ---------- Tests for property-units duplicate guard ----------
+// Validates that two listings in the same community cannot claim the
+// same physical unit. Placeholder ids ("A", "B", "main") are exempt —
+// they are display labels used before a real resort unit number has
+// been backfilled, so they don't denote identity.
+import {
+  findDuplicateUnitsInCommunity,
+  PROPERTY_UNIT_CONFIGS,
+  type PropertyUnitConfig,
+} from "../shared/property-units.ts";
+
+console.log("\nproperty-units duplicate guard suite");
+
+// Case 1: Clean config returns no duplicates.
+assert.deepEqual(
+  findDuplicateUnitsInCommunity({
+    100: { community: "Poipu Kai", units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }] },
+    101: { community: "Poipu Kai", units: [{ unitId: "812", unitLabel: "Unit 812", bedrooms: 3 }] },
+  } as Record<number, PropertyUnitConfig>),
+  [],
+  "distinct unit ids in same community should not collide",
+);
+console.log("  ✓ distinct unit ids pass");
+
+// Case 2: Same unit id, same community, different properties → collision.
+const dupes = findDuplicateUnitsInCommunity({
+  100: { community: "Poipu Kai", units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }] },
+  101: { community: "Poipu Kai", units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }] },
+} as Record<number, PropertyUnitConfig>);
+assert.equal(dupes.length, 1, "should detect one duplicate unit");
+assert.equal(dupes[0].community, "Poipu Kai");
+assert.equal(dupes[0].unitId, "721");
+assert.deepEqual(dupes[0].propertyIds.sort(), [100, 101]);
+console.log("  ✓ cross-property collision detected");
+
+// Case 3: Same unit id in different communities → NOT a collision.
+assert.deepEqual(
+  findDuplicateUnitsInCommunity({
+    100: { community: "Poipu Kai",   units: [{ unitId: "A1", unitLabel: "A1", bedrooms: 3 }] },
+    101: { community: "Princeville", units: [{ unitId: "A1", unitLabel: "A1", bedrooms: 3 }] },
+  } as Record<number, PropertyUnitConfig>),
+  [],
+  "same unit id across different communities should not collide",
+);
+console.log("  ✓ cross-community same id is allowed");
+
+// Case 4: Placeholder ids ("A"/"B"/"main") are exempt.
+assert.deepEqual(
+  findDuplicateUnitsInCommunity({
+    100: { community: "Poipu Kai", units: [
+      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
+      { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
+    ] },
+    101: { community: "Poipu Kai", units: [
+      { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
+      { unitId: "B", unitLabel: "Unit B", bedrooms: 2 },
+    ] },
+    102: { community: "Windsor Hills", units: [
+      { unitId: "main", unitLabel: "Main", bedrooms: 3 },
+    ] },
+  } as Record<number, PropertyUnitConfig>),
+  [],
+  "placeholder ids A/B/main should be exempt from the collision check",
+);
+console.log("  ✓ placeholders A/B/main exempt");
+
+// Case 5: Live config has no duplicates (regression guard against a
+// future edit that accidentally reuses a real unit number).
+assert.deepEqual(
+  findDuplicateUnitsInCommunity(PROPERTY_UNIT_CONFIGS),
+  [],
+  "live PROPERTY_UNIT_CONFIGS should be free of community+unitId duplicates",
+);
+console.log("  ✓ live config has no duplicates");
+
 console.log("\nall suites passed ✅");
