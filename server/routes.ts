@@ -9020,14 +9020,89 @@ export async function registerRoutes(
   });
 
   // ============================================================
-  // Step 4: Fetch unit photos from a Zillow/Homes.com URL
+  // Step 4: Fetch unit photos
+  //
+  // Two call shapes:
+  //   1. { url } — direct: scrape photos from a known listing URL
+  //      (the user-found-unit path in Add a New Community).
+  //   2. { communityName, city, state, bedrooms } — discovery: when
+  //      the algorithm-suggested pairing has no MLS URL, search
+  //      Zillow for a real listing matching the community + BR count
+  //      and scrape its photos. Returns the source URL alongside the
+  //      photos so the UI can credit where they came from. If the
+  //      search returns nothing, responds 200 with `photos: []` and
+  //      a `note` so the page's "no photos" empty state continues
+  //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url } = req.body as { url: string };
-    if (!url) return res.status(400).json({ error: "url required" });
+    const { url, communityName, city, state, bedrooms } = req.body as {
+      url?: string;
+      communityName?: string;
+      city?: string;
+      state?: string;
+      bedrooms?: number;
+    };
+
+    let listingUrl: string | undefined = url || undefined;
+    let foundVia: "url" | "search" = "url";
+
+    if (!listingUrl) {
+      // Discovery path. Need at least the community name to search.
+      if (!communityName) {
+        return res.status(400).json({ error: "url required (or communityName + bedrooms for discovery)" });
+      }
+      const searchApiKey = process.env.SEARCHAPI_API_KEY;
+      if (!searchApiKey) {
+        return res.status(503).json({ error: "Discovery requires SEARCHAPI_API_KEY (only direct url calls work without it)" });
+      }
+      // Targeted Zillow search. Quoting the community name + a
+      // specific bedroom hint lifts the homedetails pages above
+      // the area-search noise. We only accept `homedetails`
+      // results — those are the per-listing pages the scraper
+      // can actually pull photos from. Region / building
+      // overview pages don't have a photo carousel.
+      const brHint = bedrooms ? `${bedrooms} bedroom` : "";
+      const q = `"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim();
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+        );
+        if (resp.ok) {
+          const data = await resp.json() as any;
+          const organic = (data.organic_results || []) as Array<{ link?: string; title?: string }>;
+          const candidates = organic
+            .map((r) => String(r.link ?? ""))
+            .filter((l) => /zillow\.com\/homedetails\//i.test(l));
+          if (candidates.length > 0) {
+            listingUrl = candidates[0];
+            foundVia = "search";
+          }
+        } else {
+          console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+        }
+      } catch (e: any) {
+        console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
+      }
+
+      if (!listingUrl) {
+        // No matching Zillow listing — return empty so the page's
+        // empty state covers it. Not an error.
+        return res.json({
+          photos: [],
+          sourceUrl: null,
+          foundVia: "search",
+          note: `No Zillow listing found for "${communityName}"${bedrooms ? ` (${bedrooms}BR)` : ""}.`,
+        });
+      }
+    }
+
     try {
-      const photos = await scrapeListingPhotos(url);
-      res.json({ photos: photos.map(p => ({ url: p.url, label: p.title || "Photo" })) });
+      const photos = await scrapeListingPhotos(listingUrl);
+      res.json({
+        photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+        sourceUrl: listingUrl,
+        foundVia,
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
