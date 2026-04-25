@@ -1515,20 +1515,35 @@ export default function InboxPage() {
                                         </>
                                       )}
                                     </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      className="h-7 px-2.5 text-[11px]"
-                                      onClick={() => {
-                                        if (confirm(`Decline this Airbnb inquiry from ${guest.fullName ?? "this guest"}? This action cannot be undone.`)) {
-                                          declineAirbnb.mutate({ reservationId: res._id });
-                                        }
-                                      }}
-                                      disabled={declineAirbnb.isPending}
-                                      data-testid="button-decline-airbnb"
-                                    >
-                                      <XCircle className="h-3 w-3 mr-1" /> Decline
-                                    </Button>
+                                    {/* Airbnb only allows API-driven decline
+                                        for booking REQUESTS, not inquiries —
+                                        Guesty returns "Reservation status is
+                                        inquiry - can't decline" on the
+                                        inquiry path. Inquiries auto-expire
+                                        after 24h if you don't respond, so
+                                        the right "no thanks" action on an
+                                        inquiry is to either send a Special
+                                        Offer at a number that works, send a
+                                        polite reply, or just let it lapse.
+                                        We hide the Decline button on
+                                        inquiries to avoid the user clicking
+                                        into a 502 from Guesty's API. */}
+                                    {phase === "request" && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2.5 text-[11px]"
+                                        onClick={() => {
+                                          if (confirm(`Decline this Airbnb booking request from ${guest.fullName ?? "this guest"}? This action cannot be undone.`)) {
+                                            declineAirbnb.mutate({ reservationId: res._id });
+                                          }
+                                        }}
+                                        disabled={declineAirbnb.isPending}
+                                        data-testid="button-decline-airbnb"
+                                      >
+                                        <XCircle className="h-3 w-3 mr-1" /> Decline
+                                      </Button>
+                                    )}
                                     <a
                                       href={`https://app.guesty.com/reservations/${res._id}`}
                                       target="_blank"
@@ -1537,6 +1552,16 @@ export default function InboxPage() {
                                     >
                                       Open in Guesty ↗
                                     </a>
+                                  </div>
+                                )}
+                                {/* Inquiry-specific footnote — Airbnb's
+                                    decline action is request-only, so we
+                                    explain what to do with an inquiry the
+                                    operator doesn't want to take instead
+                                    of leaving a no-op Decline button. */}
+                                {phase === "inquiry" && (
+                                  <div className="text-[10px] text-amber-800/80 italic mt-1">
+                                    Airbnb inquiries can't be declined — they auto-expire after 24h. To pass, send a Special Offer at a workable price or just let the inquiry lapse.
                                   </div>
                                 )}
                               </div>
