@@ -141,18 +141,48 @@ interface GuestyConversation {
   posts?: GuestyPost[];
 }
 
+// Guesty's communication endpoints wrap list responses inconsistently:
+//   bare:      [...]
+//   legacy:    { results: [...] }
+//   envelope:  { status, data: [...] }
+//   envelope:  { status, data: { conversations: [...], cursor, count, ... } }   ← current
+// Earlier code returned `data.data` directly when present, which was an
+// OBJECT for the current envelope shape — `.filter(...)` on that object
+// threw a TypeError that the top-level catch swallowed as "errors: 1"
+// with `processed: 0`. Walk the shape until we find an array.
+function unwrapConversations(raw: any): GuestyConversation[] {
+  if (Array.isArray(raw)) return raw as GuestyConversation[];
+  if (!raw || typeof raw !== "object") return [];
+  // Try named fields at depth 0
+  for (const k of ["conversations", "results", "data"] as const) {
+    const v = (raw as any)[k];
+    if (Array.isArray(v)) return v as GuestyConversation[];
+  }
+  // Recurse one level — current Guesty shape buries the array at data.conversations
+  for (const k of ["data", "results", "result"] as const) {
+    const v = (raw as any)[k];
+    if (v && typeof v === "object") {
+      const inner = unwrapConversations(v);
+      if (inner.length > 0) return inner;
+    }
+  }
+  return [];
+}
+
 async function fetchUnreadConversations(limit = 30): Promise<GuestyConversation[]> {
   const data = await guestyRequest(
     "GET",
     `/communication/conversations?limit=${limit}&sort=-lastMessageAt`
-  ) as any;
-  const results: GuestyConversation[] = data?.results ?? data?.data ?? [];
+  );
+  const results = unwrapConversations(data);
   return results.filter((c) => (c.unreadCount ?? 0) > 0);
 }
 
 async function fetchConversationThread(id: string): Promise<GuestyConversation | null> {
   try {
     const data = await guestyRequest("GET", `/communication/conversations/${id}`) as any;
+    // Single-conversation responses are wrapped as { status, data: {...conv} }
+    // — the bare `data` is the conversation object, not a list.
     return data?.data ?? data ?? null;
   } catch (err) {
     console.error(`[auto-reply] Failed to fetch thread ${id}:`, (err as Error).message);
