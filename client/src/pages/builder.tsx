@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
 import { useParams, useLocation } from "wouter";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
-import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE } from "@/data/unit-builder-data";
+import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { getPropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { usePhotoLabels } from "@/hooks/use-photo-labels";
+import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -40,7 +41,29 @@ export default function Builder() {
   const { toast } = useToast();
 
   const propertyId = parseInt(pidStr ?? "0", 10);
-  const property = getUnitBuilderByPropertyId(propertyId);
+  const staticProperty = getUnitBuilderByPropertyId(propertyId);
+
+  // Promoted-draft fallback: when the static lookup misses AND id is
+  // negative (the synthetic -draftId convention from the dashboard),
+  // fetch /api/community/drafts and adapt the matching draft. Mirrors
+  // the same pattern in builder-preflight.tsx so "Continue to Builder"
+  // doesn't dead-end on "Property #-N not found" for promoted drafts.
+  const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
+  const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && propertyId < 0);
+  useEffect(() => {
+    if (staticProperty || propertyId >= 0) return;
+    setDraftLoading(true);
+    loadDraftPropertyByNegativeId(propertyId)
+      .then((p) => { if (p) setDraftProperty(p); })
+      .catch(() => { /* leave draftProperty null → renders the not-found state */ })
+      .finally(() => setDraftLoading(false));
+  }, [propertyId, staticProperty]);
+  const property = staticProperty ?? draftProperty;
+
+  // Pricing data is keyed off PROPERTY_UNIT_CONFIGS (the static 11);
+  // returns null for drafts. The builder reads `pricing?.totalBaseSellRate`
+  // with optional chaining so null is safe — operator adjusts in the
+  // Pricing tab once the draft is in the builder.
   const pricing = getPropertyPricing(propertyId);
 
   // Pull Claude-generated labels for every photo folder we'll render.
@@ -299,6 +322,14 @@ export default function Builder() {
   }, [property, pricing, propertyId, labelFor, isHidden, folderFiles, walkResult]);
 
   if (!property) {
+    if (draftLoading) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-screen gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          <p className="text-muted-foreground text-sm">Loading promoted draft…</p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center min-h-screen gap-4">
         <p className="text-muted-foreground">Property #{propertyId} not found.</p>
