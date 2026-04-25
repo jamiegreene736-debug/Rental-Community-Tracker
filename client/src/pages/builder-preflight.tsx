@@ -332,15 +332,18 @@ export default function BuilderPreflight() {
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
 
-  // Load any previously saved unit swaps from the DB on mount
+  // Load any previously saved unit swaps from the DB, then auto-run the
+  // platform check if no swaps are blocking it. Gated on `property` so
+  // promoted drafts (which load `draftProperty` async) actually fire
+  // the check once their data lands — earlier `[id]`-only deps meant
+  // the effect ran once with `property = null` and never re-fired.
   useEffect(() => {
-    if (!id) return;
+    if (!id || !property) return;
     fetch(`/api/unit-swaps/${id}`)
       .then(r => r.ok ? r.json() : null)
       .then((data: { swaps: any[] } | null) => {
         if (!data?.swaps?.length) {
-          // No saved swaps — auto-run the platform check immediately
-          if (!autoRunFired.current && property) {
+          if (!autoRunFired.current) {
             autoRunFired.current = true;
             runPlatformCheck();
           }
@@ -363,14 +366,13 @@ export default function BuilderPreflight() {
         setSwapsCommitted(allCommitted);
       })
       .catch(() => {
-        // On error, still auto-run
-        if (!autoRunFired.current && property) {
+        if (!autoRunFired.current) {
           autoRunFired.current = true;
           runPlatformCheck();
         }
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, property]);
 
   const commitAndContinue = async () => {
     setCommitting(true);
