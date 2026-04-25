@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -109,6 +109,49 @@ export default function AddCommunity() {
   // Step 1
   const [selectedState, setSelectedState] = useState("");
   const [cityInput, setCityInput] = useState("");
+  // City typeahead. The dropdown opens while the input is focused
+  // and there are suggestions; clicking a suggestion fills the
+  // input and closes the dropdown. The blur handler is delayed by
+  // ~150ms so a click on a suggestion lands before the dropdown
+  // tears down.
+  const [citySuggestions, setCitySuggestions] = useState<string[]>([]);
+  const [citySuggestionsLoading, setCitySuggestionsLoading] = useState(false);
+  const [showCitySuggestions, setShowCitySuggestions] = useState(false);
+  const cityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cityRequestSeqRef = useRef(0);
+
+  // Debounced fetch — server endpoint hits Nominatim, scoped to the
+  // currently-selected state. Sequence counter prevents a slow
+  // earlier response from clobbering a fresher one.
+  useEffect(() => {
+    if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
+    if (!selectedState || cityInput.trim().length < 2) {
+      setCitySuggestions([]);
+      setCitySuggestionsLoading(false);
+      return;
+    }
+    setCitySuggestionsLoading(true);
+    const mySeq = ++cityRequestSeqRef.current;
+    cityDebounceRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/community/city-suggest?state=${encodeURIComponent(selectedState)}&query=${encodeURIComponent(cityInput.trim())}`,
+        );
+        const data = await r.json();
+        // Drop stale responses
+        if (mySeq !== cityRequestSeqRef.current) return;
+        setCitySuggestions(Array.isArray(data?.cities) ? data.cities : []);
+      } catch {
+        if (mySeq !== cityRequestSeqRef.current) return;
+        setCitySuggestions([]);
+      } finally {
+        if (mySeq === cityRequestSeqRef.current) setCitySuggestionsLoading(false);
+      }
+    }, 250);
+    return () => {
+      if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
+    };
+  }, [cityInput, selectedState]);
 
   // Step 2
   const [communities, setCommunities] = useState<CommunityResult[]>([]);
@@ -670,15 +713,72 @@ export default function AddCommunity() {
               </div>
               <div>
                 <label htmlFor="input-city" className="text-sm font-medium mb-1.5 block">City</label>
-                <Input
-                  id="input-city"
-                  placeholder="e.g. Kissimmee, Myrtle Beach…"
-                  value={cityInput}
-                  onChange={e => setCityInput(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && handleResearch()}
-                  data-testid="input-city"
-                  aria-label="Enter city name"
-                />
+                <div className="relative">
+                  <Input
+                    id="input-city"
+                    placeholder={selectedState ? "Start typing — e.g. Kissimmee, Myrtle Beach…" : "Pick a state first…"}
+                    value={cityInput}
+                    onChange={e => {
+                      setCityInput(e.target.value);
+                      setShowCitySuggestions(true);
+                    }}
+                    onFocus={() => setShowCitySuggestions(true)}
+                    // Delay close so click-on-suggestion lands before
+                    // blur tears the dropdown down. 200ms is enough
+                    // for the click to register.
+                    onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        if (citySuggestions.length > 0 && showCitySuggestions) {
+                          // Pressing Enter while suggestions are
+                          // visible commits the top match — matches
+                          // typical typeahead UX where a user types
+                          // a few chars and hits Enter to accept.
+                          setCityInput(citySuggestions[0]);
+                          setShowCitySuggestions(false);
+                        } else {
+                          handleResearch();
+                        }
+                      } else if (e.key === "Escape") {
+                        setShowCitySuggestions(false);
+                      }
+                    }}
+                    disabled={!selectedState}
+                    data-testid="input-city"
+                    aria-label="Enter city name"
+                    aria-autocomplete="list"
+                    aria-expanded={showCitySuggestions && citySuggestions.length > 0}
+                    autoComplete="off"
+                  />
+                  {showCitySuggestions && (citySuggestionsLoading || citySuggestions.length > 0) && (
+                    <div
+                      className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-md shadow-lg z-20 max-h-60 overflow-auto"
+                      data-testid="city-suggestions"
+                    >
+                      {citySuggestionsLoading && citySuggestions.length === 0 && (
+                        <div className="px-3 py-2 text-xs text-muted-foreground italic">Looking up cities…</div>
+                      )}
+                      {citySuggestions.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          // onMouseDown fires before the input's onBlur,
+                          // so the click registers even though the
+                          // input is losing focus.
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setCityInput(c);
+                            setShowCitySuggestions(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-muted focus:bg-muted focus:outline-none"
+                          data-testid={`city-suggestion-${c.replace(/\s+/g, "-")}`}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">

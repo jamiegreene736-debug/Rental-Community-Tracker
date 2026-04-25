@@ -9278,6 +9278,83 @@ export async function registerRoutes(
     res.json({ seeds: TOP_MARKET_SEEDS });
   });
 
+  // GET /api/community/city-suggest?state=Florida&query=des
+  //
+  // Lightweight city autocomplete for the Add a New Community wizard.
+  // Hits OpenStreetMap's Nominatim (free, no key) scoped to the
+  // selected US state and the user's typed prefix. Returns up to 10
+  // unique city names, deduped case-insensitively.
+  //
+  // Nominatim is rate-limited to ~1 request per second per IP so the
+  // client debounces and we cache hits in-process for 5 minutes.
+  // Empty / very-short queries short-circuit to an empty array (no
+  // network) so a single keystroke doesn't trigger a request.
+  const cityCache = new Map<string, { cities: string[]; ts: number }>();
+  const CITY_CACHE_TTL = 5 * 60 * 1000;
+  app.get("/api/community/city-suggest", async (req, res) => {
+    const state = String(req.query.state || "").trim();
+    const query = String(req.query.query || "").trim();
+    if (!state || query.length < 2) return res.json({ cities: [] });
+
+    const cacheKey = `${state.toLowerCase()}|${query.toLowerCase()}`;
+    const cached = cityCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CITY_CACHE_TTL) {
+      return res.json({ cities: cached.cities });
+    }
+
+    try {
+      const url = new URL("https://nominatim.openstreetmap.org/search");
+      url.searchParams.set("country", "USA");
+      url.searchParams.set("state", state);
+      url.searchParams.set("city", query);
+      url.searchParams.set("format", "json");
+      url.searchParams.set("limit", "15");
+      url.searchParams.set("addressdetails", "1");
+
+      const resp = await fetch(url.toString(), {
+        // Nominatim's usage policy requires a User-Agent identifying
+        // the app + a contact. Don't drop this header — Nominatim
+        // 403s anonymous traffic.
+        headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" },
+      });
+      if (!resp.ok) {
+        console.warn(`[city-suggest] Nominatim ${resp.status} for "${query}" in ${state}`);
+        return res.json({ cities: [] });
+      }
+      const data = await resp.json() as Array<{
+        display_name?: string;
+        address?: {
+          city?: string; town?: string; village?: string;
+          municipality?: string; hamlet?: string; suburb?: string;
+          locality?: string;
+        };
+      }>;
+
+      const seen = new Set<string>();
+      const cities: string[] = [];
+      for (const r of data) {
+        const a = r.address ?? {};
+        // Nominatim's "city" field is sparsely populated for smaller
+        // places; cascade through the nearby admin levels so vacation
+        // towns (Kihei, Kapaa, Hanalei) still show up.
+        const cityName =
+          a.city || a.town || a.village || a.municipality || a.hamlet || a.suburb || a.locality;
+        if (!cityName) continue;
+        const key = cityName.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        cities.push(cityName);
+        if (cities.length >= 10) break;
+      }
+
+      cityCache.set(cacheKey, { cities, ts: Date.now() });
+      res.json({ cities });
+    } catch (e: any) {
+      console.warn(`[city-suggest] error for "${query}" in ${state}: ${e.message}`);
+      res.json({ cities: [] });
+    }
+  });
+
   // ============================================================
   // Photo listing check (reverse image search across Airbnb/VRBO/Booking.com)
   // ============================================================
