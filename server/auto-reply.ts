@@ -7,6 +7,7 @@ import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "../shared/walking-distance";
+import { humanizeReply } from "./humanize-reply";
 import type { InsertAutoReplyLog } from "@shared/schema";
 
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
@@ -595,9 +596,13 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
     if (!text) {
       return { draft: null, flagReason: null, toolsUsed, error: "Claude returned empty response" };
     }
-    // Safety net: ensure the fixed sign-off is present. If the model forgot it,
-    // append the canonical block so every reply is signed consistently.
-    const finalDraft = ensureSignoff(text);
+    // Humanize the model's text — strip em-dashes, "I'm thrilled to
+    // help" warm-ups, "Is there anything specific before you book?"
+    // closers, etc. — BEFORE attaching the sign-off so the signature
+    // doesn't get touched. ensureSignoff then guarantees the fixed
+    // John Carpenter / Reservationist / Magical Island Rentals block.
+    const humanized = humanizeReply(text);
+    const finalDraft = ensureSignoff(humanized);
     return { draft: finalDraft, flagReason: null, toolsUsed, error: null };
   }
 

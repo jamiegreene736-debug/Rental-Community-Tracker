@@ -8,6 +8,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
+import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -10722,12 +10723,16 @@ Do not include a subject line. Do not end with "what other questions can I answe
       //   1. **bold** / *italic* → inner text only
       //   2. `code` → inner text only
       //   3. "- " or "* " at line starts → stripped bullet prefix
-      const draft = rawDraft
+      const draftMarkdownClean = rawDraft
         .replace(/\*\*([^\n*]+?)\*\*/g, "$1")   // **bold** → bold
         .replace(/\*([^\n*]+?)\*/g, "$1")       // *italic* → italic
         .replace(/`([^\n`]+?)`/g, "$1")         // `code` → code
         .replace(/^[ \t]*[*\-•][ \t]+/gm, "")   // bullet line prefixes
         .trim();
+      // Humanize: strip the AI tells the prompt can't reliably suppress
+      // (em-dashes, "I'm thrilled to help", "Is there anything specific
+      // before you book?", etc.). See server/humanize-reply.ts for rules.
+      const draft = humanizeReply(draftMarkdownClean);
 
       res.json({ draft });
     } catch (err: any) {
