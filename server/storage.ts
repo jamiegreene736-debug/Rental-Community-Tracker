@@ -10,6 +10,7 @@ import {
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
+  type BookingConfirmation, type InsertBookingConfirmation,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
   type PhotoListingAlert, type InsertPhotoListingAlert,
@@ -17,7 +18,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -92,6 +93,10 @@ export interface IStorage {
   getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined>;
   updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined>;
   getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined>;
+
+  createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
+  getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
+  getRecentBookingConfirmations(limit?: number): Promise<BookingConfirmation[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -470,6 +475,26 @@ export class DatabaseStorage implements IStorage {
   async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
     const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
     return row;
+  }
+
+  // ── Booking confirmations ──
+  // Insert is performed AFTER a successful Guesty send, so a failed
+  // send leaves no row and gets retried on the next scheduler tick.
+  // The unique constraint on `reservationId` (in shared/schema.ts) is
+  // the safety net against rare double-sends — concurrent ticks both
+  // calling insert hit the constraint and one of them throws.
+  async createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation> {
+    const [row] = await db.insert(bookingConfirmations).values(b).returning();
+    return row;
+  }
+
+  async getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined> {
+    const [row] = await db.select().from(bookingConfirmations).where(eq(bookingConfirmations.reservationId, reservationId)).limit(1);
+    return row;
+  }
+
+  async getRecentBookingConfirmations(limit = 100): Promise<BookingConfirmation[]> {
+    return db.select().from(bookingConfirmations).orderBy(desc(bookingConfirmations.sentAt)).limit(limit);
   }
 
   // ── Photo labels ──

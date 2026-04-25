@@ -251,6 +251,38 @@ export const insertAutoReplyLogSchema = createInsertSchema(autoReplyLog).omit({
 export type InsertAutoReplyLog = z.infer<typeof insertAutoReplyLogSchema>;
 export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
 
+// ── Booking-confirmation auto-send dedup ──
+// One row per reservation we've sent the auto-confirmation message to.
+// The unique constraint on `reservationId` is what prevents the
+// scheduler from double-sending: every tick re-checks the table before
+// posting. Insert happens AFTER a successful Guesty send, so a failed
+// send stays uninserted and gets retried next tick. Status field is
+// "sent" for the success path; "error" rows are written for visibility
+// when something other than the send itself fails (e.g. property lookup
+// returned no match) but we still want a record so we don't keep
+// retrying forever.
+export const bookingConfirmations = pgTable("booking_confirmations", {
+  id: serial("id").primaryKey(),
+  reservationId: text("reservation_id").notNull().unique(),
+  conversationId: text("conversation_id").notNull(),
+  guestName: text("guest_name"),
+  listingId: text("listing_id"),
+  listingNickname: text("listing_nickname"),
+  channel: text("channel"),
+  messageBody: text("message_body").notNull(),
+  status: text("status").notNull(), // "sent" | "error"
+  errorMessage: text("error_message"),
+  sentAt: timestamp("sent_at").defaultNow().notNull(),
+});
+
+export const insertBookingConfirmationSchema = createInsertSchema(bookingConfirmations).omit({
+  id: true,
+  sentAt: true,
+});
+
+export type InsertBookingConfirmation = z.infer<typeof insertBookingConfirmationSchema>;
+export type BookingConfirmation = typeof bookingConfirmations.$inferSelect;
+
 // ── Guesty OAuth token cache ──
 // Guesty's token endpoint is rate-limited to ~5 requests per 24h. Storing
 // the token here (rather than on a Railway-ephemeral filesystem) means
