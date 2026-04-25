@@ -73,13 +73,17 @@ type Property = {
   id: number;
   // `draftId` is set when the row was sourced from a community
   // draft (`/api/community/drafts`) rather than the hard-coded
-  // active list. Drafts render with a DRAFT badge instead of the
-  // Build action, share the table layout and filters with the
-  // active rows, and disappear when the operator promotes them
-  // into unit-builder-data.ts. `id` is then a synthetic number
-  // (negative so it can't collide with active property ids) so
-  // `qualityScores` / `baseRates` / sort-stable keys still work.
+  // active list. `id` is then a synthetic negative number so
+  // id-keyed caches (qualityScores, baseRates, the `filtered`
+  // sort) never collide with active property ids.
   draftId?: number;
+  // Status pulled from the underlying community_drafts row.
+  // "researching" / "draft_ready" → renders with DRAFT pill +
+  // trash + Promote actions. "published" → renders as a regular
+  // active row (no DRAFT pill, Build button targets the
+  // builder via the synthetic negative id route). Active
+  // hardcoded rows leave this undefined.
+  draftStatus?: string;
   name: string;
   community: string;
   pricingArea: string;
@@ -347,6 +351,7 @@ export default function Home() {
       return {
         id: -d.id, // negative so id-keyed caches never collide with active rows
         draftId: d.id,
+        draftStatus: d.status,
         name: d.listingTitle || d.name,
         community: d.name,
         pricingArea: "",
@@ -648,6 +653,28 @@ export default function Home() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
     },
+  });
+
+  // Promote a draft to "published" — flips the status flag so the
+  // row renders as a regular active property (no DRAFT pill, Build
+  // button enabled). The data stays in `community_drafts` rather
+  // than moving to a separate `properties` table; the dashboard
+  // and the builder both read from the same source. Reuses the
+  // existing PATCH /api/community/:id endpoint.
+  const promoteDraftMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await apiRequest("PATCH", `/api/community/${id}`, { status: "published" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      toast({ title: "Promoted to active", description: "Row now appears as a regular property." });
+    },
+    onError: (e: any) => toast({ title: "Promote failed", description: e.message, variant: "destructive" }),
   });
 
   // Highlight south-shore (Poipu) properties with the primary badge tone.
@@ -960,15 +987,49 @@ export default function Home() {
             </TableHeader>
             <TableBody>
               {filtered.map((property, idx) => {
+                // Three states for the Actions column:
+                //   1. Active hardcoded property (in unitBuilderIds) → Build link
+                //   2. Draft awaiting promotion (draftStatus !== "published") →
+                //      DRAFT pill + Promote (publish) + Delete
+                //   3. Promoted draft (draftStatus === "published") → renders
+                //      like an active row (Build link, regular styling) so the
+                //      operator can click into the builder for it. Build links
+                //      to `/builder/<negative-id>/preflight`; the preflight
+                //      page falls back to fetching the draft when the property
+                //      isn't in the static unitBuilderData list.
                 const isDraft = property.draftId !== undefined;
+                const isPublishedDraft = isDraft && property.draftStatus === "published";
+                const isResearchDraft = isDraft && !isPublishedDraft;
                 return (
-                <TableRow key={property.id} data-testid={`row-property-${property.id}`} id={`item-property-${property.id}`} className={isDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}>
-                  <TableCell className="sticky left-0 z-10 px-2" style={{ background: isDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}>
-                    {isDraft ? (
+                <TableRow
+                  key={property.id}
+                  data-testid={`row-property-${property.id}`}
+                  id={`item-property-${property.id}`}
+                  className={isResearchDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}
+                >
+                  <TableCell
+                    className="sticky left-0 z-10 px-2"
+                    style={{ background: isResearchDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}
+                  >
+                    {isResearchDraft ? (
                       <div className="flex items-center gap-1">
-                        <Badge variant="outline" className="h-7 px-2 text-[10px] font-semibold bg-amber-100 border-amber-300 text-amber-900" data-testid={`badge-draft-${property.draftId}`}>
+                        <Badge
+                          variant="outline"
+                          className="h-7 px-2 text-[10px] font-semibold bg-amber-100 border-amber-300 text-amber-900"
+                          data-testid={`badge-draft-${property.draftId}`}
+                        >
                           DRAFT
                         </Badge>
+                        <button
+                          onClick={() => promoteDraftMutation.mutate(property.draftId!)}
+                          disabled={promoteDraftMutation.isPending}
+                          className="text-emerald-700 hover:text-emerald-800 transition-colors p-1 disabled:opacity-50"
+                          aria-label="Promote draft to active property"
+                          data-testid={`button-promote-draft-${property.draftId}`}
+                          title="Promote to active property"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
                         <button
                           onClick={() => deleteDraftMutation.mutate(property.draftId!)}
                           className="text-muted-foreground hover:text-destructive transition-colors p-1"
@@ -978,6 +1039,19 @@ export default function Home() {
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
+                    ) : isPublishedDraft ? (
+                      <Link href={`/builder/${property.id}/preflight`}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs px-2 gap-1"
+                          data-testid={`button-unit-builder-${property.id}`}
+                          aria-label={`Open builder for ${property.name}`}
+                        >
+                          <Hammer className="h-3 w-3" />
+                          Build
+                        </Button>
+                      </Link>
                     ) : unitBuilderIds.has(property.id) ? (
                       <Link href={`/builder/${property.id}/preflight`}>
                         <Button
