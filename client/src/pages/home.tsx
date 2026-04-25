@@ -53,6 +53,7 @@ import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/
 import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft, GuestyPropertyMap } from "@shared/schema";
+import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 
 const STATUS_LABELS: Record<string, string> = {
   researching: "Researching",
@@ -302,6 +303,9 @@ export default function Home() {
   const [multiUnitFilter, setMultiUnitFilter] = useState("all");
   const [sortField, setSortField] = useState<SortField>("community");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // When the operator clicks an unmapped (gray) G-dot we open the
+  // connect-to-existing dialog seeded with this row's id + name.
+  const [connectTarget, setConnectTarget] = useState<{ id: number; name: string } | null>(null);
 
   // Pull community drafts up here (early in the render) because
   // `allProperties` below depends on them and `qualityScores` /
@@ -1076,14 +1080,27 @@ export default function Home() {
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <span
-                            className="inline-block w-2.5 h-2.5 rounded-full"
-                            style={{ background: guestyConnected.has(property.id) ? "#16a34a" : "#d1d5db" }}
-                            data-testid={`dot-guesty-${property.id}`}
-                          />
+                          {guestyConnected.has(property.id) ? (
+                            <span
+                              className="inline-block w-2.5 h-2.5 rounded-full"
+                              style={{ background: "#16a34a" }}
+                              data-testid={`dot-guesty-${property.id}`}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConnectTarget({ id: property.id, name: property.name })}
+                              className="inline-block w-2.5 h-2.5 rounded-full hover:ring-2 hover:ring-emerald-300 transition-shadow cursor-pointer"
+                              style={{ background: "#d1d5db" }}
+                              aria-label={`Connect ${property.name} to a Guesty listing`}
+                              data-testid={`dot-guesty-${property.id}`}
+                            />
+                          )}
                         </TooltipTrigger>
                         <TooltipContent side="right">
-                          {guestyConnected.has(property.id) ? "Connected to Guesty" : "Not in Guesty"}
+                          {guestyConnected.has(property.id)
+                            ? "Connected to Guesty"
+                            : "Click to connect to a Guesty listing"}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
@@ -1334,6 +1351,13 @@ export default function Home() {
           NexStay portfolio data. Prices shown are nightly rates and may vary by season.
         </div>
       </div>
+
+      <GuestyConnectDialog
+        propertyId={connectTarget?.id ?? null}
+        propertyName={connectTarget?.name ?? ""}
+        open={connectTarget !== null}
+        onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
+      />
     </div>
   );
 }
