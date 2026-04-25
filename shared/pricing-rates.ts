@@ -64,6 +64,33 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
+// Suggest a BUY_IN_RATES key based on the city / state a draft is
+// being added in. Used by the Add a New Community wizard's pricing-
+// area picker as the default selection — operator can override.
+// Returns "" when nothing matches; the dashboard treats that as
+// "no pricing area" and falls back to the default per-bedroom rate.
+export function suggestPricingArea(city: string, state: string): string {
+  const c = (city || "").toLowerCase();
+  const s = (state || "").toLowerCase();
+  if (s === "hawaii" || s === "hi") {
+    if (/\b(poipu|koloa|kalaheo)\b/.test(c)) return "Poipu Kai";
+    if (/\b(princeville|hanalei|haena)\b/.test(c)) return "Princeville";
+    if (/\b(kapaa|wailua|lihue|anahola)\b/.test(c)) return "Kapaa Beachfront";
+    if (/\b(kekaha|waimea|hanapepe)\b/.test(c)) return "Kekaha Beachfront";
+    if (/\b(kona|kailua-kona|keauhou|hilo|waikoloa|kohala)\b/.test(c)) return "Keauhou";
+    return "";
+  }
+  if (s === "florida" || s === "fl") {
+    // Two FL keys in BUY_IN_RATES are the Orlando-area (Southern
+    // Dunes) and Windsor Hills sets. Match the cities we know
+    // those refer to; let the operator override otherwise.
+    if (/\b(haines city|davenport|kissimmee)\b/.test(c)) return "Southern Dunes";
+    if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
+    return "";
+  }
+  return "";
+}
+
 export function getBuyInRate(community: string, bedrooms: number): number {
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;

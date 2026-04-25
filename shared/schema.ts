@@ -151,6 +151,13 @@ export const communityDrafts = pgTable("community_drafts", {
   unit2LongDescription: text("unit2_long_description"),
   combinedBedrooms: integer("combined_bedrooms"),
   suggestedRate: integer("suggested_rate"),
+  // Pricing area key (matches BUY_IN_RATES in shared/pricing-rates).
+  // Set on Step 5 of the Add Community wizard (auto-suggested
+  // from city/state, operator can override). Promoted drafts use
+  // this for buy-in / quality calcs in the dashboard table; an
+  // empty value falls through to the default per-bedroom rate
+  // (270 × bedrooms) and the dashboard shows that approximation.
+  pricingArea: text("pricing_area"),
   listingTitle: text("listing_title"),
   // Longer "OTA-channel" headline (e.g. for Booking.com which
   // tolerates 70-80 chars where Airbnb truncates at 50).

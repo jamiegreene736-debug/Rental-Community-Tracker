@@ -354,7 +354,10 @@ export default function Home() {
         draftStatus: d.status,
         name: d.listingTitle || d.name,
         community: d.name,
-        pricingArea: "",
+        // pricingArea is set on the wizard's Step 5 (auto-suggested
+        // from city/state, operator can override). Empty = no area
+        // → buy-in calc returns the per-bedroom default.
+        pricingArea: d.pricingArea ?? "",
         location: d.city,
         island: d.state,
         bedrooms: totalBr,

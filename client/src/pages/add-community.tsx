@@ -38,6 +38,7 @@ import { estimateNewCommunityScore, gradeColor, gradeBg } from "@/data/quality-s
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { checkCommunityType } from "@shared/community-type";
+import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -234,6 +235,13 @@ export default function AddCommunity() {
   const [editedTitle, setEditedTitle] = useState("");
   const [editedBookingTitle, setEditedBookingTitle] = useState("");
   const [editedPropertyType, setEditedPropertyType] = useState<string>("Condominium");
+  // Pricing area key — keys off BUY_IN_RATES in shared/pricing-rates.
+  // Auto-seeded from the city/state via `suggestPricingArea` once
+  // the operator hits Step 5; operator can override before saving.
+  // "" means "no area selected" → buy-in calc falls through to the
+  // per-bedroom default, which the dashboard renders as an
+  // approximation.
+  const [editedPricingArea, setEditedPricingArea] = useState<string>("");
   const [editedDescription, setEditedDescription] = useState("");
   const [editedNeighborhood, setEditedNeighborhood] = useState("");
   const [editedTransit, setEditedTransit] = useState("");
@@ -573,6 +581,15 @@ export default function AddCommunity() {
       setEditedTransit(data.transit || "");
       setEditedUnitA(data.unitA ?? null);
       setEditedUnitB(data.unitB ?? null);
+      // Seed the pricing-area picker from the wizard's city/state
+      // unless the operator already picked one. The same default
+      // logic powers buy-in / quality calcs for the existing 11
+      // active rows (Hawaii cities → Poipu Kai / Princeville /
+      // Kapaa Beachfront / Kekaha Beachfront / Keauhou).
+      if (!editedPricingArea && selectedCommunity?.city && selectedCommunity?.state) {
+        const suggested = suggestPricingArea(selectedCommunity.city, selectedCommunity.state);
+        if (suggested) setEditedPricingArea(suggested);
+      }
       // Pre-fill the STR permit field with the county-aware sample
       // template so the operator sees what format to use. Empty
       // strPermit means we haven't pre-filled yet — don't clobber
@@ -630,6 +647,7 @@ export default function AddCommunity() {
         listingTitle: editedTitle || null,
         bookingTitle: editedBookingTitle || null,
         propertyType: editedPropertyType || null,
+        pricingArea: editedPricingArea || null,
         listingDescription: editedDescription || null,
         neighborhood: editedNeighborhood || null,
         transit: editedTransit || null,
@@ -644,7 +662,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1516,18 +1534,43 @@ export default function AddCommunity() {
                         data-testid="input-booking-title"
                       />
                     </div>
-                    <div>
-                      <label htmlFor="select-property-type" className="text-sm font-medium mb-1.5 block">Property Type</label>
-                      <Select value={editedPropertyType} onValueChange={setEditedPropertyType}>
-                        <SelectTrigger id="select-property-type" data-testid="select-property-type">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {["Condominium", "Townhouse", "House", "Villa", "Apartment", "Estate", "Cottage", "Bungalow", "Loft"].map(t => (
-                            <SelectItem key={t} value={t}>{t}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="select-property-type" className="text-sm font-medium mb-1.5 block">Property Type</label>
+                        <Select value={editedPropertyType} onValueChange={setEditedPropertyType}>
+                          <SelectTrigger id="select-property-type" data-testid="select-property-type">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {["Condominium", "Townhouse", "House", "Villa", "Apartment", "Estate", "Cottage", "Bungalow", "Loft"].map(t => (
+                              <SelectItem key={t} value={t}>{t}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <label htmlFor="select-pricing-area" className="text-sm font-medium mb-1.5 block">
+                          Pricing Area
+                          <span className="text-muted-foreground font-normal ml-2 text-xs">— buy-in / margin lookup</span>
+                        </label>
+                        <Select
+                          value={editedPricingArea || "__none__"}
+                          onValueChange={(v) => setEditedPricingArea(v === "__none__" ? "" : v)}
+                        >
+                          <SelectTrigger id="select-pricing-area" data-testid="select-pricing-area">
+                            <SelectValue placeholder="Pick a pricing area…" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none__">No pricing area (use default rate)</SelectItem>
+                            {Object.keys(BUY_IN_RATES).map((k) => (
+                              <SelectItem key={k} value={k}>{k}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          Defaults to a per-bedroom estimate when none is picked. Hawaii cities auto-select; pick the closest match for other markets.
+                        </p>
+                      </div>
                     </div>
                   </Card>
 
