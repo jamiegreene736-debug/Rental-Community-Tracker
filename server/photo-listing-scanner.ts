@@ -41,7 +41,7 @@
 
 import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
-import { unitHintFromFolder, isScannableFolder } from "@shared/photo-folder-utils";
+import { isScannableFolder, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
@@ -238,7 +238,15 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   };
   let anyLensSucceeded = false;
 
-  const unitHint = unitHintFromFolder(folder);
+  // Verification tokens come from `verificationTokensForFolder`,
+  // which prefers the hand-maintained FOLDER_UNIT_TOKENS map (the
+  // canonical claim per shared/folder-unit-map.ts) and falls back
+  // to the folder-name hint for folders not in the map. A Lens hit
+  // is accepted when the matched listing's page mentions ANY of
+  // these tokens — this lets shared folders (one folder claimed by
+  // multiple units) and folders whose name has drifted from the
+  // unit number both produce real signals instead of being skipped.
+  const verifyTokens = verificationTokensForFolder(folder);
   // "Our own" listings — Guesty-authorized URLs for every property we
   // manage. A Lens hit that resolves to one of these is us, not a
   // thief, and gets suppressed before the tally. Cached across runs
@@ -246,8 +254,9 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   // (scanner proceeds without suppression rather than silently
   // skipping).
   const authorizedUrls = await getAuthorizedChannelUrls();
-  // Per-run cache so a listing URL that shows up for multiple photos
-  // only costs ONE verification SERP, not N.
+  // Per-run cache: maps listing URL → boolean. The first verify call
+  // on a URL pays the SERP cost(s); later checks reuse the answer
+  // even when a different photo surfaces the same listing.
   const verifyCache = new Map<string, boolean>();
   // Cap verifications per (photo × host) so a Lens response with 30
   // airbnb.com hits doesn't burn the SERP budget. 3 is plenty — the
@@ -255,12 +264,20 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   const MAX_VERIFY_PER_HOST_PER_PHOTO = 3;
 
   const verify = async (listingUrl: string): Promise<boolean> => {
-    if (!unitHint) return true; // community/placeholder folder — verification disabled
+    if (!verifyTokens || verifyTokens.length === 0) return true; // can't verify, accept
     const cached = verifyCache.get(listingUrl);
     if (cached !== undefined) return cached;
-    const ok = await verifyUrlMentionsUnit(listingUrl, unitHint);
-    verifyCache.set(listingUrl, ok);
-    return ok;
+    // Accept if the URL's page mentions ANY of the unit tokens. Stop
+    // at the first hit so we don't burn extra SERPs on already-
+    // verified URLs.
+    for (const token of verifyTokens) {
+      if (await verifyUrlMentionsUnit(listingUrl, token)) {
+        verifyCache.set(listingUrl, true);
+        return true;
+      }
+    }
+    verifyCache.set(listingUrl, false);
+    return false;
   };
 
   for (const label of heros) {
