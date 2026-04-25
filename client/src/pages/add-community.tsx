@@ -242,6 +242,12 @@ export default function AddCommunity() {
   // per-bedroom default, which the dashboard renders as an
   // approximation.
   const [editedPricingArea, setEditedPricingArea] = useState<string>("");
+  // Single complex-level street address. Most resort communities (Pili
+  // Mai, Caribe Cove, etc.) live at one canonical street address shared
+  // across all units; the preflight Platform Check appends "Unit X" to
+  // it for per-unit text-search matching. Optional — blank falls back
+  // to "city, state".
+  const [editedStreetAddress, setEditedStreetAddress] = useState<string>("");
   const [editedDescription, setEditedDescription] = useState("");
   const [editedNeighborhood, setEditedNeighborhood] = useState("");
   const [editedTransit, setEditedTransit] = useState("");
@@ -648,6 +654,7 @@ export default function AddCommunity() {
         bookingTitle: editedBookingTitle || null,
         propertyType: editedPropertyType || null,
         pricingArea: editedPricingArea || null,
+        streetAddress: editedStreetAddress.trim() || null,
         listingDescription: editedDescription || null,
         neighborhood: editedNeighborhood || null,
         transit: editedTransit || null,
@@ -683,7 +690,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1559,6 +1566,22 @@ export default function AddCommunity() {
                         className="font-medium"
                         data-testid="input-booking-title"
                       />
+                    </div>
+                    <div>
+                      <label htmlFor="input-street-address" className="text-sm font-medium mb-1.5 block">
+                        Street Address
+                        <span className="text-muted-foreground font-normal ml-2 text-xs">— complex-level (e.g. "1661 Pe'e Rd"); preflight appends Unit A / Unit B</span>
+                      </label>
+                      <Input
+                        id="input-street-address"
+                        value={editedStreetAddress}
+                        onChange={e => setEditedStreetAddress(e.target.value)}
+                        placeholder={selectedCommunity ? `${selectedCommunity.city}, ${selectedCommunity.state}` : "Street, e.g. 1661 Pe'e Rd"}
+                        data-testid="input-street-address"
+                      />
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        Optional. Leave blank and the dashboard / preflight fall back to "{selectedCommunity?.city}, {selectedCommunity?.state}".
+                      </p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>

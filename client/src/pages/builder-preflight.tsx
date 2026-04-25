@@ -157,7 +157,12 @@ function adaptDraftToPropertyUnitBuilder(
     propertyId: -draft.id, // matches the synthetic negative id the dashboard uses
     propertyName: draft.listingTitle || draft.name,
     complexName: draft.name,
-    address: `${draft.city}, ${draft.state}`,
+    // Street address (when the operator filled it in on Step 5) gives
+    // the preflight a real per-unit address to text-search; falls
+    // back to "city, state" so older drafts keep rendering.
+    address: draft.streetAddress
+      ? `${draft.streetAddress}, ${draft.city}, ${draft.state}`
+      : `${draft.city}, ${draft.state}`,
     bookingTitle: draft.bookingTitle || draft.listingTitle || draft.name,
     sampleDisclaimer: blank,
     combinedDescription: draft.listingDescription ?? blank,

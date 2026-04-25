@@ -119,6 +119,12 @@ export const communityDrafts = pgTable("community_drafts", {
   name: text("name").notNull(),
   city: text("city").notNull(),
   state: text("state").notNull(),
+  // Single complex-level street address. Most resort communities have
+  // one canonical address shared across units; the preflight Platform
+  // Check uses this (combined with the unit number) for text-search
+  // matching. Nullable so existing drafts saved before this column
+  // existed keep working — the adapter falls back to "city, state".
+  streetAddress: text("street_address"),
   estimatedLowRate: integer("estimated_low_rate"),
   estimatedHighRate: integer("estimated_high_rate"),
   unitTypes: text("unit_types"),
