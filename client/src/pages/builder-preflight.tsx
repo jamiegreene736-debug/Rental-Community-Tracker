@@ -17,7 +17,9 @@ import {
   Camera,
   Search,
 } from "lucide-react";
-import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { apiRequest } from "@/lib/queryClient";
+import type { CommunityDraft } from "@shared/schema";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
 
@@ -122,13 +124,98 @@ const PLATFORM_LIST: { key: keyof UnitCheckResult["platforms"]; label: string }[
   { key: "booking", label: "Booking.com" },
 ];
 
+// Adapt a CommunityDraft (the AI-generated rich shape from the
+// Add a New Community wizard) into the PropertyUnitBuilder shape
+// the rest of the builder/preflight code expects. Promoted drafts
+// take this path because they don't (yet) live in the static
+// `unit-builder-data.ts` array; this adapter lets the existing
+// builder UI render against draft data without a code-side
+// migration. Photos and Guesty wiring still come up empty for
+// promoted drafts (those are operations that happen AFTER the
+// draft is fully realized as a property), but the descriptive
+// fields all flow through.
+function adaptDraftToPropertyUnitBuilder(draft: CommunityDraft): PropertyUnitBuilder {
+  const u1Br = draft.unit1Bedrooms ?? 2;
+  const u2Br = draft.unit2Bedrooms ?? 2;
+  const blank = "";
+  return {
+    propertyId: -draft.id, // matches the synthetic negative id the dashboard uses
+    propertyName: draft.listingTitle || draft.name,
+    complexName: draft.name,
+    address: `${draft.city}, ${draft.state}`,
+    bookingTitle: draft.bookingTitle || draft.listingTitle || draft.name,
+    sampleDisclaimer: blank,
+    combinedDescription: draft.listingDescription ?? blank,
+    propertyType: draft.propertyType ?? "Condominium",
+    neighborhood: draft.neighborhood ?? blank,
+    transit: draft.transit ?? blank,
+    taxMapKey: blank,
+    tatLicense: blank,
+    getLicense: blank,
+    strPermit: draft.strPermit ?? blank,
+    hasPhotos: false,
+    communityPhotos: [],
+    communityPhotoFolder: blank,
+    units: [
+      {
+        id: `draft${draft.id}-unit-a`,
+        unitNumber: "A",
+        bedrooms: u1Br,
+        bathrooms: draft.unit1Bathrooms ?? "",
+        sqft: draft.unit1Sqft ?? "",
+        maxGuests: draft.unit1MaxGuests ?? u1Br * 2,
+        shortDescription: draft.unit1ShortDescription ?? "",
+        longDescription: draft.unit1LongDescription ?? "",
+        photoFolder: "",
+        photos: [],
+      },
+      {
+        id: `draft${draft.id}-unit-b`,
+        unitNumber: "B",
+        bedrooms: u2Br,
+        bathrooms: draft.unit2Bathrooms ?? "",
+        sqft: draft.unit2Sqft ?? "",
+        maxGuests: draft.unit2MaxGuests ?? u2Br * 2,
+        shortDescription: draft.unit2ShortDescription ?? "",
+        longDescription: draft.unit2LongDescription ?? "",
+        photoFolder: "",
+        photos: [],
+      },
+    ],
+  } as PropertyUnitBuilder;
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function BuilderPreflight() {
   const { propertyId } = useParams<{ propertyId: string }>();
   const [, setLocation] = useLocation();
   const id = parseInt(propertyId || "0", 10);
-  const property = getUnitBuilderByPropertyId(id);
+  const staticProperty = getUnitBuilderByPropertyId(id);
+
+  // Draft fallback: when the static lookup misses AND the id is
+  // negative (the convention the dashboard uses for promoted
+  // drafts: -draftId), fetch /api/community/drafts and adapt the
+  // matching draft to PropertyUnitBuilder shape. Lets the builder
+  // operate on promoted drafts without migrating them into the
+  // static unitBuilderData array.
+  const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
+  const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && id < 0);
+  useEffect(() => {
+    if (staticProperty || id >= 0) return;
+    const draftId = -id;
+    setDraftLoading(true);
+    apiRequest("GET", "/api/community/drafts")
+      .then((r) => r.json() as Promise<CommunityDraft[]>)
+      .then((drafts) => {
+        const match = drafts.find((d) => d.id === draftId);
+        if (match) setDraftProperty(adaptDraftToPropertyUnitBuilder(match));
+      })
+      .catch(() => { /* leave draftProperty null → renders the not-found state */ })
+      .finally(() => setDraftLoading(false));
+  }, [id, staticProperty]);
+  const property = staticProperty ?? draftProperty;
+
   const { toast } = useToast();
 
   // Per-row rescrape state so each row can show its own spinner/result.
@@ -256,6 +343,14 @@ export default function BuilderPreflight() {
   };
 
   if (!property) {
+    if (draftLoading) {
+      return (
+        <div className="max-w-2xl mx-auto p-8 text-center">
+          <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-muted-foreground" />
+          <p className="text-muted-foreground text-sm">Loading promoted draft…</p>
+        </div>
+      );
+    }
     return (
       <div className="max-w-2xl mx-auto p-8 text-center">
         <p className="text-muted-foreground">Property not found.</p>
