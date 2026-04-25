@@ -415,6 +415,27 @@ function normalizeConversation(c: any): GuestyConversation & {
     String(firstReservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved";
   const needsPreapprove = isAirbnb && phase === "inquiry" && !preApprovedFlag;
 
+  // Surface check-in / check-out / guest count at the top level so the
+  // AI Draft call can pass them down — otherwise the AI ends every
+  // reply with "what dates are you thinking?" even on inquiries that
+  // already have dates attached. Inquiries always carry checkIn /
+  // checkOut on the Guesty reservation; guestsCount is what the guest
+  // entered into Airbnb's date picker (sometimes missing on direct
+  // bookings, in which case we leave it null and the prompt guides
+  // the AI to read it from the message body).
+  const conversationCheckIn =
+    firstReservation?.checkInDateLocalized ??
+    firstReservation?.checkIn ??
+    null;
+  const conversationCheckOut =
+    firstReservation?.checkOutDateLocalized ??
+    firstReservation?.checkOut ??
+    null;
+  const conversationGuests =
+    firstReservation?.guestsCount ??
+    firstReservation?.numberOfGuests ??
+    null;
+
   return {
     ...c,
     guestName,
@@ -432,6 +453,9 @@ function normalizeConversation(c: any): GuestyConversation & {
     needsReply: !!unread,
     needsPreapprove,
     phase,
+    conversationCheckIn,
+    conversationCheckOut,
+    conversationGuests,
   };
 }
 
@@ -777,6 +801,14 @@ export default function InboxPage() {
         // stay on the standard friendly+professional voice.
         isHawaii: ctx?.isHawaii ?? false,
         channel,
+        // The reservation already carries dates and guest count for
+        // inquiries / requests / bookings. Send them through so the
+        // AI doesn't end every reply with "what dates are you thinking
+        // and how many guests?" when the answers are already attached
+        // to the conversation.
+        checkIn: (selectedConv as any).conversationCheckIn ?? null,
+        checkOut: (selectedConv as any).conversationCheckOut ?? null,
+        guestsCount: (selectedConv as any).conversationGuests ?? null,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);

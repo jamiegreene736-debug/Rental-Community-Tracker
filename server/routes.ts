@@ -10448,12 +10448,18 @@ CONSTRAINTS
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext, isHawaii, channel } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel } = req.body as {
       guestMessage: string;
       propertyName?: string;
       guestName?: string;
       checkIn?: string;
       checkOut?: string;
+      // Number of guests the booking already specifies (Airbnb date
+      // picker, VRBO inquiry, etc.). Optional — only set when the
+      // conversation has a reservation attached. The AI uses this to
+      // stop asking "how many guests are joining you?" on inquiries
+      // that already answer it.
+      guestsCount?: number | null;
       // Structured property facts built by the client (inbox.tsx
       // `buildPropertyContextForDraft`). When present, the AI answers
       // from these facts instead of hand-waving. Optional — generic
@@ -10609,10 +10615,37 @@ ${propertyContext}
 
 ` : "";
 
-    const userPrompt = `${contextBlock}Guest name: ${guestName || "Guest"}
+    // Compute nights when both dates exist, so the AI can quote it
+    // back if relevant. Pure presentational — no business logic.
+    const nights = (checkIn && checkOut)
+      ? (() => {
+          const d1 = new Date(checkIn).getTime();
+          const d2 = new Date(checkOut).getTime();
+          if (!Number.isFinite(d1) || !Number.isFinite(d2)) return null;
+          const n = Math.round((d2 - d1) / 86_400_000);
+          return n > 0 ? n : null;
+        })()
+      : null;
+
+    // Stitch the booking facts the conversation already has — dates,
+    // nights, guest count — into a clearly-labeled "ALREADY KNOWN"
+    // block so the AI stops asking for them. Earlier prompt only
+    // listed checkIn / checkOut as-is; the model was treating them as
+    // "FYI" rather than "this is settled, don't ask". Section header
+    // makes the rule explicit.
+    const knownLines: string[] = [];
+    if (checkIn)        knownLines.push(`- Check-in: ${checkIn}`);
+    if (checkOut)       knownLines.push(`- Check-out: ${checkOut}`);
+    if (nights)         knownLines.push(`- Nights: ${nights}`);
+    if (typeof guestsCount === "number" && guestsCount > 0) {
+      knownLines.push(`- Guests on the inquiry: ${guestsCount}`);
+    }
+    const knownBlock = knownLines.length > 0
+      ? `ALREADY KNOWN ABOUT THIS BOOKING (do NOT ask the guest for these — they're already attached to the inquiry):\n${knownLines.join("\n")}\n\n`
+      : "";
+
+    const userPrompt = `${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
 Property: ${propertyName || "our property"}
-${checkIn ? `Check-in: ${checkIn}` : ""}
-${checkOut ? `Check-out: ${checkOut}` : ""}
 
 Guest message:
 "${guestMessage}"
@@ -10622,6 +10655,8 @@ Write a helpful, friendly reply.
 Length: aim for 3-5 sentences when the guest asked one or two simple questions. Go to 6-9 sentences when they asked multiple specific things (bedding plans + distance + accessibility + dates) — every question they wrote deserves a direct answer in the reply. Don't compress 4 questions into a 4-sentence reply that punts on half of them.
 
 Be specific. Quote concrete bed types, room counts, and distances from the property facts when relevant — don't paraphrase as "comfortable bedrooms" or "a short walk" if the facts give exact details.
+
+Do NOT ask the guest for facts already shown in the ALREADY KNOWN block above (their dates, nights, guest count). Also do not ask for facts they've already stated in their own message — read the message carefully and count what they told you (e.g. "2 families of 6 plus 2 seniors" = 14 guests; you don't need to ask the total). If you DO need a clarifying detail (e.g. exact arrival time, specific accessibility need), ask for that one specific thing — don't blanket re-ask everything.
 
 Do not include a subject line. Do not end with "what other questions can I answer?" or similar — answer the questions that are already on the screen.`;
 
