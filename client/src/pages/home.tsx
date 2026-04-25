@@ -47,7 +47,7 @@ import {
   Camera,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
-import { isScannableFolder, unitHintFromFolder } from "@shared/photo-folder-utils";
+import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -501,33 +501,16 @@ export default function Home() {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
       if (builder) {
-        // Unit folders only, AND only ones that are actually
-        // scannable. communityPhotoFolder is excluded (shared
-        // amenities, no unit signal). Placeholder unit folders like
-        // pili-mai-unit-a are also excluded — without a real unit
-        // number, the scanner can't cross-validate matches and would
-        // false-positive on visually similar units in the same
-        // building. Both sides of the wire share isScannableFolder
-        // so the dashboard aggregation matches what the scanner
-        // actually scanned.
-        //
-        // Additionally suppress folders whose hint doesn't match the
-        // unit's CURRENT unitNumber. The scanner verifies Lens hits
-        // against the folder's hint (e.g. "kaha-lani-109" → "109"),
-        // so a stale folder name produces matches against the OLD
-        // unit's listings on Airbnb/VRBO/Booking — flagged red on the
-        // dashboard while the pre-flight check, which uses the
-        // current unit number, correctly says "Not Found." The two
-        // surfaces only agree when the folder name tracks the unit
-        // number; until folders are renamed to match, this filter
-        // hides the misleading signal so users don't chase ghosts.
+        // Unit folders only. communityPhotoFolder is excluded (shared
+        // amenities, no unit signal). isScannableFolder consults the
+        // FOLDER_UNIT_TOKENS map first and the folder-name hint
+        // second, so any folder the scanner can verify against — by
+        // name OR by canonical claim — qualifies. Folders the
+        // scanner skips (no map entry AND no digit hint) drop out
+        // here too, keeping the dashboard aggregation in lockstep
+        // with what was scanned.
         for (const u of builder.units) {
-          if (!u.photoFolder || !isScannableFolder(u.photoFolder)) continue;
-          const hint = unitHintFromFolder(u.photoFolder);
-          if (!hint) continue;
-          const trail = String(u.unitNumber ?? "").toLowerCase().trim().match(/[a-z0-9]+$/i)?.[0];
-          if (!trail || hint.toLowerCase() !== trail) continue;
-          folderSet.add(u.photoFolder);
+          if (u.photoFolder && isScannableFolder(u.photoFolder)) folderSet.add(u.photoFolder);
         }
       }
       const folders = Array.from(folderSet);
