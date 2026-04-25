@@ -10560,9 +10560,16 @@ ${PLAIN_TEXT_RULES}`;
     // "let me confirm and follow up" rather than inventing details when
     // a question falls outside the context block.
     const groundingPrompt = propertyContext
-      ? `You will be given structured facts about the property (unit breakdown, distance between units, parking, amenities, description). USE THESE FACTS to answer specific questions accurately — per-unit bedroom counts, how far apart units are, whether parking is free/included, pool access, etc.
+      ? `You will be given structured facts about the property (unit breakdown, per-unit layout descriptions, distance between units, parking, amenities, property type). USE THESE FACTS to answer specific questions accurately:
+- Per-unit bedroom AND bathroom counts
+- Bed types in each bedroom — King, Queen, Twin, sleeper sofa, etc. (the per-unit layout text spells this out)
+- Distance between units (in minutes / steps)
+- Property type — Townhouse means multi-story with internal stairs; Condominium means single-floor unit. This is critical when guests ask about accessibility, ground-floor sleeping, seniors, mobility, or stairs.
+- Parking, pool, AC, kitchen, beach proximity
 
-If the guest asks something that isn't covered by the provided facts, acknowledge the question and say you'll confirm and follow up — never invent details.
+ANSWER EVERY QUESTION the guest asks. If they ask 4 separate things, address all 4 — don't skip any and don't end with "what other questions can I answer?" instead of answering the ones already on the screen.
+
+If the guest asks something that isn't covered by the provided facts (e.g. they ask if there's a ground-floor bedroom and the layout text doesn't mention it), acknowledge the question and say you'll confirm and follow up — never invent details.
 
 Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units.`
       : `Never mention that units are "combined" or that this is a portfolio listing.`;
@@ -10610,7 +10617,13 @@ ${checkOut ? `Check-out: ${checkOut}` : ""}
 Guest message:
 "${guestMessage}"
 
-Write a helpful, friendly reply. Keep it 3-5 sentences — longer is OK if the guest asked multiple specific questions that need direct answers. Be specific and warm. Do not include a subject line.`;
+Write a helpful, friendly reply.
+
+Length: aim for 3-5 sentences when the guest asked one or two simple questions. Go to 6-9 sentences when they asked multiple specific things (bedding plans + distance + accessibility + dates) — every question they wrote deserves a direct answer in the reply. Don't compress 4 questions into a 4-sentence reply that punts on half of them.
+
+Be specific. Quote concrete bed types, room counts, and distances from the property facts when relevant — don't paraphrase as "comfortable bedrooms" or "a short walk" if the facts give exact details.
+
+Do not include a subject line. Do not end with "what other questions can I answer?" or similar — answer the questions that are already on the screen.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
