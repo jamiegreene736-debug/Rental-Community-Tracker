@@ -9280,17 +9280,81 @@ export async function registerRoutes(
 
   // GET /api/community/city-suggest?state=Florida&query=des
   //
-  // Lightweight city autocomplete for the Add a New Community wizard.
-  // Hits OpenStreetMap's Nominatim (free, no key) scoped to the
-  // selected US state and the user's typed prefix. Returns up to 10
-  // unique city names, deduped case-insensitively.
+  // City autocomplete for the Add a New Community wizard. Backed by
+  // Photon (Komoot's typeahead-tuned OSM service) with a per-state
+  // bounding box so prefix matches stay scoped to the picked state
+  // — Nominatim's structured `city=` filter and freeform `q=` both
+  // failed for short prefixes (Destin missing under `des`, Kapaa
+  // missing under `kapa`); Photon's prefix-aware indexing plus a
+  // tight `bbox=` returns the right matches in the top-10.
   //
-  // Nominatim is rate-limited to ~1 request per second per IP so the
-  // client debounces and we cache hits in-process for 5 minutes.
-  // Empty / very-short queries short-circuit to an empty array (no
-  // network) so a single keystroke doesn't trigger a request.
+  // Cached in-process for 5 min by `${state}|${query}` so a slow
+  // typist doesn't repeatedly hit Photon. Empty / sub-2-char
+  // queries short-circuit with no network round-trip.
+  //
+  // STATE_BBOX values are rough (-min lon, min lat, max lon, max lat).
+  // Tight enough that Photon's relevance ranking surfaces the
+  // expected state matches at the top, loose enough not to clip
+  // border towns. Alaska's range crosses the antimeridian, so the
+  // bbox uses a negative-only longitude sweep that catches the
+  // mainland portion (Aleutians beyond 179.0 East are not
+  // serviceable territory for vacation rentals here).
+  const STATE_BBOX: Record<string, [number, number, number, number]> = {
+    Alabama:        [-88.473,  30.144,  -84.889,  35.008],
+    Alaska:         [-179.148, 51.214,  -129.974, 71.4  ],
+    Arizona:        [-114.819, 31.332,  -109.045, 37.004],
+    Arkansas:       [-94.618,  33.004,  -89.645,  36.500],
+    California:     [-124.482, 32.529,  -114.131, 42.009],
+    Colorado:       [-109.060, 36.992,  -102.041, 41.003],
+    Connecticut:    [-73.728,  40.989,  -71.787,  42.050],
+    Delaware:       [-75.789,  38.451,  -75.049,  39.839],
+    Florida:        [-87.635,  24.396,  -79.974,  31.001],
+    Georgia:        [-85.605,  30.357,  -80.840,  35.001],
+    Hawaii:         [-160.555, 18.910,  -154.806, 22.236],
+    Idaho:          [-117.243, 41.988,  -111.043, 49.001],
+    Illinois:       [-91.513,  36.971,  -87.494,  42.508],
+    Indiana:        [-88.098,  37.771,  -84.785,  41.761],
+    Iowa:           [-96.640,  40.376,  -90.140,  43.501],
+    Kansas:         [-102.052, 36.993,  -94.589,  40.003],
+    Kentucky:       [-89.572,  36.497,  -81.965,  39.147],
+    Louisiana:      [-94.043,  28.929,  -88.817,  33.020],
+    Maine:          [-71.084,  42.977,  -66.949,  47.460],
+    Maryland:       [-79.487,  37.886,  -75.052,  39.722],
+    Massachusetts:  [-73.508,  41.240,  -69.900,  42.886],
+    Michigan:       [-90.418,  41.696,  -82.122,  48.306],
+    Minnesota:      [-97.239,  43.499,  -89.490,  49.385],
+    Mississippi:    [-91.655,  30.174,  -88.094,  34.996],
+    Missouri:       [-95.774,  35.996,  -89.099,  40.613],
+    Montana:        [-116.050, 44.358,  -104.040, 49.001],
+    Nebraska:       [-104.054, 39.999,  -95.308,  43.002],
+    Nevada:         [-120.005, 35.001,  -114.039, 42.001],
+    "New Hampshire":[-72.557,  42.697,  -70.610,  45.305],
+    "New Jersey":   [-75.560,  38.928,  -73.894,  41.358],
+    "New Mexico":   [-109.050, 31.332,  -103.001, 37.000],
+    "New York":     [-79.762,  40.477,  -71.856,  45.016],
+    "North Carolina":[-84.322, 33.842,  -75.461,  36.588],
+    "North Dakota": [-104.049, 45.935,  -96.554,  49.001],
+    Ohio:           [-84.820,  38.404,  -80.518,  41.978],
+    Oklahoma:       [-103.002, 33.616,  -94.430,  37.003],
+    Oregon:         [-124.566, 41.992,  -116.463, 46.292],
+    Pennsylvania:   [-80.520,  39.720,  -74.690,  42.270],
+    "Rhode Island": [-71.862,  41.146,  -71.120,  42.019],
+    "South Carolina":[-83.354, 32.034,  -78.499,  35.215],
+    "South Dakota": [-104.058, 42.480,  -96.436,  45.945],
+    Tennessee:      [-90.310,  34.983,  -81.647,  36.679],
+    Texas:          [-106.646, 25.837,  -93.508,  36.501],
+    Utah:           [-114.052, 36.998,  -109.041, 42.001],
+    Vermont:        [-73.438,  42.727,  -71.465,  45.017],
+    Virginia:       [-83.675,  36.541,  -75.243,  39.467],
+    Washington:     [-124.733, 45.544,  -116.916, 49.002],
+    "West Virginia":[-82.644,  37.202,  -77.719,  40.638],
+    Wisconsin:      [-92.889,  42.492,  -86.805,  47.080],
+    Wyoming:        [-111.056, 40.995,  -104.052, 45.005],
+  };
+
   const cityCache = new Map<string, { cities: string[]; ts: number }>();
   const CITY_CACHE_TTL = 5 * 60 * 1000;
+
   app.get("/api/community/city-suggest", async (req, res) => {
     const state = String(req.query.state || "").trim();
     const query = String(req.query.query || "").trim();
@@ -9302,84 +9366,67 @@ export async function registerRoutes(
       return res.json({ cities: cached.cities });
     }
 
+    const bbox = STATE_BBOX[state];
+    if (!bbox) {
+      console.warn(`[city-suggest] no bbox for state="${state}"`);
+      return res.json({ cities: [] });
+    }
+
     try {
-      // Use Nominatim's freeform `q=` search rather than the
-      // structured `city=` filter. The `city=` filter is an
-      // EXACT-name match and silently drops results for any place
-      // Nominatim doesn't classify as a "city" — Destin (a
-      // city of 14k people, classified as `town`) and Kapaa
-      // (`village`) both came back empty under `city=des` /
-      // `city=kapa`. Freeform `q=` with addressdetails + class
-      // filtering covers the same exact-prefix intent without
-      // tripping over OSM's category labels. Also bumped to
-      // limit=20 so post-filtering still leaves enough survivors.
-      const url = new URL("https://nominatim.openstreetmap.org/search");
-      url.searchParams.set("q", `${query}, ${state}, USA`);
-      url.searchParams.set("format", "json");
+      const url = new URL("https://photon.komoot.io/api/");
+      url.searchParams.set("q", query);
       url.searchParams.set("limit", "20");
-      url.searchParams.set("addressdetails", "1");
-      url.searchParams.set("countrycodes", "us");
+      url.searchParams.set("bbox", bbox.join(","));
+      // `osm_tag=place` keeps the response focused on populated
+      // places — drops streets, businesses, POIs that the
+      // typeahead would otherwise pull in for a short prefix.
+      url.searchParams.set("osm_tag", "place");
 
       const resp = await fetch(url.toString(), {
-        // Nominatim's usage policy requires a User-Agent identifying
-        // the app + a contact. Don't drop this header — Nominatim
-        // 403s anonymous traffic.
         headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" },
       });
       if (!resp.ok) {
-        console.warn(`[city-suggest] Nominatim ${resp.status} for "${query}" in ${state}`);
+        console.warn(`[city-suggest] Photon ${resp.status} for "${query}" in ${state}`);
         return res.json({ cities: [] });
       }
-      const data = await resp.json() as Array<{
-        display_name?: string;
-        class?: string;
-        type?: string;
-        address?: {
-          city?: string; town?: string; village?: string;
-          municipality?: string; hamlet?: string; suburb?: string;
-          locality?: string;
-          state?: string;
-        };
-      }>;
+      const data = await resp.json() as {
+        features?: Array<{
+          properties?: {
+            name?: string;
+            country?: string;
+            state?: string;
+            osm_value?: string;
+          };
+        }>;
+      };
 
-      // Keep populated-place rows only — exclude street, business,
-      // POI matches that the freeform query would otherwise pull in.
-      // Nominatim's `class` is "place" / "boundary" for settlements
-      // and admin areas; `type` narrows it further.
-      const PLACE_TYPES = new Set([
+      // Keep populated-place rows only. `osm_value` tells us what
+      // kind of place each feature is — drop counties/airports/
+      // schools/etc that bbox+osm_tag still let through.
+      const PLACE_VALUES = new Set([
         "city", "town", "village", "hamlet", "municipality",
         "borough", "suburb", "locality", "neighbourhood",
-        "administrative", // OSM admin boundaries (counties / muni)
       ]);
       const seen = new Set<string>();
       const cities: string[] = [];
-      const queryLower = query.toLowerCase();
-      for (const r of data) {
-        const cls = (r.class ?? "").toLowerCase();
-        const typ = (r.type ?? "").toLowerCase();
-        if (cls !== "place" && cls !== "boundary") continue;
-        if (!PLACE_TYPES.has(typ)) continue;
-        const a = r.address ?? {};
-        // Confirm the row actually sits in the requested state —
-        // otherwise a query like "des" in Florida could match
-        // Des Moines, IA via the freeform search.
-        if (a.state && a.state.toLowerCase() !== state.toLowerCase()) continue;
-        // Cascade through the address fields so vacation towns
-        // Nominatim doesn't classify as `city` still surface
-        // (Kihei, Kapaa, Hanalei, etc.).
-        const cityName =
-          a.city || a.town || a.village || a.municipality || a.hamlet || a.suburb || a.locality;
-        if (!cityName) continue;
-        // Soft prefix filter — the freeform query sometimes returns
-        // looser matches (Tampa for "tam", but also Tarpon Springs
-        // because the query phrase appears in display_name). Anchor
-        // on whether the city name itself starts with the typed
-        // prefix to keep the dropdown predictable.
-        if (!cityName.toLowerCase().startsWith(queryLower) && !cityName.toLowerCase().includes(queryLower)) continue;
-        const key = cityName.toLowerCase();
+      // Photon represents Hawaiian okina with the U+02BB modifier
+      // letter ("Kapaʻa"), but the operator is going to type plain
+      // ASCII ("kapaa"). Strip the okina (and any other diacritics)
+      // for both the surface display and the dedupe key so both
+      // forms map to the same suggestion.
+      const stripOkina = (s: string) => s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[̀-ͯ]/g, "");
+      for (const f of data.features ?? []) {
+        const p = f.properties ?? {};
+        if ((p.country ?? "") !== "United States") continue;
+        if ((p.state ?? "").toLowerCase() !== state.toLowerCase()) continue;
+        if (!PLACE_VALUES.has((p.osm_value ?? "").toLowerCase())) continue;
+        const raw = (p.name ?? "").trim();
+        if (!raw) continue;
+        const display = stripOkina(raw);
+        const key = display.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
-        cities.push(cityName);
+        cities.push(display);
         if (cities.length >= 10) break;
       }
 
