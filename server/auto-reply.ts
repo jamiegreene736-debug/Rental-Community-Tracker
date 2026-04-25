@@ -135,9 +135,18 @@ interface GuestyConversation {
   reservationId?: string;
   lastMessageAt?: string;
   lastMessageReceivedAt?: string;
-  unreadCount?: number;
+  // Older shape Guesty used to return — null on the current shape,
+  // kept for type compatibility with cached/older responses.
+  unreadCount?: number | null;
+  // Current shape: state is an object with `read` and `status`.
+  // `read: false` means the conversation hasn't been viewed by the
+  // host yet. `status: "OPEN"` means active (vs CLOSED/ARCHIVED).
+  // The string-form ("NEW"/"UNREAD") is the legacy shape — we keep
+  // both in the type so older fixtures still typecheck.
+  state?: string | { read?: boolean; status?: string };
   module?: { type?: string };
   integration?: { platform?: string };
+  meta?: { reservations?: any[]; guest?: { fullName?: string; firstName?: string } };
   posts?: GuestyPost[];
 }
 
@@ -169,13 +178,34 @@ function unwrapConversations(raw: any): GuestyConversation[] {
   return [];
 }
 
-async function fetchUnreadConversations(limit = 30): Promise<GuestyConversation[]> {
+// Pull conversations that COULD have a guest message awaiting our
+// response. The narrower "is it unread" question used to be:
+//
+//   results.filter((c) => (c.unreadCount ?? 0) > 0)
+//
+// Guesty's current API shape returns `unreadCount: null` and tracks
+// read state via `state.read: false` / `state.status: "OPEN"`. Worse,
+// the read flag flips to true the moment the operator opens the
+// thread in the Guesty UI — even if they didn't reply — so a
+// pure "unread" filter would miss conversations where the host
+// looked at the inquiry, walked away, and we should still
+// auto-respond. The cleanest contract: pull every OPEN conversation
+// here, then `pickPostToReplyTo` (per-thread) decides whether the
+// guest's latest message is actually awaiting a host reply.
+async function fetchOpenConversations(limit = 30): Promise<GuestyConversation[]> {
   const data = await guestyRequest(
     "GET",
     `/communication/conversations?limit=${limit}&sort=-lastMessageAt`
   );
   const results = unwrapConversations(data);
-  return results.filter((c) => (c.unreadCount ?? 0) > 0);
+  return results.filter((c) => {
+    const status =
+      (typeof c.state === "object" && c.state?.status) ||
+      (typeof c.state === "string" ? c.state : null);
+    if (!status) return true; // unknown shape — be permissive
+    const s = String(status).toUpperCase();
+    return s === "OPEN" || s === "NEW" || s === "UNREAD" || s === "UNANSWERED";
+  });
 }
 
 async function fetchConversationThread(id: string): Promise<GuestyConversation | null> {
@@ -190,18 +220,65 @@ async function fetchConversationThread(id: string): Promise<GuestyConversation |
   }
 }
 
-function pickLatestIncomingPost(posts: GuestyPost[] | undefined): GuestyPost | null {
+// Identify which posts are FROM the guest vs FROM the host. Guesty
+// doesn't always populate every field — it's `isIncoming` on some
+// account shapes, `direction` on others, `authorType: "guest"` on
+// the inbox-v2 shape. We accept any of them.
+function isIncomingPost(p: any): boolean {
+  if (p.isIncoming === true) return true;
+  if (p.direction === "incoming" || p.direction === "in" || p.direction === "inbound") return true;
+  if (p.authorType && p.authorType.toLowerCase() === "guest") return true;
+  if (p.senderType && p.senderType.toLowerCase() === "guest") return true;
+  return false;
+}
+
+function isHostPost(p: any): boolean {
+  if (p.isIncoming === false) return true;
+  if (p.direction === "outgoing" || p.direction === "out" || p.direction === "outbound") return true;
+  if (p.authorType && p.authorType.toLowerCase() === "host") return true;
+  if (p.authorRole && p.authorRole.toLowerCase() === "host") return true;
+  if (p.senderType && p.senderType.toLowerCase() === "host") return true;
+  return false;
+}
+
+// Decide whether this conversation has a guest message awaiting a
+// host response — and if so, which post is the trigger. Returns
+// null when:
+//   - there are no incoming posts (host-initiated thread)
+//   - the host has already replied AFTER the guest's latest message
+//     (manual reply via the inbox UI or Guesty itself)
+//
+// Without this check, a pure "is there an incoming post?" filter
+// would re-trigger after the host manually replies — the dedup
+// table catches re-sends only when the same post ID has been
+// processed before, so a fresh tick on a thread the host has
+// already handled would otherwise produce a duplicate auto-reply
+// on the very next guest message that arrives.
+function pickPostToReplyTo(posts: GuestyPost[] | undefined): GuestyPost | null {
   if (!posts || posts.length === 0) return null;
-  const incoming = posts.filter((p) => {
-    if (p.isIncoming === true) return true;
-    if (p.direction === "incoming") return true;
-    if (p.authorType && p.authorType.toLowerCase() === "guest") return true;
-    return false;
-  });
+
+  const ts = (p: any): number => {
+    const v = p.createdAt ?? p.sentAt ?? p.postedAt;
+    const t = v ? new Date(v).getTime() : NaN;
+    return Number.isFinite(t) ? t : 0;
+  };
+
+  const incoming = posts.filter(isIncomingPost);
   if (incoming.length === 0) return null;
-  // Most recent
-  incoming.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
-  return incoming[0];
+  incoming.sort((a, b) => ts(b) - ts(a));
+  const latestIncoming = incoming[0];
+  if (!latestIncoming?._id) return null;
+
+  const host = posts.filter(isHostPost);
+  if (host.length === 0) return latestIncoming;
+  host.sort((a, b) => ts(b) - ts(a));
+  const latestHost = host[0];
+
+  // Host's last message is more recent than the guest's last —
+  // they've already handled it. Skip.
+  if (ts(latestHost) > ts(latestIncoming)) return null;
+
+  return latestIncoming;
 }
 
 async function sendReply(conversationId: string, body: string, moduleField: { type?: string } | undefined) {
@@ -475,18 +552,18 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
     return r;
   }
 
-  console.log("[auto-reply] Polling Guesty inbox for unread conversations...");
+  console.log("[auto-reply] Polling Guesty inbox for open conversations awaiting a host reply...");
   let processed = 0, sent = 0, drafted = 0, flagged = 0, errors = 0;
 
   try {
-    const unread = await fetchUnreadConversations(30);
-    console.log(`[auto-reply] Found ${unread.length} unread conversation(s)`);
+    const open = await fetchOpenConversations(30);
+    console.log(`[auto-reply] Found ${open.length} open conversation(s)`);
 
-    for (const conv of unread) {
+    for (const conv of open) {
       try {
         const thread = await fetchConversationThread(conv._id);
         const posts = thread?.posts ?? conv.posts ?? [];
-        const latest = pickLatestIncomingPost(posts);
+        const latest = pickPostToReplyTo(posts);
         if (!latest || !latest._id) continue;
 
         // Dedupe — skip if we've already logged this post
@@ -498,10 +575,29 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
 
         processed++;
 
-        const guestName = conv.guest?.fullName ?? conv.guest?.firstName ?? null;
-        const listingId = conv.listingId ?? null;
-        const reservationId = conv.reservationId ?? null;
-        const moduleField = latest.module ?? conv.module ?? { type: "email" };
+        // Inbox-v2 conversation shape nests the guest + reservation
+        // info under `meta`. Top-level `listingId` / `reservationId`
+        // were on older shapes — accept either to stay forward-
+        // compatible with whatever Guesty hands back.
+        const meta: any = (conv as any).meta ?? {};
+        const guestObj = (conv as any).guest ?? meta.guest ?? {};
+        const firstReservation =
+          Array.isArray(meta.reservations) && meta.reservations.length > 0
+            ? meta.reservations[0]
+            : (conv as any).reservation ?? null;
+
+        const guestName = guestObj.fullName ?? guestObj.firstName ?? null;
+        const listingId =
+          (conv as any).listingId ??
+          firstReservation?.listingId ??
+          firstReservation?.listing?._id ??
+          null;
+        const reservationId =
+          (conv as any).reservationId ??
+          firstReservation?._id ??
+          firstReservation?.id ??
+          null;
+        const moduleField = (latest as any).module ?? (conv as any).module ?? meta.lastMessage?.module ?? { type: "email" };
         const channel = moduleField?.type ?? null;
 
         // Pre-filter: known risky keywords → draft-only path (no Claude send)
