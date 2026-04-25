@@ -5,6 +5,8 @@
 
 import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
+import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
+import { fallbackWalkForResort } from "../shared/walking-distance";
 import type { InsertAutoReplyLog } from "@shared/schema";
 
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
@@ -294,7 +296,16 @@ async function sendReply(conversationId: string, body: string, moduleField: { ty
 const TOOLS = [
   {
     name: "get_listing_details",
-    description: "Fetch property/listing details (title, bedrooms, amenities, address, check-in instructions) from Guesty for the given listingId.",
+    description: "Fetch property/listing details (title, bedrooms, amenities, address, check-in instructions) from Guesty for the given listingId. Returns aggregate totals — for per-unit bedding plans / layout / property type, ALSO call get_local_property_facts.",
+    input_schema: {
+      type: "object",
+      properties: { listingId: { type: "string", description: "Guesty listing _id" } },
+      required: ["listingId"],
+    },
+  },
+  {
+    name: "get_local_property_facts",
+    description: "Fetch the rich per-unit layout for this listing — bed types in each bedroom, square footage, sleeps count, full layout description, property type (Townhouse / Condominium / etc., load-bearing for accessibility / stairs questions), and walking distance between units. Use this whenever the guest asks about beds, bedding, room layouts, distance between units, accessibility, ground-floor sleeping, stairs, or 'how does it sleep'.",
     input_schema: {
       type: "object",
       properties: { listingId: { type: "string", description: "Guesty listing _id" } },
@@ -332,6 +343,48 @@ async function runTool(name: string, input: any): Promise<unknown> {
       return { error: (err as Error).message };
     }
   }
+  if (name === "get_local_property_facts") {
+    const id = input?.listingId;
+    if (!id) return { error: "listingId required" };
+    try {
+      const map = await storage.getGuestyPropertyMap();
+      const row = map.find((m) => m.guestyListingId === id);
+      if (!row) return { error: "No local property mapped to this Guesty listing", guestyListingId: id };
+      const prop = getUnitBuilderByPropertyId(row.propertyId);
+      if (!prop) return { error: "Local propertyId not found in unit-builder-data", propertyId: row.propertyId };
+      const walk = prop.units.length >= 2 ? fallbackWalkForResort(prop.complexName) : null;
+      return {
+        propertyName: prop.propertyName,
+        complexName: prop.complexName,
+        address: prop.address,
+        propertyType: prop.propertyType ?? "Condominium",
+        propertyTypeNote: prop.propertyType === "Townhouse"
+          ? "Multi-story attached units WITH internal stairs — relevant for accessibility / ground-floor / mobility questions."
+          : prop.propertyType === "Condominium"
+            ? "Single-floor units (no internal stairs). Building-level access may have stairs or elevator depending on the resort."
+            : null,
+        totalBedrooms: prop.units.reduce((s, u) => s + u.bedrooms, 0),
+        totalSleeps: prop.units.reduce((s, u) => s + u.maxGuests, 0),
+        units: prop.units.map((u, i) => ({
+          label: `Unit ${String.fromCharCode(65 + i)}`,
+          unitNumber: u.unitNumber,
+          bedrooms: u.bedrooms,
+          bathrooms: u.bathrooms,
+          sqft: u.sqft,
+          maxGuests: u.maxGuests,
+          shortDescription: u.shortDescription,
+          longDescription: u.longDescription.length > 700
+            ? u.longDescription.slice(0, 700) + "…"
+            : u.longDescription,
+        })),
+        distanceBetweenUnits: walk ? `${walk.description} (~${walk.minutes}-min walk)` : null,
+        neighborhood: prop.neighborhood ?? null,
+        transit: prop.transit ?? null,
+      };
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
+  }
   if (name === "get_reservation") {
     const id = input?.reservationId;
     if (!id) return { error: "reservationId required" };
@@ -356,6 +409,8 @@ RULES:
 
 INFORMATION GATHERING
 - Always use the tools available to fetch listing details or reservation details BEFORE answering questions about the property, dates, or amenities. Never guess facts.
+- For per-unit bedding plans, layouts, bed types (King / Queen / Twin / sleeper sofa), bathroom counts per unit, square footage, distance between units, property type (Townhouse vs Condominium — relevant for stairs/accessibility), and ground-floor questions, ALWAYS call get_local_property_facts. The Guesty listing alone (get_listing_details) only has aggregate totals — it does NOT have per-unit bedding.
+- When a guest asks multiple specific questions in one message (e.g. bedding + distance + accessibility + check-in time), call get_local_property_facts and answer EVERY one of them. Do not flag for human just because the message is long — flag only when something falls outside the data we fetched OR the FLAG categories below.
 - If the guest's question cannot be answered confidently from the fetched context, call flag_for_human with a reason and stop. "Confidently" means the fact is in the data we fetched — not vibes or generic Hawaii knowledge.
 
 WHEN TO FLAG FOR HUMAN (call flag_for_human tool, do NOT write a reply):
@@ -404,7 +459,9 @@ Examples (same content, different voice):
 
 FORMATTING
 - Plain text only. No Markdown — no asterisks, no underscores, no bullet markers at line starts, no headings.
-- Keep replies to 2-4 sentences. Longer is OK only if the guest asked multiple specific questions that each need a direct answer.
+- Length: 2-4 sentences for one or two simple questions. 6-9 sentences when the guest asks multiple specific things (bedding + distance + accessibility + dates) — answer EACH question they wrote, in order; don't compress 4 questions into a 4-sentence reply that punts on half of them.
+- Quote concrete details (bed types, bathroom counts, exact distances, property type) from the fetched facts — don't paraphrase as "comfortable beds" or "a short walk" if the data spells it out.
+- Don't end with "what other questions can I answer?" — answer the questions already on the screen.
 - No subject line, no email headers.
 - Sign off EXACTLY as three lines, on their own, after a blank line:
   John Carpenter

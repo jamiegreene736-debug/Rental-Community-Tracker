@@ -52,7 +52,17 @@ async function buildPropertyContextForDraft(
 
     const unitLines = prop.units.map((u, i) => {
       const label = `Unit ${String.fromCharCode(65 + i)}`;
-      return `- ${label} (${u.unitNumber}): ${u.bedrooms}BR / ${u.bathrooms}BA · ~${u.sqft} sqft · sleeps ${u.maxGuests}. ${u.shortDescription}`;
+      // Include both shortDescription AND longDescription per unit so the
+      // AI can answer specific bedding/layout questions ("what beds in
+      // each room?", "any king bed?", "is there a sleeper sofa?"). Earlier
+      // version only sent shortDescription, which had bedding embedded in
+      // a single line — Claude often skipped over it. longDescription
+      // spells out the layout sentence-by-sentence (king master / queen
+      // second / twin third) so the AI can quote it back accurately.
+      const longTrimmed = u.longDescription.length > 600
+        ? u.longDescription.slice(0, 600) + "…"
+        : u.longDescription;
+      return `- ${label} (${u.unitNumber}): ${u.bedrooms}BR / ${u.bathrooms}BA · ~${u.sqft} sqft · sleeps ${u.maxGuests}.\n    Layout: ${longTrimmed}`;
     }).join("\n");
 
     // Per-resort walking-distance fallback (same helper the Builder
@@ -69,6 +79,13 @@ async function buildPropertyContextForDraft(
     const parts: string[] = [];
     parts.push(`PROPERTY: ${prop.propertyName} at ${prop.complexName}`);
     parts.push(`Address: ${prop.address}`);
+    if (prop.propertyType) {
+      // propertyType is load-bearing for accessibility questions —
+      // a Townhouse is multi-story, a Condominium is single-floor.
+      // Surfaces "downstairs unit" / "stairs?" / "ground floor"
+      // questions accurately instead of having the AI guess.
+      parts.push(`Property type: ${prop.propertyType}${prop.propertyType === "Townhouse" ? " (multi-story attached units, has internal stairs)" : prop.propertyType === "Condominium" ? " (single-floor unit)" : ""}`);
+    }
     parts.push(`Total: ${prop.units.reduce((s, u) => s + u.bedrooms, 0)} bedrooms across ${prop.units.length} unit${prop.units.length === 1 ? "" : "s"}, sleeps ${prop.units.reduce((s, u) => s + u.maxGuests, 0)}.`);
     parts.push(`\nUNITS:\n${unitLines}`);
     if (walk) parts.push(`\nDISTANCE BETWEEN UNITS: ${walk.description} (approx ${walk.minutes}-min walk)`);
