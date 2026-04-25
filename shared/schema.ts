@@ -140,6 +140,14 @@ export const communityDrafts = pgTable("community_drafts", {
   unit1Bedding: text("unit1_bedding"),
   unit1ShortDescription: text("unit1_short_description"),
   unit1LongDescription: text("unit1_long_description"),
+  // Folder name under /app/client/public/photos/ holding the
+  // downloaded photos for this unit. Persist-photos endpoint
+  // creates these folders on save (draft-${id}-unit-a /
+  // draft-${id}-unit-b) and writes the unit's selected photos
+  // there. Builder-preflight reads these folders so promoted
+  // drafts have photos in the builder UI just like the
+  // hardcoded 11 properties do.
+  unit1PhotoFolder: text("unit1_photo_folder"),
   unit2Url: text("unit2_url"),
   unit2Bedrooms: integer("unit2_bedrooms"),
   unit2Description: text("unit2_description"),
@@ -149,6 +157,7 @@ export const communityDrafts = pgTable("community_drafts", {
   unit2Bedding: text("unit2_bedding"),
   unit2ShortDescription: text("unit2_short_description"),
   unit2LongDescription: text("unit2_long_description"),
+  unit2PhotoFolder: text("unit2_photo_folder"),
   combinedBedrooms: integer("combined_bedrooms"),
   suggestedRate: integer("suggested_rate"),
   // Pricing area key (matches BUY_IN_RATES in shared/pricing-rates).

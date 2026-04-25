@@ -612,7 +612,7 @@ export default function AddCommunity() {
     if (!selectedCommunity) return;
     setSaving(true);
     try {
-      await apiRequest("POST", "/api/community/save", {
+      const saveResp = await apiRequest("POST", "/api/community/save", {
         name: selectedCommunity.name,
         city: selectedCommunity.city,
         state: selectedCommunity.state,
@@ -654,6 +654,27 @@ export default function AddCommunity() {
         strPermit: strPermit.trim() || null,
         status: "draft_ready",
       });
+      // Persist Step 4 photos so the builder has them when the
+      // operator promotes the draft. Best-effort — a failure here
+      // doesn't roll back the draft save (the operator can re-run
+      // photo persistence later by editing + re-saving).
+      const saved = await saveResp.json().catch(() => null) as { id?: number } | null;
+      const draftId = saved?.id;
+      if (draftId && (unit1Photos.length > 0 || unit2Photos.length > 0)) {
+        try {
+          await apiRequest("POST", `/api/community/${draftId}/persist-photos`, {
+            unit1Photos: unit1Photos.map((p) => p.url),
+            unit2Photos: unit2Photos.map((p) => p.url),
+          });
+        } catch (e: any) {
+          console.warn(`[add-community] photo persist failed: ${e?.message}`);
+          // Surface a soft warning but don't block — the draft saved successfully.
+          toast({
+            title: "Saved (photos pending)",
+            description: "Community saved, but the photos didn't persist. Edit + re-save to retry.",
+          });
+        }
+      }
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
       toast({ title: "Community saved to dashboard!" });
       navigate("/");
@@ -662,7 +683,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
