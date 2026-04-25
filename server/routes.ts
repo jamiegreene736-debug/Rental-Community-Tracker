@@ -11,6 +11,7 @@ import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurre
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
+import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
@@ -9578,6 +9579,45 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Auto-reply run failed", message: err.message });
+    }
+  });
+
+  // ── Booking-confirmation auto-send ──
+  // Status / toggle / manual-run endpoints. Mirrors the auto-reply
+  // shape so the inbox UI can reuse the same patterns. The scheduler
+  // runs every 5 minutes from server/index.ts; "run now" lets the
+  // operator force a tick (useful right after a fresh deploy or to
+  // confirm a recent booking gets greeted without waiting).
+  app.get("/api/inbox/booking-confirmations/status", (_req, res) => {
+    res.json(getBookingConfirmationStatus());
+  });
+
+  app.post("/api/inbox/booking-confirmations/toggle", (req, res) => {
+    const { enabled } = req.body as { enabled: boolean };
+    setBookingConfirmationEnabled(!!enabled);
+    res.json(getBookingConfirmationStatus());
+  });
+
+  app.post("/api/inbox/booking-confirmations/run", async (_req, res) => {
+    try {
+      const result = await runBookingConfirmations();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Booking-confirmation run failed", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/booking-confirmations/logs", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "50", 10) || 50, 200);
+      const logs = await storage.getRecentBookingConfirmations(limit);
+      res.json(logs);
+    } catch (err: any) {
+      // Fail-soft on missing table (Postgres 42P01) — keeps the
+      // dashboard usable until `npm run db:push` runs on Railway.
+      const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err.message || "");
+      console.error(`[booking-confirmations/logs] ${missingTable ? "table missing — returning []" : err.message}`);
+      res.json([]);
     }
   });
 

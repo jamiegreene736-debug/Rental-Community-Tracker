@@ -7,6 +7,7 @@ import { startAutoApproveScheduler } from "./auto-approve";
 import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
+import { startBookingConfirmationScheduler } from "./booking-confirmations";
 
 const app = express();
 const httpServer = createServer(app);
@@ -110,6 +111,7 @@ app.use((req, res, next) => {
       startAutoReplyScheduler();
       startAvailabilityScheduler();
       startPhotoListingScheduler();
+      startBookingConfirmationScheduler();
     },
   );
 })();
