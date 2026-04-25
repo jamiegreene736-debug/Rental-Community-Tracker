@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
@@ -20,8 +20,11 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight, Bot, Flag, X,
+  ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle,
 } from "lucide-react";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { MessageTemplate } from "@shared/schema";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
@@ -295,6 +298,13 @@ function normalizeConversation(c: any): GuestyConversation & {
   displayTimestamp: string | undefined;
   isUnread: boolean;
   reservationId?: string;
+  // Indicators surfaced on the list row beside the guest name. Each
+  // flag means "host action is pending" for a different reason.
+  // Computed from the conversation/reservation stub the list endpoint
+  // already returns — no extra queries.
+  needsReply: boolean;       // unread incoming message awaits a host response
+  needsPreapprove: boolean;  // Airbnb inquiry not yet pre-approved (host has 24h)
+  phase?: "inquiry" | "request" | "booked" | "cancelled" | "other";
 } {
   const meta = c?.meta ?? {};
   const guest = c?.guest ?? meta.guest ?? {};
@@ -367,6 +377,27 @@ function normalizeConversation(c: any): GuestyConversation & {
   else if (resStatus === "request" || resStatus === "pending" || resStatus === "awaitingpayment") phase = "request";
   else if (["reserved", "confirmed", "accepted", "checked_in", "checkedin", "completed"].includes(resStatus)) phase = "booked";
 
+  // Channel detection — used by needsPreapprove. Pre-approval is an
+  // Airbnb-only concept (VRBO/Booking.com handle inquiries differently)
+  // so the indicator is gated to airbnb conversations.
+  const channelRaw =
+    (mod && (mod as any).type) ??
+    c?.integration?.platform ??
+    firstReservation?.integration?.platform ??
+    "";
+  const isAirbnb = String(channelRaw).toLowerCase().includes("airbnb");
+
+  // Pre-approval indicator: an Airbnb inquiry that hasn't been
+  // pre-approved yet. Once the host pre-approves, Guesty flips
+  // status away from "inquiry" (or sets preApproveState=true on the
+  // reservation), so checking phase + the explicit flag covers both
+  // shapes that can come back on the list endpoint stub.
+  const preApprovedFlag =
+    firstReservation?.preApproveState === true ||
+    firstReservation?.preApproved === true ||
+    String(firstReservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved";
+  const needsPreapprove = isAirbnb && phase === "inquiry" && !preApprovedFlag;
+
   return {
     ...c,
     guestName,
@@ -381,6 +412,8 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayPreview: typeof preview === "string" ? preview : "",
     displayTimestamp: timestamp,
     isUnread: !!unread,
+    needsReply: !!unread,
+    needsPreapprove,
     phase,
   };
 }
@@ -506,6 +539,10 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
   const [templateDialog, setTemplateDialog] = useState<{ open: boolean; template: Partial<MessageTemplate> | null }>({ open: false, template: null });
+  // Property filter for the conversation list — narrows the visible
+  // conversations to a single listing nickname. Defaults to "all" so
+  // nothing is hidden until the user picks a property.
+  const [propertyFilter, setPropertyFilter] = useState<string>("all");
   const threadRef = useRef<HTMLDivElement>(null);
 
   // ── Conversations ──
@@ -528,6 +565,25 @@ export default function InboxPage() {
   const conversations: GuestyConversation[] = unwrapList<GuestyConversation>(convData, [
     "conversations", "results", "data",
   ]);
+
+  // Unique listing names for the property filter dropdown. Sourced from
+  // the conversations themselves (no extra fetch) so the dropdown only
+  // ever lists properties the operator currently has conversations
+  // for — no empty options.
+  const listingOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of conversations) {
+      const name = normalizeConversation(c).displayListingName;
+      if (name && name !== "—") set.add(name);
+    }
+    return Array.from(set).sort();
+  }, [conversations]);
+
+  // Apply the property filter. "all" passes everything through.
+  const filteredConversations = useMemo(() => {
+    if (propertyFilter === "all") return conversations;
+    return conversations.filter((c) => normalizeConversation(c).displayListingName === propertyFilter);
+  }, [conversations, propertyFilter]);
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
@@ -992,10 +1048,31 @@ export default function InboxPage() {
             <div className="grid grid-cols-[280px_1fr_300px] gap-4 h-[calc(100vh-220px)] min-h-[600px]">
               {/* Conversation List */}
               <div className="border rounded-lg bg-card overflow-y-auto">
-                <div className="px-4 py-3 border-b flex items-center justify-between">
-                  <span className="text-sm font-medium">Conversations</span>
-                  {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />}
+                <div className="px-4 py-3 border-b flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium shrink-0">Conversations</span>
+                  {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
                 </div>
+                {/* Property filter — only visible when there's something to
+                    filter (>1 distinct listing). Hidden when there's a single
+                    property in the inbox so the dropdown isn't dead UI. */}
+                {listingOptions.length > 1 && (
+                  <div className="px-3 py-2 border-b">
+                    <Select value={propertyFilter} onValueChange={setPropertyFilter}>
+                      <SelectTrigger
+                        className="h-8 text-xs"
+                        data-testid="select-conversation-property-filter"
+                      >
+                        <SelectValue placeholder="All properties" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All properties</SelectItem>
+                        {listingOptions.map((p) => (
+                          <SelectItem key={p} value={p}>{p}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 {convError && !convLoading && (
                   <div className="p-6 text-center text-sm text-destructive">
                     <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-30" />
@@ -1009,7 +1086,20 @@ export default function InboxPage() {
                     No conversations yet
                   </div>
                 )}
-                {conversations.map(rawC => {
+                {!convError && conversations.length > 0 && filteredConversations.length === 0 && (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    No conversations for that property.{" "}
+                    <button
+                      className="underline text-primary"
+                      onClick={() => setPropertyFilter("all")}
+                      data-testid="button-clear-conversation-filter"
+                    >
+                      Clear filter
+                    </button>
+                  </div>
+                )}
+                <TooltipProvider>
+                {filteredConversations.map(rawC => {
                   const c = normalizeConversation(rawC);
                   const active = c._id === selectedConvId;
                   return (
@@ -1025,7 +1115,33 @@ export default function InboxPage() {
                             <User className="h-3.5 w-3.5 text-primary" />
                           </div>
                           <div className="min-w-0">
-                            <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
+                              {/* Pending-action icons. Each one means a
+                                  different host action is outstanding —
+                                  reply needed (unread incoming) and/or
+                                  pre-approval owed on an Airbnb inquiry. */}
+                              {c.needsReply && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span data-testid={`indicator-needs-reply-${c._id}`}>
+                                      <MessageCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Reply needed</TooltipContent>
+                                </Tooltip>
+                              )}
+                              {c.needsPreapprove && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span data-testid={`indicator-needs-preapprove-${c._id}`}>
+                                      <ShieldAlert className="h-3.5 w-3.5 text-red-600 shrink-0" />
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Pre-approval needed (Airbnb)</TooltipContent>
+                                </Tooltip>
+                              )}
+                            </div>
                             <p className="text-xs text-muted-foreground truncate">{c.displayListingName}</p>
                             {c.phase && c.phase !== "other" && (
                               <span
@@ -1057,6 +1173,7 @@ export default function InboxPage() {
                     </button>
                   );
                 })}
+                </TooltipProvider>
               </div>
 
               {/* Thread + Reply */}
