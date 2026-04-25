@@ -81,10 +81,17 @@ export function suggestPricingArea(city: string, state: string): string {
     return "";
   }
   if (s === "florida" || s === "fl") {
-    // Two FL keys in BUY_IN_RATES are the Orlando-area (Southern
-    // Dunes) and Windsor Hills sets. Match the cities we know
-    // those refer to; let the operator override otherwise.
-    if (/\b(haines city|davenport|kissimmee)\b/.test(c)) return "Southern Dunes";
+    // Two FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
+    // Davenport, ~15-25mi from Disney, lower buy-in) and Windsor
+    // Hills (Disney-proximate vacation-rental tier). Kissimmee is
+    // broad but most STR-eligible communities there (Caribe Cove,
+    // Windsor Palms, Windsor Hills itself) are within ~5mi of the
+    // parks, so default to Windsor Hills tier and let the operator
+    // downshift to Southern Dunes if a specific Kissimmee community
+    // is south of the 192 corridor. Earlier logic listed Kissimmee
+    // under Southern Dunes which under-priced everything closer to
+    // Disney.
+    if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
     if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
     return "";
   }
