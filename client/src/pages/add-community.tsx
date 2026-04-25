@@ -1333,7 +1333,12 @@ export default function AddCommunity() {
 
                           {/* Buy-in cost */}
                           <div className="flex flex-col">
-                            <span className="text-xs text-muted-foreground">Est. buy-in cost</span>
+                            <span
+                              className="text-xs text-muted-foreground"
+                              title="Amortized over a 7-night stay so cleaning + service fees are diluted across the week, not a single night"
+                            >
+                              Est. buy-in cost <span className="text-[10px]">(7-night avg)</span>
+                            </span>
                             <span className="font-medium text-sm">
                               ${p.estimatedUnit1Rate.toLocaleString()} + ${p.estimatedUnit2Rate.toLocaleString()}<span className="text-xs font-normal text-muted-foreground">/night</span>
                             </span>
