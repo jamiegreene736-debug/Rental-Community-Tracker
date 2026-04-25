@@ -9677,35 +9677,62 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
 
     // Expected state-change per action — we check this via GET afterward to
     // confirm Guesty actually applied the change (some endpoints return 200
-    // but ignore the field).
-    const verifyExpectations: Record<typeof action, (r: any) => boolean> = {
+    // but ignore the field). For special-offer we have no reliable field to
+    // verify; null tells the loop below to skip the verify step entirely.
+    const verifyExpectations: Record<typeof action, ((r: any) => boolean) | null> = {
       preapprove: (r) => r?.preApproveState === true || r?.status === "preApproved" || r?.status === "accepted",
       decline:    (r) => r?.status === "declined" || r?.status === "canceled",
-      "special-offer": () => true, // no reliable field to verify
+      "special-offer": null,
     };
+
+    // Verify with up to N attempts, 1s apart, to absorb Guesty's
+    // write-then-read consistency lag. Most successful writes show up
+    // on the very next GET, but the airbnb2 channel sync can take a
+    // beat — without retries we'd reject a real success as no-op and
+    // fall through to a fallback URL that "200s" without doing anything.
+    const VERIFY_TRIES = 3;
+    const VERIFY_DELAY_MS = 1000;
+    const verify = verifyExpectations[action];
 
     for (const c of candidates[action]) {
       try {
         const data = await guestyRequest(c.method, c.path, c.body ?? body);
-        // If this is a PUT/PATCH to /reservations/{id}, verify the state changed.
-        const isUpdateAttempt = (c.method === "PUT" || c.method === "PATCH") && c.path === `/reservations/${reservationId}`;
-        if (isUpdateAttempt) {
-          try {
-            const fetched = await guestyRequest("GET", `/reservations/${reservationId}`) as any;
-            if (!verifyExpectations[action](fetched)) {
-              attempts.push({
-                path: c.path,
-                method: c.method,
-                status: 200,
-                error: `${c.method} returned 200 but state did not change (still preApproveState=${fetched?.preApproveState}, status=${fetched?.status})`,
-              });
-              console.warn(`[airbnb-action] ${action} via ${c.method} ${c.path} 200 but no-op`);
-              continue;
+
+        // Verify EVERY successful candidate, not just PUT/PATCH. Earlier
+        // versions only verified PUT/PATCH to /reservations/{id}, so a
+        // POST /reservations/{id}/preapprove that returned 200 — but
+        // didn't actually flip preApproveState — propagated as
+        // success. The client then optimistically lit the green
+        // banner, refetched from Guesty, saw preApproveState still
+        // false, and reverted the UI ("button doesn't stick"). The
+        // verify-everything pass below is the contract: we only tell
+        // the client "success" when we can confirm Guesty actually
+        // applied the state change.
+        if (verify) {
+          let confirmed = false;
+          let lastFetched: any = null;
+          for (let i = 0; i < VERIFY_TRIES; i++) {
+            try {
+              lastFetched = await guestyRequest("GET", `/reservations/${reservationId}`) as any;
+              if (verify(lastFetched)) { confirmed = true; break; }
+            } catch {
+              // GET errored — wait and retry; final attempt falls through to no-op
             }
-          } catch {
-            // Couldn't verify — assume success
+            if (i < VERIFY_TRIES - 1) await new Promise((r) => setTimeout(r, VERIFY_DELAY_MS));
+          }
+
+          if (!confirmed) {
+            attempts.push({
+              path: c.path,
+              method: c.method,
+              status: 200,
+              error: `${c.method} returned 200 but state did not change after ${VERIFY_TRIES} verify attempts (preApproveState=${lastFetched?.preApproveState}, status=${lastFetched?.status})`,
+            });
+            console.warn(`[airbnb-action] ${action} via ${c.method} ${c.path} 200 but no-op (verified ${VERIFY_TRIES}x)`);
+            continue;
           }
         }
+
         console.log(`[airbnb-action] ${action} via ${c.method} ${c.path} OK`);
         return { success: true, via: `${c.method} ${c.path}`, data };
       } catch (err: any) {
