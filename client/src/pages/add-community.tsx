@@ -155,17 +155,64 @@ export default function AddCommunity() {
   const [photosLoading, setPhotosLoading] = useState(false);
   const [photoChecks, setPhotoChecks] = useState<Record<string, PhotoCheckResult | "checking">>({});
 
-  // Step 5
-  const [listing, setListing] = useState<{ title: string; description: string; combinedBedrooms: number; suggestedRate: number } | null>(null);
+  // Step 5 — extended draft shape that mirrors the existing
+  // Listing Builder's Descriptions tab plus per-unit metadata
+  // (bedding / sqft / sleeps / baths / short / long descriptions).
+  // Fields default to empty so the existing flat title/description
+  // path keeps working while the new structured fields populate
+  // alongside.
+  type UnitDraft = {
+    bedrooms: number;
+    bathrooms: string;
+    sqft: string;
+    maxGuests: number;
+    bedding: string;
+    shortDescription: string;
+    longDescription: string;
+  };
+  type ListingDraft = {
+    title: string;
+    bookingTitle?: string;
+    propertyType?: string;
+    description: string;
+    summary?: string;
+    space?: string;
+    neighborhood?: string;
+    transit?: string;
+    unitA?: UnitDraft | null;
+    unitB?: UnitDraft | null;
+    combinedBedrooms: number;
+    suggestedRate: number;
+    strPermitSample?: string;
+    warning?: string;
+  };
+  const [listing, setListing] = useState<ListingDraft | null>(null);
   const [listingLoading, setListingLoading] = useState(false);
   const [editedTitle, setEditedTitle] = useState("");
+  const [editedBookingTitle, setEditedBookingTitle] = useState("");
+  const [editedPropertyType, setEditedPropertyType] = useState<string>("Condominium");
   const [editedDescription, setEditedDescription] = useState("");
+  const [editedNeighborhood, setEditedNeighborhood] = useState("");
+  const [editedTransit, setEditedTransit] = useState("");
+  const [editedUnitA, setEditedUnitA] = useState<UnitDraft | null>(null);
+  const [editedUnitB, setEditedUnitB] = useState<UnitDraft | null>(null);
   const [strPermit, setStrPermit] = useState("");
   const [saving, setSaving] = useState(false);
 
   const combinedBedrooms = (selectedUnit1?.bedrooms ?? 0) + (selectedUnit2?.bedrooms ?? 0);
   const baseRate = (selectedUnit1?.price ?? 0) + (selectedUnit2?.price ?? 0);
-  const suggestedRate = baseRate > 0 ? Math.round(baseRate * 1.25) : 0;
+  // Suggested nightly rate targets a 20% NET margin AFTER channel
+  // costs (Airbnb takes 15.5%, the highest-volume channel for this
+  // operator). Math: sell × (1 − 0.155) − cost = 0.20 × cost
+  //                   sell = cost × 1.20 / 0.845 ≈ cost × 1.42
+  // A flat 25% markup (the prior `* 1.25`) only nets ~5% after the
+  // Airbnb fee, which is well below the 20% target Jamie wants the
+  // wizard to recommend. Display below shows the actual NET margin
+  // so the operator sees what they take home, not the gross markup.
+  const NET_MARGIN_TARGET = 0.20;
+  const AIRBNB_FEE = 0.155;
+  const SELL_MARKUP = (1 + NET_MARGIN_TARGET) / (1 - AIRBNB_FEE); // ≈ 1.42
+  const suggestedRate = baseRate > 0 ? Math.round(baseRate * SELL_MARKUP) : 0;
 
   // ── Step 2: Research ────────────────────────────────────────
   const handleResearch = useCallback(async () => {
@@ -407,14 +454,14 @@ export default function AddCommunity() {
       fetches.push(
         apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit1))
           .then((r) => r.json())
-          .then((d) => setUnit1Photos((d.photos || []).slice(0, 8))),
+          .then((d) => setUnit1Photos((d.photos || []).slice(0, 25))),
       );
     }
     if (canFetch(selectedUnit2)) {
       fetches.push(
         apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2))
           .then((r) => r.json())
-          .then((d) => setUnit2Photos((d.photos || []).slice(0, 8))),
+          .then((d) => setUnit2Photos((d.photos || []).slice(0, 25))),
       );
     }
 
@@ -473,16 +520,32 @@ export default function AddCommunity() {
         },
         suggestedRate,
       });
-      const data = await res.json();
+      const data: ListingDraft = await res.json();
       setListing(data);
       setEditedTitle(data.title || "");
+      setEditedBookingTitle(data.bookingTitle || data.title || "");
+      setEditedPropertyType(data.propertyType || "Condominium");
       setEditedDescription(data.description || "");
+      setEditedNeighborhood(data.neighborhood || "");
+      setEditedTransit(data.transit || "");
+      setEditedUnitA(data.unitA ?? null);
+      setEditedUnitB(data.unitB ?? null);
+      // Pre-fill the STR permit field with the county-aware sample
+      // template so the operator sees what format to use. Empty
+      // strPermit means we haven't pre-filled yet — don't clobber
+      // edits the operator made on a prior generate.
+      if (!strPermit && data.strPermitSample) {
+        setStrPermit(data.strPermitSample);
+      }
+      if (data.warning) {
+        toast({ title: "AI draft incomplete", description: data.warning, variant: "destructive" });
+      }
     } catch (e: any) {
       toast({ title: "Listing generation failed", description: e.message, variant: "destructive" });
     } finally {
       setListingLoading(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, toast]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, strPermit, toast]);
 
   // ── Save to dashboard ───────────────────────────────────────
   const handleSave = useCallback(async () => {
@@ -501,12 +564,32 @@ export default function AddCommunity() {
         sourceUrl: selectedCommunity.sourceUrl,
         unit1Url: selectedUnit1?.url ?? null,
         unit1Bedrooms: selectedUnit1?.bedrooms ?? null,
+        // Per-unit structured fields. Each is nullable on the
+        // schema so a draft saved before the operator filled them
+        // in (or saved with the AI fallback that doesn't produce
+        // them) keeps working.
+        unit1Bathrooms: editedUnitA?.bathrooms ?? null,
+        unit1Sqft: editedUnitA?.sqft ?? null,
+        unit1MaxGuests: editedUnitA?.maxGuests ?? null,
+        unit1Bedding: editedUnitA?.bedding ?? null,
+        unit1ShortDescription: editedUnitA?.shortDescription ?? null,
+        unit1LongDescription: editedUnitA?.longDescription ?? null,
         unit2Url: selectedUnit2?.url ?? null,
         unit2Bedrooms: selectedUnit2?.bedrooms ?? null,
+        unit2Bathrooms: editedUnitB?.bathrooms ?? null,
+        unit2Sqft: editedUnitB?.sqft ?? null,
+        unit2MaxGuests: editedUnitB?.maxGuests ?? null,
+        unit2Bedding: editedUnitB?.bedding ?? null,
+        unit2ShortDescription: editedUnitB?.shortDescription ?? null,
+        unit2LongDescription: editedUnitB?.longDescription ?? null,
         combinedBedrooms: combinedBedrooms || null,
         suggestedRate: suggestedRate || null,
         listingTitle: editedTitle || null,
+        bookingTitle: editedBookingTitle || null,
+        propertyType: editedPropertyType || null,
         listingDescription: editedDescription || null,
+        neighborhood: editedNeighborhood || null,
+        transit: editedTransit || null,
         strPermit: strPermit.trim() || null,
         status: "draft_ready",
       });
@@ -518,7 +601,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedDescription, strPermit, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1297,38 +1380,195 @@ export default function AddCommunity() {
                     <p className="text-2xl font-bold text-green-600" data-testid="text-suggested-rate" id="text-suggested-rate">${suggestedRate > 0 ? suggestedRate.toLocaleString() : listing.suggestedRate?.toLocaleString() ?? "—"}</p>
                   </Card>
                   <Card className="p-4">
-                    <p className="text-xs text-muted-foreground mb-1">Markup</p>
-                    <p className="text-2xl font-bold">25%</p>
+                    <p className="text-xs text-muted-foreground mb-1">Net margin (after Airbnb fees)</p>
+                    <p className="text-2xl font-bold">{Math.round(NET_MARGIN_TARGET * 100)}%</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Sell × (1 − {Math.round(AIRBNB_FEE * 100)}%) − cost = {Math.round(NET_MARGIN_TARGET * 100)}% net
+                    </p>
                   </Card>
                 </div>
 
-                <div className="space-y-4 mb-6">
-                  <div>
-                    <label htmlFor="input-listing-title" className="text-sm font-medium mb-1.5 block">
-                      Headline <span className="text-muted-foreground font-normal">({editedTitle.length}/80 chars)</span>
-                    </label>
-                    <Input
-                      id="input-listing-title"
-                      value={editedTitle}
-                      onChange={e => setEditedTitle(e.target.value.slice(0, 80))}
-                      className="font-medium"
-                      data-testid="input-listing-title"
-                      aria-label="Listing headline"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="textarea-listing-description" className="text-sm font-medium mb-1.5 block">Description</label>
-                    <Textarea
-                      id="textarea-listing-description"
-                      value={editedDescription}
-                      onChange={e => setEditedDescription(e.target.value)}
-                      rows={16}
-                      className="font-mono text-xs leading-relaxed resize-y"
-                      data-testid="textarea-listing-description"
-                      aria-label="Listing description"
-                    />
-                  </div>
-                  <div>
+                <div className="space-y-5 mb-6">
+                  {/* ── Listing identity ──────────────────────── */}
+                  <Card className="p-4 space-y-4">
+                    <div>
+                      <label htmlFor="input-listing-title" className="text-sm font-medium mb-1.5 block">
+                        Headline <span className="text-muted-foreground font-normal">({editedTitle.length}/80 chars · Airbnb truncates at 50)</span>
+                      </label>
+                      <Input
+                        id="input-listing-title"
+                        value={editedTitle}
+                        onChange={e => setEditedTitle(e.target.value.slice(0, 80))}
+                        className="font-medium"
+                        data-testid="input-listing-title"
+                        aria-label="Listing headline"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="input-booking-title" className="text-sm font-medium mb-1.5 block">
+                        Booking.com / VRBO Title <span className="text-muted-foreground font-normal">({editedBookingTitle.length}/110 chars)</span>
+                      </label>
+                      <Input
+                        id="input-booking-title"
+                        value={editedBookingTitle}
+                        onChange={e => setEditedBookingTitle(e.target.value.slice(0, 110))}
+                        className="font-medium"
+                        data-testid="input-booking-title"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="select-property-type" className="text-sm font-medium mb-1.5 block">Property Type</label>
+                      <Select value={editedPropertyType} onValueChange={setEditedPropertyType}>
+                        <SelectTrigger id="select-property-type" data-testid="select-property-type">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {["Condominium", "Townhouse", "House", "Villa", "Apartment", "Estate", "Cottage", "Bungalow", "Loft"].map(t => (
+                            <SelectItem key={t} value={t}>{t}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </Card>
+
+                  {/* ── Description (combined / Airbnb summary) ── */}
+                  <Card className="p-4 space-y-4">
+                    <div>
+                      <label htmlFor="textarea-listing-description" className="text-sm font-medium mb-1.5 block">
+                        Combined Listing Description
+                        <span className="text-muted-foreground font-normal ml-2">— rendered as the main listing body</span>
+                      </label>
+                      <Textarea
+                        id="textarea-listing-description"
+                        value={editedDescription}
+                        onChange={e => setEditedDescription(e.target.value)}
+                        rows={14}
+                        className="font-mono text-xs leading-relaxed resize-y"
+                        data-testid="textarea-listing-description"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="textarea-neighborhood" className="text-sm font-medium mb-1.5 block">The Neighborhood</label>
+                      <Textarea
+                        id="textarea-neighborhood"
+                        value={editedNeighborhood}
+                        onChange={e => setEditedNeighborhood(e.target.value)}
+                        rows={5}
+                        className="text-sm leading-relaxed"
+                        placeholder="What's around the property — beaches, dining, shops, vibe."
+                        data-testid="textarea-neighborhood"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="textarea-transit" className="text-sm font-medium mb-1.5 block">Getting Around</label>
+                      <Textarea
+                        id="textarea-transit"
+                        value={editedTransit}
+                        onChange={e => setEditedTransit(e.target.value)}
+                        rows={4}
+                        className="text-sm leading-relaxed"
+                        placeholder="Distance to airport, rental car notes, rideshare availability."
+                        data-testid="textarea-transit"
+                      />
+                    </div>
+                  </Card>
+
+                  {/* ── Per-unit details (Unit A / Unit B) ──── */}
+                  {[
+                    { key: "A", state: editedUnitA, setState: setEditedUnitA, brFallback: selectedUnit1?.bedrooms ?? 0 },
+                    { key: "B", state: editedUnitB, setState: setEditedUnitB, brFallback: selectedUnit2?.bedrooms ?? 0 },
+                  ].map(({ key, state, setState, brFallback }) => {
+                    const unit = state ?? {
+                      bedrooms: brFallback,
+                      bathrooms: "",
+                      sqft: "",
+                      maxGuests: brFallback * 2,
+                      bedding: "",
+                      shortDescription: "",
+                      longDescription: "",
+                    };
+                    const update = (patch: Partial<UnitDraft>) => setState({ ...unit, ...patch });
+                    return (
+                      <Card key={key} className="p-4 space-y-3" data-testid={`unit-${key}-card`}>
+                        <div className="flex items-center gap-2">
+                          <Building2 className="h-4 w-4 text-primary" />
+                          <h3 className="font-semibold text-sm">Unit {key} — {unit.bedrooms}BR</h3>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                          <div>
+                            <label className="text-xs font-medium mb-1 block">Bedrooms</label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={unit.bedrooms}
+                              onChange={e => update({ bedrooms: Number(e.target.value) || 0 })}
+                              data-testid={`input-unit-${key}-bedrooms`}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium mb-1 block">Bathrooms</label>
+                            <Input
+                              value={unit.bathrooms}
+                              onChange={e => update({ bathrooms: e.target.value })}
+                              placeholder="2"
+                              data-testid={`input-unit-${key}-bathrooms`}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium mb-1 block">Sqft</label>
+                            <Input
+                              value={unit.sqft}
+                              onChange={e => update({ sqft: e.target.value })}
+                              placeholder="~1,200"
+                              data-testid={`input-unit-${key}-sqft`}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium mb-1 block">Sleeps</label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={unit.maxGuests}
+                              onChange={e => update({ maxGuests: Number(e.target.value) || 0 })}
+                              data-testid={`input-unit-${key}-max-guests`}
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium mb-1 block">Bedding</label>
+                          <Input
+                            value={unit.bedding}
+                            onChange={e => update({ bedding: e.target.value })}
+                            placeholder="King master, Queen second bedroom, Twin third, queen sleeper sofa"
+                            data-testid={`input-unit-${key}-bedding`}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium mb-1 block">Short Description</label>
+                          <Input
+                            value={unit.shortDescription}
+                            onChange={e => update({ shortDescription: e.target.value })}
+                            placeholder="One-sentence highlight."
+                            data-testid={`input-unit-${key}-short-desc`}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium mb-1 block">Long Description</label>
+                          <Textarea
+                            value={unit.longDescription}
+                            onChange={e => update({ longDescription: e.target.value })}
+                            rows={6}
+                            className="text-sm leading-relaxed"
+                            placeholder="Layout, beds, key amenities, why a family/group would love this unit."
+                            data-testid={`textarea-unit-${key}-long-desc`}
+                          />
+                        </div>
+                      </Card>
+                    );
+                  })}
+
+                  {/* ── STR Permit ────────────────────────────── */}
+                  <Card className="p-4">
                     <label htmlFor="input-str-permit" className="text-sm font-medium mb-1.5 block">
                       STR Permit Number
                       <span className="text-muted-foreground font-normal ml-2">— Obtain from county once property is secured</span>
@@ -1337,7 +1577,7 @@ export default function AddCommunity() {
                       id="input-str-permit"
                       value={strPermit}
                       onChange={e => setStrPermit(e.target.value)}
-                      placeholder="e.g. TVR-2024-012 or TVNC-0342"
+                      placeholder={listing.strPermitSample ?? "e.g. TVR-2024-012 or TVNC-0342"}
                       className="font-mono"
                       data-testid="input-str-permit"
                     />
@@ -1351,7 +1591,7 @@ export default function AddCommunity() {
                         <span><span className="font-mono font-semibold">NUC-##-###-####</span> — Honolulu (Oahu)</span>
                       </div>
                     </div>
-                  </div>
+                  </Card>
                 </div>
 
                 <div className="flex items-center gap-3">

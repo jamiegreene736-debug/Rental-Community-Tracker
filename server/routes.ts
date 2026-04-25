@@ -9553,37 +9553,112 @@ This listing combines two separate, individually owned units within the same com
 
 ---`;
 
+    // STR permit format suggestion based on city / state. Each
+    // Hawaii county has its own license naming convention; we drop a
+    // template the operator can fill in once they have the real
+    // permit. Falls back to a generic placeholder for non-HI markets.
+    const strPermitSample = (() => {
+      const c = (city || "").toLowerCase();
+      const s = (state || "").toLowerCase();
+      if (s.includes("hawaii") || s === "hi") {
+        // Maui County (Maui island)
+        if (/(kihei|wailea|lahaina|kaanapali|kapalua|hana|paia|kahului|wailuku|makawao)/i.test(c)) {
+          return "STRH-XXXXXXXX (sample — replace with real Maui County permit)";
+        }
+        // Hawaii County (Big Island)
+        if (/(kona|kailua-kona|hilo|waimea|kohala|keauhou|waikoloa|volcano)/i.test(c)) {
+          return "STVR-YYYY-XXXXXX (sample — replace with real Hawaii County permit)";
+        }
+        // Honolulu County (Oahu)
+        if (/(honolulu|waikiki|kailua|haleiwa|aiea|pearl|ko olina|koolina|kaneohe|laie)/i.test(c)) {
+          return "NUC-XX-XXX-XXXX (sample — replace with real Honolulu permit)";
+        }
+        // Kauai County — VDA zones (Poipu / Princeville) use TVR;
+        // non-VDA / residential zones (Kekaha, Kapaa) use TVNC.
+        if (/(poipu|princeville|koloa|kalaheo)/i.test(c)) {
+          return "TVR-YYYY-XX (sample — replace with real Kauai VDA permit)";
+        }
+        if (/(kapaa|kekaha|lihue|wailua|hanalei|anini)/i.test(c)) {
+          return "TVNC-XXXX (sample — replace with real Kauai TVNC permit)";
+        }
+        return "TVR-YYYY-XX or TVNC-XXXX (sample — confirm permit type with the right HI county)";
+      }
+      return "STR-XXXX (sample — replace with the actual short-term rental permit number for this county)";
+    })();
+
     if (!anthropicKey) {
       const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
       const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. Unit 1 is a ${unit1.bedrooms}-bedroom residence and Unit 2 is a ${unit2.bedrooms}-bedroom residence, totaling ${combinedBedrooms} bedrooms. ${walk.description} Guests receive separate access codes for each unit at check-in.`;
-      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate, walk });
+      return res.json({
+        title: fallbackTitle,
+        bookingTitle: fallbackTitle,
+        propertyType: "Condominium",
+        description: fallbackDescription,
+        summary: "",
+        space: fallbackDescription,
+        neighborhood: "",
+        transit: "",
+        unitA: null,
+        unitB: null,
+        combinedBedrooms,
+        suggestedRate,
+        walk,
+        strPermitSample,
+      });
     }
 
-    const prompt = `Generate a VRBO-ready vacation rental listing for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
+    // Structured-output prompt. Mirrors the fields the existing
+    // Listing Builder's "Descriptions" tab pushes to Guesty (title,
+    // summary, space, neighborhood, transit, …) plus the per-unit
+    // metadata that Listing Builder's bedding/units tabs need
+    // (bedrooms / bathrooms / sqft / sleeps / bedding text). Output
+    // shape lines up with `unit-builder-data.ts` so this draft can
+    // graduate into a real property entry without reformatting.
+    const disclosureForPrompt = DISCLOSURE.replace(/\n/g, "\\n").replace(/"/g, '\\"');
+    const prompt = `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
 
-The listing combines:
-- Unit 1: ${unit1.bedrooms}-bedroom unit at ${communityName}
-- Unit 2: ${unit2.bedrooms}-bedroom unit at ${communityName}
-- Combined total: ${combinedBedrooms} bedrooms
-- Suggested nightly rate: $${suggestedRate}
-- Walking distance between units: ${walk.description} (${walk.source})
+CONTEXT
+- Unit A: ${unit1.bedrooms}-bedroom unit at ${communityName}${unit1.url ? ` (source: ${unit1.url})` : ""}
+- Unit B: ${unit2.bedrooms}-bedroom unit at ${communityName}${unit2.url ? ` (source: ${unit2.url})` : ""}
+- Combined total: ${combinedBedrooms} bedrooms across two separate units
+- Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
 
-Requirements:
-1. HEADLINE: Max 80 characters, VRBO-compliant, exciting and descriptive
-2. DESCRIPTION: Must start with this EXACT disclosure block (copy it verbatim):
+OUTPUT — return ONLY valid JSON with this exact shape:
 
-${DISCLOSURE}
+{
+  "title": "Headline, max 80 chars, evocative, no all-caps",
+  "bookingTitle": "Slightly longer headline up to 110 chars for booking.com / VRBO",
+  "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
+  "summary": "Single paragraph (2-3 sentences) introducing the property. Lead with the strongest selling point.",
+  "space": "1-2 paragraphs describing the combined property — bedroom count across both units, what guests get, why it works for a large group. MUST start with this exact disclosure block, copied verbatim:\\n\\n${disclosureForPrompt}\\n\\nThen continue with the body. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance.",
+  "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
+  "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
+  "unitA": {
+    "bedrooms": ${unit1.bedrooms},
+    "bathrooms": "Estimated bathroom count for a ${unit1.bedrooms}BR vacation condo at this complex — return as a string like \\"2\\" or \\"2.5\\"",
+    "sqft": "Estimated square footage range like \\"~1,200\\" or \\"~1,500\\"",
+    "maxGuests": "Number — how many people can comfortably sleep here, sofa beds counted",
+    "bedding": "Concrete bedding plan: e.g. \\"King master, Queen second bedroom, Twin third bedroom, queen sleeper sofa in living area\\". One sentence.",
+    "shortDescription": "1 sentence describing this unit specifically — what stands out.",
+    "longDescription": "2-3 paragraphs describing this unit in detail. Layout, beds, key amenities."
+  },
+  "unitB": {
+    "bedrooms": ${unit2.bedrooms},
+    "bathrooms": "...",
+    "sqft": "...",
+    "maxGuests": ...,
+    "bedding": "...",
+    "shortDescription": "...",
+    "longDescription": "..."
+  }
+}
 
-Then follow with:
-- Engaging community/location highlights (2-3 paragraphs)
-- Bedroom and bathroom breakdown for both units
-- A sentence noting the walking distance between the two units, using the exact phrasing provided above (do not make up a different number)
-- Key amenities
-- Local attractions
-
-Keep the total description under 800 words. Write for VRBO. Be specific about ${city}, ${state}.
-
-Return ONLY valid JSON: {"title": "...", "description": "..."}`;
+CONSTRAINTS
+- Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
+- Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
+- The "space" field MUST start with the disclosure block exactly as given.
+- Plain text only inside the strings. No Markdown. No bullet markers. No headers.
+- Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -9594,24 +9669,93 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 2000,
+          // Sonnet 4.6 — handles this richer JSON-shape task with
+          // long prose better than Haiku, and this endpoint runs
+          // once per community (not in a hot loop). Previous ID
+          // `claude-3-5-sonnet-20241022` is the legacy alias every
+          // other endpoint had to migrate off of (PRs #97/98/99/103);
+          // the same fix unblocks this endpoint too — without it
+          // the catch block silently swallowed errors and Step 5
+          // displayed the bare 2-line fallback Jamie was seeing.
+          model: "claude-sonnet-4-6",
+          max_tokens: 4000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
 
-      const claudeData = await claudeResp.json() as any;
-      const text: string = claudeData?.content?.[0]?.text ?? "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON in Claude response");
+      const claudeData = await claudeResp.json().catch(() => null) as any;
 
-      const { title, description } = JSON.parse(jsonMatch[0]);
-      return res.json({ title: title.slice(0, 80), description, combinedBedrooms, suggestedRate, walk });
+      if (!claudeResp.ok) {
+        const upstreamMsg = claudeData?.error?.message ?? claudeData?.error?.type ?? `HTTP ${claudeResp.status}`;
+        throw new Error(`Anthropic ${claudeResp.status}: ${upstreamMsg}`);
+      }
+      if (claudeData?.error) {
+        throw new Error(`Anthropic error: ${claudeData.error.message ?? claudeData.error.type ?? "unknown"}`);
+      }
+
+      const text: string = claudeData?.content?.[0]?.text ?? "";
+      // Tolerate ```json fences — Sonnet sometimes wraps despite
+      // the no-Markdown instruction. Strip them before regex-matching.
+      const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error(`[community/generate-listing] No JSON in Claude response. Head: ${text.slice(0, 200)}`);
+        throw new Error("No JSON in Claude response");
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Compose the flat description (used by the Description
+      // textarea on Step 5 and stored in `listingDescription`) by
+      // gluing the structured fields in reading order. The Step 5
+      // form ALSO surfaces each field individually below so the
+      // operator can edit them per-section, but the flat one stays
+      // so the existing `Save → CommunityDraft` path keeps working
+      // unchanged.
+      const description = [
+        parsed.summary?.trim(),
+        parsed.space?.trim(),
+        parsed.neighborhood ? `THE NEIGHBORHOOD\n\n${parsed.neighborhood.trim()}` : null,
+        parsed.transit ? `GETTING AROUND\n\n${parsed.transit.trim()}` : null,
+      ].filter(Boolean).join("\n\n");
+
+      return res.json({
+        title: String(parsed.title ?? "").slice(0, 80),
+        bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 110),
+        propertyType: parsed.propertyType ?? "Condominium",
+        description,
+        summary: parsed.summary ?? "",
+        space: parsed.space ?? "",
+        neighborhood: parsed.neighborhood ?? "",
+        transit: parsed.transit ?? "",
+        unitA: parsed.unitA ?? null,
+        unitB: parsed.unitB ?? null,
+        combinedBedrooms,
+        suggestedRate,
+        walk,
+        strPermitSample,
+      });
     } catch (e: any) {
       console.warn("[community/generate-listing] Claude error:", e.message);
       const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
       const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. ${walk.description}`;
-      return res.json({ title: fallbackTitle, description: fallbackDescription, combinedBedrooms, suggestedRate, walk });
+      return res.json({
+        title: fallbackTitle,
+        bookingTitle: fallbackTitle,
+        propertyType: "Condominium",
+        description: fallbackDescription,
+        summary: "",
+        space: fallbackDescription,
+        neighborhood: "",
+        transit: "",
+        unitA: null,
+        unitB: null,
+        combinedBedrooms,
+        suggestedRate,
+        walk,
+        strPermitSample,
+        warning: `AI draft generation failed (${e.message}). Edit the fields below directly.`,
+      });
     }
   });
 
