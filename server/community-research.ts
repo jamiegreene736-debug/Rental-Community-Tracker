@@ -134,18 +134,47 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 3000,
+          // Haiku 4.5 — current model, fast, structured-JSON friendly.
+          // Previous ID `claude-3-5-sonnet-20241022` is a legacy alias
+          // that Anthropic was returning errors for, which silently
+          // emptied this endpoint's response (every market reported
+          // "0 qualifying" — see /api/inbox/ai-draft for the same
+          // migration). Bumped max_tokens to 4000 because the JSON
+          // output for a market with multiple communities can run
+          // long and the old 3000 truncated mid-array.
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 4000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
 
-      if (claudeResp.ok) {
-        const claudeData = await claudeResp.json() as any;
+      const claudeData = await claudeResp.json().catch(() => null) as any;
+
+      if (!claudeResp.ok) {
+        const upstreamMsg =
+          claudeData?.error?.message ??
+          claudeData?.error?.type ??
+          `HTTP ${claudeResp.status}`;
+        console.error(`[research] Anthropic ${claudeResp.status} for ${city}, ${state}: ${upstreamMsg}`);
+      } else if (claudeData?.error) {
+        const upstreamMsg = claudeData.error.message ?? claudeData.error.type ?? "unknown";
+        console.error(`[research] Anthropic error envelope for ${city}, ${state}: ${upstreamMsg}`);
+      } else {
         const text: string = claudeData?.content?.[0]?.text ?? "";
-        const jsonMatch = text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          const scored = JSON.parse(jsonMatch[0]) as Array<any>;
+        // Tolerate Markdown fences around the JSON — Haiku occasionally
+        // wraps array output in ```json … ``` despite the "no markdown"
+        // instruction. Strip the fences before regex-matching the array.
+        const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
+        const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+        if (!jsonMatch) {
+          console.error(`[research] Claude returned no JSON array for ${city}, ${state}. Raw text head: ${text.slice(0, 200)}`);
+        } else {
+          let scored: Array<any> = [];
+          try {
+            scored = JSON.parse(jsonMatch[0]) as Array<any>;
+          } catch (parseErr: any) {
+            console.error(`[research] JSON.parse failed for ${city}, ${state}: ${parseErr.message}. Head: ${jsonMatch[0].slice(0, 200)}`);
+          }
           for (const s of scored.slice(0, 10)) {
             // Hard post-filter. The prompt warns against villas/SFH, but
             // Claude occasionally lets one through. Drop anything whose
@@ -175,7 +204,7 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         }
       }
     } catch (e: any) {
-      console.warn(`[research] Claude error for ${city}:`, e.message);
+      console.error(`[research] Claude exception for ${city}, ${state}: ${e.message}`);
     }
   } else {
     // No Claude — fall back to raw results (low-confidence)
