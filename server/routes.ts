@@ -1627,6 +1627,29 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/guesty-property-map — connect a propertyId (positive for
+  // hardcoded units, negative `-draftId` for promoted drafts) to an
+  // existing Guesty listing. Idempotent: re-POSTing for the same
+  // propertyId rewrites the mapping. Used by the dashboard's "Connect
+  // to Guesty" action on the gray G-dot.
+  app.post("/api/guesty-property-map", async (req, res) => {
+    try {
+      const { propertyId, guestyListingId } = req.body as {
+        propertyId?: unknown; guestyListingId?: unknown;
+      };
+      if (typeof propertyId !== "number" || !Number.isInteger(propertyId)) {
+        return res.status(400).json({ error: "propertyId (integer) required" });
+      }
+      if (typeof guestyListingId !== "string" || !guestyListingId.trim()) {
+        return res.status(400).json({ error: "guestyListingId (non-empty string) required" });
+      }
+      const row = await storage.upsertGuestyPropertyMap(propertyId, guestyListingId.trim());
+      res.json(row);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to upsert Guesty property map", message: err.message });
+    }
+  });
+
   // GET /api/dashboard/channel-status
   //
   // Returns per-propertyId channel status for every mapped property in one
