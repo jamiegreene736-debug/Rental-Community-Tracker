@@ -380,37 +380,47 @@ export default function AddCommunity() {
     setUnit2Photos([]);
     setPhotoChecks({});
 
-    // Algorithm-suggested pairings (the "3BR + 3BR" combinations
-    // shown on Step 3) are theoretical bedroom matches — they don't
-    // carry a specific MLS source URL because no real per-unit
-    // listing was picked. Calling /fetch-unit-photos with an empty
-    // URL legitimately 400s ("url required") on the server, which
-    // showed up as a confusing red toast even though the empty
-    // state on this page already handles the "no photos to load"
-    // case gracefully ("Photos could not be fetched from Zillow
-    // automatically. You can proceed to generate the listing draft
-    // anyway."). Skip the fetch when there's no URL to fetch — and
-    // only toast on REAL errors (URL present, server returned
-    // failure).
+    // Two call shapes for /fetch-unit-photos:
+    //   - Direct: pass `url` when the user picked a specific Zillow
+    //     listing on Step 3.
+    //   - Discovery: when the unit came from an algorithm-suggested
+    //     pairing (no URL), pass community + bedrooms so the server
+    //     can search Zillow for a real listing matching the
+    //     community + BR count and scrape its photos. Either way
+    //     the response is `{ photos, sourceUrl, foundVia }`.
+    //
+    // We only short-circuit to the empty state when neither path
+    // can run (no URL AND insufficient community info to search).
+    const buildBody = (u: UnitResult) =>
+      u.url
+        ? { url: u.url }
+        : {
+            communityName: selectedCommunity?.name,
+            city: selectedCommunity?.city,
+            state: selectedCommunity?.state,
+            bedrooms: u.bedrooms ?? undefined,
+          };
+    const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && u.bedrooms));
+
     const fetches: Array<Promise<void>> = [];
-    if (selectedUnit1.url) {
+    if (canFetch(selectedUnit1)) {
       fetches.push(
-        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit1.url })
+        apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit1))
           .then((r) => r.json())
           .then((d) => setUnit1Photos((d.photos || []).slice(0, 8))),
       );
     }
-    if (selectedUnit2.url) {
+    if (canFetch(selectedUnit2)) {
       fetches.push(
-        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit2.url })
+        apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2))
           .then((r) => r.json())
           .then((d) => setUnit2Photos((d.photos || []).slice(0, 8))),
       );
     }
 
     if (fetches.length === 0) {
-      // Both units are virtual algorithm pairings — nothing to fetch.
-      // The UI's empty state is the correct outcome here.
+      // Nothing we can fetch with — neither a URL nor enough
+      // community info to search. The page's empty state covers it.
       setPhotosLoading(false);
       return;
     }
@@ -422,7 +432,7 @@ export default function AddCommunity() {
     } finally {
       setPhotosLoading(false);
     }
-  }, [selectedUnit1, selectedUnit2, toast]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, toast]);
 
   // Run platform check on a photo URL
   const checkPhoto = useCallback(async (imageUrl: string) => {
