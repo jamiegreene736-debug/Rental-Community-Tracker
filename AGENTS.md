@@ -219,23 +219,45 @@ established it so you can read the rationale in the commit message.
     `computeQualityScore` (via `{ ...p, community: p.pricingArea }`),
     and `communityVariant` all read `pricingArea`. See PR #93.
 
-22. **Dashboard Photo Match column drops folders whose
+22. ~~**Dashboard Photo Match column drops folders whose
     `unitHintFromFolder` doesn't equal the unit's current
-    `unitNumber`.** In `home.tsx` `photoByProperty`, a unit folder
-    only feeds the property-level aggregation when the trailing
-    alphanumeric of `unit.unitNumber` matches the folder's hint.
-    The scanner uses the folder hint to verify Lens hits, so a
-    stale folder name (e.g. `kaha-lani-109` for a unit now numbered
-    339 / unit-swapped to 122) flags real but irrelevant
-    Airbnb/VRBO/Booking listings for the OLD unit, while the
-    pre-flight check — keyed off the current unit number — correctly
-    says "Not Found." On prop 23 the two surfaces disagreed for
-    exactly this reason. The scanner itself is unchanged; it still
-    scans these folders and writes rows. Long-term fix is renaming
-    folders to track unit numbers (touches DB photo-label rows,
-    `unit-builder-data`, photo URLs, and the on-disk paths under
-    `/app/client/public/photos/`); until that's done, this filter
-    prevents red-badge ghosts on the dashboard. See PR #93.
+    `unitNumber`.**~~ **Replaced in PR #95.** The dashboard-side
+    staleness filter introduced in PR #93 was a band-aid over a
+    scanner that verified Lens hits against the folder-name hint
+    (e.g. `kaha-lani-109` → "109"). Removed in favour of moving
+    the canonical unit identity into `shared/folder-unit-map.ts`'s
+    `FOLDER_UNIT_TOKENS` (see #23). The dashboard now trusts the
+    scanner output again.
+
+23. **Photo-listing scanner verifies Lens hits against
+    `FOLDER_UNIT_TOKENS`, not the folder-name hint.** Each
+    scannable folder in `shared/folder-unit-map.ts` maps to a list
+    of unit-number tokens — usually the unit numbers from
+    `unit-builder-data`, with single-letter IDs ("A"/"B") dropped
+    because they false-positive on Google snippets. Verification
+    accepts a Lens hit when the matched listing's page mentions
+    ANY of the listed tokens. This handles three real-world cases
+    the prior folder-hint approach choked on:
+    - **Folder names that have drifted** — `kaha-lani-109` is the
+      photo folder for a unit now claimed as 339; verification
+      targets 339, not 109, so listings for the OLD 109 unit are
+      correctly rejected.
+    - **Shared folders** — `unit-114` is claimed by props 1, 9,
+      AND 27. The map lists every claiming unit's tokens; a match
+      against any one of them counts.
+    - **Placeholder folders without a digit hint** —
+      `pili-mai-unit-a/b` hold Pili Mai photos. Building numbers
+      from "Building 38" / "Building 10" / etc. become the
+      verification tokens, so the folders enter the scan universe
+      for the first time.
+    `isScannableFolder` consults the map first, then falls back to
+    the folder-name hint, so the dashboard aggregation in
+    `home.tsx`→`photoByProperty` stays in lockstep with what the
+    scanner actually scans. **Adding a new property requires
+    adding the folder to `FOLDER_UNIT_TOKENS`** so the scanner has
+    tokens to verify against — otherwise the folder falls through
+    to the hint-based legacy path or is treated as unscannable.
+    See PR #95.
 
 ## Conventions
 
