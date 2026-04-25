@@ -789,11 +789,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // ties to TMK / GE / TAT / per-county STR; Florida ties to DBPR
   // VR License / Sales Tax / County TDT / LBTR. Detect from the
   // address rather than from a separate flag so the labels stay
-  // in sync with whatever location the operator typed.
+  // in sync with whatever location the operator typed. The
+  // `address` field on GuestyPropertyData is an object
+  // ({full, city, state, …}) — earlier revision treated it as a
+  // string and crashed the page with "X.toLowerCase is not a
+  // function" on every render. Read .state first when present
+  // (cheapest, most accurate); fall back to scanning .full.
   const complianceLabels = useMemo(() => {
-    const addr = (effectivePropertyData?.address ?? "").toLowerCase();
-    const isHawaii  = /\b(hawaii|hi)\b/.test(addr) || addr.includes(", hi ") || addr.endsWith(", hi");
-    const isFlorida = /\b(florida|fl)\b/.test(addr) || addr.includes(", fl ") || addr.endsWith(", fl");
+    const addr = effectivePropertyData?.address;
+    const stateField = (typeof addr === "object" && addr ? (addr as any).state : "") ?? "";
+    const fullField = (typeof addr === "object" && addr ? (addr as any).full : (typeof addr === "string" ? addr : "")) ?? "";
+    const blob = `${stateField} ${fullField}`.toLowerCase();
+    const isHawaii  = /\b(hawaii|hi)\b/.test(blob);
+    const isFlorida = /\b(florida|fl)\b/.test(blob);
     if (isFlorida) {
       return {
         title1: "DBPR Vacation Rental License",
