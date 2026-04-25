@@ -28,7 +28,7 @@ import type { CommunityDraft } from "@shared/schema";
 //
 // Florida re-uses the same four UI fields for the Florida vacation-
 // rental compliance stack (the field labels are state-aware in the
-// builder — see complianceLabelsForState there):
+// builder — see complianceLabels there):
 //   - field 1 (TMK slot)  → DBPR Vacation Rental License
 //   - field 2 (GE slot)   → Florida DOR Sales Tax Certificate
 //   - field 3 (TAT slot)  → County Tourist Development Tax account
