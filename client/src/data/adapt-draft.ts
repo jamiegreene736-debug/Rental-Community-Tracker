@@ -14,6 +14,41 @@ import { type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
 
+// Sample license placeholders for promoted drafts. Active properties
+// in unit-builder-data have hand-curated TMK / GE / TAT / STR values;
+// the wizard doesn't collect them, so the builder's Compliance &
+// Registration card was rendering all four fields blank for promoted
+// drafts — operator complaint: "nothing inserted for sample license
+// data". Insert state-aware placeholders so the operator sees the
+// expected format and replaces with the real values before pushing
+// to Guesty.
+//
+// Hawaii uses TMK (parcel id) + GE (general excise tax) + TAT
+// (transient accom. tax) + STR (per-county permit). Florida only
+// has the STR permit at the county level (Osceola etc.) — TMK / GE /
+// TAT don't apply, but the builder UI still renders those labels so
+// we drop a "(N/A — Florida)" hint rather than leaving them blank.
+type LicenseSamples = {
+  taxMapKey: string;
+  getLicense: string;
+  tatLicense: string;
+};
+function sampleLicensesForState(state: string): LicenseSamples {
+  const s = (state || "").toLowerCase();
+  if (s === "hawaii" || s === "hi") {
+    return {
+      taxMapKey: "XXXXXXXXXXXX (sample — replace with the 12-digit TMK)",
+      getLicense: "GE-XXX-XXX-XXXX-XX (sample — replace with GE Tax license)",
+      tatLicense: "TA-XXX-XXX-XXXX-XX (sample — replace with TAT Tax license)",
+    };
+  }
+  return {
+    taxMapKey: "(N/A — Hawaii TMK only)",
+    getLicense: "(N/A — Hawaii GE Tax only)",
+    tatLicense: "(N/A — Hawaii TAT Tax only)",
+  };
+}
+
 export function adaptDraftToPropertyUnitBuilder(
   draft: CommunityDraft,
   photoFiles: Record<string, string[]> = {},
@@ -21,6 +56,7 @@ export function adaptDraftToPropertyUnitBuilder(
   const u1Br = draft.unit1Bedrooms ?? 2;
   const u2Br = draft.unit2Bedrooms ?? 2;
   const blank = "";
+  const licenseSamples = sampleLicensesForState(draft.state);
   const filesToPhotos = (folder: string | null | undefined) => {
     if (!folder) return [];
     const files = photoFiles[folder] ?? [];
@@ -46,9 +82,9 @@ export function adaptDraftToPropertyUnitBuilder(
     propertyType: draft.propertyType ?? "Condominium",
     neighborhood: draft.neighborhood ?? blank,
     transit: draft.transit ?? blank,
-    taxMapKey: blank,
-    tatLicense: blank,
-    getLicense: blank,
+    taxMapKey: licenseSamples.taxMapKey,
+    tatLicense: licenseSamples.tatLicense,
+    getLicense: licenseSamples.getLicense,
     strPermit: draft.strPermit ?? blank,
     hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
                  (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,

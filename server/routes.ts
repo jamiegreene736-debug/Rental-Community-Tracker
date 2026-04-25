@@ -9858,11 +9858,15 @@ export async function registerRoutes(
       ? await walkBetween(unit1.address, unit2.address, communityName).catch(() => fallbackWalkForResort(communityName))
       : fallbackWalkForResort(communityName);
 
-    const DISCLOSURE = `⚠️ IMPORTANT DISCLOSURE
-
-This listing combines two separate, individually owned units within the same community. The photos shown are representative of the unit type, quality, and bedroom count within this community — the exact unit assigned may differ but will be of equivalent size, finishes, and bedroom count. Guests will receive two separate unit keys/access codes at check-in. Both units are located within the same building cluster or immediate community grounds.
-
----`;
+    // The builder UI auto-prepends a soft "Please note: this listing
+    // combines two units…" disclaimer (LISTING_DISCLOSURE in
+    // unit-builder-data.ts) when assembling the summary it pushes to
+    // Guesty. So this endpoint must NOT include any disclosure block
+    // in the summary / space fields it returns — earlier prompt did,
+    // and the result was Caribe Cove showing the disclaimer 3 times
+    // (auto-prepend + Claude-written soft version in summary +
+    // formal block embedded in space). Keep summary/space free of
+    // disclaimer language; the auto-prepend handles it.
 
     // STR permit format suggestion based on city / state. Each
     // Hawaii county has its own license naming convention; we drop a
@@ -9898,8 +9902,8 @@ This listing combines two separate, individually owned units within the same com
     })();
 
     if (!anthropicKey) {
-      const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
-      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. Unit 1 is a ${unit1.bedrooms}-bedroom residence and Unit 2 is a ${unit2.bedrooms}-bedroom residence, totaling ${combinedBedrooms} bedrooms. ${walk.description} Guests receive separate access codes for each unit at check-in.`;
+      const fallbackTitle = `${communityName} ${combinedBedrooms}BR for ${combinedBedrooms * 2}!`.slice(0, 50);
+      const fallbackDescription = `Two condos at ${communityName} in ${city}, ${state}. Unit A is ${unit1.bedrooms}BR, Unit B is ${unit2.bedrooms}BR — ${combinedBedrooms}BR combined. ${walk.description} Guests receive separate access codes per unit at check-in.`;
       return res.json({
         title: fallbackTitle,
         bookingTitle: fallbackTitle,
@@ -9925,7 +9929,7 @@ This listing combines two separate, individually owned units within the same com
     // (bedrooms / bathrooms / sqft / sleeps / bedding text). Output
     // shape lines up with `unit-builder-data.ts` so this draft can
     // graduate into a real property entry without reformatting.
-    const disclosureForPrompt = DISCLOSURE.replace(/\n/g, "\\n").replace(/"/g, '\\"');
+    const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
     const prompt = `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
 
 CONTEXT
@@ -9937,11 +9941,11 @@ CONTEXT
 OUTPUT — return ONLY valid JSON with this exact shape:
 
 {
-  "title": "Headline, max 80 chars, evocative, no all-caps",
-  "bookingTitle": "Slightly longer headline up to 110 chars for booking.com / VRBO",
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Beautiful 4BR for 10 in Caribe Cove!', 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!'. Always end with !. Count characters and STAY UNDER 50.",
+  "bookingTitle": "Slightly longer headline up to 110 chars for Booking.com / VRBO — same energy with room for landmarks (e.g. 'Caribe Cove ${combinedBedrooms}BR Bundle — Two Private Condos, Sleeps ${guestCapacity}, 6mi to Walt Disney World').",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
-  "summary": "Single paragraph (2-3 sentences) introducing the property. Lead with the strongest selling point.",
-  "space": "1-2 paragraphs describing the combined property — bedroom count across both units, what guests get, why it works for a large group. MUST start with this exact disclosure block, copied verbatim:\\n\\n${disclosureForPrompt}\\n\\nThen continue with the body. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance.",
+  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'photos representative' here — a separate disclosure block is auto-prepended above this text.",
+  "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' language; that block is added automatically.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
   "unitA": {
@@ -9965,9 +9969,10 @@ OUTPUT — return ONLY valid JSON with this exact shape:
 }
 
 CONSTRAINTS
+- title is HARD CAPPED at 50 characters. Count characters. If your draft hits 51+, shorten it.
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
-- The "space" field MUST start with the disclosure block exactly as given.
+- summary and space must NOT contain the disclosure block; that's auto-prepended.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
 - Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`;
 
@@ -10031,7 +10036,10 @@ CONSTRAINTS
       ].filter(Boolean).join("\n\n");
 
       return res.json({
-        title: String(parsed.title ?? "").slice(0, 80),
+        // Airbnb truncates titles past 50 chars. We hard-cap here so
+        // a Claude output that overshoots doesn't silently push a
+        // truncated headline downstream — operator can edit on Step 5.
+        title: String(parsed.title ?? "").slice(0, 50),
         bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 110),
         propertyType: parsed.propertyType ?? "Condominium",
         description,
