@@ -783,6 +783,44 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [propertyData, editableTitle]);
 
+  // Compliance card labels swap by state. The four data fields
+  // (taxMapKey / getLicense / tatLicense / strPermit) are reused
+  // across jurisdictions but represent different things — Hawaii
+  // ties to TMK / GE / TAT / per-county STR; Florida ties to DBPR
+  // VR License / Sales Tax / County TDT / LBTR. Detect from the
+  // address rather than from a separate flag so the labels stay
+  // in sync with whatever location the operator typed.
+  const complianceLabels = useMemo(() => {
+    const addr = (effectivePropertyData?.address ?? "").toLowerCase();
+    const isHawaii  = /\b(hawaii|hi)\b/.test(addr) || addr.includes(", hi ") || addr.endsWith(", hi");
+    const isFlorida = /\b(florida|fl)\b/.test(addr) || addr.includes(", fl ") || addr.endsWith(", fl");
+    if (isFlorida) {
+      return {
+        title1: "DBPR Vacation Rental License",
+        title2: "Florida Sales Tax Certificate",
+        title3: "Tourist Development Tax (County)",
+        title4: "Local Business Tax Receipt (LBTR)",
+        notesHint: "Florida tax compliance — DBPR license + DOR sales tax + county TDT + county LBTR",
+      };
+    }
+    if (isHawaii) {
+      return {
+        title1: "Tax Map Key (TMK)",
+        title2: "GET License (General Excise Tax)",
+        title3: "TAT License (Transient Accom. Tax)",
+        title4: "STR Permit Number",
+        notesHint: "Hawaii tax compliance — TMK + GE + TAT + per-county STR",
+      };
+    }
+    return {
+      title1: "Tax Map Key / Parcel ID",
+      title2: "Sales Tax / GE License",
+      title3: "Lodging / TAT License",
+      title4: "STR / Local Permit",
+      notesHint: "tax compliance — confirm the relevant jurisdiction fields",
+    };
+  }, [effectivePropertyData?.address]);
+
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
   type AvailWindow = {
@@ -2404,7 +2442,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                       </div>
                     )}
 
-                    {/* Compliance & Registration Section */}
+                    {/* Compliance & Registration Section
+                        Field labels swap based on the property's state
+                        because the four slots represent different things
+                        per jurisdiction. Hawaii: TMK / GE / TAT / STR.
+                        Florida: DBPR Vacation Rental / Sales Tax Cert /
+                        County TDT / Local Business Tax Receipt. The
+                        underlying data field names stay HI-flavored
+                        (taxMapKey / getLicense / tatLicense / strPermit);
+                        only display labels change. */}
                     {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit) && (
                       <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
@@ -2468,7 +2514,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              Tax Map Key (TMK)
+                              {complianceLabels.title1}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tmk-value">
@@ -2484,7 +2530,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              GET License (General Excise Tax)
+                              {complianceLabels.title2}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-get-value">
@@ -2500,7 +2546,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              TAT License (Transient Accom. Tax)
+                              {complianceLabels.title3}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tat-value">
@@ -2516,7 +2562,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              STR Permit Number
+                              {complianceLabels.title4}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-str-permit-value">

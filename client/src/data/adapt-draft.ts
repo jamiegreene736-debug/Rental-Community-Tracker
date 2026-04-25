@@ -15,19 +15,24 @@ import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
 
 // Sample license placeholders for promoted drafts. Active properties
-// in unit-builder-data have hand-curated TMK / GE / TAT / STR values;
-// the wizard doesn't collect them, so the builder's Compliance &
-// Registration card was rendering all four fields blank for promoted
-// drafts — operator complaint: "nothing inserted for sample license
-// data". Insert state-aware placeholders so the operator sees the
-// expected format and replaces with the real values before pushing
-// to Guesty.
+// in unit-builder-data have hand-curated values for the four
+// Compliance fields; the wizard doesn't collect them, so the builder's
+// Compliance & Registration card was rendering all four fields blank
+// for promoted drafts — operator complaint: "nothing inserted for
+// sample license data". Insert state-aware placeholders so the
+// operator sees the expected format and replaces with the real values
+// before pushing to Guesty.
 //
 // Hawaii uses TMK (parcel id) + GE (general excise tax) + TAT
-// (transient accom. tax) + STR (per-county permit). Florida only
-// has the STR permit at the county level (Osceola etc.) — TMK / GE /
-// TAT don't apply, but the builder UI still renders those labels so
-// we drop a "(N/A — Florida)" hint rather than leaving them blank.
+// (transient accom. tax) + STR (per-county permit).
+//
+// Florida re-uses the same four UI fields for the Florida vacation-
+// rental compliance stack (the field labels are state-aware in the
+// builder — see complianceLabels there):
+//   - field 1 (TMK slot)  → DBPR Vacation Rental License
+//   - field 2 (GE slot)   → Florida DOR Sales Tax Certificate
+//   - field 3 (TAT slot)  → County Tourist Development Tax account
+//   - field 4 (STR slot)  → Local Business Tax Receipt (LBTR)
 type LicenseSamples = {
   taxMapKey: string;
   getLicense: string;
@@ -42,10 +47,17 @@ function sampleLicensesForState(state: string): LicenseSamples {
       tatLicense: "TA-XXX-XXX-XXXX-XX (sample — replace with TAT Tax license)",
     };
   }
+  if (s === "florida" || s === "fl") {
+    return {
+      taxMapKey: "DWE/COND-XXXXXXXXXX (sample — Florida DBPR Vacation Rental Dwelling/Condo License)",
+      getLicense: "XX-XXXXXXXXXX-X (sample — Florida DOR Sales & Use Tax Certificate)",
+      tatLicense: "Account # XXXXXXX (sample — county Tourist Development Tax registration)",
+    };
+  }
   return {
-    taxMapKey: "(N/A — Hawaii TMK only)",
-    getLicense: "(N/A — Hawaii GE Tax only)",
-    tatLicense: "(N/A — Hawaii TAT Tax only)",
+    taxMapKey: "(no parcel/license id required for this state — verify with local jurisdiction)",
+    getLicense: "(no state sales tax cert required — verify with local jurisdiction)",
+    tatLicense: "(no occupancy tax registration required — verify with local jurisdiction)",
   };
 }
 

@@ -9898,6 +9898,21 @@ export async function registerRoutes(
         }
         return "TVR-YYYY-XX or TVNC-XXXX (sample — confirm permit type with the right HI county)";
       }
+      if (s.includes("florida") || s === "fl") {
+        // Osceola County (Kissimmee, Davenport, Celebration, Poinciana)
+        if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Osceola County Local Business Tax Receipt for STR)";
+        }
+        // Orange County (Orlando, Windermere, Lake Buena Vista)
+        if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Orange County Local Business Tax Receipt for STR)";
+        }
+        // Polk County (Haines City, Davenport-adjacent)
+        if (/(haines\s*city|lakeland|winter\s+haven|auburndale)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Polk County Local Business Tax Receipt for STR)";
+        }
+        return "LBTR-XXXXXX (sample — confirm permit type with the right FL county tax collector)";
+      }
       return "STR-XXXX (sample — replace with the actual short-term rental permit number for this county)";
     })();
 
@@ -9941,8 +9956,8 @@ CONTEXT
 OUTPUT — return ONLY valid JSON with this exact shape:
 
 {
-  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Beautiful 4BR for 10 in Caribe Cove!', 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!'. Always end with !. Count characters and STAY UNDER 50.",
-  "bookingTitle": "Slightly longer headline up to 110 chars for Booking.com / VRBO — same energy with room for landmarks (e.g. 'Caribe Cove ${combinedBedrooms}BR Bundle — Two Private Condos, Sleeps ${guestCapacity}, 6mi to Walt Disney World').",
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Beautiful 4BR for 10 in Caribe Cove!', 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
+  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Caribe Cove - 4BR Condos - Sleeps 10', 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
   "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'photos representative' here — a separate disclosure block is auto-prepended above this text.",
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' language; that block is added automatically.",
@@ -9970,6 +9985,8 @@ OUTPUT — return ONLY valid JSON with this exact shape:
 
 CONSTRAINTS
 - title is HARD CAPPED at 50 characters. Count characters. If your draft hits 51+, shorten it.
+- bookingTitle is ALSO HARD CAPPED at 50 characters. Same rule.
+- Use commas and hyphens (-) only. NO em dashes (—) in either title.
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
 - summary and space must NOT contain the disclosure block; that's auto-prepended.
@@ -10036,11 +10053,14 @@ CONSTRAINTS
       ].filter(Boolean).join("\n\n");
 
       return res.json({
-        // Airbnb truncates titles past 50 chars. We hard-cap here so
-        // a Claude output that overshoots doesn't silently push a
-        // truncated headline downstream — operator can edit on Step 5.
+        // Airbnb truncates titles past 50 chars. Booking.com / VRBO
+        // tolerate longer but active properties keep both under 50
+        // anyway, since the same title is pushed to all channels via
+        // bookingTitle. Hard-cap both at 50 so a Claude overshoot
+        // doesn't silently push a truncated headline downstream —
+        // operator can edit on Step 5.
         title: String(parsed.title ?? "").slice(0, 50),
-        bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 110),
+        bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 50),
         propertyType: parsed.propertyType ?? "Condominium",
         description,
         summary: parsed.summary ?? "",
