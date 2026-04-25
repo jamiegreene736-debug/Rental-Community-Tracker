@@ -10651,15 +10651,27 @@ Property: ${propertyName || "our property"}
 Guest message:
 "${guestMessage}"
 
-Write a helpful, friendly reply.
+Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational fluff.
 
-Length: aim for 3-5 sentences when the guest asked one or two simple questions. Go to 6-9 sentences when they asked multiple specific things (bedding plans + distance + accessibility + dates) — every question they wrote deserves a direct answer in the reply. Don't compress 4 questions into a 4-sentence reply that punts on half of them.
+Structure:
+1. A one-line greeting ("Aloha [Name],"). Nothing more — do NOT add "Thanks for reaching out!", "We're excited to host you", "We're thrilled to have you", or any variation. Skip it.
+2. Lead straight into answering the guest's questions in the order they asked. One sentence per question when possible.
+3. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
 
-Be specific. Quote concrete bed types, room counts, and distances from the property facts when relevant — don't paraphrase as "comfortable bedrooms" or "a short walk" if the facts give exact details.
+Hard rules — every one of these has been a real failure mode:
+- Do NOT restate the booking dates ("you've got two beautiful townhomes reserved from December 27th through January 1st"). The guest sent the inquiry; they know their dates.
+- Do NOT restate the guest count or party composition. They wrote it; they know it.
+- Do NOT add filler — "plenty of space", "perfect for your group", "a great fit", "spacious", "beautiful", "lovely". These add words without adding facts.
+- Do NOT use transition phrases like "Here's what you're working with:", "Let me break this down for you:", "Here's the rundown:". Just answer.
+- Do NOT end with "If you have any specific questions…", "Is there anything else…", "Feel free to reach out", "Don't hesitate to ask", "Looking forward to hosting you". Stop after the last answer.
 
-Do NOT ask the guest for facts already shown in the ALREADY KNOWN block above (their dates, nights, guest count). Also do not ask for facts they've already stated in their own message — read the message carefully and count what they told you (e.g. "2 families of 6 plus 2 seniors" = 14 guests; you don't need to ask the total). If you DO need a clarifying detail (e.g. exact arrival time, specific accessibility need), ask for that one specific thing — don't blanket re-ask everything.
+Length target: 3-7 sentences of body text (excluding greeting + signature). Multi-part questions can go to 6-9 sentences ONLY IF every sentence is answering a distinct question. If you find yourself padding, cut.
 
-Do not include a subject line. Do not end with "what other questions can I answer?" or similar — answer the questions that are already on the screen.`;
+Be specific. Quote concrete bed types, room counts, and distances from the property facts — never paraphrase as "comfortable bedrooms" or "a short walk" if the facts give exact details.
+
+Do NOT ask for facts already shown in the ALREADY KNOWN block (dates, nights, guest count) or already in the guest's own message. If you DO need a clarifying detail (exact arrival time, specific accessibility need), ask for that ONE thing in one sentence — don't blanket re-ask.
+
+Do not include a subject line.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
