@@ -71,6 +71,15 @@ const STATUS_LABELS: Record<string, string> = {
 // `pricingArea` to the area whose buy-in rates apply.
 type Property = {
   id: number;
+  // `draftId` is set when the row was sourced from a community
+  // draft (`/api/community/drafts`) rather than the hard-coded
+  // active list. Drafts render with a DRAFT badge instead of the
+  // Build action, share the table layout and filters with the
+  // active rows, and disappear when the operator promotes them
+  // into unit-builder-data.ts. `id` is then a synthetic number
+  // (negative so it can't collide with active property ids) so
+  // `qualityScores` / `baseRates` / sort-stable keys still work.
+  draftId?: number;
   name: string;
   community: string;
   pricingArea: string;
@@ -290,8 +299,86 @@ export default function Home() {
   const [sortField, setSortField] = useState<SortField>("community");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
+  // Pull community drafts up here (early in the render) because
+  // `allProperties` below depends on them and `qualityScores` /
+  // `baseRates` / `filtered` all read `allProperties`. The fetch
+  // is deduped by react-query so rendering it twice (here and the
+  // existing useQuery further down used to delete drafts) is free.
+  const { data: communityDraftsDataForRows } = useQuery<CommunityDraft[]>({
+    queryKey: ["/api/community/drafts"],
+  });
+
+  // Map community drafts → Property-shaped rows so they show up in
+  // the main table next to the active 11 properties. Synthetic
+  // negative `id` ensures no collision with active property ids —
+  // every cache keyed on `id` (qualityScores, baseRates, the
+  // useMemo `filtered` sort) stays unique.
+  //
+  // Empty / fallback fields:
+  //   - `pricingArea` is "" so getBuyInRate / quality lookups
+  //     fall through to fallbacks. Drafts don't yet belong to a
+  //     known buy-in area; the operator picks one when promoting
+  //     the draft into unit-builder-data.
+  //   - `island` defaults to the state name (Florida, Hawaii, …)
+  //     so the Island filter still has something to scope on.
+  //   - `bathrooms` is the sum of per-unit bathrooms parsed from
+  //     the AI draft strings ("2" / "2.5"); falls back to 0.
+  const draftsAsProperties: Property[] = useMemo(() => {
+    if (!communityDraftsDataForRows) return [];
+    const parseBath = (s: string | null) => {
+      const n = Number(String(s ?? "").replace(/[^\d.]/g, ""));
+      return Number.isFinite(n) ? n : 0;
+    };
+    return communityDraftsDataForRows.map((d) => {
+      const u1Br = d.unit1Bedrooms ?? 0;
+      const u2Br = d.unit2Bedrooms ?? 0;
+      const totalBr = d.combinedBedrooms ?? (u1Br + u2Br);
+      const totalGuests =
+        ((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) ||
+        // Fallback: 2 guests/BR, the rough rule the existing 11
+        // properties follow.
+        totalBr * 2;
+      const totalBath =
+        parseBath(d.unit1Bathrooms ?? null) + parseBath(d.unit2Bathrooms ?? null);
+      const unitDetails =
+        u1Br > 0 && u2Br > 0
+          ? `${u1Br}BR + ${u2Br}BR`
+          : "Two units (draft)";
+      return {
+        id: -d.id, // negative so id-keyed caches never collide with active rows
+        draftId: d.id,
+        name: d.listingTitle || d.name,
+        community: d.name,
+        pricingArea: "",
+        location: d.city,
+        island: d.state,
+        bedrooms: totalBr,
+        guests: totalGuests,
+        bathrooms: totalBath,
+        lowPrice: d.estimatedLowRate ?? d.suggestedRate ?? null,
+        highPrice: d.estimatedHighRate ?? null,
+        multiUnit: true,
+        unitDetails,
+        url: d.sourceUrl ?? "",
+      };
+    });
+  }, [communityDraftsDataForRows]);
+
+  // Combined list used by every downstream calc (qualityScores,
+  // baseRates, communities/islands filters, the rendered rows).
+  // Active properties first so they sort to the top by default;
+  // drafts append below until the user changes sort order.
+  const allProperties = useMemo(
+    () => [...properties, ...draftsAsProperties],
+    [draftsAsProperties],
+  );
+
   const qualityScores = useMemo(() => {
     const map = new Map<number, ReturnType<typeof computeQualityScore>>();
+    // Quality score is only meaningful for active properties — it
+    // depends on a real lowPrice and pricingArea-keyed market data.
+    // Drafts get rendered with "—" in the Quality column so the
+    // operator doesn't read a misleading number.
     for (const p of properties) {
       // computeQualityScore reads `community` as a pricing/demand key
       // (MARKET_RATE_PER_BR, LOCATION_DEMAND), so feed pricingArea — the
@@ -304,24 +391,24 @@ export default function Home() {
 
   const baseRates = useMemo(() => {
     const map = new Map<number, number>();
-    for (const p of properties) {
+    for (const p of allProperties) {
       map.set(p.id, computeBaseRate(p));
     }
     return map;
-  }, []);
+  }, [allProperties]);
 
   const communities = useMemo(() => {
-    const set = new Set(properties.map((p) => p.community));
+    const set = new Set(allProperties.map((p) => p.community));
     return Array.from(set).sort();
-  }, []);
+  }, [allProperties]);
 
   const islands = useMemo(() => {
-    const set = new Set(properties.map((p) => p.island));
+    const set = new Set(allProperties.map((p) => p.island));
     return Array.from(set).sort();
-  }, []);
+  }, [allProperties]);
 
   const filtered = useMemo(() => {
-    let result = properties;
+    let result = allProperties;
     if (searchTerm) {
       const lower = searchTerm.toLowerCase();
       result = result.filter(
@@ -365,7 +452,7 @@ export default function Home() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores, baseRates]);
+  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores, baseRates]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -872,10 +959,26 @@ export default function Home() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((property, idx) => (
-                <TableRow key={property.id} data-testid={`row-property-${property.id}`} id={`item-property-${property.id}`}>
-                  <TableCell className="sticky left-0 bg-background z-10 px-2">
-                    {unitBuilderIds.has(property.id) ? (
+              {filtered.map((property, idx) => {
+                const isDraft = property.draftId !== undefined;
+                return (
+                <TableRow key={property.id} data-testid={`row-property-${property.id}`} id={`item-property-${property.id}`} className={isDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}>
+                  <TableCell className="sticky left-0 z-10 px-2" style={{ background: isDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}>
+                    {isDraft ? (
+                      <div className="flex items-center gap-1">
+                        <Badge variant="outline" className="h-7 px-2 text-[10px] font-semibold bg-amber-100 border-amber-300 text-amber-900" data-testid={`badge-draft-${property.draftId}`}>
+                          DRAFT
+                        </Badge>
+                        <button
+                          onClick={() => deleteDraftMutation.mutate(property.draftId!)}
+                          className="text-muted-foreground hover:text-destructive transition-colors p-1"
+                          aria-label="Delete draft"
+                          data-testid={`button-delete-draft-${property.draftId}`}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ) : unitBuilderIds.has(property.id) ? (
                       <Link href={`/builder/${property.id}/preflight`}>
                         <Button
                           size="sm"
@@ -1063,7 +1166,12 @@ export default function Home() {
                   <TableCell className="text-center" data-testid={`cell-quality-${property.id}`}>
                     {(() => {
                       const qs = qualityScores.get(property.id);
-                      if (!qs) return null;
+                      // Drafts don't get a quality score — the
+                      // calculation needs a real listed price and a
+                      // pricingArea-keyed market rate, neither of
+                      // which exists yet for a research-stage draft.
+                      // Render "—" so the cell isn't visually broken.
+                      if (!qs) return <span className="text-muted-foreground text-xs">—</span>;
                       return (
                         <TooltipProvider>
                           <Tooltip>
@@ -1125,7 +1233,8 @@ export default function Home() {
                     })()}
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
               {filtered.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={12} className="text-center py-8 text-muted-foreground">
@@ -1138,70 +1247,11 @@ export default function Home() {
           </div>
         </Card>
 
-        {/* Community Drafts Section */}
-        {communityDraftsData && communityDraftsData.length > 0 && (
-          <div className="mt-8">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold flex items-center gap-2">
-                  <Plus className="h-5 w-5 text-primary" />
-                  New Communities in Research
-                </h2>
-                <p className="text-sm text-muted-foreground mt-0.5">
-                  Communities discovered through the Add New Community workflow
-                </p>
-              </div>
-              <Link href="/add-community">
-                <Button size="sm" data-testid="button-add-community-small">
-                  <Plus className="h-4 w-4 mr-1" /> Add Another
-                </Button>
-              </Link>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {communityDraftsData.map(draft => (
-                <Card key={draft.id} className="p-4 relative" data-testid={`card-draft-${draft.id}`}>
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="min-w-0">
-                      <h3 className="font-semibold text-sm truncate" data-testid={`text-draft-name-${draft.id}`}>{draft.name}</h3>
-                      <p className="text-xs text-muted-foreground">
-                        <MapPin className="h-3 w-3 inline mr-0.5" />{draft.city}, {draft.state}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <Badge variant="outline" className="text-xs">
-                        {STATUS_LABELS[draft.status] ?? draft.status}
-                      </Badge>
-                      <button
-                        className="text-muted-foreground hover:text-destructive transition-colors p-1"
-                        onClick={() => deleteDraftMutation.mutate(draft.id)}
-                        data-testid={`button-delete-draft-${draft.id}`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground mb-2">
-                    {draft.combinedBedrooms && (
-                      <span><BedDouble className="h-3 w-3 inline mr-0.5" />{draft.combinedBedrooms}BR combined</span>
-                    )}
-                    {draft.suggestedRate && (
-                      <span><DollarSign className="h-3 w-3 inline" />${draft.suggestedRate}/night</span>
-                    )}
-                    {draft.confidenceScore && (
-                      <span><Star className="h-3 w-3 inline mr-0.5" />{draft.confidenceScore}/100</span>
-                    )}
-                  </div>
-                  {draft.researchSummary && (
-                    <p className="text-xs text-muted-foreground line-clamp-2">{draft.researchSummary}</p>
-                  )}
-                  {draft.listingTitle && (
-                    <p className="text-xs font-medium mt-1 truncate">{draft.listingTitle}</p>
-                  )}
-                </Card>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Drafts now render as rows in the main table above (DRAFT
+            badge in the Actions column, deletable inline). The
+            standalone "New Communities in Research" cards section
+            used to live here — removed because it duplicated what's
+            in the table now. */}
 
         <div className="mt-4 text-xs text-muted-foreground text-center">
           NexStay portfolio data. Prices shown are nightly rates and may vary by season.
