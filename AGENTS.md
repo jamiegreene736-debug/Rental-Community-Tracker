@@ -203,6 +203,40 @@ established it so you can read the rationale in the commit message.
     (`GE-` / `TA-`) skip phone-number filters. See PR that added
     this entry for the full diagnosis flow.
 
+### Dashboard data shape
+
+21. **`home.tsx` properties carry both `community` (display) and
+    `pricingArea` (lookup key).** Dashboard badges, filters, and
+    sorting use `community` — the canonical complexName from
+    `unit-builder-data` (Kaha Lani Resort, Regency at Poipu Kai,
+    Mauna Kai Princeville, …). Buy-in rates, market-rate-per-BR,
+    and location-demand tables in `shared/pricing-rates` and
+    `client/src/data/quality-score` are keyed by area (Poipu Kai,
+    Princeville, Kapaa Beachfront, …) — multiple complexes share
+    one area. Keep both fields up to date when adding a property:
+    `community` matches the complex; `pricingArea` matches whichever
+    BUY_IN_RATES key applies. `computeBaseRate`,
+    `computeQualityScore` (via `{ ...p, community: p.pricingArea }`),
+    and `communityVariant` all read `pricingArea`. See PR #93.
+
+22. **Dashboard Photo Match column drops folders whose
+    `unitHintFromFolder` doesn't equal the unit's current
+    `unitNumber`.** In `home.tsx` `photoByProperty`, a unit folder
+    only feeds the property-level aggregation when the trailing
+    alphanumeric of `unit.unitNumber` matches the folder's hint.
+    The scanner uses the folder hint to verify Lens hits, so a
+    stale folder name (e.g. `kaha-lani-109` for a unit now numbered
+    339 / unit-swapped to 122) flags real but irrelevant
+    Airbnb/VRBO/Booking listings for the OLD unit, while the
+    pre-flight check — keyed off the current unit number — correctly
+    says "Not Found." On prop 23 the two surfaces disagreed for
+    exactly this reason. The scanner itself is unchanged; it still
+    scans these folders and writes rows. Long-term fix is renaming
+    folders to track unit numbers (touches DB photo-label rows,
+    `unit-builder-data`, photo URLs, and the on-disk paths under
+    `/app/client/public/photos/`); until that's done, this filter
+    prevents red-badge ghosts on the dashboard. See PR #93.
+
 ## Conventions
 
 ### Branches
