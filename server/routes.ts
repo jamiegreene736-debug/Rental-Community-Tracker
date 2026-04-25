@@ -9187,6 +9187,92 @@ export async function registerRoutes(
     res.json({ success: true });
   });
 
+  // POST /api/community/:id/persist-photos
+  //
+  // Body: { unit1Photos: string[], unit2Photos: string[] }
+  //
+  // The Add a New Community wizard scrapes Zillow / runs a
+  // discovery search and surfaces candidate photos in Step 4.
+  // Those URLs sit in React state on the wizard — `handleSave`
+  // posts the draft metadata to /api/community/save but didn't
+  // persist the photos themselves, so a promoted draft opened in
+  // builder-preflight had no images. This endpoint pulls each URL
+  // down into per-unit folders under /app/client/public/photos/
+  // (`draft-${id}-unit-a`, `draft-${id}-unit-b`) and updates the
+  // draft row with those folder names. The volume mounted at that
+  // path on Railway (Load-Bearing #17) means the files survive
+  // deploys.
+  //
+  // Best-effort: a single bad URL is logged and skipped; the
+  // response reports the saved count per unit so the wizard can
+  // surface it. Caps at 25 photos/unit to mirror the wizard's
+  // existing display cap.
+  app.post("/api/community/:id/persist-photos", async (req, res) => {
+    const draftId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
+
+    const body = req.body as { unit1Photos?: string[]; unit2Photos?: string[] };
+    const unit1Urls = Array.isArray(body.unit1Photos) ? body.unit1Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
+    const unit2Urls = Array.isArray(body.unit2Photos) ? body.unit2Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
+
+    const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
+    const MAX_PER_UNIT = 25;
+
+    const downloadOne = async (url: string, folderPath: string, idx: number): Promise<boolean> => {
+      try {
+        const resp = await fetch(url, { headers: { "User-Agent": "NexStay/1.0" } });
+        if (!resp.ok) return false;
+        const buf = Buffer.from(await resp.arrayBuffer());
+        // Photos.zillowstatic.com URLs end in .jpg/.jpeg/.png/.webp;
+        // honor the original extension for content-type accuracy
+        // when Express serves the file. Defaults to .jpg when the
+        // URL has nothing parseable.
+        const ext = (url.match(/\.(jpe?g|png|webp)\b/i)?.[1] ?? "jpg").toLowerCase().replace("jpeg", "jpg");
+        const filename = `${String(idx).padStart(2, "0")}.${ext}`;
+        await fs.promises.writeFile(path.join(folderPath, filename), buf);
+        return true;
+      } catch (e: any) {
+        console.warn(`[draft-photos] download failed for ${url}: ${e.message}`);
+        return false;
+      }
+    };
+
+    const persistUnit = async (urls: string[], folder: string): Promise<{ folder: string; saved: number } | null> => {
+      if (urls.length === 0) return null;
+      const folderPath = path.join(PHOTOS_BASE, folder);
+      // Wipe any prior contents so re-saving doesn't accumulate.
+      // mkdir -p semantics handle the missing-folder case.
+      await fs.promises.rm(folderPath, { recursive: true, force: true });
+      await fs.promises.mkdir(folderPath, { recursive: true });
+      const capped = urls.slice(0, MAX_PER_UNIT);
+      const results = await Promise.all(capped.map((u, i) => downloadOne(u, folderPath, i)));
+      const saved = results.filter(Boolean).length;
+      return { folder, saved };
+    };
+
+    try {
+      const [u1, u2] = await Promise.all([
+        persistUnit(unit1Urls, `draft-${draftId}-unit-a`),
+        persistUnit(unit2Urls, `draft-${draftId}-unit-b`),
+      ]);
+      const update: Record<string, string | null> = {};
+      if (u1) update.unit1PhotoFolder = u1.folder;
+      if (u2) update.unit2PhotoFolder = u2.folder;
+      if (Object.keys(update).length > 0) {
+        await storage.updateCommunityDraft(draftId, update);
+      }
+      console.log(`[draft-photos] draft ${draftId}: unit1 saved ${u1?.saved ?? 0}, unit2 saved ${u2?.saved ?? 0}`);
+      res.json({
+        ok: true,
+        unit1: u1,
+        unit2: u2,
+      });
+    } catch (e: any) {
+      console.error(`[draft-photos] draft ${draftId} failed: ${e.message}`);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ============================================================
   // Step 2: Research communities in a city/state via SearchAPI + Claude scoring
   // ============================================================

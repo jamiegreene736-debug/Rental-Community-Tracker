@@ -130,14 +130,29 @@ const PLATFORM_LIST: { key: keyof UnitCheckResult["platforms"]; label: string }[
 // take this path because they don't (yet) live in the static
 // `unit-builder-data.ts` array; this adapter lets the existing
 // builder UI render against draft data without a code-side
-// migration. Photos and Guesty wiring still come up empty for
-// promoted drafts (those are operations that happen AFTER the
-// draft is fully realized as a property), but the descriptive
-// fields all flow through.
-function adaptDraftToPropertyUnitBuilder(draft: CommunityDraft): PropertyUnitBuilder {
+// migration.
+//
+// `photoFiles` is an optional per-folder file list (filename →
+// label) — when supplied, the unit's `photos` array is populated
+// from disk so the builder's Photo tab shows the operator's
+// scraped photos. When omitted, photos come up empty (Guesty
+// connection / push flow becomes available later).
+function adaptDraftToPropertyUnitBuilder(
+  draft: CommunityDraft,
+  photoFiles: Record<string, string[]> = {},
+): PropertyUnitBuilder {
   const u1Br = draft.unit1Bedrooms ?? 2;
   const u2Br = draft.unit2Bedrooms ?? 2;
   const blank = "";
+  const filesToPhotos = (folder: string | null | undefined) => {
+    if (!folder) return [];
+    const files = photoFiles[folder] ?? [];
+    return files.map((filename) => ({
+      filename,
+      label: "Photo",
+      category: "interior" as const,
+    }));
+  };
   return {
     propertyId: -draft.id, // matches the synthetic negative id the dashboard uses
     propertyName: draft.listingTitle || draft.name,
@@ -153,7 +168,8 @@ function adaptDraftToPropertyUnitBuilder(draft: CommunityDraft): PropertyUnitBui
     tatLicense: blank,
     getLicense: blank,
     strPermit: draft.strPermit ?? blank,
-    hasPhotos: false,
+    hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
+                 (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,
     communityPhotos: [],
     communityPhotoFolder: blank,
     units: [
@@ -166,8 +182,8 @@ function adaptDraftToPropertyUnitBuilder(draft: CommunityDraft): PropertyUnitBui
         maxGuests: draft.unit1MaxGuests ?? u1Br * 2,
         shortDescription: draft.unit1ShortDescription ?? "",
         longDescription: draft.unit1LongDescription ?? "",
-        photoFolder: "",
-        photos: [],
+        photoFolder: draft.unit1PhotoFolder ?? "",
+        photos: filesToPhotos(draft.unit1PhotoFolder),
       },
       {
         id: `draft${draft.id}-unit-b`,
@@ -178,8 +194,8 @@ function adaptDraftToPropertyUnitBuilder(draft: CommunityDraft): PropertyUnitBui
         maxGuests: draft.unit2MaxGuests ?? u2Br * 2,
         shortDescription: draft.unit2ShortDescription ?? "",
         longDescription: draft.unit2LongDescription ?? "",
-        photoFolder: "",
-        photos: [],
+        photoFolder: draft.unit2PhotoFolder ?? "",
+        photos: filesToPhotos(draft.unit2PhotoFolder),
       },
     ],
   } as PropertyUnitBuilder;
@@ -198,21 +214,46 @@ export default function BuilderPreflight() {
   // drafts: -draftId), fetch /api/community/drafts and adapt the
   // matching draft to PropertyUnitBuilder shape. Lets the builder
   // operate on promoted drafts without migrating them into the
-  // static unitBuilderData array.
+  // static unitBuilderData array. Per-unit photo folders are
+  // fetched alongside so the units' photos array is populated
+  // (the wizard persists photos to disk via /persist-photos on
+  // save; this just lists them).
   const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
   const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && id < 0);
   useEffect(() => {
     if (staticProperty || id >= 0) return;
     const draftId = -id;
     setDraftLoading(true);
-    apiRequest("GET", "/api/community/drafts")
-      .then((r) => r.json() as Promise<CommunityDraft[]>)
-      .then((drafts) => {
+    (async () => {
+      try {
+        const r = await apiRequest("GET", "/api/community/drafts");
+        const drafts = (await r.json()) as CommunityDraft[];
         const match = drafts.find((d) => d.id === draftId);
-        if (match) setDraftProperty(adaptDraftToPropertyUnitBuilder(match));
-      })
-      .catch(() => { /* leave draftProperty null → renders the not-found state */ })
-      .finally(() => setDraftLoading(false));
+        if (!match) return;
+        // Pull file lists for any persisted unit photo folders so
+        // the builder Photo tab has thumbnails. Best-effort — if
+        // the folder is missing on disk (e.g. volume reset) we
+        // fall through with empty photos rather than blocking.
+        const folders = [match.unit1PhotoFolder, match.unit2PhotoFolder].filter((f): f is string => !!f);
+        const filesByFolder: Record<string, string[]> = {};
+        await Promise.all(
+          folders.map(async (folder) => {
+            try {
+              const fr = await apiRequest("GET", `/api/photos/community/${encodeURIComponent(folder)}`);
+              const list = (await fr.json()) as Array<{ filename: string }> | null;
+              filesByFolder[folder] = Array.isArray(list) ? list.map((f) => f.filename) : [];
+            } catch {
+              filesByFolder[folder] = [];
+            }
+          }),
+        );
+        setDraftProperty(adaptDraftToPropertyUnitBuilder(match, filesByFolder));
+      } catch {
+        /* leave draftProperty null → renders the not-found state */
+      } finally {
+        setDraftLoading(false);
+      }
+    })();
   }, [id, staticProperty]);
   const property = staticProperty ?? draftProperty;
 
