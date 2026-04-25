@@ -22,24 +22,96 @@ export function setAutoReplyEnabled(enabled: boolean) {
   console.log(`[auto-reply] ${enabled ? "Enabled" : "Disabled"}`);
 }
 
-// --- Safety classifier ----------------------------------------------------
-// Any message containing these keywords is NEVER auto-sent — only drafted.
+// --- Safety classifier (input side) ---------------------------------------
+//
+// First line of defense for auto-reply: if the guest's message contains
+// any of these terms, we ALWAYS draft for human review instead of
+// auto-sending. The cost of a missed auto-send (host clicks Send a few
+// minutes later) is much smaller than the cost of an auto-send that
+// commits us to something we can't deliver — refunds, pet exceptions,
+// schedule changes, etc.
+//
+// Keywords are grouped by category so it's easy to reason about what's
+// being filtered and add new ones without duplicating. "When in doubt,
+// add it." Any false-positive just means a draft instead of a send.
 const RISK_KEYWORDS = [
+  // Money / billing — anything that touches the wallet drafts.
   "refund", "cancel", "cancellation", "chargeback", "dispute",
-  "damage", "damaged", "broken", "leak", "flood", "mold",
+  "deposit", "security deposit", "credit", "comp", "compensation",
+  "discount", "lower price", "cheaper", "negotiate",
+  // Property condition / damage / cleanliness complaints.
+  "damage", "damaged", "broken", "leak", "leaking", "flood", "mold",
+  "complaint", "complain", "unsafe", "unsanitary", "dirty", "filthy",
+  "bug", "roach", "rat", "mouse", "bed bug", "bedbug", "cockroach",
+  "mice", "ants", "termite",
+  // Health / safety / medical / emergency.
   "injury", "injured", "hurt", "medical", "hospital", "allergic",
-  "emergency", "police", "fire", "ambulance", "911",
-  "lawyer", "legal", "attorney", "sue", "lawsuit",
-  "complaint", "complain", "unsafe", "unsanitary", "dirty",
-  "bug", "roach", "rat", "mouse", "bed bug", "bedbug",
-  "discrimination", "racist", "harassment",
-  "deposit", "security deposit",
+  "allergy", "asthma", "emergency", "police", "fire", "ambulance",
+  "911", "sick", "covid", "covid-19", "quarantine",
+  // Legal / disputes / fair-housing.
+  "lawyer", "legal", "attorney", "sue", "lawsuit", "subpoena",
+  "warrant", "discrimination", "racist", "racism", "harass",
+  "harassment", "ada", "disability", "accommodation",
+  "wheelchair", "service animal",
+  // Press / media / influencer (rare but high-stakes — always human).
+  "press", "journalist", "reporter", "media", "interview",
+  "review " /* trailing space avoids "previewed", "reviewing context" */,
+  "rating", "yelp", "tripadvisor",
+  // Policy exceptions — these are ALL human-decided per listing.
+  "pet", "pets", "dog", "cat", "puppy", "service dog", "esa",
+  "smoke", "smoking", "vape", "vaping", "marijuana", "weed", "cannabis",
+  "party", "wedding", "event", "gathering", "loud music",
+  "extra guest", "additional guest", "more people",
+  "extend", "extension", "extra night", "stay longer",
+  "early check-in", "early checkin", "late check-out", "late checkout",
+  "late check out", "early arrival", "late departure",
+  // Operational issues that need real-world action, not a chat reply.
+  "lockout", "locked out", "can't get in", "cannot access",
+  "no power", "no water", "no wifi", "no internet",
+  "broken ac", "broken a/c", "ac not working", "heat not working",
+  "noise", "neighbor", "construction",
+  // Insurance / liability / waiver.
+  "insurance", "claim", "liability", "waiver", "indemnify",
+  // Weather / disaster (active conditions = host attention).
+  "hurricane", "tsunami", "evacuation", "flood warning", "wildfire",
 ];
 
 function classifyMessage(text: string): { risky: boolean; matched: string[] } {
   const lower = text.toLowerCase();
   const matched = RISK_KEYWORDS.filter((kw) => lower.includes(kw));
   return { risky: matched.length > 0, matched };
+}
+
+// --- Safety classifier (output side) --------------------------------------
+//
+// Second line of defense: even when the GUEST'S message looks clean,
+// scan the AI's draft before sending. If the model commits to
+// something it shouldn't (refund language, schedule change, pet
+// exception, etc.) we downgrade to "drafted" so the host eyeballs it
+// before it goes out. Patterns are intentionally permissive — false
+// positives just delay a send by one click.
+const OUTPUT_RISK_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /\bI'?ll (?:refund|comp|credit)\b/i, reason: "promised refund/comp/credit" },
+  { pattern: /\bwe (?:can|will|'?ll) (?:refund|comp|credit)\b/i, reason: "promised refund/comp/credit" },
+  { pattern: /\b(?:full|partial|complimentary)\s+refund\b/i, reason: "mentions refund" },
+  { pattern: /\b(?:waive|waiving|waived)\b/i, reason: "promised to waive a fee/policy" },
+  { pattern: /\bI?'?ll (?:upgrade|move you|relocate you)\b/i, reason: "promised upgrade/relocation" },
+  { pattern: /\b(?:free|no charge|on us|on the house)\b/i, reason: "promised something free" },
+  { pattern: /\bwe (?:allow|accept|welcome)\s+(?:pets?|dogs?|cats?)\b/i, reason: "confirmed pet exception" },
+  { pattern: /\b(?:pets?|dogs?|cats?)\s+(?:are|is)\s+(?:allowed|welcome|fine|ok|okay)\b/i, reason: "confirmed pet exception" },
+  { pattern: /\b(?:smoking|vaping)\s+(?:is|will be|would be)\s+(?:allowed|fine|ok|okay)\b/i, reason: "confirmed smoking exception" },
+  { pattern: /\bearly check[- ]?in (?:is|will be) (?:fine|ok|okay|available)\b/i, reason: "confirmed early check-in" },
+  { pattern: /\blate check[- ]?out (?:is|will be) (?:fine|ok|okay|available)\b/i, reason: "confirmed late check-out" },
+  { pattern: /\bextend(?:ed|ing)?\s+your stay\b/i, reason: "discussed stay extension" },
+  { pattern: /\b(?:lockbox|access)\s+code\s+(?:is|will be)\b/i, reason: "shared access code in chat" },
+  { pattern: /\b\d{4,6}\b.*\b(?:lockbox|door code|gate code|access code)\b/i, reason: "shared access code in chat" },
+];
+
+function classifyOutput(text: string): { risky: boolean; reason: string | null } {
+  for (const { pattern, reason } of OUTPUT_RISK_PATTERNS) {
+    if (pattern.test(text)) return { risky: true, reason };
+  }
+  return { risky: false, reason: null };
 }
 
 // --- Guesty helpers -------------------------------------------------------
@@ -171,22 +243,70 @@ async function runTool(name: string, input: any): Promise<unknown> {
 
 const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
 
-Your job: read a guest's incoming message and write a warm, concise, professional reply in the tone of a hospitality host.
+Your job: read a guest's incoming message and write a warm, concise, professional reply in the tone of a hospitality host. Replies you generate are AUTO-SENT to the guest unless you explicitly flag for human review — so the bar for "I'm sure" is high.
 
 RULES:
+
+INFORMATION GATHERING
 - Always use the tools available to fetch listing details or reservation details BEFORE answering questions about the property, dates, or amenities. Never guess facts.
-- If the guest's question cannot be answered confidently from the fetched context, or if the message contains a complaint, damage claim, refund request, medical/legal/safety issue, or anything ambiguous — call the flag_for_human tool with a reason and stop.
-- Never mention that units are combined. Refer to the property as a single home.
-- Keep replies to 2-4 sentences. Be warm but efficient.
+- If the guest's question cannot be answered confidently from the fetched context, call flag_for_human with a reason and stop. "Confidently" means the fact is in the data we fetched — not vibes or generic Hawaii knowledge.
+
+WHEN TO FLAG FOR HUMAN (call flag_for_human tool, do NOT write a reply):
+- Money: refund, discount, comp, credit, deposit, chargeback, dispute. Anything touching the guest's wallet.
+- Schedule changes: early check-in, late check-out, extension, extra night, date swap, cancellation.
+- Policy exceptions: pets/animals, smoking/vaping, parties/events/weddings, extra/additional guests beyond the listed cap.
+- Property condition / damage / complaints: damage, broken, leak, mold, pests, "dirty", "unsanitary", anything implying a defect or bad experience.
+- Health / safety / emergency / legal: medical issues, allergies, injury, "emergency", police/fire/911, lawyers, lawsuits, accessibility (ADA, wheelchair, service animal).
+- Press / media: journalist, reporter, interview requests.
+- Reviews & ratings: any post-stay message about a review, rating, or feedback.
+- Operational issues: lockouts, no power/water/wifi, broken AC, neighbor complaints, weather emergencies.
+- Anything you'd send to a manager if you were on shift.
+
+WHAT YOU MAY NEVER COMMIT TO IN A REPLY (even if the guest asks nicely):
+- Refunds, discounts, upgrades, free nights, comps, credits — flag for human instead.
+- Pet, smoking, party, or extra-guest exceptions — flag for human instead.
+- Specific early check-in or late check-out times — listing has the standard times, anything else is a human decision.
+- Stay extensions or date changes — flag for human.
+- Sharing access codes (lockbox, gate, door) in chat — those go through Guesty's automated arrival flow.
+- Quoting prices for new dates or upgrades — flag.
+- Apologizing for or explaining external conditions (weather, traffic, airport delays) — flag.
+- Statements about other businesses, competitors, or other listings.
+- Anything that costs money, changes the booking, or grants an exception.
+
+WHAT YOU MAY ANSWER ON YOUR OWN
+- Already-confirmed facts about the property pulled via tools (bedrooms, bathrooms, amenities, location, parking, AC, WiFi presence, pool, BBQ, etc.).
+- General "what's it like nearby" questions when the listing description covers it.
+- Travel logistics (driving distance, airport proximity) when the listing description includes it.
+- Reassurance and warm acknowledgment of the question.
+
+VOICE (sound like a real host who just read the message, not a chatbot):
+- Lead with the answer. No warm-up phrases like "I hope this finds you well", "I'd be happy to help", "What a great question!". Guests want their answer.
+- Use contractions: we're, you'll, that's, here's, don't.
+- Vary sentence length. Short sentences for emphasis; longer ones with a comma or two when there's flow.
+- Skip restating what the guest asked.
+- Avoid AI-stock phrases: "absolutely!", "certainly!", "kindly", "rest assured", "please be advised", "in regards to", "going forward", "at your earliest convenience".
+- One small Hawaiian flourish is fine ("'ohana", a quick "Aloha [Name]," opener) — at most one or two per reply, never forced.
+- Don't end with a sales-y closer ("Looking forward to hosting you!"). The signature closes the message.
+
+Examples (same content, different voice):
+  ROBOTIC: "Thank you so much for your message! I'd be delighted to help. Regarding parking, I can confirm that yes, parking is available for both units at no additional cost."
+  HUMAN:   "Yes — parking is included for both units, right next to the building."
+
+  ROBOTIC: "What a wonderful question! Our two units are situated approximately 3 minutes by foot from each other within the resort grounds."
+  HUMAN:   "The two units are about a 3-minute walk apart, easy to move between."
+
+FORMATTING
+- Plain text only. No Markdown — no asterisks, no underscores, no bullet markers at line starts, no headings.
+- Keep replies to 2-4 sentences. Longer is OK only if the guest asked multiple specific questions that each need a direct answer.
+- No subject line, no email headers.
 - Sign off EXACTLY as three lines, on their own, after a blank line:
   John Carpenter
   Reservationist
   Magical Island Rentals
-- Do NOT include a subject line, greeting block, or email headers.
-- Do NOT promise refunds, discounts, upgrades, or anything that costs money.
-- Do NOT share guest personal information, credit card info, or internal operational notes.
+- Never mention that units are "combined" or that this is a portfolio listing. Refer to the listing as a single property with multiple units.
+- Never share guest personal information or internal operational notes.
 
-When you have everything you need, write ONLY the reply body (ending with the sign-off block above) as your final response — no preamble, no explanation.`;
+When you have everything you need and the message is in scope, write ONLY the reply body (ending with the sign-off block above) as your final response — no preamble, no explanation. When in doubt, flag for human.`;
 
 // Canonical sign-off appended to every auto-reply.
 const SIGNOFF = "John Carpenter\nReservationist\nMagical Island Rentals";
@@ -253,7 +373,14 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-20241022",
+        // Haiku 4.5 — current model with reliable tool-use. Same swap
+        // as PR #97 (AI Draft) and PR #98 (community research): the
+        // legacy `claude-3-5-sonnet-20241022` alias was returning
+        // errors, which is why every auto-reply tick before this fix
+        // came back as `error` status — none ever auto-sent. Haiku
+        // 4.5 handles the 3-tool flow (get_listing_details,
+        // get_reservation, flag_for_human) inside the 5-turn cap.
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
         system: SYSTEM_PROMPT,
         tools: TOOLS,
@@ -388,15 +515,29 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             flagReason = result.flagReason;
             flagged++;
           } else if (result.draft) {
-            try {
-              await sendReply(conv._id, result.draft, moduleField);
-              status = "sent";
-              replySent = true;
-              sent++;
-            } catch (sendErr) {
-              status = "drafted";
-              errorMessage = `send failed: ${(sendErr as Error).message}`;
-              drafted++;
+            // Output-side safety filter — second line of defense even
+            // when the input passed the keyword classifier and Claude
+            // didn't self-flag. Looks for risky commitments in the
+            // generated reply (refund language, schedule confirms,
+            // policy exceptions, leaked access codes) and downgrades
+            // to "drafted" so the host eyeballs it before it goes out.
+            const outputSafety = classifyOutput(result.draft);
+            if (outputSafety.risky) {
+              status = "flagged";
+              flagReason = `Output filter: ${outputSafety.reason}`;
+              flagged++;
+              console.warn(`[auto-reply] output blocked for conversation ${conv._id}: ${outputSafety.reason}`);
+            } else {
+              try {
+                await sendReply(conv._id, result.draft, moduleField);
+                status = "sent";
+                replySent = true;
+                sent++;
+              } catch (sendErr) {
+                status = "drafted";
+                errorMessage = `send failed: ${(sendErr as Error).message}`;
+                drafted++;
+              }
             }
           } else {
             status = "error";

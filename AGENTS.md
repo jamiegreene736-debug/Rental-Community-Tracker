@@ -259,6 +259,50 @@ established it so you can read the rationale in the commit message.
     to the hint-based legacy path or is treated as unscannable.
     See PR #95.
 
+### Inbox auto-reply
+
+24. **Auto-reply has a three-layer safety stack — input filter,
+    Claude self-flag, output filter.** Generated replies are
+    AUTO-SENT to the guest by default; the layers exist so a wrong
+    auto-send is harder to produce than a wrong draft.
+
+    **Layer 1 — input keyword filter** (`RISK_KEYWORDS` in
+    `server/auto-reply.ts`). If the GUEST'S message contains any of
+    the listed terms (refund, cancel, pet, smoke, party, early
+    check-in, lockout, lawyer, …), the reply is forced into the
+    "flagged" path — Claude still drafts so the host has something
+    to send, but the message never auto-sends. The list is grouped
+    by category in the source. **When in doubt, add a keyword** —
+    a false positive is one extra click; a missed case can be a
+    refund we didn't authorize.
+
+    **Layer 2 — Claude self-flag.** The system prompt tells the
+    model to call the `flag_for_human` tool whenever it can't
+    answer confidently from fetched context, or whenever the
+    request touches money / schedule changes / policy exceptions /
+    health / safety / legal / reviews / press / operational
+    issues. The tool exits the run with `flagReason` set; the
+    auto-reply records "flagged" status without sending.
+
+    **Layer 3 — output regex filter** (`OUTPUT_RISK_PATTERNS`).
+    Even when input passed the keyword filter and Claude didn't
+    self-flag, the generated reply is scanned for forbidden
+    commitments — "I'll refund", "we can comp", "pets are fine",
+    "early check-in is ok", a 4–6 digit number adjacent to "code"
+    (access-code leak), etc. Any match downgrades to "flagged" so
+    the host reviews before send.
+
+    The system prompt explicitly enumerates what the AI MAY answer
+    on its own (factual property questions answered from tool-
+    fetched context) vs what it MUST flag (anything that costs
+    money, changes the booking, grants an exception, or addresses
+    a complaint/safety issue). Adding a new "auto-send-OK" topic
+    means widening the prompt's "WHAT YOU MAY ANSWER" list.
+    Adding a new "always draft" topic means at minimum adding
+    keywords to `RISK_KEYWORDS`; for high-stakes categories,
+    also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
+    that added this entry.
+
 ## Conventions
 
 ### Branches
