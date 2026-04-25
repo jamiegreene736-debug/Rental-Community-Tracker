@@ -9303,13 +9303,22 @@ export async function registerRoutes(
     }
 
     try {
+      // Use Nominatim's freeform `q=` search rather than the
+      // structured `city=` filter. The `city=` filter is an
+      // EXACT-name match and silently drops results for any place
+      // Nominatim doesn't classify as a "city" — Destin (a
+      // city of 14k people, classified as `town`) and Kapaa
+      // (`village`) both came back empty under `city=des` /
+      // `city=kapa`. Freeform `q=` with addressdetails + class
+      // filtering covers the same exact-prefix intent without
+      // tripping over OSM's category labels. Also bumped to
+      // limit=20 so post-filtering still leaves enough survivors.
       const url = new URL("https://nominatim.openstreetmap.org/search");
-      url.searchParams.set("country", "USA");
-      url.searchParams.set("state", state);
-      url.searchParams.set("city", query);
+      url.searchParams.set("q", `${query}, ${state}, USA`);
       url.searchParams.set("format", "json");
-      url.searchParams.set("limit", "15");
+      url.searchParams.set("limit", "20");
       url.searchParams.set("addressdetails", "1");
+      url.searchParams.set("countrycodes", "us");
 
       const resp = await fetch(url.toString(), {
         // Nominatim's usage policy requires a User-Agent identifying
@@ -9323,23 +9332,50 @@ export async function registerRoutes(
       }
       const data = await resp.json() as Array<{
         display_name?: string;
+        class?: string;
+        type?: string;
         address?: {
           city?: string; town?: string; village?: string;
           municipality?: string; hamlet?: string; suburb?: string;
           locality?: string;
+          state?: string;
         };
       }>;
 
+      // Keep populated-place rows only — exclude street, business,
+      // POI matches that the freeform query would otherwise pull in.
+      // Nominatim's `class` is "place" / "boundary" for settlements
+      // and admin areas; `type` narrows it further.
+      const PLACE_TYPES = new Set([
+        "city", "town", "village", "hamlet", "municipality",
+        "borough", "suburb", "locality", "neighbourhood",
+        "administrative", // OSM admin boundaries (counties / muni)
+      ]);
       const seen = new Set<string>();
       const cities: string[] = [];
+      const queryLower = query.toLowerCase();
       for (const r of data) {
+        const cls = (r.class ?? "").toLowerCase();
+        const typ = (r.type ?? "").toLowerCase();
+        if (cls !== "place" && cls !== "boundary") continue;
+        if (!PLACE_TYPES.has(typ)) continue;
         const a = r.address ?? {};
-        // Nominatim's "city" field is sparsely populated for smaller
-        // places; cascade through the nearby admin levels so vacation
-        // towns (Kihei, Kapaa, Hanalei) still show up.
+        // Confirm the row actually sits in the requested state —
+        // otherwise a query like "des" in Florida could match
+        // Des Moines, IA via the freeform search.
+        if (a.state && a.state.toLowerCase() !== state.toLowerCase()) continue;
+        // Cascade through the address fields so vacation towns
+        // Nominatim doesn't classify as `city` still surface
+        // (Kihei, Kapaa, Hanalei, etc.).
         const cityName =
           a.city || a.town || a.village || a.municipality || a.hamlet || a.suburb || a.locality;
         if (!cityName) continue;
+        // Soft prefix filter — the freeform query sometimes returns
+        // looser matches (Tampa for "tam", but also Tarpon Springs
+        // because the query phrase appears in display_name). Anchor
+        // on whether the city name itself starts with the typed
+        // prefix to keep the dropdown predictable.
+        if (!cityName.toLowerCase().startsWith(queryLower) && !cityName.toLowerCase().includes(queryLower)) continue;
         const key = cityName.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
