@@ -9658,41 +9658,83 @@ export async function registerRoutes(
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    // ── 1. Search Airbnb & VRBO for existing listings at this community ──────
+    // ── 1. Find existing Airbnb/VRBO listings at this community ──────────────
+    // Two passes:
+    //   (a) Google site: searches — counts how many listings exist at this
+    //       community at all (powers the "X listings found" telemetry).
+    //       We do NOT scrape "$X/night" out of the snippets here; those
+    //       numbers are dominated by Airbnb's "from $X/night" headlines for
+    //       a 1-night quote, where the cleaning fee inflates the apparent
+    //       nightly by ~50%.
+    //   (b) SearchAPI airbnb engine — actual priced listings with a 7-night
+    //       check_in/check_out window (the assumption being that a typical
+    //       vacation-rental booking is a week, so cleaning + service fees
+    //       should amortize over 7 nights, not 1). extracted_total_price
+    //       includes nightly + cleaning + service, so total/7 is the proper
+    //       amortized buy-in cost per night.
     const ratesByBR: Record<number, number[]> = {};
     let airbnbListingCount = 0;
-    const searchQueries = [
-      `"${communityName}" ${city} ${state} site:airbnb.com per night`,
-      `"${communityName}" ${city} ${state} site:vrbo.com per night`,
-      `"${communityName}" ${city} ${state} vacation rental nightly rate`,
-    ];
 
-    for (const q of searchQueries) {
+    const listingCountQueries = [
+      `"${communityName}" ${city} ${state} site:airbnb.com`,
+      `"${communityName}" ${city} ${state} site:vrbo.com`,
+    ];
+    for (const q of listingCountQueries) {
       try {
         const resp = await fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=8&api_key=${searchApiKey}`,
         );
         if (!resp.ok) continue;
         const data = await resp.json() as any;
-        const organic = (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
+        const organic = (data.organic_results || []) as Array<{ link: string }>;
         for (const r of organic) {
           if (r.link?.includes("airbnb.com") || r.link?.includes("vrbo.com")) airbnbListingCount++;
-          const text = r.title + " " + r.snippet;
-          // Extract bedroom count
-          const brMatch = text.match(/(\d+)\s*(?:bed|br|bedroom)/i);
-          const br = brMatch ? parseInt(brMatch[1]) : null;
-          // Extract nightly rate
-          const rateMatches = text.match(/\$\s*(\d{2,4})\s*(?:\/\s*night|per night|a night)/gi) || [];
-          for (const m of rateMatches) {
-            const rate = parseInt(m.replace(/[^\d]/g, ""));
-            if (rate >= 80 && rate <= 3000 && br && br >= 1 && br <= 6) {
-              if (!ratesByBR[br]) ratesByBR[br] = [];
-              ratesByBR[br].push(rate);
-            }
-          }
         }
-      } catch { /* ignore */ }
+      } catch { /* non-fatal */ }
     }
+
+    // Live priced lookup: a 7-night window 30 days out. We pick 30 days
+    // ahead so the calendar is open (Airbnb often blocks last-minute on
+    // popular listings) and far enough to dodge the next-7-days surge
+    // pricing. The exact dates are arbitrary — the methodology is what
+    // matters: total / 7 = amortized nightly inclusive of cleaning/svc.
+    const now = new Date(); now.setUTCHours(0, 0, 0, 0);
+    const checkInDate = new Date(now); checkInDate.setUTCDate(checkInDate.getUTCDate() + 30);
+    const checkOutDate = new Date(checkInDate); checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
+    const ymd = (d: Date) => d.toISOString().slice(0, 10);
+    try {
+      const sp: Record<string, string> = {
+        engine: "airbnb",
+        q: `${communityName} ${city} ${state}`,
+        check_in_date: ymd(checkInDate),
+        check_out_date: ymd(checkOutDate),
+        adults: "2",
+        type_of_place: "entire_home",
+        currency: "USD",
+        api_key: searchApiKey,
+      };
+      const resp = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+        const cnameLower = communityName.toLowerCase();
+        for (const p of properties) {
+          const title = String(p?.name ?? p?.title ?? "");
+          const desc = String(p?.description ?? "");
+          // Engine bbox is generous — restrict to listings whose title or
+          // description actually names this community.
+          if (!title.toLowerCase().includes(cnameLower) && !desc.toLowerCase().includes(cnameLower)) continue;
+          const total = Number(p?.price?.extracted_total_price);
+          const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
+          if (!Number.isFinite(total) || total <= 0) continue;
+          if (!Number.isFinite(br) || br < 1 || br > 6) continue;
+          const nightly = Math.round(total / 7);
+          if (nightly < 50 || nightly > 3000) continue;
+          if (!ratesByBR[br]) ratesByBR[br] = [];
+          ratesByBR[br].push(nightly);
+        }
+      }
+    } catch { /* fall through to per-BR default */ }
 
     // ── 2. Parse available unit types ─────────────────────────────────────────
     // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
