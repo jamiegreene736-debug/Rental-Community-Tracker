@@ -20,7 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle,
+  ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -543,6 +543,17 @@ export default function InboxPage() {
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
   const [propertyFilter, setPropertyFilter] = useState<string>("all");
+  // Special-offer dialog state. Only one offer in flight at a time
+  // — there's only ever one selected conversation. The dialog opens
+  // pre-filled with the current quoted rate so the host just types
+  // the new total they're willing to take.
+  const [specialOfferDialog, setSpecialOfferDialog] = useState<{
+    open: boolean;
+    reservationId: string | null;
+    currentTotal: number;
+  }>({ open: false, reservationId: null, currentTotal: 0 });
+  const [specialOfferPrice, setSpecialOfferPrice] = useState<string>("");
+  const [specialOfferMessage, setSpecialOfferMessage] = useState<string>("");
   const threadRef = useRef<HTMLDivElement>(null);
 
   // ── Conversations ──
@@ -923,6 +934,38 @@ export default function InboxPage() {
       });
     },
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
+  });
+
+  // Send an Airbnb Special Offer — overrides the listing rate for
+  // this specific inquiry. Same `callGuestyAirbnbAction` candidate-
+  // walker on the server as pre-approve / decline (PR #99 verifies
+  // every candidate, so a 200 that didn't actually create the offer
+  // bubbles up as failure). Body is `{ price, message?,
+  // expirationDays? }` per the existing endpoint.
+  const sendSpecialOffer = useMutation({
+    mutationFn: async (vars: { reservationId: string; price: number; message?: string }) => {
+      const r = await apiRequest("POST", `/api/inbox/reservations/${vars.reservationId}/airbnb/special-offer`, {
+        price: vars.price,
+        ...(vars.message ? { message: vars.message } : {}),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
+      setSpecialOfferPrice("");
+      setSpecialOfferMessage("");
+      toast({
+        title: "Special offer sent on Airbnb",
+        description: "The guest will see your custom price next time they open the conversation.",
+      });
+    },
+    onError: (e: any) => toast({ title: "Special offer failed", description: e.message, variant: "destructive" }),
   });
 
   // Decline an Airbnb inquiry.
@@ -1546,6 +1589,51 @@ export default function InboxPage() {
                         </div>
                       </div>
 
+                      {/* Quoted rate — what the GUEST sees on Airbnb for
+                          this stay. Shown for inquiries and booking
+                          requests (the cases where the host might
+                          haggle); the booked-phase Financials block
+                          below already covers the same numbers when
+                          they're settled. Pull from the same `money`
+                          shape used by Financials so the math stays
+                          consistent. Hidden when guestGross is 0
+                          (Guesty hasn't quoted yet). */}
+                      {(phase === "inquiry" || phase === "request") && guestGross > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
+                            <span>Quoted rate</span>
+                            <span className="text-muted-foreground/70 font-normal normal-case tracking-normal">what guest sees</span>
+                          </div>
+                          <div className="border rounded-lg divide-y text-xs">
+                            <div className="flex justify-between px-2.5 py-1.5">
+                              <span className="text-muted-foreground">Total</span>
+                              <span className="font-semibold">${guestGross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                            </div>
+                            {nights && nights > 0 && (
+                              <div className="flex justify-between px-2.5 py-1.5">
+                                <span className="text-muted-foreground">Per night</span>
+                                <span>${Math.round(guestGross / nights).toLocaleString()}</span>
+                              </div>
+                            )}
+                          </div>
+                          {isAirbnb && res?._id && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 mt-2 px-2.5 text-[11px] w-full"
+                              onClick={() => {
+                                setSpecialOfferDialog({ open: true, reservationId: res._id, currentTotal: guestGross });
+                                setSpecialOfferPrice(String(Math.round(guestGross)));
+                                setSpecialOfferMessage("");
+                              }}
+                              data-testid="button-special-offer-airbnb"
+                            >
+                              <DollarSign className="h-3 w-3 mr-1" /> Send Special Offer
+                            </Button>
+                          )}
+                        </div>
+                      )}
+
                       {/* Financials — only for booked reservations */}
                       {phase === "booked" && (
                         <div>
@@ -2035,6 +2123,100 @@ export default function InboxPage() {
           onSave={saveTemplate}
           onClose={() => setTemplateDialog({ open: false, template: null })}
         />
+      </Dialog>
+
+      {/* Special-offer dialog. Pre-populated with the current Airbnb-
+          quoted total so the host just types the new total they're
+          willing to take. Fires the same `callGuestyAirbnbAction`
+          server path as pre-approve / decline (which now verifies
+          every candidate per PR #99). */}
+      <Dialog
+        open={specialOfferDialog.open}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
+            setSpecialOfferPrice("");
+            setSpecialOfferMessage("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Send Special Offer on Airbnb</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div>
+              <Label htmlFor="special-offer-price">New total guest price (USD)</Label>
+              <Input
+                id="special-offer-price"
+                type="number"
+                min={1}
+                step={1}
+                value={specialOfferPrice}
+                onChange={(e) => setSpecialOfferPrice(e.target.value)}
+                placeholder="7000"
+                data-testid="input-special-offer-price"
+              />
+              {specialOfferDialog.currentTotal > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Currently quoted to guest: ${specialOfferDialog.currentTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
+                  This is the total before Airbnb's guest service fee — Airbnb adds their fee on top of whatever you set here.
+                </p>
+              )}
+            </div>
+            <div>
+              <Label htmlFor="special-offer-message">Message to guest (optional)</Label>
+              <Textarea
+                id="special-offer-message"
+                value={specialOfferMessage}
+                onChange={(e) => setSpecialOfferMessage(e.target.value)}
+                rows={3}
+                placeholder="A short note explaining the offer (optional)."
+                data-testid="textarea-special-offer-message"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
+                setSpecialOfferPrice("");
+                setSpecialOfferMessage("");
+              }}
+              data-testid="button-special-offer-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const price = parseFloat(specialOfferPrice);
+                if (!Number.isFinite(price) || price <= 0) {
+                  toast({ title: "Enter a valid price greater than 0", variant: "destructive" });
+                  return;
+                }
+                if (!specialOfferDialog.reservationId) return;
+                sendSpecialOffer.mutate({
+                  reservationId: specialOfferDialog.reservationId,
+                  price,
+                  message: specialOfferMessage.trim() || undefined,
+                });
+              }}
+              disabled={sendSpecialOffer.isPending || !specialOfferPrice}
+              data-testid="button-special-offer-send"
+            >
+              {sendSpecialOffer.isPending ? (
+                <>
+                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Sending…
+                </>
+              ) : (
+                <>
+                  <Send className="h-3 w-3 mr-1" /> Send Special Offer
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );
