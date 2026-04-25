@@ -640,7 +640,30 @@ export default function InboxPage() {
   const generateDraft = async () => {
     if (!selectedConv) return;
     setDraftLoading(true);
-    const lastGuestPost = [...posts].reverse().find(p => p.authorType !== "host" && p.authorRole !== "host");
+    // Find the guest's MOST RECENT message. Sort posts ascending by
+    // timestamp first — Guesty's /posts endpoint returns newest-
+    // first, so a naive `[...posts].reverse()` gave us oldest-first
+    // and `.find()` then returned the guest's *first* message
+    // (Jamie's bug report: AI Draft answered the original inquiry
+    // instead of the latest follow-up about discount/payment).
+    // Mirror the rendering's isHost detection (line ~1079) so a host
+    // post tagged with `direction: "outbound"` or `senderType: "host"`
+    // — but no `authorType`/`authorRole` — is correctly excluded.
+    const sortedAsc = [...posts].sort((a: any, b: any) => {
+      const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
+      const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
+      return ta - tb;
+    });
+    const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
+      const isHost =
+        p.authorType === "host" ||
+        p.authorRole === "host" ||
+        p.senderType === "host" ||
+        p.direction === "outbound" ||
+        p.direction === "out" ||
+        p.isIncoming === false;
+      return !isHost;
+    });
     // Build property-specific context so the AI can answer "how many
     // bedrooms per unit?" / "how far apart are the units?" / "is
     // parking free?" with facts instead of hand-waves. Non-blocking:
@@ -650,6 +673,14 @@ export default function InboxPage() {
     const ctx = selectedConv.listingId
       ? await buildPropertyContextForDraft(selectedConv.listingId)
       : null;
+    // Channel name (airbnb / vrbo / booking / direct / email / …) so
+    // the server can give a channel-correct answer when the guest
+    // asks about payment timing — e.g. "Airbnb sets the payment
+    // schedule" rather than a generic disclaimer.
+    const channel =
+      selectedConv.module?.type ??
+      (selectedConv as any).integration?.platform ??
+      "";
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
         guestMessage: lastGuestPost?.body ?? lastGuestPost?.text ?? "",
@@ -661,6 +692,7 @@ export default function InboxPage() {
         // only Hawaii listings get that flavor. Non-HI properties
         // stay on the standard friendly+professional voice.
         isHawaii: ctx?.isHawaii ?? false,
+        channel,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);
