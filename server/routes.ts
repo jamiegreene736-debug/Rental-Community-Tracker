@@ -9823,7 +9823,7 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext, isHawaii } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, propertyContext, isHawaii, channel } = req.body as {
       guestMessage: string;
       propertyName?: string;
       guestName?: string;
@@ -9841,9 +9841,27 @@ Return ONLY valid JSON: {"title": "...", "description": "..."}`;
       // stay on the standard friendly+professional voice — avoids
       // bleeding the Hawaii voice onto future mainland listings.
       isHawaii?: boolean;
+      // Booking platform the conversation is on (airbnb / vrbo /
+      // booking / direct / email / …). Used to make the payment-
+      // timing policy reply name the right platform when a guest
+      // asks about smaller deposits or paying later. Optional; an
+      // empty string falls back to a generic "the booking platform"
+      // phrasing.
+      channel?: string;
     };
 
     if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
+
+    // Friendly platform name for the payment-timing policy. Guesty
+    // uses raw keys like "airbnb2" / "homeaway2" / "bookingCom" — map
+    // them to what guests actually see on their reservation.
+    const platformName = (() => {
+      const c = (channel || "").toLowerCase();
+      if (c.includes("airbnb")) return "Airbnb";
+      if (c.includes("vrbo") || c.includes("homeaway")) return "VRBO";
+      if (c.includes("booking")) return "Booking.com";
+      return "the booking platform";
+    })();
 
     // Tone preamble — prepended to whichever grounded/ungrounded
     // system prompt we pick below. Hawaiian tone: warm, familiar,
@@ -9898,7 +9916,35 @@ If the guest asks something that isn't covered by the provided facts, acknowledg
 Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units.`
       : `Never mention that units are "combined" or that this is a portfolio listing.`;
 
-    const systemPrompt = `${tonePreamble}\n\n${groundingPrompt}`;
+    // Policies the AI must apply when the guest's message asks about
+    // them. Phrased as rules so Haiku follows them literally:
+    //
+    //   1. Discount asks: cap any offer at 5% off. The AI is allowed
+    //      to OFFER the discount in the draft (saves the host a
+    //      back-and-forth) but never above 5% — no creative "let me
+    //      see if I can do 10%" hedging. Frame it as a one-time
+    //      accommodation, not a standing policy, so we're not
+    //      anchoring future guests.
+    //
+    //   2. Payment-timing asks (smaller deposit, pay later, custom
+    //      payment plan): we cannot change the schedule. The booking
+    //      platform — Airbnb, VRBO, Booking.com — controls when the
+    //      guest pays and how it's split. Apologize briefly and
+    //      explain the platform sets it. NAME the platform if we
+    //      know it (passed in via `channel`); fall back to "the
+    //      booking platform" otherwise. Do NOT promise to ask the
+    //      platform on the guest's behalf — that's not a thing.
+    //
+    // Not all guest messages will trigger these. The AI should only
+    // apply a policy when the guest's message actually asks about
+    // discounts or payment timing. Don't pre-emptively volunteer them.
+    const policyPrompt = `POLICIES (apply only when the guest's message asks about them):
+
+DISCOUNTS: If the guest asks for a discount, special rate, or to lower the price, you may offer up to (and no more than) 5% off the listing price. Do not offer 10% or any larger discount under any circumstance. State the percentage clearly in the draft and frame it as a one-time accommodation for them, not a standing offer. If they ask for more than 5%, politely explain that 5% is the most you can offer.
+
+PAYMENT TIMING: If the guest asks for a smaller deposit, to pay later, to split payments differently, or any change to the payment schedule, explain that ${platformName} controls the payment schedule for this booking and we are not able to adjust it on our end. Apologize briefly that this isn't something you can change. Do not offer to "ask ${platformName}" or "look into it" — there is no workaround on our side. Keep the explanation short and warm; don't dwell on it.`;
+
+    const systemPrompt = `${tonePreamble}\n\n${groundingPrompt}\n\n${policyPrompt}`;
 
     const contextBlock = propertyContext ? `PROPERTY FACTS (ground your answer in these — don't invent beyond them):
 ${propertyContext}
