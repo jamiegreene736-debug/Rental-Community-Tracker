@@ -47,7 +47,7 @@ import {
   Camera,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
-import { isScannableFolder } from "@shared/photo-folder-utils";
+import { isScannableFolder, unitHintFromFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -60,10 +60,20 @@ const STATUS_LABELS: Record<string, string> = {
   active: "Active",
 };
 
+// `community` is the displayed complex name (Kaha Lani Resort, Regency at
+// Poipu Kai, …) — kept in sync with `complexName` in unit-builder-data so
+// the dashboard, builder, and PDF all agree on what to call a property.
+// `pricingArea` is the lookup key for shared/pricing-rates BUY_IN_RATES
+// and quality-score MARKET_RATE_PER_BR / LOCATION_DEMAND tables, which
+// are keyed by area (Poipu Kai, Princeville, …) — multiple complexes
+// can share an area, so the two fields stay separate. When adding a
+// new property, set `community` to the specific complex and
+// `pricingArea` to the area whose buy-in rates apply.
 type Property = {
   id: number;
   name: string;
   community: string;
+  pricingArea: string;
   location: string;
   island: string;
   bedrooms: number;
@@ -80,7 +90,8 @@ const properties: Property[] = [
   {
     id: 1,
     name: "Poipu Kai for large groups!",
-    community: "Poipu Kai",
+    community: "Regency at Poipu Kai",
+    pricingArea: "Poipu Kai",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 7,
@@ -95,7 +106,8 @@ const properties: Property[] = [
   {
     id: 4,
     name: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
-    community: "Poipu Kai",
+    community: "Regency at Poipu Kai",
+    pricingArea: "Poipu Kai",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 6,
@@ -110,7 +122,8 @@ const properties: Property[] = [
   {
     id: 9,
     name: "Spacious 5 Bedrooms in Poipu Kai! AC!",
-    community: "Poipu Kai",
+    community: "Regency at Poipu Kai",
+    pricingArea: "Poipu Kai",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
@@ -125,7 +138,8 @@ const properties: Property[] = [
   {
     id: 19,
     name: "Fabulous 5 bedroom for 10 townhome above Anini Beach!",
-    community: "Princeville",
+    community: "Mauna Kai Princeville",
+    pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 5,
@@ -140,7 +154,8 @@ const properties: Property[] = [
   {
     id: 20,
     name: "Fabulous 7 bedrooms for 16 above Anini Beach!",
-    community: "Princeville",
+    community: "Mauna Kai Princeville",
+    pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
@@ -155,7 +170,8 @@ const properties: Property[] = [
   {
     id: 23,
     name: "Gorgeous 5 br for 12 in Kapaa - Beachfront!",
-    community: "Kapaa Beachfront",
+    community: "Kaha Lani Resort",
+    pricingArea: "Kapaa Beachfront",
     location: "Kapaa",
     island: "Kauai",
     bedrooms: 5,
@@ -170,7 +186,8 @@ const properties: Property[] = [
   {
     id: 24,
     name: "Wonderful 5 br 12 Poipu ocean view! Oceanfront complex!",
-    community: "Poipu Oceanfront",
+    community: "Makahuena at Poipu",
+    pricingArea: "Poipu Oceanfront",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
@@ -185,7 +202,8 @@ const properties: Property[] = [
   {
     id: 27,
     name: "Beautiful 4 bedroom Poipu Kai Condo!",
-    community: "Poipu Kai",
+    community: "Regency at Poipu Kai",
+    pricingArea: "Poipu Kai",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 4,
@@ -200,7 +218,8 @@ const properties: Property[] = [
   {
     id: 29,
     name: "Ocean view 7 bedrooms for 14 above Anini Beach!",
-    community: "Princeville",
+    community: "Kaiulani of Princeville",
+    pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
@@ -216,6 +235,7 @@ const properties: Property[] = [
     id: 32,
     name: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     community: "Pili Mai",
+    pricingArea: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 5,
@@ -231,6 +251,7 @@ const properties: Property[] = [
     id: 33,
     name: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     community: "Pili Mai",
+    pricingArea: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 6,
@@ -249,13 +270,15 @@ type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "hi
 // Total nightly buy-in cost across all units (sum of per-unit rates from
 // shared/pricing-rates). Multi-unit properties get parsed from unitDetails
 // (e.g. "3BR + 2BR" → sum of 3BR and 2BR rates); falls back to a single-unit
-// lookup when parsing returns nothing useful.
+// lookup when parsing returns nothing useful. Pricing keys off pricingArea
+// (e.g. "Poipu Kai") rather than the displayed complex name (e.g. "Regency
+// at Poipu Kai") because BUY_IN_RATES is keyed by area.
 function computeBaseRate(property: Property): number {
   const brs = property.multiUnit ? extractBRList(property.unitDetails) : [];
   if (brs.length >= 2 && brs.reduce((s, n) => s + n, 0) === property.bedrooms) {
-    return brs.reduce((sum, br) => sum + getBuyInRate(property.community, br), 0);
+    return brs.reduce((sum, br) => sum + getBuyInRate(property.pricingArea, br), 0);
   }
-  return getBuyInRate(property.community, property.bedrooms);
+  return getBuyInRate(property.pricingArea, property.bedrooms);
 }
 type SortDir = "asc" | "desc";
 
@@ -270,7 +293,11 @@ export default function Home() {
   const qualityScores = useMemo(() => {
     const map = new Map<number, ReturnType<typeof computeQualityScore>>();
     for (const p of properties) {
-      map.set(p.id, computeQualityScore(p));
+      // computeQualityScore reads `community` as a pricing/demand key
+      // (MARKET_RATE_PER_BR, LOCATION_DEMAND), so feed pricingArea — the
+      // displayed complex name (Regency at Poipu Kai, Mauna Kai
+      // Princeville, …) won't match those tables.
+      map.set(p.id, computeQualityScore({ ...p, community: p.pricingArea }));
     }
     return map;
   }, []);
@@ -483,8 +510,24 @@ export default function Home() {
         // building. Both sides of the wire share isScannableFolder
         // so the dashboard aggregation matches what the scanner
         // actually scanned.
+        //
+        // Additionally suppress folders whose hint doesn't match the
+        // unit's CURRENT unitNumber. The scanner verifies Lens hits
+        // against the folder's hint (e.g. "kaha-lani-109" → "109"),
+        // so a stale folder name produces matches against the OLD
+        // unit's listings on Airbnb/VRBO/Booking — flagged red on the
+        // dashboard while the pre-flight check, which uses the
+        // current unit number, correctly says "Not Found." The two
+        // surfaces only agree when the folder name tracks the unit
+        // number; until folders are renamed to match, this filter
+        // hides the misleading signal so users don't chase ghosts.
         for (const u of builder.units) {
-          if (u.photoFolder && isScannableFolder(u.photoFolder)) folderSet.add(u.photoFolder);
+          if (!u.photoFolder || !isScannableFolder(u.photoFolder)) continue;
+          const hint = unitHintFromFolder(u.photoFolder);
+          if (!hint) continue;
+          const trail = String(u.unitNumber ?? "").toLowerCase().trim().match(/[a-z0-9]+$/i)?.[0];
+          if (!trail || hint.toLowerCase() !== trail) continue;
+          folderSet.add(u.photoFolder);
         }
       }
       const folders = Array.from(folderSet);
@@ -537,9 +580,13 @@ export default function Home() {
     },
   });
 
-  const communityVariant = (community: string): "default" | "secondary" | "outline" => {
-    const poipuCommunities = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Pili Mai"];
-    if (poipuCommunities.includes(community)) return "default";
+  // Highlight south-shore (Poipu) properties with the primary badge tone.
+  // Keys off pricingArea — the styling decision is per-area, not per the
+  // displayed complex name, so it stays right when multiple complexes
+  // share the same area.
+  const communityVariant = (pricingArea: string): "default" | "secondary" | "outline" => {
+    const poipuAreas = ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront", "Pili Mai"];
+    if (poipuAreas.includes(pricingArea)) return "default";
     return "secondary";
   };
 
@@ -1007,7 +1054,7 @@ export default function Home() {
                   </TableCell>
                   <TableCell className="px-2">
                     <Badge
-                      variant={communityVariant(property.community)}
+                      variant={communityVariant(property.pricingArea)}
                       className="no-default-hover-elevate no-default-active-elevate text-xs"
                       data-testid={`badge-community-${property.id}`}
                     >
