@@ -380,15 +380,43 @@ export default function AddCommunity() {
     setUnit2Photos([]);
     setPhotoChecks({});
 
+    // Algorithm-suggested pairings (the "3BR + 3BR" combinations
+    // shown on Step 3) are theoretical bedroom matches — they don't
+    // carry a specific MLS source URL because no real per-unit
+    // listing was picked. Calling /fetch-unit-photos with an empty
+    // URL legitimately 400s ("url required") on the server, which
+    // showed up as a confusing red toast even though the empty
+    // state on this page already handles the "no photos to load"
+    // case gracefully ("Photos could not be fetched from Zillow
+    // automatically. You can proceed to generate the listing draft
+    // anyway."). Skip the fetch when there's no URL to fetch — and
+    // only toast on REAL errors (URL present, server returned
+    // failure).
+    const fetches: Array<Promise<void>> = [];
+    if (selectedUnit1.url) {
+      fetches.push(
+        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit1.url })
+          .then((r) => r.json())
+          .then((d) => setUnit1Photos((d.photos || []).slice(0, 8))),
+      );
+    }
+    if (selectedUnit2.url) {
+      fetches.push(
+        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit2.url })
+          .then((r) => r.json())
+          .then((d) => setUnit2Photos((d.photos || []).slice(0, 8))),
+      );
+    }
+
+    if (fetches.length === 0) {
+      // Both units are virtual algorithm pairings — nothing to fetch.
+      // The UI's empty state is the correct outcome here.
+      setPhotosLoading(false);
+      return;
+    }
+
     try {
-      const [r1, r2] = await Promise.all([
-        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit1.url }),
-        apiRequest("POST", "/api/community/fetch-unit-photos", { url: selectedUnit2.url }),
-      ]);
-      const d1 = await r1.json();
-      const d2 = await r2.json();
-      setUnit1Photos((d1.photos || []).slice(0, 8));
-      setUnit2Photos((d2.photos || []).slice(0, 8));
+      await Promise.all(fetches);
     } catch (e: any) {
       toast({ title: "Photo fetch failed", description: e.message, variant: "destructive" });
     } finally {
