@@ -10685,10 +10685,10 @@ Source priority for the answer (use the FIRST one that applies):
 
 1. If the property facts include a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
 
-   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we CAN accommodate by prioritizing a specific unit type (single-level / ground-floor / Moana plan / etc.), make a soft commitment: "We'll note this on your booking and prioritize a [unit-type the note names] for your stay." This is a unit-assignment note we can typically fulfill — it's not a refund, upgrade, or policy exception, so it's safe to commit to. Do not invent commitments the note doesn't support.
+   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Do NOT invent commitments the note doesn't support.
 
 2. Otherwise, fall back to the propertyType:
-   - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on: "we'd confirm the assigned unit's floor plan before booking" — never guess.
+   - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on: "we'd confirm the assigned unit's floor plan before booking" — never guess. (This soft-hedge phrasing is ONLY for the no-FLOOR-PLAN-block fallback.)
    - Condominium → confirm units are single-floor (no internal stairs).
    - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
 
