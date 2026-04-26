@@ -10655,11 +10655,16 @@ ${propertyContext}
     const accessibilityMandate = accessibilityRaised
       ? `\n\nACCESSIBILITY / FLOOR-PLAN ASK DETECTED — MANDATORY:
 The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Source priority (use the FIRST one that applies):
+
 1. If the property facts have a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
+
+   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we CAN accommodate by prioritizing a specific unit type (single-level / ground-floor / Moana plan / etc.), make a soft commitment in the reply: "We'll note this on your booking and prioritize a [unit-type the note names] for your stay." This is a unit-assignment note we can typically fulfill — it's not a refund, upgrade, or policy exception, so it's safe to commit to. Do not invent commitments the note doesn't support.
+
 2. Otherwise, fall back to the propertyType:
    - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly: "we'd confirm the assigned unit's floor plan before booking" — never guess.
    - Condominium → confirm units are single-floor (no internal stairs).
    - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
+
 Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
       : "";
 
