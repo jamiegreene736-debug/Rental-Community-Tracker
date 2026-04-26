@@ -9059,12 +9059,16 @@ export async function registerRoutes(
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, city, state, bedrooms } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls } = req.body as {
       url?: string;
       communityName?: string;
+      streetAddress?: string;
       city?: string;
       state?: string;
       bedrooms?: number;
+      // URLs the caller already has (e.g. from a previous click) so
+      // a "Find another" button can skip listings already surfaced.
+      skipUrls?: string[];
     };
 
     let listingUrl: string | undefined = url || undefined;
@@ -9079,33 +9083,54 @@ export async function registerRoutes(
       if (!searchApiKey) {
         return res.status(503).json({ error: "Discovery requires SEARCHAPI_API_KEY (only direct url calls work without it)" });
       }
-      // Targeted Zillow search. Quoting the community name + a
-      // specific bedroom hint lifts the homedetails pages above
-      // the area-search noise. We only accept `homedetails`
-      // results — those are the per-listing pages the scraper
-      // can actually pull photos from. Region / building
-      // overview pages don't have a photo carousel.
+      // Multi-query Zillow discovery. Mirrors the staged-search pattern
+      // /api/replacement/find-unit uses: try the most specific query
+      // first (street address), then community-name + bedrooms-hint,
+      // then bare community name. First query that returns a Zillow
+      // /homedetails/ link wins. Earlier single-query version only ran
+      // the bedroom-hinted variant, which came up empty on communities
+      // whose Zillow listings don't say "N bedroom" in the title — so
+      // the preflight ended up with zero photos for everything from
+      // the wizard's algorithm-suggested pairings (Caribe Cove etc.).
+      const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
+      const queries: string[] = [];
+      if (streetAddress) {
+        queries.push(`site:zillow.com "${streetAddress}"`);
+      }
       const brHint = bedrooms ? `${bedrooms} bedroom` : "";
-      const q = `"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim();
-      try {
-        const resp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
-        );
-        if (resp.ok) {
+      if (brHint) {
+        queries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
+      }
+      queries.push(`site:zillow.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+      // Last-ditch: bare quoted community name, no city/state. Catches
+      // distinctive names ("Pili Mai", "Caribe Cove Resort") that
+      // Google indexes well even without geographic disambiguation.
+      queries.push(`site:zillow.com "${communityName}"`);
+
+      for (const q of queries) {
+        try {
+          const resp = await fetch(
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+          );
+          if (!resp.ok) {
+            console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+            continue;
+          }
           const data = await resp.json() as any;
           const organic = (data.organic_results || []) as Array<{ link?: string; title?: string }>;
           const candidates = organic
             .map((r) => String(r.link ?? ""))
-            .filter((l) => /zillow\.com\/homedetails\//i.test(l));
+            .filter((l) => /zillow\.com\/homedetails\//i.test(l))
+            .filter((l) => !skipSet.has(l.toLowerCase()));
           if (candidates.length > 0) {
             listingUrl = candidates[0];
             foundVia = "search";
+            console.log(`[fetch-unit-photos] discovery hit on query "${q}" → ${listingUrl}`);
+            break;
           }
-        } else {
-          console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+        } catch (e: any) {
+          console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
         }
-      } catch (e: any) {
-        console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
       }
 
       if (!listingUrl) {
