@@ -217,29 +217,57 @@ export default function BuilderPreflight() {
   // photos, the reverse-image-search half of the Platform Check is fully
   // skipped (it has nothing to feed Google Lens), so the check returns "no
   // signals" regardless of whether the property is actually listed somewhere.
-  // This UI lets the operator paste a Zillow URL per unit, re-uses the same
-  // /api/community/fetch-unit-photos + /api/community/:id/persist-photos
-  // endpoints the wizard uses, then refreshes the property state so the
-  // updated photoFolder flows into the next Re-run of the Platform Check.
-  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
+  //
+  // Mirrors the same Zillow-discovery logic /api/replacement/find-unit
+  // uses for active properties: searches Zillow by community + street
+  // address + bedroom count, picks the first /homedetails/ result, scrapes
+  // its photos. Operator clicks one button per unit; URL paste isn't needed.
   const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
-  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unitId: string) => {
-    if (id >= 0) return; // promoted drafts only
-    const draftId = -id;
-    const url = (photoUrls[unitId] ?? "").trim();
-    if (!url) {
-      toast({ title: "Paste a Zillow URL first", variant: "destructive" });
-      return;
+  // Track URLs the operator has already accepted/rejected so the
+  // "Try another" path skips them. Reset when the property changes.
+  const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
+
+  // Parse street / city / state out of the property's display address
+  // ("9000 Treasure Trove Lane, Kissimmee, Florida"). For HI properties
+  // the address often has a building suffix ("…, Bldg 38, Koloa, HI
+  // 96756") which we tolerate by taking position[-2] / position[-1].
+  const parsePropertyAddress = (addr: string): { street: string; city: string; state: string } => {
+    const parts = (addr || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 2) return { street: addr || "", city: "", state: "" };
+    const street = parts[0];
+    let city = "";
+    let state = "";
+    if (parts.length >= 3) {
+      city = parts[parts.length - 2];
+      state = (parts[parts.length - 1].split(" ")[0] || "").trim(); // "FL 34747" → "FL"
+    } else {
+      city = parts[1];
+      state = parts[2] ?? "";
     }
-    setScrapingUnitId(unitId);
+    return { street, city, state };
+  };
+
+  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number }) => {
+    if (id >= 0 || !property) return; // promoted drafts only
+    const draftId = -id;
+    const { street, city, state } = parsePropertyAddress(property.address);
+    setScrapingUnitId(unit.id);
     try {
-      const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", { url });
+      const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
+        communityName: property.complexName,
+        streetAddress: street || undefined,
+        city: city || undefined,
+        state: state || undefined,
+        bedrooms: unit.bedrooms,
+        skipUrls: skippedUrlsByUnit[unit.id] ?? [],
+      });
       const fetchData = await fetchR.json();
       const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+      const sourceUrl: string | null = fetchData?.sourceUrl ?? null;
       if (photos.length === 0) {
         toast({
-          title: "No photos found",
-          description: fetchData?.note || "Couldn't scrape photos from that URL. Try another listing.",
+          title: "No Zillow listing found",
+          description: fetchData?.note || `Couldn't find a representative ${unit.bedrooms}BR listing at ${property.complexName}. The community may not have Zillow coverage.`,
           variant: "destructive",
         });
         return;
@@ -255,14 +283,22 @@ export default function BuilderPreflight() {
       const saved = unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
       toast({
         title: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`,
-        description: "Re-run the Platform Check below to reverse-image-search them.",
+        description: sourceUrl
+          ? `From ${new URL(sourceUrl).hostname}. Re-run the Platform Check to reverse-image-search them.`
+          : "Re-run the Platform Check below to reverse-image-search them.",
       });
+      // Track this URL so a subsequent "Try another" click skips it.
+      if (sourceUrl) {
+        setSkippedUrlsByUnit((prev) => ({
+          ...prev,
+          [unit.id]: [...(prev[unit.id] ?? []), sourceUrl],
+        }));
+      }
       // Refresh property state so unit.photos / photoFolder reflect the
       // new folder. Without this the next Platform Check still sees the
       // stale (empty) photos array.
       const updated = await loadDraftPropertyByNegativeId(id);
       if (updated) setDraftProperty(updated);
-      setPhotoUrls((prev) => ({ ...prev, [unitId]: "" }));
     } catch (e: any) {
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
     } finally {
@@ -562,54 +598,60 @@ export default function BuilderPreflight() {
         </div>
 
         {/* ── Photo Sources (promoted drafts only) ──
-            The reverse-image-search half of the Platform Check below is
-            only as good as the photos the draft has on disk. When the
-            wizard's Step 4 scrape didn't find a matching Zillow listing,
-            both unit photo folders come up empty and the check has
-            nothing to scan. Surface a per-unit URL field here so the
-            operator can paste a Zillow URL of a representative listing
-            for each unit, scrape its photos, and then Re-run the check. */}
+            The reverse-image-search half of the Platform Check needs
+            photos to scan. When the wizard's Step 4 scrape didn't
+            find a matching Zillow listing, the unit photo folders
+            arrive empty. This card calls the same multi-query Zillow
+            discovery that /api/replacement/find-unit uses for active
+            properties — operator clicks one button per unit, no URL
+            paste needed. "Try another" walks through subsequent
+            results so a bad first match isn't a dead end. */}
         {id < 0 && (
           <Card className="p-6 mb-6">
             <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
             <p className="text-sm text-muted-foreground mb-4">
               The reverse-image-search half of the Platform Check below needs
-              photos to scan. Paste a Zillow URL of a representative listing
-              for each unit, we'll scrape its photos and save them to this
-              draft, then click Re-run on the Platform Check.
+              photos to scan. Click <strong>Find Photos</strong> for each unit
+              and we'll search Zillow for a representative listing at{" "}
+              <strong>{property.complexName}</strong>, scrape its photos, and
+              save them to the draft. Then click Re-run on the Platform Check.
             </p>
             <div className="space-y-3">
               {property.units.map((unit, i) => {
                 const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
+                const skippedCount = (skippedUrlsByUnit[unit.id] ?? []).length;
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-medium w-20 flex-shrink-0">Unit {String.fromCharCode(65 + i)}</span>
-                    <input
-                      type="url"
-                      placeholder="https://www.zillow.com/homedetails/…"
-                      value={photoUrls[unit.id] ?? ""}
-                      onChange={(e) => setPhotoUrls((prev) => ({ ...prev, [unit.id]: e.target.value }))}
-                      disabled={scrapingUnitId !== null}
-                      className="flex-1 min-w-[260px] px-3 py-1.5 text-sm border rounded-md bg-background"
-                      data-testid={`input-photo-url-${unit.id}`}
-                    />
+                    <span className="text-sm font-medium w-20 flex-shrink-0">
+                      Unit {String.fromCharCode(65 + i)}
+                    </span>
+                    <span className="text-xs text-muted-foreground flex-1">
+                      {unit.bedrooms}BR · ~{unit.sqft || "?"} sqft
+                    </span>
                     <Button
                       size="sm"
-                      onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit.id)}
-                      disabled={scrapingUnitId !== null || !(photoUrls[unit.id] ?? "").trim()}
+                      onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit)}
+                      disabled={scrapingUnitId !== null}
                       className="h-8 text-xs"
                       data-testid={`button-scrape-photos-${unit.id}`}
                     >
                       {scrapingUnitId === unit.id ? (
-                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Scraping…</>
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Searching Zillow…</>
+                      ) : folderHasPhotos ? (
+                        <><RefreshCw className="h-3 w-3 mr-1" /> Try another</>
                       ) : (
-                        <><Camera className="h-3 w-3 mr-1" /> Scrape &amp; Save</>
+                        <><Search className="h-3 w-3 mr-1" /> Find Photos</>
                       )}
                     </Button>
                     {folderHasPhotos && (
                       <Badge variant="outline" className="text-[10px] flex-shrink-0">
                         {unit.photos.length} on file
                       </Badge>
+                    )}
+                    {skippedCount > 0 && !folderHasPhotos && (
+                      <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                        skipped {skippedCount}
+                      </span>
                     )}
                   </div>
                 );
