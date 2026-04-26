@@ -40,38 +40,43 @@
 const EM_DASH_WITH_SPACES = /\s+—\s+/g;
 const EM_DASH_BARE = /—/g;
 
-// WARM_UP_TRIGGERS match the START of a sentence (case-insensitive).
-// When matched, the prefix up to the first sentence terminator
-// (`:`, `.`, `!`, `?`) is stripped from the sentence — not the whole
-// sentence. So "Here's what you're working with: Unit A is a 3BR…"
-// keeps "Unit A is a 3BR…" but loses the AI-transition prefix.
-// Sentences that are PURE fluff (e.g. "Thanks for reaching out!")
-// have nothing left after stripping the prefix and get dropped.
-const WARM_UP_TRIGGERS: ReadonlyArray<RegExp> = [
+// FLUFF_SENTENCE_TRIGGERS — sentences whose FIRST words match these
+// are pure social filler. Strip the prefix up to the first sentence
+// terminator (`:`, `.`, `!`, `?`); for these the sentence usually
+// IS the prefix, leaving an empty residue → drop the whole sentence.
+const FLUFF_SENTENCE_TRIGGERS: ReadonlyArray<RegExp> = [
   /^I'?m (thrilled|delighted|happy|excited|pleased|so excited|so happy|really excited|really happy)\b/i,
   /^I'?d (be (happy|delighted|thrilled|glad|pleased)|love)\b/i,
   /^We'?re (thrilled|delighted|happy|excited|pleased|so excited|so happy|really excited|really happy|stoked)\b/i,
   /^What (a|an) (great|wonderful|fantastic|amazing|awesome|excellent|terrific) question/i,
-  // "Thanks for reaching out!" with the exclamation — the AI tell.
-  // A neutral "Thanks for reaching out." (period) reads natural and
-  // is allowed through.
+  // "Thanks for reaching out!" with exclamation — the AI tell.
+  // Neutral "Thanks for reaching out." (period) reads natural and
+  // passes through.
   /^Thanks for (reaching out|your message|your inquiry|the message|the inquiry)\s*[!]/i,
   /^Thank you (so much|very much) for/i,
-  // "Here's what you're working with:" / "Here's the breakdown" /
-  // "Here's a quick rundown" — AI transition phrases.
-  /^Here'?s (what|the|a) (you'?re working with|breakdown|quick (breakdown|rundown|overview)|rundown|overview|setup|deal)/i,
   /^(Absolutely|Certainly|Of course|Naturally)\s*[!.]/i,
   /^Rest assured/i,
   /^Please be advised/i,
-  // Excitement-as-opener: "We're so excited to host you", "Excited
-  // to have you", etc.
+  // Excitement-as-opener.
   /^(We'?re|I'?m) (so |really |very |truly )?(excited|thrilled|delighted|happy|stoked|pumped) to (have|host|welcome|see)/i,
   /^(So )?excited to (have|host|welcome|see)/i,
-  // Date / booking restating openers — guest sent the inquiry, they
-  // know their dates. Specific to fluff phrasings ("You've got two
-  // beautiful townhomes reserved from…") so legitimate answers like
-  // "You've got king beds in both masters" don't get hit.
-  /^You'?ve got (a |an |two |three |four |five |\d+ |both |several )?\s*(beautiful|stunning|gorgeous|spacious|lovely|amazing|wonderful|incredible|fabulous|fantastic|charming|cozy)\b/i,
+];
+
+// RESTATING_PREAMBLE_TRIGGERS — sentences whose FIRST words match
+// these are restating-the-booking preambles. They're often followed
+// by substantive content in the SAME sentence ("You've got two
+// townhomes at Pili Mai, Unit A sleeps 8 with a king master…").
+// Strip the prefix up to the first natural break (`,`, `;`, `:`,
+// `!`, `.`, `?`) so the answer that follows survives.
+const RESTATING_PREAMBLE_TRIGGERS: ReadonlyArray<RegExp> = [
+  // "Here's what you're working with:" / "Here's the breakdown" /
+  // "Here's a quick rundown" — AI transition phrases.
+  /^Here'?s (what|the|a) (you'?re working with|breakdown|quick (breakdown|rundown|overview)|rundown|overview|setup|deal)/i,
+  // "You've got [optional adjective] [unit-noun]" — restating which
+  // property they're inquiring about. The unit-noun list keeps
+  // legitimate answers like "You've got king beds in both masters"
+  // (no unit-noun) from being stripped.
+  /^You'?ve got (a |an |two |three |four |five |\d+ |both |several )?\s*(beautiful |stunning |gorgeous |spacious |lovely |amazing |wonderful |incredible |fabulous |fantastic |charming |cozy )?(townhome|condo|unit|villa|property|home|house|place|cottage|bungalow|residence|townhouse|apartment)s?\b/i,
   /^Your (booking|reservation|stay|trip) (is|runs|starts|begins|spans)\b/i,
   /^You'?(re|ll be) (booked|staying|with us|joining us|coming) (from|on|for)\b/i,
 ];
@@ -153,13 +158,25 @@ function splitParagraphSentences(paragraph: string): string[] {
   return out;
 }
 
-// If the sentence starts with a warm-up trigger, strip the prefix up
-// to (and including) the first sentence terminator (`:`, `.`, `!`, `?`).
-// The residue (which may be empty) is what's kept.
-function stripWarmUpPrefix(sentence: string): string {
-  for (const re of WARM_UP_TRIGGERS) {
+// Two prefix-stripping behaviors:
+//
+//   FLUFF — strip the prefix up to the first hard terminator
+//           (`:`, `.`, `!`, `?`). For pure-fluff sentences ("Thanks
+//           for reaching out!") this leaves an empty residue and the
+//           caller drops the whole sentence.
+//
+//   RESTATING — strip the prefix up to the first natural break
+//               (`,`, `;`, `:`, `!`, `.`, `?`). Used when the prefix
+//               is a restating-the-booking preamble that's followed
+//               by substantive content in the SAME sentence
+//               ("You've got two townhomes at Pili Mai, Unit A
+//               sleeps 8 with a king master…" → "Unit A sleeps 8…").
+function stripPrefix(sentence: string, mode: "fluff" | "restating"): string | null {
+  const triggers = mode === "fluff" ? FLUFF_SENTENCE_TRIGGERS : RESTATING_PREAMBLE_TRIGGERS;
+  for (const re of triggers) {
     if (re.test(sentence)) {
-      const m = sentence.match(/[:!.?]/);
+      const breakClass = mode === "fluff" ? /[:!.?]/ : /[,;:!.?]/;
+      const m = sentence.match(breakClass);
       if (!m || m.index === undefined) return ""; // no terminator → drop whole sentence
       const rest = sentence.slice(m.index + 1).trim();
       // If the rest starts with a lowercase letter, capitalize it so
@@ -170,7 +187,7 @@ function stripWarmUpPrefix(sentence: string): string {
       return rest;
     }
   }
-  return sentence;
+  return null; // signals "no trigger matched"
 }
 
 function isClosingSentence(s: string): boolean {
@@ -220,8 +237,19 @@ export function humanizeReply(text: string): string {
         cutTail = true;
         break;
       }
-      const after = stripWarmUpPrefix(s);
-      if (after) out.push(after);
+      // Try fluff first (drop whole sentence), then restating
+      // (strip up to natural break in same sentence).
+      const fluff = stripPrefix(s, "fluff");
+      if (fluff !== null) {
+        if (fluff) out.push(fluff);
+        continue;
+      }
+      const restated = stripPrefix(s, "restating");
+      if (restated !== null) {
+        if (restated) out.push(restated);
+        continue;
+      }
+      out.push(s);
     }
     if (out.length > 0) cleanedParagraphs.push(out.join(" "));
   }

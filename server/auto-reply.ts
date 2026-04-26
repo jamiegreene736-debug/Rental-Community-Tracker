@@ -527,6 +527,21 @@ async function draftReplyWithClaude(params: {
     return { draft: null, flagReason: null, toolsUsed: [], error: "ANTHROPIC_API_KEY not set" };
   }
 
+  // Detect accessibility / floor-plan / mobility concerns. Same rule
+  // and pattern as the manual AI Draft endpoint — promote these from
+  // "should address" to "MUST address" since the system prompt's
+  // softer guidance gets ignored when the question is buried in a
+  // multi-part guest message.
+  const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
+  const accessibilityMandate = ACCESSIBILITY_CUES.test(params.guestMessage)
+    ? `\n\nACCESSIBILITY / FLOOR-PLAN ASK DETECTED — MANDATORY:
+The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Call get_local_property_facts and use the propertyType field:
+- Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly ("we'd confirm the assigned unit's floor plan before booking") — never guess.
+- Condominium → confirm units are single-floor (no internal stairs).
+- Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
+Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
+    : "";
+
   const userPrompt = `Guest name: ${params.guestName ?? "Guest"}
 Channel: ${params.channel ?? "unknown"}
 ${params.listingId ? `Listing ID: ${params.listingId}` : ""}
@@ -536,6 +551,7 @@ Guest message:
 """
 ${params.guestMessage}
 """
+${accessibilityMandate}
 
 Use tools to gather any needed context, then reply. If unsafe or ambiguous, call flag_for_human and stop.`;
 
