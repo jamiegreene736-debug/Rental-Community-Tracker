@@ -771,7 +771,26 @@ export default function InboxPage() {
       const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
       return ta - tb;
     });
+    // Exclude Guesty's automated system / log posts — these have
+    // `module.type === "log"` and a body like "New guest inquiry"
+    // (auto-emitted when an inquiry hits the inbox). Without this
+    // filter the latest "non-host" post on a fresh inquiry is the
+    // log entry, NOT the guest's actual message — so the AI gets
+    // "New guest inquiry" as the guestMessage, the accessibility
+    // regex never fires, and the post-processor never injects a
+    // floor-plan answer (which is exactly the bug Jamie hit on
+    // the Pili Mai Jolene draft).
+    const isSystemPost = (p: any): boolean => {
+      const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
+      if (moduleType === "log" || moduleType === "system" || moduleType === "internal" || moduleType === "note") return true;
+      // Some Guesty accounts surface log posts with no module.type
+      // but a recognizable canned body — catch those too.
+      const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
+      if (body === "new guest inquiry" || body === "new inquiry" || body === "new reservation request") return true;
+      return false;
+    };
     const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
+      if (isSystemPost(p)) return false;
       const isHost =
         p.authorType === "host" ||
         p.authorRole === "host" ||
