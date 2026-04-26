@@ -2491,20 +2491,40 @@ export async function registerRoutes(
       photoMatches: photoMatchesByUrl.get(c.url) ?? [],
     }));
 
-    // Combined cheapest (top 2) across sources that have pricing.
-    // VRBO removed; cheapest now drawn from airbnb / booking / pm only.
-    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...pm]
+    // Combined cheapest (top 2) across BOOKABLE sources that have pricing.
+    //
+    // Airbnb is INTENTIONALLY excluded from the cheapest pool — Auto-fill
+    // pulls from `cheapest` and creates a buy-in attached to the picked
+    // candidate's URL. Picking an Airbnb URL is a footgun: the operator
+    // can't sublet it (Airbnb TOS), so the buy-in record points at a
+    // listing that can't actually be booked for the guest. The PM
+    // matches surfaced under each Airbnb row (photoMatches) ARE
+    // bookable — but they don't have prices, so they don't compete on
+    // "cheapest" anyway.
+    //
+    // VRBO already excluded (TOS, same reason). Booking.com stays —
+    // many Booking.com listings are commercial hotels that DO allow
+    // re-rental. PM stays — the whole point of PM is they accept
+    // commercial bookings.
+    const priced: Candidate[] = [...booking, ...pm]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
     const cheapest = priced.slice(0, 2);
+    // Telemetry: what would the cheapest have been if we counted Airbnb?
+    // Useful to see how often Airbnb is undercutting the bookable channels.
+    const airbnbCheapest = airbnbWithMatches
+      .filter((c) => c.nightlyPrice > 0)
+      .sort((a, b) => a.nightlyPrice - b.nightlyPrice)
+      .slice(0, 1);
 
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
-      + `airbnb=${airbnb.length}/${airbnbRawCount} (site, dropped noResort=${airbnbDropped.noResort}, wrongBR=${airbnbDropped.wrongBedrooms}) `
+      + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `booking=${booking.length}/${bookingRawCount} (noResort=${bookingDropped.noResort}, wrongBR=${bookingDropped.wrongBedrooms}) `
-      + `pm=${pm.length}/${pmRawCount} · photoMatches=${totalPhotoMatches} · priced=${priced.length}`
+      + `pm=${pm.length}/${pmRawCount} · photoMatches=${totalPhotoMatches} · `
+      + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
 
     return res.json({
@@ -2526,6 +2546,13 @@ export async function registerRoutes(
         searchLocation,
         vrboDestination,
         resortName,
+        // For-reference-only: what the cheapest Airbnb listing would have
+        // been if Airbnb were a bookable channel. Helps the operator see
+        // how much they're paying for the not-being-able-to-sublet
+        // restriction (e.g. "Airbnb $250/night vs PM $370/night").
+        airbnbCheapestTelemetry: airbnbCheapest[0]
+          ? { nightlyPrice: airbnbCheapest[0].nightlyPrice, totalPrice: airbnbCheapest[0].totalPrice, url: airbnbCheapest[0].url }
+          : null,
       },
       cheapest,
       totalPricedResults: priced.length,

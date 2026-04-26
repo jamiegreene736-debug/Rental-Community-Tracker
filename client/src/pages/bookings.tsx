@@ -377,12 +377,27 @@ export default function Bookings() {
       );
       const estProfit = payout - existingCost - totalCost;
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
-      toast({
-        title: `Filled ${filled.length} / ${results.length} units`,
-        description:
-          `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-          + (skipped.length ? ` · No priced candidate for: ${skipped.join(", ")}` : ""),
-      });
+      // When auto-fill picked nothing for any slot, that means the
+      // bookable-channels pool (Booking.com + PM) had no priced
+      // candidates. Tell the operator explicitly so they know to
+      // expand the per-slot Find buy-in panel and click through to
+      // a PM company manually — Airbnb is intentionally excluded
+      // from auto-fill since we can't sublet from there.
+      if (filled.length === 0) {
+        toast({
+          title: "No auto-fill candidates",
+          description:
+            "Booking.com and PM Companies didn't return a priced candidate for the dates. Click 'Find buy-in' on any slot to see Airbnb listings (with reverse-image PM matches you can click through to book direct).",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: `Filled ${filled.length} / ${results.length} units`,
+          description:
+            `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
+            + (skipped.length ? ` · No priced PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
+        });
+      }
       setAutoFilling(null);
     },
     onError: (e: any) => {
