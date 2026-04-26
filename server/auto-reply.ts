@@ -364,6 +364,12 @@ async function runTool(name: string, input: any): Promise<unknown> {
           : prop.propertyType === "Condominium"
             ? "Single-floor units (no internal stairs). Building-level access may have stairs or elevator depending on the resort."
             : null,
+        // Per-complex floor-plan / accessibility note. Only set on
+        // properties where there's meaningful variation propertyType
+        // alone doesn't capture (e.g. Pili Mai). When set, this is
+        // the AUTHORITATIVE source — it overrides the generic
+        // propertyTypeNote above for accessibility questions.
+        accessibilityNote: prop.accessibilityNote ?? null,
         totalBedrooms: prop.units.reduce((s, u) => s + u.bedrooms, 0),
         totalSleeps: prop.units.reduce((s, u) => s + u.maxGuests, 0),
         units: prop.units.map((u, i) => ({
@@ -535,10 +541,12 @@ async function draftReplyWithClaude(params: {
   const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
   const accessibilityMandate = ACCESSIBILITY_CUES.test(params.guestMessage)
     ? `\n\nACCESSIBILITY / FLOOR-PLAN ASK DETECTED — MANDATORY:
-The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Call get_local_property_facts and use the propertyType field:
-- Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly ("we'd confirm the assigned unit's floor plan before booking") — never guess.
-- Condominium → confirm units are single-floor (no internal stairs).
-- Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
+The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Call get_local_property_facts and use this priority:
+1. If the response has an \`accessibilityNote\` field set, paraphrase it accurately. That note is AUTHORITATIVE — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
+2. Otherwise fall back to propertyType:
+   - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly ("we'd confirm the assigned unit's floor plan before booking") — never guess.
+   - Condominium → confirm units are single-floor (no internal stairs).
+   - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
 Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
     : "";
 

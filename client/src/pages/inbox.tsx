@@ -91,6 +91,15 @@ async function buildPropertyContextForDraft(
     if (walk) parts.push(`\nDISTANCE BETWEEN UNITS: ${walk.description} (approx ${walk.minutes}-min walk)`);
     if (parkingAmenities.length > 0) parts.push(`\nPARKING: ${parkingAmenities.join(", ")}`);
     if (otherHighlights.length > 0) parts.push(`\nKEY AMENITIES: ${otherHighlights.slice(0, 12).join(", ")}`);
+    // Per-complex floor-plan / accessibility note. Only set on
+    // properties where there's meaningful variation propertyType
+    // alone doesn't capture (Pili Mai mixes Moana single-level and
+    // Mahina multi-level plans). When present, surface it as its
+    // own section so the AI can quote it back accurately for
+    // accessibility / seniors / "downstair units?" asks.
+    if (prop.accessibilityNote) {
+      parts.push(`\nFLOOR PLAN / ACCESSIBILITY: ${prop.accessibilityNote}`);
+    }
     parts.push(`\nDESCRIPTION: ${prop.combinedDescription.slice(0, 600)}${prop.combinedDescription.length > 600 ? "…" : ""}`);
 
     // Hawaii detection by state code / name in the address string.

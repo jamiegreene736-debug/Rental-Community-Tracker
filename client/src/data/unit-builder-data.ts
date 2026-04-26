@@ -72,6 +72,17 @@ export type PropertyUnitBuilder = {
   //   Maui County:  STRH-########    e.g. STRH-20220042
   //   Honolulu (Oahu):  NUC-##-###-####    e.g. NUC-22-001-0134
   strPermit?: string;
+  // Free-text note about floor plan / stairs / mobility access for
+  // this complex. Surfaces in the AI Draft + auto-reply context only
+  // (not pushed to OTA listings) so the AI can answer
+  // accessibility / seniors / "downstair units?" questions
+  // accurately. Set this when the complex has meaningful variation
+  // the propertyType alone doesn't capture (e.g. Pili Mai mixes
+  // single-level Moana plans with multi-level Mahina plans). Leave
+  // undefined when the propertyType-derived default is enough — a
+  // straight Condominium complex with elevator access doesn't need
+  // a custom note.
+  accessibilityNote?: string;
   units: Unit[];
   hasPhotos: boolean;
   communityPhotos: CommunityPhoto[];
@@ -1689,6 +1700,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-120-9012-01",
     getLicense: "GE-024-120-9012-01",
     strPermit: "TVR-2022-037",
+    accessibilityNote: "Pili Mai includes a mix of floor plans — some are single-level ground-floor residences (Moana plan, 3BR/3BA, no internal stairs), others are multi-level townhomes with internal stairs (Mahina plan, 2BR/2.5BA), and some upper-level units have a flight of stairs to the entry door. The specific layout depends on the assigned unit. For groups with seniors / mobility / stairs concerns, we confirm the assigned unit's floor plan before booking.",
     hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
@@ -1762,6 +1774,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-120-9012-02",
     getLicense: "GE-024-120-9012-02",
     strPermit: "TVR-2022-038",
+    accessibilityNote: "Pili Mai includes a mix of floor plans — some are single-level ground-floor residences (Moana plan, 3BR/3BA, no internal stairs), others are multi-level townhomes with internal stairs (Mahina plan, 2BR/2.5BA), and some upper-level units have a flight of stairs to the entry door. The specific layout depends on the assigned unit. For groups with seniors / mobility / stairs concerns, we confirm the assigned unit's floor plan before booking.",
     hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
