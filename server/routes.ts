@@ -10678,27 +10678,30 @@ ${propertyContext}
     const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
     const accessibilityRaised = ACCESSIBILITY_CUES.test(guestMessage);
     const accessibilityMandate = accessibilityRaised
-      ? `\n\nACCESSIBILITY / FLOOR-PLAN ASK DETECTED — MANDATORY:
-The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Source priority (use the FIRST one that applies):
+      ? `🚨 ACCESSIBILITY / FLOOR-PLAN ASK — TOP PRIORITY 🚨
+The guest's message contains an accessibility, ground-floor, stairs, mobility, or seniors concern. Your reply MUST include a sentence that directly addresses it. The reply will be considered INCOMPLETE if it doesn't contain at least one of these words: "stairs", "floor", "level", "ground", "multi-story", "single-level". Do not skip this. Do not bury it. Write it as its own paragraph or sentence near the end of the body, before the sign-off.
 
-1. If the property facts have a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
+Source priority for the answer (use the FIRST one that applies):
 
-   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we CAN accommodate by prioritizing a specific unit type (single-level / ground-floor / Moana plan / etc.), make a soft commitment in the reply: "We'll note this on your booking and prioritize a [unit-type the note names] for your stay." This is a unit-assignment note we can typically fulfill — it's not a refund, upgrade, or policy exception, so it's safe to commit to. Do not invent commitments the note doesn't support.
+1. If the property facts include a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
+
+   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we CAN accommodate by prioritizing a specific unit type (single-level / ground-floor / Moana plan / etc.), make a soft commitment: "We'll note this on your booking and prioritize a [unit-type the note names] for your stay." This is a unit-assignment note we can typically fulfill — it's not a refund, upgrade, or policy exception, so it's safe to commit to. Do not invent commitments the note doesn't support.
 
 2. Otherwise, fall back to the propertyType:
-   - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly: "we'd confirm the assigned unit's floor plan before booking" — never guess.
+   - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on: "we'd confirm the assigned unit's floor plan before booking" — never guess.
    - Condominium → confirm units are single-floor (no internal stairs).
    - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
 
-Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
+Do not roll it into a generic "let me know if you have questions" closer.
+
+`
       : "";
 
-    const userPrompt = `${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
+    const userPrompt = `${accessibilityMandate}${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
 Property: ${propertyName || "our property"}
 
 Guest message:
 "${guestMessage}"
-${accessibilityMandate}
 
 Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational fluff.
 
@@ -10793,7 +10796,52 @@ Do not include a subject line.`;
       // Humanize: strip the AI tells the prompt can't reliably suppress
       // (em-dashes, "I'm thrilled to help", "Is there anything specific
       // before you book?", etc.). See server/humanize-reply.ts for rules.
-      const draft = humanizeReply(draftMarkdownClean);
+      const humanized = humanizeReply(draftMarkdownClean);
+
+      // Deterministic accessibility safety net: when the guest's message
+      // raised an accessibility / floor-plan / seniors concern but the
+      // AI's reply doesn't include any accessibility-related word
+      // ("stairs", "floor", "level", "ground", "multi-story",
+      // "single-level", "elevator"), inject a fallback sentence drawn
+      // from the property's FLOOR PLAN / ACCESSIBILITY block (or from
+      // the propertyType when no block is set). Keeps Haiku honest
+      // when it ignores the MANDATORY prompt instruction — the prompt
+      // is the soft path, this is the hard guarantee.
+      const draft = (() => {
+        if (!accessibilityRaised) return humanized;
+        const REPLY_HAS_ACCESS_KEYWORD = /\b(stairs?|floor|level|ground|multi-story|multistory|single-level|elevator|stair[-\s]?free)\b/i;
+        if (REPLY_HAS_ACCESS_KEYWORD.test(humanized)) return humanized;
+
+        // Build a fallback sentence. Prefer the property's
+        // accessibilityNote (passed in propertyContext as
+        // "FLOOR PLAN / ACCESSIBILITY: …"); else propertyType-derived.
+        let fallback: string;
+        const noteMatch = (propertyContext ?? "").match(/FLOOR PLAN \/ ACCESSIBILITY:\s*([^]+?)(?=\n\n|\n[A-Z][A-Z ]+:|$)/);
+        if (noteMatch) {
+          // Use the operator-authored note verbatim. It's already
+          // phrased with the right tone + commitment language.
+          fallback = `On the floor-plan question for the seniors in your group: ${noteMatch[1].trim()}`;
+        } else {
+          const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
+          const propType = typeMatch?.[1];
+          if (propType === "Townhouse") {
+            fallback = "On the seniors / downstairs question — these units are multi-story townhomes with internal stairs. We'd confirm the assigned unit's floor plan before booking, especially for guests with mobility concerns.";
+          } else if (propType === "Condominium") {
+            fallback = "On the floor-plan question — these are single-floor condo units with no internal stairs. Building-level access varies (stairs vs. elevator), and we can confirm specifics for the assigned unit before booking.";
+          } else {
+            fallback = "On the floor-plan question — we'd confirm the specific unit's accessibility before booking.";
+          }
+        }
+
+        // Insert before the signature block so the sign-off stays at
+        // the bottom. Falls back to appending when no signature is
+        // detected (rare; humanizeReply normally re-attaches one).
+        const sigMatch = humanized.match(/\n\s*(Mahalo|Thank You|Thanks|Best|Regards|Sincerely|Aloha)\s*,\s*\n/i);
+        if (sigMatch && sigMatch.index !== undefined) {
+          return `${humanized.slice(0, sigMatch.index).trimEnd()}\n\n${fallback}${humanized.slice(sigMatch.index)}`;
+        }
+        return `${humanized.trimEnd()}\n\n${fallback}`;
+      })();
 
       res.json({ draft });
     } catch (err: any) {
