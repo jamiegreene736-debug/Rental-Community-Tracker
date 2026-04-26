@@ -211,6 +211,65 @@ export default function BuilderPreflight() {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   };
 
+  // ── Photo source scraper for promoted drafts ─────────────────────────────
+  // Drafts whose Step 4 wizard scrape didn't find a matching Zillow listing
+  // arrive at preflight with no photos persisted on the volume. Without
+  // photos, the reverse-image-search half of the Platform Check is fully
+  // skipped (it has nothing to feed Google Lens), so the check returns "no
+  // signals" regardless of whether the property is actually listed somewhere.
+  // This UI lets the operator paste a Zillow URL per unit, re-uses the same
+  // /api/community/fetch-unit-photos + /api/community/:id/persist-photos
+  // endpoints the wizard uses, then refreshes the property state so the
+  // updated photoFolder flows into the next Re-run of the Platform Check.
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
+  const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
+  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unitId: string) => {
+    if (id >= 0) return; // promoted drafts only
+    const draftId = -id;
+    const url = (photoUrls[unitId] ?? "").trim();
+    if (!url) {
+      toast({ title: "Paste a Zillow URL first", variant: "destructive" });
+      return;
+    }
+    setScrapingUnitId(unitId);
+    try {
+      const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", { url });
+      const fetchData = await fetchR.json();
+      const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+      if (photos.length === 0) {
+        toast({
+          title: "No photos found",
+          description: fetchData?.note || "Couldn't scrape photos from that URL. Try another listing.",
+          variant: "destructive",
+        });
+        return;
+      }
+      // Pass empty array for the OTHER unit so persist-photos doesn't wipe
+      // its existing folder. The endpoint skips a unit when its URL list
+      // is empty.
+      const persistBody = unitIndex === 0
+        ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [] }
+        : { unit1Photos: [], unit2Photos: photos.map((p) => p.url) };
+      const persistR = await apiRequest("POST", `/api/community/${draftId}/persist-photos`, persistBody);
+      const persistData = await persistR.json();
+      const saved = unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
+      toast({
+        title: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`,
+        description: "Re-run the Platform Check below to reverse-image-search them.",
+      });
+      // Refresh property state so unit.photos / photoFolder reflect the
+      // new folder. Without this the next Platform Check still sees the
+      // stale (empty) photos array.
+      const updated = await loadDraftPropertyByNegativeId(id);
+      if (updated) setDraftProperty(updated);
+      setPhotoUrls((prev) => ({ ...prev, [unitId]: "" }));
+    } catch (e: any) {
+      toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
+    } finally {
+      setScrapingUnitId(null);
+    }
+  };
+
   const [platformChecking, setPlatformChecking] = useState(false);
   // Track which unit IDs are still being checked (for per-row spinner)
   const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
@@ -501,6 +560,63 @@ export default function BuilderPreflight() {
             {property.address}
           </p>
         </div>
+
+        {/* ── Photo Sources (promoted drafts only) ──
+            The reverse-image-search half of the Platform Check below is
+            only as good as the photos the draft has on disk. When the
+            wizard's Step 4 scrape didn't find a matching Zillow listing,
+            both unit photo folders come up empty and the check has
+            nothing to scan. Surface a per-unit URL field here so the
+            operator can paste a Zillow URL of a representative listing
+            for each unit, scrape its photos, and then Re-run the check. */}
+        {id < 0 && (
+          <Card className="p-6 mb-6">
+            <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
+            <p className="text-sm text-muted-foreground mb-4">
+              The reverse-image-search half of the Platform Check below needs
+              photos to scan. Paste a Zillow URL of a representative listing
+              for each unit, we'll scrape its photos and save them to this
+              draft, then click Re-run on the Platform Check.
+            </p>
+            <div className="space-y-3">
+              {property.units.map((unit, i) => {
+                const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
+                return (
+                  <div key={unit.id} className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium w-20 flex-shrink-0">Unit {String.fromCharCode(65 + i)}</span>
+                    <input
+                      type="url"
+                      placeholder="https://www.zillow.com/homedetails/…"
+                      value={photoUrls[unit.id] ?? ""}
+                      onChange={(e) => setPhotoUrls((prev) => ({ ...prev, [unit.id]: e.target.value }))}
+                      disabled={scrapingUnitId !== null}
+                      className="flex-1 min-w-[260px] px-3 py-1.5 text-sm border rounded-md bg-background"
+                      data-testid={`input-photo-url-${unit.id}`}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit.id)}
+                      disabled={scrapingUnitId !== null || !(photoUrls[unit.id] ?? "").trim()}
+                      className="h-8 text-xs"
+                      data-testid={`button-scrape-photos-${unit.id}`}
+                    >
+                      {scrapingUnitId === unit.id ? (
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Scraping…</>
+                      ) : (
+                        <><Camera className="h-3 w-3 mr-1" /> Scrape &amp; Save</>
+                      )}
+                    </Button>
+                    {folderHasPhotos && (
+                      <Badge variant="outline" className="text-[10px] flex-shrink-0">
+                        {unit.photos.length} on file
+                      </Badge>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
 
         {/* ── Platform Check ── */}
         <Card className="p-6 mb-6">
