@@ -432,7 +432,7 @@ export default function Bookings() {
         <div>
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
-            Bookings · Buy-in tracking · Live search across Airbnb, Vrbo, Booking.com, and PM companies
+            Bookings · Buy-in tracking · Live search across Airbnb (telemetry), Booking.com, and PM companies (with reverse-image matches)
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -960,7 +960,7 @@ function CandidateList({
 // ─── Live search across Airbnb, Vrbo, Booking.com, and PM companies ─────────
 
 type LiveCandidate = {
-  source: "airbnb" | "vrbo" | "booking" | "pm";
+  source: "airbnb" | "booking" | "pm";
   sourceLabel: string;
   title: string;
   url: string;
@@ -969,6 +969,12 @@ type LiveCandidate = {
   bedrooms?: number;
   image?: string;
   snippet?: string;
+  // Reverse-image-search hits where the same photo appears on a non-OTA
+  // site (typically a property-management company that has the same
+  // unit listed for direct booking). Only populated for the top 2
+  // Airbnb candidates server-side. Zero-length when no matches were
+  // found OR the candidate isn't one of the top 2.
+  photoMatches?: Array<{ url: string; title: string; domain: string }>;
 };
 
 type FindBuyInResponse = {
@@ -977,18 +983,18 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
+  // VRBO removed — same TOS subletting restriction as Airbnb makes it
+  // an unusable buy-in channel. Airbnb stays as telemetry/photo-source.
   sources: {
     airbnb: LiveCandidate[];
-    vrbo: LiveCandidate[];
     booking: LiveCandidate[];
     pm: LiveCandidate[];
   };
   cheapest: LiveCandidate[];
   debug?: {
-    rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number };
+    rawCounts?: { airbnb?: number; booking?: number; pm?: number; photoMatches?: number };
     dropped?: {
       airbnb?: { noResort: number; wrongBedrooms: number };
-      vrbo?: { noResort: number; wrongBedrooms: number };
       booking?: { noResort: number; wrongBedrooms: number };
     };
     searchLocation?: string;
@@ -1053,7 +1059,7 @@ function LiveSearchSection({
               <Globe className="h-4 w-4" /> Live search
             </p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Searches Airbnb, Vrbo, Booking.com, and Google for {slot.bedrooms}BR rentals in the area
+              Searches Airbnb (telemetry), Booking.com, and PM companies for {slot.bedrooms}BR rentals in the area
               covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
@@ -1069,7 +1075,7 @@ function LiveSearchSection({
     return (
       <div className="border rounded-lg p-6 text-center text-sm text-muted-foreground">
         <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-        Searching Airbnb, Vrbo, Booking.com, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
+        Searching Airbnb (for photo matches), Booking.com, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
       </div>
     );
   }
@@ -1084,7 +1090,6 @@ function LiveSearchSection({
   }
 
   const airbnb  = data?.sources.airbnb  ?? [];
-  const vrbo    = data?.sources.vrbo    ?? [];
   const booking = data?.sources.booking ?? [];
   const pm      = data?.sources.pm      ?? [];
   const cheapest = data?.cheapest       ?? [];
@@ -1111,13 +1116,15 @@ function LiveSearchSection({
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+            {typeof (data.debug.rawCounts as any).photoMatches === "number" && (
+              <> · photo-matches {(data.debug.rawCounts as any).photoMatches}</>
+            )}
           </div>
           {data.debug.dropped && (
             <div>
               Dropped (wrong resort / bedrooms):
               {" "}airbnb {data.debug.dropped.airbnb?.noResort ?? 0}/{data.debug.dropped.airbnb?.wrongBedrooms ?? 0} ·
-              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0} ·
               {" "}booking {data.debug.dropped.booking?.noResort ?? 0}/{data.debug.dropped.booking?.wrongBedrooms ?? 0}
             </div>
           )}
@@ -1139,10 +1146,13 @@ function LiveSearchSection({
         </div>
       )}
 
-      {/* By-source sections */}
+      {/* By-source sections.
+          VRBO removed — same TOS bar on guest-side subletting as Airbnb,
+          so any VRBO listing surfaced here would be an unusable channel.
+          Airbnb stays as telemetry + photo source for the reverse-image
+          matches rendered inside each Airbnb row (see LiveRow). */}
       {[
-        { key: "airbnb",  label: "Airbnb",        items: airbnb  },
-        { key: "vrbo",    label: "Vrbo",          items: vrbo    },
+        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb  },
         { key: "booking", label: "Booking.com",   items: booking },
         { key: "pm",      label: "PM Companies (Google)", items: pm },
       ].map((s) => (
@@ -1177,49 +1187,83 @@ function LiveSearchSection({
 }
 
 function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () => void; highlight?: boolean }) {
+  const photoMatches = c.photoMatches ?? [];
   return (
     <div
-      className={`border rounded-lg p-2.5 flex items-start gap-2.5 ${highlight ? "bg-white dark:bg-background" : ""}`}
+      className={`border rounded-lg p-2.5 ${highlight ? "bg-white dark:bg-background" : ""}`}
     >
-      {c.image && (
-        <img src={c.image} alt="" className="h-14 w-14 rounded object-cover shrink-0" />
-      )}
-      <div className="grow min-w-0">
-        <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-          <Badge className={`text-[9px] ${sourceBadgeClass(c.source)}`}>{c.sourceLabel}</Badge>
-          <p className="font-medium text-sm truncate">{c.title}</p>
-        </div>
-        {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
-      </div>
-      <div className="text-right shrink-0 min-w-[80px]">
-        {c.nightlyPrice > 0 ? (
-          <>
-            <p className="font-semibold text-sm">{fmtMoney(c.totalPrice)}</p>
-            <p className="text-[10px] text-muted-foreground">{fmtMoney(c.nightlyPrice)}/night</p>
-          </>
-        ) : (
-          <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+      <div className="flex items-start gap-2.5">
+        {c.image && (
+          <img src={c.image} alt="" className="h-14 w-14 rounded object-cover shrink-0" />
         )}
+        <div className="grow min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+            <Badge className={`text-[9px] ${sourceBadgeClass(c.source)}`}>{c.sourceLabel}</Badge>
+            <p className="font-medium text-sm truncate">{c.title}</p>
+          </div>
+          {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
+        </div>
+        <div className="text-right shrink-0 min-w-[80px]">
+          {c.nightlyPrice > 0 ? (
+            <>
+              <p className="font-semibold text-sm">{fmtMoney(c.totalPrice)}</p>
+              <p className="text-[10px] text-muted-foreground">{fmtMoney(c.nightlyPrice)}/night</p>
+            </>
+          ) : (
+            <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+          )}
+        </div>
+        <div className="flex flex-col gap-1 shrink-0">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => window.open(c.url, "_blank", "noopener,noreferrer")}
+          >
+            <ExternalLink className="h-3 w-3 mr-1" /> Open
+          </Button>
+          {/* Record is always available — even if price is unknown you can
+              enter it manually in the dialog after you negotiate with the PM. */}
+          <Button
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            onClick={onRecord}
+          >
+            <ShoppingCart className="h-3 w-3 mr-1" /> Record
+          </Button>
+        </div>
       </div>
-      <div className="flex flex-col gap-1 shrink-0">
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 px-2 text-[11px]"
-          onClick={() => window.open(c.url, "_blank", "noopener,noreferrer")}
-        >
-          <ExternalLink className="h-3 w-3 mr-1" /> Open
-        </Button>
-        {/* Record is always available — even if price is unknown you can
-            enter it manually in the dialog after you negotiate with the PM. */}
-        <Button
-          size="sm"
-          className="h-7 px-2 text-[11px]"
-          onClick={onRecord}
-        >
-          <ShoppingCart className="h-3 w-3 mr-1" /> Record
-        </Button>
-      </div>
+      {/* Reverse-image matches: when this candidate's photo also appears
+          on a non-OTA site, surface those URLs so the operator can click
+          through to the property-management company that has the same
+          unit listed for direct (commercial-OK) booking. Only set on
+          the top 2 Airbnb candidates server-side; absent everywhere
+          else (the conditional below skips render for empty arrays). */}
+      {photoMatches.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-dashed border-border">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5 font-semibold">
+            Same photo also at — bookable for commercial use
+          </p>
+          <div className="space-y-1">
+            {photoMatches.map((m, idx) => (
+              <a
+                key={`${c.url}-match-${idx}`}
+                href={m.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-2 py-1 text-[11px] rounded hover:bg-muted/50 transition-colors"
+                data-testid={`photo-match-${idx}`}
+              >
+                <Badge className="text-[9px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300">
+                  {m.domain}
+                </Badge>
+                <span className="truncate flex-1 text-foreground">{m.title}</span>
+                <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

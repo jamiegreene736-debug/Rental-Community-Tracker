@@ -2045,7 +2045,7 @@ export async function registerRoutes(
     console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
     type Candidate = {
-      source: "airbnb" | "vrbo" | "booking" | "pm";
+      source: "airbnb" | "booking" | "pm";
       sourceLabel: string;
       title: string;
       url: string;
@@ -2054,6 +2054,13 @@ export async function registerRoutes(
       bedrooms?: number;
       image?: string;
       snippet?: string;
+      // Reverse-image-search matches on this candidate's photo. Used
+      // to surface "this exact unit also listed at <PM company>" links
+      // — the operator can't sublet from Airbnb directly, but the same
+      // unit on a property-management company's own site is bookable
+      // for commercial use. Only populated for the top 2 Airbnb
+      // candidates (cost-controlled — Google Lens calls aren't free).
+      photoMatches?: Array<{ url: string; title: string; domain: string }>;
     };
 
     const asNum = (v: unknown): number => {
@@ -2157,7 +2164,7 @@ export async function registerRoutes(
     // (if we resolved one), and the bedroom count to match.
     const siteSearch = async (
       siteDomain: string,
-      source: "airbnb" | "vrbo" | "booking",
+      source: "airbnb" | "booking",
       sourceLabel: string,
     ): Promise<{ candidates: Candidate[]; raw: number; dropped: { noResort: number; wrongBedrooms: number } }> => {
       const resortQualifier = resortName ? `"${resortName}"` : searchLocation;
@@ -2291,26 +2298,23 @@ export async function registerRoutes(
       return [...priced, ...unpriced];
     })();
 
-    // ── Vrbo + Booking via site: search ───────────────────────────────────
-    let vrboRawCount = 0;
-    let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
+    // ── Booking.com via site: search ──────────────────────────────────────
+    // VRBO removed: same restriction as Airbnb — VRBO's standard rental
+    // agreement template explicitly bans guest-side subletting / commercial
+    // re-rental ("Guest shall not assign the lease or sublet the Property"),
+    // so any VRBO listing surfaced here would be an unusable channel for
+    // buy-in. Airbnb stays as TELEMETRY (pricing reference + photo source
+    // for reverse-image-search to find the property-management URL the same
+    // unit is also listed at). Booking.com stays for hotel-style inventory
+    // that DOES allow commercial booking on some properties.
     let bookingRawCount = 0;
     let bookingDropped = { noResort: 0, wrongBedrooms: 0 };
-    const vrboPromise: Promise<Candidate[]> = (async () => {
-      const { candidates, raw, dropped } = await siteSearch("vrbo.com", "vrbo", "Vrbo");
-      vrboRawCount = raw;
-      vrboDropped = dropped;
-      return candidates;
-    })();
     const bookingPromise: Promise<Candidate[]> = (async () => {
       const { candidates, raw, dropped } = await siteSearch("booking.com", "booking", "Booking.com");
       bookingRawCount = raw;
       bookingDropped = dropped;
       return candidates;
     })();
-
-    const hotelsPromise: Promise<{ vrbo: Candidate[]; booking: Candidate[] }> = Promise.all([vrboPromise, bookingPromise])
-      .then(([v, b]) => ({ vrbo: v, booking: b }));
 
     // ── Property-management companies via Google search ────────────────────
     // No live pricing — we return company sites + their booking page as
@@ -2427,21 +2431,80 @@ export async function registerRoutes(
       }
     })();
 
-    const [airbnb, hotels, pm] = await Promise.all([airbnbPromise, hotelsPromise, pmPromise]);
+    const [airbnb, booking, pm] = await Promise.all([airbnbPromise, bookingPromise, pmPromise]);
 
-    // Combined cheapest (top 2) across sources that have pricing
-    const priced: Candidate[] = [...airbnb, ...hotels.vrbo, ...hotels.booking, ...pm]
-      .filter(c => c.nightlyPrice > 0)
+    // ── Path B: reverse-image search the top Airbnb candidates ───────────
+    // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
+    // re-rental), but the SAME unit is often listed on the property-
+    // management company's own site too — and PM sites usually reuse the
+    // Airbnb-listed photos verbatim. Run Google Lens on each top
+    // candidate's image, filter to non-OTA domains, surface the matches
+    // as `photoMatches` on each candidate. Capped at the top 2 priced
+    // Airbnb candidates so the SearchAPI cost stays bounded.
+    //
+    // Filter list mirrors the major OTAs we already track + a handful of
+    // meta-search aggregators (kayak, trivago, hotels.com) that don't add
+    // a useful new booking surface for the operator.
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.com|vrbo\.com|booking\.com|tripadvisor\.com|expedia\.com|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com)$/i;
+    async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
+      try {
+        const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
+        if (!r.ok) return [];
+        const data = await r.json() as any;
+        const sources = [
+          ...(Array.isArray(data?.visual_matches) ? data.visual_matches : []),
+          ...(Array.isArray(data?.organic_results) ? data.organic_results : []),
+          ...(Array.isArray(data?.pages_with_matching_images) ? data.pages_with_matching_images : []),
+        ];
+        const seen = new Set<string>();
+        const out: Array<{ url: string; title: string; domain: string }> = [];
+        for (const s of sources) {
+          const url = String(s?.link || s?.url || s?.source_url || s?.source || "");
+          if (!url) continue;
+          let domain: string;
+          try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch { continue; }
+          if (OTA_DOMAIN_FILTER.test(domain)) continue;
+          if (seen.has(domain)) continue;
+          seen.add(domain);
+          out.push({
+            url,
+            title: String(s?.title || s?.source || domain).slice(0, 80),
+            domain,
+          });
+          if (out.length >= 3) break;
+        }
+        return out;
+      } catch (e: any) {
+        console.warn(`[find-buy-in] google_lens error:`, e.message);
+        return [];
+      }
+    }
+    const topAirbnb = airbnb.filter((c) => c.image && c.nightlyPrice > 0).slice(0, 2);
+    const photoMatchesByUrl = new Map<string, Array<{ url: string; title: string; domain: string }>>();
+    if (topAirbnb.length > 0) {
+      const lensResults = await Promise.all(topAirbnb.map((c) => lensMatches(c.image!)));
+      topAirbnb.forEach((c, i) => photoMatchesByUrl.set(c.url, lensResults[i]));
+    }
+    const airbnbWithMatches: Candidate[] = airbnb.map((c) => ({
+      ...c,
+      photoMatches: photoMatchesByUrl.get(c.url) ?? [],
+    }));
+
+    // Combined cheapest (top 2) across sources that have pricing.
+    // VRBO removed; cheapest now drawn from airbnb / booking / pm only.
+    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...pm]
+      .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
     const cheapest = priced.slice(0, 2);
 
+    const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (site, dropped noResort=${airbnbDropped.noResort}, wrongBR=${airbnbDropped.wrongBedrooms}) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${hotels.vrbo.length}/${vrboRawCount} (noResort=${vrboDropped.noResort}, wrongBR=${vrboDropped.wrongBedrooms}) `
-      + `booking=${hotels.booking.length}/${bookingRawCount} (noResort=${bookingDropped.noResort}, wrongBR=${bookingDropped.wrongBedrooms}) `
-      + `pm=${pm.length}/${pmRawCount} · priced=${priced.length}`
+      + `booking=${booking.length}/${bookingRawCount} (noResort=${bookingDropped.noResort}, wrongBR=${bookingDropped.wrongBedrooms}) `
+      + `pm=${pm.length}/${pmRawCount} · photoMatches=${totalPhotoMatches} · priced=${priced.length}`
     );
 
     return res.json({
@@ -2453,14 +2516,13 @@ export async function registerRoutes(
       checkIn,
       checkOut,
       sources: {
-        airbnb: airbnb.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        vrbo: hotels.vrbo.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        booking: hotels.booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        airbnb: airbnbWithMatches.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        booking: booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         pm: pm.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, pm: pmRawCount },
-        dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
+        rawCounts: { airbnb: airbnbRawCount, booking: bookingRawCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
+        dropped: { airbnb: airbnbDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
         resortName,
