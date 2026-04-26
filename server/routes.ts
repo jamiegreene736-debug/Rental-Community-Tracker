@@ -2665,10 +2665,25 @@ export async function registerRoutes(
 
       const today = new Date().toISOString().slice(0, 10);
       const fields = encodeURIComponent("_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money source integration confirmationCode preApproveState");
-      let url = `/reservations?listingId=${encodeURIComponent(listingId)}&limit=${limit}&sort=checkIn&fields=${fields}&status[]=confirmed&status[]=inquiry&status[]=awaitingPayment`;
+      // Guesty Open API requires the JSON `filters=[...]` syntax for
+      // listingId — the simple `listingId=X` query param is silently
+      // ignored, so the account-wide reservation list comes back
+      // regardless. That was Jamie's bug: every property selection
+      // returned the same first reservation (Mike Stevens) because
+      // Guesty wasn't filtering at all. Status moves into the filter
+      // array too so the whole filter set goes through one consistent
+      // path; legacy `status[]=` is left out to avoid mixing syntaxes.
+      // checkOut date filter only applies when includePast is false.
+      // See https://open-api-docs.guesty.com/docs/how-to-search-for-reservations
+      const filterArr: Array<Record<string, unknown>> = [
+        { field: "listingId", operator: "$eq", value: listingId },
+        { field: "status", operator: "$in", value: ["confirmed", "inquiry", "awaitingPayment"] },
+      ];
       if (!includePast) {
-        url += `&checkOutFrom=${today}`;
+        filterArr.push({ field: "checkOut", operator: "$gte", value: today });
       }
+      const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
+      const url = `/reservations?filters=${filtersParam}&limit=${limit}&sort=checkIn&fields=${fields}`;
       const data = await guestyRequest("GET", url) as any;
       // Guesty wraps list responses inconsistently across accounts — could be
       //   { results: [...] }         (legacy)
