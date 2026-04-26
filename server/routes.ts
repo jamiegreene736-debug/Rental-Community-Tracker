@@ -10687,6 +10687,8 @@ Source priority for the answer (use the FIRST one that applies):
 
    COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Do NOT invent commitments the note doesn't support.
 
+   TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. Pattern to follow: "Since you mentioned [the specific concern from the guest's message — seniors, mobility, ground-floor preference, etc.] and that you'd prefer [their stated need], here's the good news: ..." Avoid stiff openers like "Here's what matters", "You need", "You have", "Let me address", "Regarding your concern". The "good news" framing fits because we CAN actually accommodate — lead with that warmth, then deliver the firm commitment.
+
 2. Otherwise, fall back to the propertyType:
    - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on: "we'd confirm the assigned unit's floor plan before booking" — never guess. (This soft-hedge phrasing is ONLY for the no-FLOOR-PLAN-block fallback.)
    - Condominium → confirm units are single-floor (no internal stairs).
@@ -10819,8 +10821,11 @@ Do not include a subject line.`;
         const noteMatch = (propertyContext ?? "").match(/FLOOR PLAN \/ ACCESSIBILITY:\s*([^]+?)(?=\n\n|\n[A-Z][A-Z ]+:|$)/);
         if (noteMatch) {
           // Use the operator-authored note verbatim. It's already
-          // phrased with the right tone + commitment language.
-          fallback = `On the floor-plan question for the seniors in your group: ${noteMatch[1].trim()}`;
+          // phrased with the right tone + commitment language. The
+          // prefix mirrors the warm "here's the good news" pattern
+          // the prompt asks Haiku to use, so even the deterministic
+          // fallback doesn't read clinically.
+          fallback = `Since you mentioned wanting ground-floor units for the seniors in your group, here's the good news: ${noteMatch[1].trim()}`;
         } else {
           const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
           const propType = typeMatch?.[1];
