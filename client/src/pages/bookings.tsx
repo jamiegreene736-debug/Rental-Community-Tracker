@@ -454,17 +454,25 @@ export default function Bookings() {
           let visionVerified = false;
           if (!pick) {
             const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0);
-            // Suite Paradise URLs first (fast scraper), then everything else.
-            const isFastScrape = (u: string) => /(?:^|\.)suite-paradise\.com/.test(u);
+            const allUnpricedVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0);
+            // Fast-scrape PMs (~1-10s): Suite Paradise direct rcapi,
+            // Vrbo via Browserbase + GraphQL calendar parse.
+            const isFastScrape = (u: string) =>
+              /(?:^|\.)(?:suite-paradise|vrbo)\.com/.test(u);
             const ordered = [
-              ...allUnpricedPm.filter((c) => isFastScrape(c.url)),
+              // Suite Paradise URLs (rcapi, ~1s) → fastest
+              ...allUnpricedPm.filter((c) => /(?:^|\.)suite-paradise\.com/.test(c.url)),
+              // Vrbo URLs (Browserbase + GraphQL parse, ~6-10s)
+              ...allUnpricedVrbo,
+              // Other PM URLs that fall through to the agent (~60-180s)
               ...allUnpricedPm.filter((c) => !isFastScrape(c.url)),
             ].slice(0, 4); // cap at 4 to bound worst-case wall time
 
             for (const c of ordered) {
               try {
-                // 25s timeout for fast-scrape PMs; 95s for agent-path.
-                const timeoutMs = isFastScrape(c.url) ? 25000 : 95000;
+                // 30s timeout for fast-scrape PMs (Vrbo can be 10s+
+                // when Browserbase cold-starts); 95s for agent-path.
+                const timeoutMs = isFastScrape(c.url) ? 30000 : 95000;
                 const controller = new AbortController();
                 const t = setTimeout(() => controller.abort(), timeoutMs);
                 const resp = await fetch("/api/operations/verify-pm-listing", {
