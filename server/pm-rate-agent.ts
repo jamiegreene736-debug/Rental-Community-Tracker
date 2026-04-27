@@ -16,6 +16,7 @@
 
 import Browserbase from "@browserbasehq/sdk";
 import { chromium, type Page } from "playwright";
+import { manualEntryForUrl, manualOnlyResult } from "./pm-scrapers";
 
 export type AgentExtraction = {
   isUnitPage: boolean | null;
@@ -76,8 +77,19 @@ export async function verifyPmRate(opts: {
   anthropicKey: string;
   bbApiKey: string;
   bbProjectId: string;
-}): Promise<AgentResult> {
+}): Promise<AgentResult & { manualOnly?: boolean }> {
   const { url, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId } = opts;
+
+  // Fast path: manual-only PMs (Suite Paradise, etc.) — return
+  // immediately without burning a Browserbase session or Anthropic
+  // tokens. The client renders contact info instead of trying to
+  // verify a price.
+  const manual = manualEntryForUrl(url);
+  if (manual) {
+    console.log(`[pm-agent] ${manual.name}: manual-only PM, skipping agent`);
+    return manualOnlyResult(manual, url);
+  }
+
   const nights = Math.max(
     1,
     Math.round(
