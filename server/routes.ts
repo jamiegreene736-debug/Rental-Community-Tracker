@@ -2666,22 +2666,22 @@ export async function registerRoutes(
 
     // Combined cheapest (top 2) across BOOKABLE sources that have pricing.
     //
-    // Airbnb is INTENTIONALLY excluded from the cheapest pool — Auto-fill
-    // pulls from `cheapest` and creates a buy-in attached to the picked
-    // candidate's URL. Picking an Airbnb URL is a footgun: the operator
-    // can't sublet it (Airbnb TOS), so the buy-in record points at a
-    // listing that can't actually be booked for the guest. The PM
-    // matches surfaced under each Airbnb row (photoMatches) ARE
-    // bookable — but they don't have prices, so they don't compete on
-    // "cheapest" anyway.
+    // Airbnb is excluded from the SERVER-SIDE `cheapest` pool — Auto-fill
+    // pulls from `cheapest` first, and the Booking.com / PM channels
+    // remain the preferred bookable surface (no TOS sublet issue). The
+    // CLIENT'S auto-fill walks Airbnb separately as an explicit
+    // last-resort step (see bookings.tsx — only fires when nothing else,
+    // including the unpriced-PM and peak-season-Vrbo fallbacks, returned
+    // a usable URL). The buy-in note surfaces "last-resort Airbnb pick —
+    // Airbnb TOS prohibits sublet" so the operator handles the booking
+    // channel choice consciously rather than thinking it's a normal pick.
     //
     // Vrbo IS surfaced now (operator explicitly opted back in) but stays
     // OUT of the priced/cheapest pool — Vrbo's TOS has the same sublet
-    // restriction as Airbnb, so picking a Vrbo URL for a buy-in carries
-    // the same risk. It shows up under sources.vrbo for awareness/manual
-    // outreach. Booking.com stays — many Booking.com listings are
-    // commercial hotels that DO allow re-rental. PM stays — the whole
-    // point of PM is they accept commercial bookings.
+    // restriction as Airbnb. It shows up under sources.vrbo for
+    // awareness / manual outreach. Booking.com stays — many Booking.com
+    // listings are commercial hotels that DO allow re-rental. PM stays
+    // — the whole point of PM is they accept commercial bookings.
     const priced: Candidate[] = [...booking, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
