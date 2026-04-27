@@ -32,7 +32,10 @@
 //   OUTSCRAPER_VRBO_ENDPOINT      — optional, default below
 //   OUTSCRAPER_VRBO_MAX_RESULTS   — optional, default 30
 
-const DEFAULT_ENDPOINT = "https://api.app.outscraper.com/vrbo-search";
+// Per Grok's architectural review (2026-04-27 consultation): the correct
+// Outscraper Vrbo service slug is `/vrbo-properties`, not `/vrbo-search`.
+// Likewise auth header is `Authorization: secret_<key>`, NOT `X-API-KEY`.
+const DEFAULT_ENDPOINT = "https://api.app.outscraper.com/vrbo-properties";
 const DEFAULT_MAX_RESULTS = 30;
 const RUN_TIMEOUT_MS = 180_000;
 
@@ -246,7 +249,10 @@ export async function searchVrboViaOutscraper(opts: {
     const r = await fetch(url, {
       method: "GET",
       headers: {
-        "X-API-KEY": apiKey,
+        // Outscraper uses `Authorization: secret_<key>` for auth (per
+        // their docs / Grok review). The `X-API-KEY` header we tried
+        // first is a different vendor convention (ScrapingBee).
+        "Authorization": `secret_${apiKey}`,
         "Accept": "application/json",
       },
       signal: AbortSignal.timeout(RUN_TIMEOUT_MS),

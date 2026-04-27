@@ -27,6 +27,15 @@
 import Browserbase from "@browserbasehq/sdk";
 import { chromium } from "playwright";
 
+const SUGGESTIONS_ENDPOINT = "https://www.vrbo.com/suggestions/v2";
+const FETCH_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Accept": "application/json,text/javascript,*/*;q=0.1",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
 export type VrboRegion = {
   /** Vrbo's internal place identifier — typically 18 digits. */
   regionId: string;
@@ -108,6 +117,64 @@ function extractRegionFromHtml(html: string): VrboRegion | null {
   };
 }
 
+// Tier 3a — direct fetch of Vrbo's destination autocomplete API. No
+// auth required; just needs a real-browser User-Agent. Per Grok's
+// review this is the right call: returns regionId + latLong directly,
+// faster than scraping the destination SEO page (which is now
+// client-rendered and doesn't expose regionId in HTML).
+async function resolveViaSuggestionsApi(destination: string): Promise<VrboRegion | null> {
+  try {
+    const url = `${SUGGESTIONS_ENDPOINT}?query=${encodeURIComponent(destination)}&locale=en_US`;
+    const r = await fetch(url, {
+      headers: FETCH_HEADERS,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) {
+      console.warn(`[vrbo-region:suggestions] HTTP ${r.status} for "${destination}"`);
+      return null;
+    }
+    const data = await r.json().catch(() => null) as any;
+    const suggestion =
+      data?.suggestions?.[0] ??
+      data?.results?.[0] ??
+      data?.data?.[0] ??
+      null;
+    if (!suggestion) {
+      console.warn(`[vrbo-region:suggestions] no suggestions for "${destination}"`);
+      return null;
+    }
+    // Field names vary across Vrbo's API revisions — try several shapes.
+    const regionId =
+      suggestion?.data?.regionId ??
+      suggestion?.regionId ??
+      suggestion?.gaiaId ??
+      suggestion?.placeId ??
+      null;
+    const lat =
+      suggestion?.data?.latitude ?? suggestion?.latitude ??
+      suggestion?.coordinates?.lat ?? suggestion?.geometry?.location?.lat ?? null;
+    const lng =
+      suggestion?.data?.longitude ?? suggestion?.longitude ??
+      suggestion?.coordinates?.lng ?? suggestion?.geometry?.location?.lng ?? null;
+    const display =
+      suggestion?.value ?? suggestion?.label ?? suggestion?.fullName ?? destination;
+    if (!regionId) {
+      console.warn(`[vrbo-region:suggestions] no regionId in response for "${destination}" — keys: ${Object.keys(suggestion).join(",")}`);
+      return null;
+    }
+    const region: VrboRegion = {
+      regionId: String(regionId),
+      latLong: lat && lng ? `${lat},${lng}` : "",
+      displayDestination: String(display),
+    };
+    console.log(`[vrbo-region:suggestions] resolved "${destination}" → regionId=${region.regionId} latLong=${region.latLong}`);
+    return region;
+  } catch (e: any) {
+    console.warn(`[vrbo-region:suggestions] error for "${destination}": ${e?.message ?? e}`);
+    return null;
+  }
+}
+
 async function resolveViaBrowserbase(
   destination: string,
   bbApiKey: string,
@@ -155,7 +222,8 @@ async function resolveViaBrowserbase(
 
 export async function resolveVrboRegion(opts: {
   destination: string;
-  /** When omitted, only the hardcoded + dynamic caches are checked. */
+  /** When omitted, the Browserbase fallback is skipped (suggestions
+   * API + caches still run). */
   bbApiKey?: string;
   bbProjectId?: string;
 }): Promise<VrboRegion | null> {
@@ -166,10 +234,21 @@ export async function resolveVrboRegion(opts: {
   // Tier 2: in-memory cache
   const cached = cacheLookup(destination);
   if (cached !== undefined) return cached;
-  // Tier 3: Browserbase fetch
+  // Tier 3a: Vrbo suggestions API (free, fast, doesn't burn Browserbase).
+  // This is the canonical way to get regionId per Vrbo's own frontend
+  // — their search bar autocomplete hits this endpoint.
+  const viaApi = await resolveViaSuggestionsApi(destination);
+  if (viaApi) {
+    dynamicCache.set(normalizeDest(destination), {
+      value: viaApi,
+      expiresAt: Date.now() + RESOLUTION_TTL_MS,
+    });
+    return viaApi;
+  }
+  // Tier 3b: Browserbase fetch of Vrbo's destination SEO page. Only
+  // fires when the suggestions API doesn't return a useful row AND
+  // the caller passed Browserbase credentials.
   if (!bbApiKey || !bbProjectId) {
-    // Caller didn't pass credentials → can't do tier 3. Cache short
-    // negative result so we don't try again on every call.
     dynamicCache.set(normalizeDest(destination), {
       value: null,
       expiresAt: Date.now() + NEGATIVE_TTL_MS,
