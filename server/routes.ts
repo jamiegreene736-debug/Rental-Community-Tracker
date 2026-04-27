@@ -9,6 +9,7 @@ import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
+import { findAvailableParrishKauaiUnits } from "./pm-scraper-parrish-kauai";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -1984,6 +1985,9 @@ export async function registerRoutes(
     spCalls: 0,
     spHits: 0,            // call returned ≥1 priced unit
     spUnitsTotal: 0,      // sum across all calls
+    pkCalls: 0,
+    pkHits: 0,
+    pkUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -1991,15 +1995,19 @@ export async function registerRoutes(
     sinceBoot: new Date().toISOString(),
   };
   app.get("/api/operations/discovery-stats", (_req, res) => {
-    const spHitRate = pmDiscoveryStats.spCalls > 0
-      ? +(pmDiscoveryStats.spHits / pmDiscoveryStats.spCalls).toFixed(3) : 0;
-    const googleHitRate = pmDiscoveryStats.googleCalls > 0
-      ? +(pmDiscoveryStats.googleHits / pmDiscoveryStats.googleCalls).toFixed(3) : 0;
-    const spAvgUnits = pmDiscoveryStats.spCalls > 0
-      ? +(pmDiscoveryStats.spUnitsTotal / pmDiscoveryStats.spCalls).toFixed(2) : 0;
-    const googleAvgUnits = pmDiscoveryStats.googleCalls > 0
-      ? +(pmDiscoveryStats.googleUnitsTotal / pmDiscoveryStats.googleCalls).toFixed(2) : 0;
-    res.json({ ...pmDiscoveryStats, spHitRate, googleHitRate, spAvgUnits, googleAvgUnits });
+    const rate = (hits: number, calls: number) =>
+      calls > 0 ? +(hits / calls).toFixed(3) : 0;
+    const avg = (total: number, calls: number) =>
+      calls > 0 ? +(total / calls).toFixed(2) : 0;
+    res.json({
+      ...pmDiscoveryStats,
+      spHitRate: rate(pmDiscoveryStats.spHits, pmDiscoveryStats.spCalls),
+      pkHitRate: rate(pmDiscoveryStats.pkHits, pmDiscoveryStats.pkCalls),
+      googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
+      spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
+      pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
+      googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
+    });
   });
 
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
@@ -2688,15 +2696,61 @@ export async function registerRoutes(
         })()
       : Promise.resolve([]);
 
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered] = await Promise.all([
-      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise,
+    // ── Parrish Kauai inventory discovery (sitemap + WP vrp endpoints) ────
+    // Same pattern as Suite Paradise but using PK's two cheap public
+    // AJAX endpoints (getUnitRates, getUnitBookedDates). PK runs on a
+    // custom WP plugin — every unit page has data-unit-* attrs (`beds`,
+    // `slug`, `unit-id`, `name`, `city`) so metadata extraction is just
+    // attribute-reading. Pricing + availability is two GETs per unit.
+    //
+    // PK covers all of Kauai (Poipu, Princeville, Hanalei, …), so the
+    // resort filter is essential — without it a Poipu Kai search would
+    // return Princeville rentals indiscriminately. Runs for ANY Kauai
+    // search, not just Poipu, since PK isn't Poipu-exclusive.
+    const isKauai = /kauai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai/i.test(community);
+    const pkDiscoveryPromise: Promise<Candidate[]> = isKauai
+      ? (async () => {
+          pmDiscoveryStats.pkCalls++;
+          try {
+            const units = await findAvailableParrishKauaiUnits({
+              bedrooms,
+              checkIn,
+              checkOut,
+              resortName: resortName ?? community,
+            });
+            if (units.length > 0) pmDiscoveryStats.pkHits++;
+            pmDiscoveryStats.pkUnitsTotal += units.length;
+            return units.map((u): Candidate => ({
+              source: "pm" as const,
+              sourceLabel: "Parrish Kauai",
+              title: u.name,
+              url: withStayDates("pm", u.url),
+              nightlyPrice: u.nightlyPrice,
+              totalPrice: u.totalPrice,
+              bedrooms: u.bedrooms,
+              snippet: `Parrish Kauai · ${u.bedrooms}BR · sitemap-discovered, vrp-priced`,
+            }));
+          } catch (e: any) {
+            console.error("[find-buy-in] pk-discovery error:", e.message);
+            return [];
+          }
+        })()
+      : Promise.resolve([]);
+
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered] = await Promise.all([
+      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise,
     ]);
-    // Merge SP-discovered (priced) ahead of Google-deep-dive (mostly
-    // unpriced), but dedupe by URL — sitemap walk and Google may both
+    // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
+    // unpriced), but dedupe by URL — sitemap walks and Google may both
     // surface the same unit, in which case we prefer the priced version.
-    const seenPmUrls = new Set<string>(spDiscovered.map((c) => c.url));
+    // SP and PK won't overlap (different domains), so just union them.
+    const seenPmUrls = new Set<string>([
+      ...spDiscovered.map((c) => c.url),
+      ...pkDiscovered.map((c) => c.url),
+    ]);
     const pm: Candidate[] = [
       ...spDiscovered,
+      ...pkDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
@@ -2840,7 +2894,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length}/${vrboRawCount} (awareness-only — same TOS as airbnb) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length} (google+photoMatches+sp-sitemap) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length} (google+photoMatches+sp-sitemap+pk-sitemap) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
@@ -2860,7 +2914,7 @@ export async function registerRoutes(
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, photoMatches: totalPhotoMatches },
         dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
