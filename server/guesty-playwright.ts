@@ -572,6 +572,176 @@ export async function loginToGuestyViaGoogleSso(
     trace.push({ step: "google-sso-email-submitted" });
   }
 
+  // CAPTCHA gate. Google's identifier step often serves a "Type the
+  // text you hear or see" image CAPTCHA when the request comes from a
+  // datacenter IP (which Railway always is). Detection: after email
+  // submit we wait briefly, then check whether we're STILL on
+  // /signin/identifier with a CAPTCHA image present. If both, send the
+  // image to 2captcha, type the solution, click Next, retry. Up to 2
+  // CAPTCHA solves per run — Google sometimes chains a second one
+  // after the first solves correctly. Past that we bail with the
+  // standard cookie-refresh recommendation; chained challenges are a
+  // signal that this session is suspect and no amount of solving will
+  // get us through.
+  //
+  // Cost: $0.001 per solve. Disabled cleanly when TWOCAPTCHA_API_KEY
+  // is not set (we just fall through to the existing "no password
+  // field" diagnostic, which still works).
+  for (let captchaAttempt = 0; captchaAttempt < 2; captchaAttempt++) {
+    await workPage.waitForTimeout(2000);
+    const stillOnIdentifier = /\/signin\/identifier|\/v3\/signin\/identifier/i.test(
+      workPage.url(),
+    );
+    if (!stillOnIdentifier) break; // advanced past identifier step
+
+    // Look for the CAPTCHA image. Google renders it as an <img> with
+    // either a data: URL or an https://www.google.com/... URL. The
+    // image is inside the form, not in any Google chrome (logo, etc),
+    // so scoping to form > img is reasonably tight.
+    const captchaImg = await workPage
+      .$(
+        'form img[src*="captcha" i], form img[src^="data:image"], img[role="presentation"][src]:not([alt*="Google" i]):not([src*="logo" i])',
+      )
+      .catch(() => null);
+    if (!captchaImg) break; // not a CAPTCHA — let the password-wait surface the real reason
+
+    if (!process.env.TWOCAPTCHA_API_KEY) {
+      const shot = await saveShot(workPage, "google-captcha-no-key");
+      return {
+        ok: false,
+        error:
+          "Google served a 'Type the text you hear or see' CAPTCHA but TWOCAPTCHA_API_KEY env var is not set. Either set it (cheap: ~$0.001/solve at 2captcha.com) or refresh GUESTY_SESSION_COOKIES + GUESTY_OKTA_TOKEN_STORAGE to skip Google's login entirely.",
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+
+    trace.push({
+      step: "google-captcha-detected",
+      detail: `attempt ${captchaAttempt + 1}/2`,
+    });
+
+    // Get the image as base64. If it's a data: URL we already have
+    // it; otherwise fetch it from inside the page so the request
+    // inherits the page's auth cookies (Google's CAPTCHA endpoint
+    // requires the session).
+    const imgSrc = await captchaImg.getAttribute("src");
+    if (!imgSrc) {
+      const shot = await saveShot(workPage, "google-captcha-no-src");
+      return {
+        ok: false,
+        error: "CAPTCHA image element had no src attribute.",
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+    let imgBase64: string;
+    if (imgSrc.startsWith("data:image")) {
+      imgBase64 = imgSrc.split(",")[1] || "";
+    } else {
+      imgBase64 = await workPage
+        .evaluate(async (url: string) => {
+          const res = await fetch(url, { credentials: "include" });
+          const blob = await res.blob();
+          return await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () =>
+              resolve(((reader.result as string) || "").split(",")[1] || "");
+            reader.readAsDataURL(blob);
+          });
+        }, imgSrc)
+        .catch(() => "");
+    }
+    if (!imgBase64) {
+      const shot = await saveShot(workPage, "google-captcha-fetch-failed");
+      return {
+        ok: false,
+        error: `Couldn't fetch CAPTCHA image from ${imgSrc.slice(0, 120)}.`,
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+    trace.push({
+      step: "google-captcha-image-fetched",
+      detail: `${imgBase64.length} base64 chars`,
+    });
+
+    const { solveImageCaptcha, reportBadCaptcha } = await import(
+      "./captcha-solver"
+    );
+    const solveResult = await solveImageCaptcha(
+      imgBase64,
+      process.env.TWOCAPTCHA_API_KEY,
+    );
+    if (!solveResult.ok) {
+      const shot = await saveShot(workPage, "google-captcha-solver-failed");
+      return {
+        ok: false,
+        error: `2captcha solver failed: ${solveResult.error}`,
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+    trace.push({
+      step: "google-captcha-solved",
+      detail: `solution=${solveResult.solution.length} chars id=${solveResult.captchaId}`,
+    });
+
+    // Type the solution into the CAPTCHA input. The input typically
+    // has aria-label "Type the text you hear or see" or name="ca";
+    // cover both plus a positional fallback (the only text input
+    // inside the form that isn't the email field).
+    const captchaInput = await workPage
+      .$(
+        'input[aria-label*="text you hear" i], input[name="ca"], input[type="text"][autocomplete="off"]:not([type="email"])',
+      )
+      .catch(() => null);
+    if (!captchaInput) {
+      const shot = await saveShot(workPage, "google-captcha-no-input");
+      // Refund the credit since we never used the solution.
+      await reportBadCaptcha(
+        process.env.TWOCAPTCHA_API_KEY,
+        solveResult.captchaId,
+      );
+      return {
+        ok: false,
+        error: "Solved CAPTCHA but couldn't find the input field to type it into.",
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+    await captchaInput.fill(solveResult.solution);
+    trace.push({ step: "google-captcha-solution-filled" });
+
+    await workPage
+      .click('#identifierNext button, button:has-text("Next")', {
+        timeout: 8000,
+      })
+      .catch(() => {});
+    trace.push({ step: "google-captcha-next-clicked" });
+
+    // Brief beat for Google to respond. If we're still on identifier
+    // after this, the loop iterates and tries again (with a fresh
+    // CAPTCHA, since Google rotates the image on rejection).
+    await workPage.waitForTimeout(3000);
+    if (
+      !/\/signin\/identifier|\/v3\/signin\/identifier/i.test(workPage.url())
+    ) {
+      // Advanced — break out and let the password-wait take over.
+      break;
+    }
+    // Solution was rejected. Report it bad to refund the credit, then
+    // loop for one more attempt (or bail).
+    await reportBadCaptcha(
+      process.env.TWOCAPTCHA_API_KEY,
+      solveResult.captchaId,
+    );
+    trace.push({
+      step: "google-captcha-solution-rejected",
+      detail: "still on identifier page — looping for retry",
+    });
+  }
+
   // STEP 2: Password. Google sometimes shows an interstitial ("Not your
   // device? Sign in with a private window") between email and password
   // — the password field still mounts after a beat, so we just wait
