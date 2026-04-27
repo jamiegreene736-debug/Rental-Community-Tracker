@@ -3007,7 +3007,12 @@ export async function registerRoutes(
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
+          // Sonnet 4.6 over Haiku — Haiku missed prices on Parrish Kauai
+          // and Suite Paradise screenshots even when the rate calendar
+          // was clearly visible. Sonnet's extra cost (~$0.015 vs $0.003
+          // per call) is trivial at this volume and the recall is
+          // dramatically better.
+          model: "claude-sonnet-4-6",
           max_tokens: 250,
           messages: [{
             role: "user",
@@ -3017,7 +3022,7 @@ export async function registerRoutes(
             ],
           }],
         }),
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(20000),
       });
       if (!visionResp.ok) {
         const body = await visionResp.text().catch(() => "");

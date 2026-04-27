@@ -366,31 +366,70 @@ export default function Bookings() {
             break;
           }
 
-          // No priced candidate worked → fall back to the server's top
-          // unpriced PM URL (PR #150). Auto-fill stays fast and the
-          // operator can run the per-slot 🔍 Verify rate button on
-          // demand to fetch a screenshot + extracted price.
+          // No priced candidate worked → try to vision-extract a real
+          // price from the top unpriced PM URL before falling back to
+          // $0. Uses /api/operations/verify-pm-listing (Playwright +
+          // Sonnet vision). 90s client timeout per call so a slow PM
+          // site can't hang auto-fill indefinitely.
           //
-          // Earlier (PR #151-#153) auto-fill itself ran the headless
-          // verify-pm-listing call against unpriced candidates. That
-          // routinely took 70+s per slot on PM sites with readonly
-          // date pickers (Suite Paradise, Parrish Kauai), starved
-          // parallel slots, and rarely extracted a price anyway because
-          // generic input.fill() can't drive jQuery UI / react-datepicker
-          // popups. Decoupled now: auto-fill always finishes in ~5s,
-          // and the verify dialog runs per-slot when the operator wants
-          // to see the page.
+          // Slots run in parallel via Promise.all upstream so the
+          // wall-clock impact is bounded by the slowest slot (~30-60s
+          // typical for Sonnet on a real PM page, popup dismissed).
+          // Single candidate per slot to keep Railway's parallel
+          // Playwright count to one per slot.
+          let visionVerified = false;
+          if (!pick) {
+            const topUnpriced = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).slice(0, 1);
+            for (const c of topUnpriced) {
+              try {
+                const controller = new AbortController();
+                const t = setTimeout(() => controller.abort(), 90000);
+                const resp = await fetch("/api/operations/verify-pm-listing", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "include",
+                  body: JSON.stringify({ url: c.url, checkIn: ci, checkOut: co }),
+                  signal: controller.signal,
+                }).finally(() => clearTimeout(t));
+                const v = resp.ok ? await resp.json() : null;
+                const ex = v?.extracted;
+                if (
+                  v?.ok &&
+                  ex?.isUnitPage === true &&
+                  ex?.available !== false &&
+                  ex?.dateMatch !== false &&
+                  typeof ex?.totalPrice === "number" &&
+                  ex.totalPrice > 0
+                ) {
+                  pick = c;
+                  verifiedPrice = ex.totalPrice;
+                  visionVerified = true;
+                  break;
+                }
+                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
+              } catch (e: any) {
+                skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
+              }
+            }
+          }
+
+          // Final fallback: if vision couldn't extract, attach the
+          // server's unpricedFallback URL at $0. Operator can hit the
+          // per-slot 📷 Verify rate button to retry with a fresh
+          // screenshot, or just type the cost manually.
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
           }
 
-          if (!pick) return { slot, picked: null, created: null, skippedReasons };
+          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
           const propertyName =
             (selectedListingId && listingNameById.get(selectedListingId)) ||
             `Property ${selectedPropertyId}`;
-          const noteSuffix = "";
+          const noteSuffix = visionVerified
+            ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
+            : "";
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
             propertyName,
@@ -410,7 +449,7 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
-          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons };
+          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified };
         }),
       );
       return { reservation, results };
@@ -450,10 +489,12 @@ export default function Bookings() {
             + (skipped.length ? ` · No PM URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
+        const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
         toast({
           title: `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
+            + (visionVerifiedCount > 0 ? ` · ${visionVerifiedCount} verified via screenshot analysis` : "")
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
             + (skipped.length ? ` · No PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
