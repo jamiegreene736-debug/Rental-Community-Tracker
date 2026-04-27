@@ -2470,48 +2470,89 @@ export async function registerRoutes(
       return out;
     })();
 
-    // ── Vrbo via Apify actor (priced + all-in totals in USD) ─────────────
-    // Replaces the Google site:vrbo.com path that returned unpriced URLs.
-    // The Apify actor (`makework36/vrbo-scraper`) takes a destination
-    // string + check-in/check-out + bedrooms and returns priced
-    // candidates with all-in totals (base + cleaning + service + taxes)
-    // in USD. ~$0.0025/result × ~30 results = ~$0.075 per call; cached
-    // 5 min in-process so repeated find-buy-in calls for the same dates
-    // cost $0.
+    // ── Vrbo: Apify actor (priced/all-in) + Google site:search (unpriced) ─
+    // Two paths run in parallel and merge:
     //
-    // Auto-fill still treats Vrbo as awareness-only by default (same
-    // TOS sublet restriction as Airbnb), but with priced candidates the
-    // operator now sees the actual rate without clicking through. The
-    // Apify path lets us retire our Browserbase Vrbo scraper for the
-    // common case — verify-pm-listing for Vrbo URLs becomes a fallback
-    // only.
+    //   1. Apify (`easyapi/vrbo-property-listing-scraper` by default) —
+    //      returns priced candidates with all-in totals (base + cleaning +
+    //      service + taxes) in USD when it works. Currently returning 0
+    //      raw items for our Hawaii destinations because Vrbo's search
+    //      requires `regionId`/`latLong` disambiguators we don't yet
+    //      have. Future work: bake regionId per destination via a
+    //      one-time Browserbase autocomplete lookup. When that lands the
+    //      priced path comes online for free.
+    //
+    //   2. Google `site:vrbo.com` — returns unpriced URLs from Google's
+    //      index, same behavior as before PR #204. Operator clicks
+    //      through to see rates. This is the safety net while the
+    //      Apify path is a no-op so we don't regress to "0 Vrbo
+    //      candidates" entirely.
+    //
+    // Merge order: Apify-priced FIRST (operator sees rates upfront when
+    // available), then Google-unpriced URLs that aren't already in the
+    // priced list. Auto-fill still treats Vrbo as awareness-only (same
+    // Vrbo TOS sublet restriction as Airbnb).
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
+    let vrboApifyCount = 0;
+    let vrboGoogleCount = 0;
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      try {
-        const apifyResults = await searchVrboViaApify({
+      const [apifyResults, googleResults] = await Promise.all([
+        // Apify path — returns priced when working
+        searchVrboViaApify({
           resortName: resortName ?? community,
           location: resortName ?? community,
           bedrooms,
           checkIn,
           checkOut,
-        });
-        vrboRawCount = apifyResults.length;
-        return apifyResults.map((c): Candidate => ({
-          source: "vrbo" as const,
-          sourceLabel: "Vrbo",
-          title: c.title,
-          url: withStayDates("vrbo", c.url),
-          nightlyPrice: c.nightlyPrice,
-          totalPrice: c.totalPrice,
-          bedrooms: c.bedrooms,
-          image: c.image,
-          snippet: c.snippet,
-        }));
-      } catch (e: any) {
-        console.error("[find-buy-in] vrbo (apify) error:", e.message);
-        return [];
+        }).catch((e: any) => {
+          console.error("[find-buy-in] vrbo (apify) error:", e?.message ?? e);
+          return [] as Awaited<ReturnType<typeof searchVrboViaApify>>;
+        }),
+        // Google site:search — returns unpriced URLs, used to be the only path
+        siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
+          console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
+          return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
+        }),
+      ]);
+
+      vrboApifyCount = apifyResults.length;
+      const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
+        source: "vrbo" as const,
+        sourceLabel: "Vrbo",
+        title: c.title,
+        url: withStayDates("vrbo", c.url),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        bedrooms: c.bedrooms,
+        image: c.image,
+        snippet: c.snippet,
+      }));
+
+      vrboGoogleCount = googleResults.candidates.length;
+      vrboDropped = googleResults.dropped;
+      vrboRawCount = vrboApifyCount + googleResults.raw;
+
+      // Dedupe by Vrbo listing id when both paths surface the same unit.
+      // Vrbo URLs follow `vrbo.com/<id>` or `vrbo.com/<id>?...`.
+      const listingIdOf = (url: string): string | null => {
+        const m = url.match(/vrbo\.com\/(\d+)/);
+        return m ? m[1] : null;
+      };
+      const seenIds = new Set<string>();
+      const out: Candidate[] = [];
+      for (const c of apifyCandidates) {
+        const id = listingIdOf(c.url);
+        if (id) seenIds.add(id);
+        out.push(c);
       }
+      for (const c of googleResults.candidates) {
+        const id = listingIdOf(c.url);
+        if (id && seenIds.has(id)) continue;
+        if (id) seenIds.add(id);
+        out.push(c);
+      }
+      return out;
     })();
 
     // ── Property-management companies via Google search ────────────────────
@@ -2949,7 +2990,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length}/${vrboRawCount} (awareness-only — same TOS as airbnb) `
+      + `vrbo=${vrbo.length} (apify=${vrboApifyCount} priced, google=${vrboGoogleCount} unpriced — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
