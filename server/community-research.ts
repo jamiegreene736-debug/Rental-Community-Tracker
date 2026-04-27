@@ -74,6 +74,17 @@ export type AmortizedNightlyResult = {
   // coordinates without redeploying — e.g. "Treasure Trove Lane"
   // resolved to the right resort and not a same-named street elsewhere.
   bboxCenter?: { lat: number; lng: number };
+  // Drop counters for diagnosing "engine returned listings but I got 0
+  // rates" failures. Each filter reports how many listings it rejected;
+  // `engineCount` is the raw count from SearchAPI before any filtering.
+  drops?: {
+    engineCount: number;
+    outsideBbox: number;
+    nameMismatch: number;
+    noPrice: number;
+    badBedrooms: number;
+    nightlyOutOfRange: number;
+  };
 };
 
 export async function fetchAmortizedNightlyByBR(
@@ -122,6 +133,14 @@ export async function fetchAmortizedNightlyByBR(
   };
 
   const ratesByBR: Record<number, number[]> = {};
+  const drops = {
+    engineCount: 0,
+    outsideBbox: 0,
+    nameMismatch: 0,
+    noPrice: 0,
+    badBedrooms: 0,
+    nightlyOutOfRange: 0,
+  };
   try {
     const sp: Record<string, string> = {
       engine: "airbnb",
@@ -142,39 +161,41 @@ export async function fetchAmortizedNightlyByBR(
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
     );
-    if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox, bboxCenter };
+    if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops };
     const data = await resp.json() as any;
     const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    drops.engineCount = properties.length;
     for (const p of properties) {
-      // Geo filter (when active) — drop listings whose coordinates fall
-      // outside the bbox. Listings without coordinates are kept since
-      // the engine already honored the bbox query param; missing coords
-      // is more often a data-shape quirk than an out-of-bounds listing.
       if (bbox) {
         const lat = Number(p?.gps_coordinates?.latitude);
         const lng = Number(p?.gps_coordinates?.longitude);
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          if (lat < bbox.sw_lat || lat > bbox.ne_lat || lng < bbox.sw_lng || lng > bbox.ne_lng) continue;
+          if (lat < bbox.sw_lat || lat > bbox.ne_lat || lng < bbox.sw_lng || lng > bbox.ne_lng) {
+            drops.outsideBbox++;
+            continue;
+          }
         }
       } else {
-        // No bbox — fall back to name match against title + description.
         const title = String(p?.name ?? p?.title ?? "");
         const desc = String(p?.description ?? "");
-        if (!nameMatches(`${title} ${desc}`)) continue;
+        if (!nameMatches(`${title} ${desc}`)) {
+          drops.nameMismatch++;
+          continue;
+        }
       }
       const total = Number(p?.price?.extracted_total_price);
       const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
-      if (!Number.isFinite(total) || total <= 0) continue;
-      if (!Number.isFinite(br) || br < 1 || br > 6) continue;
+      if (!Number.isFinite(total) || total <= 0) { drops.noPrice++; continue; }
+      if (!Number.isFinite(br) || br < 1 || br > 6) { drops.badBedrooms++; continue; }
       const nightly = Math.round(total / 7);
-      if (nightly < 50 || nightly > 3000) continue;
+      if (nightly < 50 || nightly > 3000) { drops.nightlyOutOfRange++; continue; }
       if (!ratesByBR[br]) ratesByBR[br] = [];
       ratesByBR[br].push(nightly);
     }
   } catch {
     /* network / parse error — return whatever we accumulated */
   }
-  return { ratesByBR, bboxApplied: !!bbox, bboxCenter };
+  return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops };
 }
 
 // Median of a numeric list, or null on empty input.
