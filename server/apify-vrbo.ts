@@ -62,6 +62,26 @@ type CacheEntry = { value: ApifyVrboCandidate[]; expiresAt: number };
 const searchCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
 
+// Last-call snapshot for /api/operations/apify-vrbo-debug. Lets us
+// diagnose "0 candidates" returns without needing Railway log access
+// or re-running (and re-paying for) the actor each time.
+type ApifyVrboDebugSnapshot = {
+  at: string;
+  input: Record<string, unknown>;
+  httpStatus: number | null;
+  errorBody: string | null;
+  rawItemsCount: number;
+  firstItemKeys: string[];
+  firstItemSample: any;
+  filteredOut: { noResort: number; wrongBedrooms: number; noPrice: number };
+  candidatesReturned: number;
+  durationMs: number;
+} | null;
+let lastDebugSnapshot: ApifyVrboDebugSnapshot = null;
+export function getApifyVrboDebugSnapshot(): ApifyVrboDebugSnapshot {
+  return lastDebugSnapshot;
+}
+
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -148,31 +168,56 @@ export async function searchVrboViaApify(opts: {
   };
 
   const startedAt = Date.now();
+  const inputObj: Record<string, unknown> = {
+    locations: [location],
+    checkIn,
+    checkOut,
+    adults: 2,
+    maxResults,
+    currency: "USD",
+    locale: "en_US",
+  };
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        locations: [location],
-        checkIn,
-        checkOut,
-        adults: 2,
-        maxResults,
-        currency: "USD",
-        locale: "en_US",
-      }),
+      body: JSON.stringify(inputObj),
       signal: AbortSignal.timeout(RUN_TIMEOUT_MS),
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
       console.warn(`[apify-vrbo] HTTP ${r.status} ${body.slice(0, 200)}`);
+      lastDebugSnapshot = {
+        at: new Date().toISOString(),
+        input: inputObj,
+        httpStatus: r.status,
+        errorBody: body.slice(0, 600),
+        rawItemsCount: 0,
+        firstItemKeys: [],
+        firstItemSample: null,
+        filteredOut: { noResort: 0, wrongBedrooms: 0, noPrice: 0 },
+        candidatesReturned: 0,
+        durationMs: Date.now() - startedAt,
+      };
       searchCache.set(cacheKey, { value: [], expiresAt: Date.now() + 60_000 });
       return [];
     }
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items)) {
       console.warn(`[apify-vrbo] non-array response`);
+      lastDebugSnapshot = {
+        at: new Date().toISOString(),
+        input: inputObj,
+        httpStatus: r.status,
+        errorBody: "non-array response",
+        rawItemsCount: 0,
+        firstItemKeys: [],
+        firstItemSample: null,
+        filteredOut: { noResort: 0, wrongBedrooms: 0, noPrice: 0 },
+        candidatesReturned: 0,
+        durationMs: Date.now() - startedAt,
+      };
       return [];
     }
 
@@ -237,6 +282,32 @@ export async function searchVrboViaApify(opts: {
       `(dropped: noResort=${droppedNoResort} wrongBeds=${droppedWrongBedrooms} noPrice=${droppedNoPrice}) ` +
       `· ${Date.now() - startedAt}ms`,
     );
+
+    // Capture diagnostic snapshot — last call only. Truncate the first
+    // item to ~2KB JSON so the debug response stays bounded.
+    const firstItem = items[0] ?? null;
+    let firstItemSample: any = null;
+    if (firstItem && typeof firstItem === "object") {
+      try {
+        const clone = JSON.parse(JSON.stringify(firstItem));
+        const json = JSON.stringify(clone);
+        firstItemSample = json.length > 2000 ? json.slice(0, 2000) + "…(truncated)" : clone;
+      } catch {
+        firstItemSample = "(unstringifiable)";
+      }
+    }
+    lastDebugSnapshot = {
+      at: new Date().toISOString(),
+      input: inputObj,
+      httpStatus: r.status,
+      errorBody: null,
+      rawItemsCount: items.length,
+      firstItemKeys: firstItem && typeof firstItem === "object" ? Object.keys(firstItem) : [],
+      firstItemSample,
+      filteredOut: { noResort: droppedNoResort, wrongBedrooms: droppedWrongBedrooms, noPrice: droppedNoPrice },
+      candidatesReturned: candidates.length,
+      durationMs: Date.now() - startedAt,
+    };
 
     searchCache.set(cacheKey, { value: candidates, expiresAt: Date.now() + CACHE_TTL_MS });
     return candidates;
