@@ -384,6 +384,39 @@ export async function scrapeVrboRate(opts: {
     } catch { /* fall through */ }
     candidates.push(...domCandidates);
 
+    // ── Recon dump when no candidates found ──
+    // When neither JSON nor DOM scan finds a plausible all-in total,
+    // surface inspectable samples in agentTrace so we can iterate on
+    // the regex / pattern set without redeploying. Each body capped
+    // at 800 chars to keep trace size bounded but still informative
+    // (typical Vrbo GraphQL bodies are 50-200KB; the first 800 chars
+    // include the op name + first object's structure).
+    //
+    // Also dumps a sample of the visible page text so we can see
+    // what locale Vrbo served us and where the widget total renders
+    // (or doesn't).
+    const dumpForRecon: string[] = [];
+    if (candidates.length === 0) {
+      dumpForRecon.push(`vrbo-recon: 0 candidates from ${graphqlBodies.length} graphql bodies + ${domCandidates.length} DOM hits`);
+      for (const { op, body } of graphqlBodies.slice(0, 8)) {
+        // Pull a few hundred chars near "$" or "price"/"total"/"amount"
+        // keywords, since those are the regions that might carry the
+        // all-in we're missing.
+        const interesting = body.match(/.{0,200}(?:\$|"price|"total|"amount|"display|"formatted|currency).{0,300}/i);
+        const sample = interesting ? interesting[0] : body.slice(0, 400);
+        dumpForRecon.push(`[graphql:${op}] ${sample.slice(0, 600).replace(/\s+/g, " ")}`);
+      }
+      // Pull a 500-char window from the visible page text near any
+      // dollar amount — likely contains the widget's price cluster.
+      try {
+        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+        const dollarMatch = bodyText.match(/.{0,150}\$\s*[\d,]+.{0,300}/);
+        if (dollarMatch) {
+          dumpForRecon.push(`[dom-sample] ${dollarMatch[0].slice(0, 500).replace(/\s+/g, " ")}`);
+        }
+      } catch { /* ignore */ }
+    }
+
     // Take the SMALLEST plausible candidate. If both layers found
     // numbers, they should be the same; smallest = safety against a
     // marketing-banner number being scooped up.
@@ -419,6 +452,7 @@ export async function scrapeVrboRate(opts: {
         `vrbo-scraper: ${graphqlBodies.length} graphql bodies captured (ops: ${graphqlOps.slice(0, 8).join(", ")})`,
         `vrbo-scraper: candidate totals=[${candidates.slice(0, 8).join(", ")}] (graphql+DOM, ${domCandidates.length} from DOM)`,
         `vrbo-scraper: chosen total=${allInTotal > 0 ? `$${allInTotal}` : "calendar-base"} (using ${allInSource})`,
+        ...dumpForRecon,
       ],
     };
   } finally {
