@@ -44,8 +44,8 @@ import Browserbase from "@browserbasehq/sdk";
 import { chromium } from "playwright";
 import type { AgentResult } from "./pm-rate-agent";
 
-const PAGE_TIMEOUT_MS = 25_000;
-const CALENDAR_WAIT_MS = 15_000;
+const PAGE_TIMEOUT_MS = 30_000;
+const CALENDAR_WAIT_MS = 25_000;
 
 function parseIsoDate(s: string): { y: number; m: number; d: number } {
   const [y, m, d] = s.split("-").map(Number);
@@ -77,6 +77,7 @@ export async function scrapeVrboRate(opts: {
 
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   let calendarBody = "";
+  const graphqlOps: string[] = []; // for diagnostics
 
   try {
     browser = await chromium.connectOverCDP(session.connectUrl);
@@ -90,6 +91,13 @@ export async function scrapeVrboRate(opts: {
       const ct = resp.headers()["content-type"] || "";
       if (!/json/i.test(ct)) return;
       const body = await resp.text().catch(() => "");
+      // Record operation names that fired so we can debug if the rate
+      // query doesn't show up.
+      const ops = body.match(/"data":\{"(\w+)"/g) || [];
+      ops.forEach((m) => {
+        const name = m.match(/"data":\{"(\w+)"/)?.[1];
+        if (name) graphqlOps.push(name);
+      });
       if (body.includes("propertyRatesDateSelector")) {
         calendarBody = body;
       }
@@ -104,7 +112,23 @@ export async function scrapeVrboRate(opts: {
     }
 
     if (!calendarBody) {
-      return errResult(url, "vrbo-no-calendar", "Vrbo didn't fire PropertyRatesDateSelectorQuery within 15s");
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => "");
+      return {
+        ok: false,
+        reason: "vrbo-no-calendar",
+        extracted: null,
+        finalUrl,
+        title,
+        screenshotBase64: "",
+        iterations: 0,
+        agentError: `Vrbo didn't fire PropertyRatesDateSelectorQuery within ${CALENDAR_WAIT_MS / 1000}s. Page title: "${title}". Operations seen: [${graphqlOps.join(", ").slice(0, 300)}]`,
+        agentTrace: [
+          `vrbo-scraper: title="${title}"`,
+          `vrbo-scraper: ${graphqlOps.length} graphql ops fired`,
+          `vrbo-scraper: ops=${graphqlOps.slice(0, 10).join(", ")}`,
+        ],
+      };
     }
 
     let parsed: any;
