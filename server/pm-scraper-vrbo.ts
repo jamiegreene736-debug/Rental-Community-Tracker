@@ -73,7 +73,11 @@ export async function scrapeVrboRate(opts: {
   );
 
   const bb = new Browserbase({ apiKey: bbApiKey });
-  const session = await bb.sessions.create({ projectId: bbProjectId });
+  // Vrbo aggressively rate-limits Browserbase's default IP pool — first
+  // few hits work but subsequent ones get a "Too Many Requests" wall
+  // page. Enable Browserbase's residential proxy network (proxies:true)
+  // so each session gets a fresh residential IP.
+  const session = await bb.sessions.create({ projectId: bbProjectId, proxies: true });
 
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   let calendarBody = "";
