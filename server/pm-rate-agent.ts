@@ -45,7 +45,11 @@ const VIEWPORT_H = 768;
 // Bound: most PMs converge in 4-7 iterations. 12 leaves headroom for
 // awkward date-pickers without unbounded spend on stuck sites.
 const MAX_ITERATIONS = 12;
-const MODEL = "claude-sonnet-4-6";
+// Sonnet 4.6 doesn't support the `computer_20250124` tool type (it's a
+// coding-focused variant). The latest Sonnet that does support
+// computer-use is 4.5. Reserve 4.6 for non-computer-use vision calls.
+const AGENT_MODEL = "claude-sonnet-4-5";
+const EXTRACTOR_MODEL = "claude-sonnet-4-5";
 
 export async function verifyPmRate(opts: {
   url: string;
@@ -160,7 +164,7 @@ async function runAgentLoop(
         "anthropic-beta": "computer-use-2025-01-24",
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: AGENT_MODEL,
         max_tokens: 1024,
         system: systemPrompt,
         tools: [
@@ -344,7 +348,7 @@ async function extractFinal(
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: MODEL,
+      model: EXTRACTOR_MODEL,
       max_tokens: 250,
       messages: [
         {
