@@ -232,6 +232,32 @@ established it so you can read the rationale in the commit message.
     was written. See `server/guesty-playwright.ts` for the shared
     session helpers both phases lean on.
 
+28. **Guesty login fallback order: stored session → Google SSO →
+    native email/password.** `loginToGuestyIfNeeded` first relies on
+    `GUESTY_SESSION_COOKIES` + `GUESTY_OKTA_TOKEN_STORAGE` to skip
+    login entirely. If Guesty bounces to `/auth/login`, the dispatcher
+    checks for the SSO branch FIRST: when `GOOGLE_PASSWORD` is set AND
+    Guesty's login page actually shows a "Sign in with Google" button
+    (so we don't misroute on non-SSO accounts), we drive the Google
+    OAuth popup with `GOOGLE_EMAIL` (defaults to `GUESTY_EMAIL`) +
+    `GOOGLE_PASSWORD`. Otherwise the native `GUESTY_EMAIL` /
+    `GUESTY_PASSWORD` flow runs (with IMAP-fetched 6-digit MFA via
+    `GMAIL_USER` / `GMAIL_APP_PASSWORD`).
+
+    The SSO path exists because Google Workspace tenants on Guesty
+    typically have NO native password — Continue on the email step
+    just stalls. **It is not a complete substitute for refreshing
+    cookies.** Google's challenges from new datacenter IPs ("verify
+    it's you", post-password 2SV, "this browser may not be secure")
+    are genuine hard-blockers — there is no automatable second factor
+    for an SSO-only account. When the SSO flow hits one of these, the
+    error message tells the operator to refresh
+    `GUESTY_SESSION_COOKIES` + `GUESTY_OKTA_TOKEN_STORAGE` from a
+    logged-in browser instead of trying again. Realistic steady-state
+    reliability of the SSO path is ~70-80% once Railway's IP has been
+    device-trusted by one successful login. Don't expand the SSO path
+    to handle 2SV; expand the cookie-refresh ergonomics instead.
+
 ### Compliance & channel sync
 
 20. **Tax Map Key (TMK) is NEVER written to
