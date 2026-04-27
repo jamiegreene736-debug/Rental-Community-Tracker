@@ -1,3 +1,5 @@
+import { resolveVrboRegion } from "./vrbo-region-resolver";
+
 // Vrbo search via Apify actor.
 //
 // Replaces the Google site:vrbo.com step in find-buy-in (which only
@@ -120,6 +122,12 @@ function buildVrboSearchUrl(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  /** Optional Vrbo `regionId` — strongly recommended; without it, Vrbo's search
+   * often returns 0 properties because the destination string alone doesn't
+   * disambiguate. Resolved by `vrbo-region-resolver.ts`. */
+  regionId?: string;
+  /** Optional `<lat>,<lng>` matching the regionId. */
+  latLong?: string;
 }): string {
   const params = new URLSearchParams({
     destination: opts.destination,
@@ -132,6 +140,8 @@ function buildVrboSearchUrl(opts: {
     isInvalidatedDate: "false",
     sort: "RECOMMENDED",
   });
+  if (opts.regionId) params.set("regionId", opts.regionId);
+  if (opts.latLong) params.set("latLong", opts.latLong);
   // Note: we deliberately DO NOT pass `minBedrooms` to Vrbo. The data
   // is sparse on listings and Vrbo's filter often drops valid results
   // that just don't have the field set. The post-hoc bedroom filter
@@ -160,14 +170,24 @@ function buildActorInput(opts: {
   checkIn: string;
   checkOut: string;
   maxResults: number;
+  /** Vrbo's regionId for the destination, when known. Critical for the
+   * easyapi actor — Vrbo's search returns 0 without it. */
+  regionId?: string;
+  latLong?: string;
+  /** Override for the `destination` query param. When the resolver
+   * supplies a canonical destination string (e.g. "Koloa, Hawaii,
+   * United States of America"), prefer it over the heuristic mapping. */
+  displayDestination?: string;
 }): Record<string, unknown> {
   const { actor, location, bedrooms, checkIn, checkOut, maxResults } = opts;
   if (/easyapi/.test(actor)) {
     const searchUrl = buildVrboSearchUrl({
-      destination: resolveVrboDestination(location),
+      destination: opts.displayDestination || resolveVrboDestination(location),
       checkIn,
       checkOut,
       bedrooms,
+      regionId: opts.regionId,
+      latLong: opts.latLong,
     });
     return {
       searchUrls: [{ url: searchUrl }],
@@ -268,6 +288,18 @@ export async function searchVrboViaApify(opts: {
     return resortTokens.every((t) => n.includes(t));
   };
 
+  // Resolve Vrbo regionId for the destination. Tier 1 (hardcoded) is
+  // synchronous and instant for our active markets. Tier 2 (in-memory
+  // cache) is also fast. Tier 3 (Browserbase fetch) only fires when
+  // we encounter an unknown destination — and only if Browserbase
+  // creds are configured. For known destinations this is a no-op.
+  const destinationForVrbo = resolveVrboDestination(location);
+  const region = await resolveVrboRegion({
+    destination: destinationForVrbo,
+    bbApiKey: process.env.BROWSERBASE_API_KEY,
+    bbProjectId: process.env.BROWSERBASE_PROJECT_ID,
+  }).catch(() => null);
+
   const startedAt = Date.now();
   const inputObj: Record<string, unknown> = buildActorInput({
     actor,
@@ -276,6 +308,9 @@ export async function searchVrboViaApify(opts: {
     checkIn,
     checkOut,
     maxResults,
+    regionId: region?.regionId,
+    latLong: region?.latLong || undefined,
+    displayDestination: region?.displayDestination || undefined,
   });
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
