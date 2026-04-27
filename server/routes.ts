@@ -2298,22 +2298,103 @@ export async function registerRoutes(
       return [...priced, ...unpriced];
     })();
 
-    // ── Booking.com via site: search ──────────────────────────────────────
-    // VRBO removed: same restriction as Airbnb — VRBO's standard rental
-    // agreement template explicitly bans guest-side subletting / commercial
-    // re-rental ("Guest shall not assign the lease or sublet the Property"),
-    // so any VRBO listing surfaced here would be an unusable channel for
-    // buy-in. Airbnb stays as TELEMETRY (pricing reference + photo source
-    // for reverse-image-search to find the property-management URL the same
-    // unit is also listed at). Booking.com stays for hotel-style inventory
-    // that DOES allow commercial booking on some properties.
+    // ── Booking.com / hotel-style inventory via Google Hotels engine ──────
+    // VRBO removed: same TOS subletting bar as Airbnb. Airbnb stays as
+    // telemetry + photo seed for reverse-image PM matches.
+    //
+    // Booking.com flow mirrors the Airbnb pattern (site search + priced
+    // engine, deduped). The priced side now uses SearchAPI's
+    // `google_hotels` engine — returns structured JSON with check-in/
+    // check-out date support and live `total_rate` / `rate_per_night`
+    // fields, instead of the previous site:booking.com Google scrape
+    // that depended on snippet text mentioning "$X/night" verbatim
+    // (most Booking.com snippets don't). Engine returns hotels AND
+    // vacation rentals from booking.com, hotels.com, expedia, etc. —
+    // we keep them all since they're commercially bookable, but tag
+    // the source as "booking" to fit the existing Candidate union.
     let bookingRawCount = 0;
     let bookingDropped = { noResort: 0, wrongBedrooms: 0 };
+    let bookingPricedCount = 0;
     const bookingPromise: Promise<Candidate[]> = (async () => {
-      const { candidates, raw, dropped } = await siteSearch("booking.com", "booking", "Booking.com");
-      bookingRawCount = raw;
-      bookingDropped = dropped;
-      return candidates;
+      const [site, priced] = await Promise.all([
+        siteSearch("booking.com", "booking", "Booking.com"),
+        (async (): Promise<Candidate[]> => {
+          try {
+            const sp: Record<string, string> = {
+              engine: "google_hotels",
+              q: searchLocation,
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              adults: "2",
+              currency: "USD",
+              api_key: apiKey,
+            };
+            const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+            if (!r.ok) {
+              console.warn(`[find-buy-in] google_hotels HTTP ${r.status}`);
+              return [];
+            }
+            const data = await r.json() as any;
+            let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+            bookingPricedCount = properties.length;
+            // Resort filter — same rule we apply to the airbnb engine.
+            if (resortName) {
+              properties = properties.filter((p: any) => {
+                const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
+                return mentionsResort(hay);
+              });
+            }
+            return properties
+              .map((p: any): Candidate | null => {
+                // Different google_hotels response shapes seen in the
+                // wild — total_rate.extracted_lowest is the most reliable
+                // priced field; rate_per_night.extracted_lowest is its
+                // per-night counterpart. Either presence is enough.
+                const totalLowest = Number(p?.total_rate?.extracted_lowest ?? p?.total_rate?.lowest ?? 0);
+                const perNightLowest = Number(p?.rate_per_night?.extracted_lowest ?? p?.rate_per_night?.lowest ?? 0);
+                const total = totalLowest > 0 ? totalLowest : perNightLowest * Math.max(1, nights);
+                const nightly = perNightLowest > 0 ? perNightLowest : Math.round(total / Math.max(1, nights));
+                if (!(total > 0)) return null;
+                const url = String(p?.link ?? p?.url ?? "");
+                if (!url) return null;
+                return {
+                  source: "booking",
+                  sourceLabel: "Booking.com",
+                  title: String(p?.name ?? p?.title ?? "Hotel listing").slice(0, 100),
+                  url,
+                  nightlyPrice: Math.round(nightly),
+                  totalPrice: Math.round(total),
+                  // type_of_place often surfaces "Vacation rental" / "Hotel" /
+                  // "Resort"; not directly bedroom-mappable but useful in UI.
+                  bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
+                  image: Array.isArray(p?.images) ? (p.images[0]?.original_image ?? p.images[0]?.thumbnail ?? p.images[0]) : (p?.thumbnail ?? undefined),
+                  snippet: String(p?.description ?? p?.type ?? "").slice(0, 160),
+                };
+              })
+              .filter((c: Candidate | null): c is Candidate => c !== null);
+          } catch (e: any) {
+            console.error(`[find-buy-in] google_hotels engine error:`, e.message);
+            return [];
+          }
+        })(),
+      ]);
+      bookingRawCount = site.raw;
+      bookingDropped = site.dropped;
+      // Dedupe by URL — prefer the priced (engine) version when both
+      // surfaces have the same listing.
+      const seen = new Set<string>();
+      const out: Candidate[] = [];
+      for (const c of priced) {
+        if (seen.has(c.url)) continue;
+        seen.add(c.url);
+        out.push(c);
+      }
+      for (const c of site.candidates) {
+        if (seen.has(c.url)) continue;
+        seen.add(c.url);
+        out.push(c);
+      }
+      return out;
     })();
 
     // ── Property-management companies via Google search ────────────────────
@@ -2365,28 +2446,68 @@ export async function registerRoutes(
 
         // Stage 2: per-PM-site deep dive to find SPECIFIC property listing pages
         // with rates. We do this in parallel — 6 sites × ~1s each.
+        //
+        // Two queries per site (concurrent), merged + deduped:
+        //   (a) date-aware: `site:${pm} "${community}" ${bedrooms}BR ${month} ${year}`
+        //       — surfaces availability pages tied to the actual stay window
+        //       (e.g. "December 2026 vacation rental Pili Mai"). PM sites
+        //       often build per-month landing pages that index by URL slug.
+        //   (b) generic: `site:${pm} "${community}" ${bedrooms} bedroom rental`
+        //       — fallback for sites without month-indexed pages.
+        // First version ran (b) only — coverage was OK, hit rate poor.
+        const checkInDate = new Date(checkIn + "T12:00:00");
+        const monthName = checkInDate.toLocaleString("en-US", { month: "long" });
+        const stayYear = checkInDate.getFullYear();
         const deepResults = await Promise.all(pmSites.map(async (site): Promise<Candidate[]> => {
           try {
-            const searchQuery = `site:${site.domain} ${bedrooms} bedroom rental rates`;
-            const pp = new URLSearchParams({
-              engine: "google",
-              q: searchQuery,
-              num: "5",
-              api_key: apiKey,
-            });
-            const rr = await fetch(`https://www.searchapi.io/api/v1/search?${pp.toString()}`);
-            // If the per-site search fails, skip the PM site entirely.
-            // Returning the homepage URL as a fallback (previous behavior) was
-            // misleading — users clicked it expecting a specific listing.
-            if (!rr.ok) return [];
-            const dd = await rr.json() as any;
-            const hits = Array.isArray(dd?.organic_results) ? dd.organic_results : [];
-            // Extract nightly price from snippet if the PM published one
-            // ("$450/night", "starting at $525", etc.)
+            const resortQualifier = resortName ?? community;
+            const queries = [
+              `site:${site.domain} "${resortQualifier}" ${bedrooms}BR ${monthName} ${stayYear}`,
+              `site:${site.domain} "${resortQualifier}" ${bedrooms} bedroom rental`,
+            ];
+            const queryResults = await Promise.all(queries.map(async (q) => {
+              const pp = new URLSearchParams({
+                engine: "google",
+                q,
+                num: "5",
+                api_key: apiKey,
+              });
+              const rr = await fetch(`https://www.searchapi.io/api/v1/search?${pp.toString()}`);
+              if (!rr.ok) return [];
+              const dd = await rr.json() as any;
+              return Array.isArray(dd?.organic_results) ? dd.organic_results : [];
+            }));
+            // Dedupe by URL across the two queries.
+            const seen = new Set<string>();
+            const hits: any[] = [];
+            for (const batch of queryResults) {
+              for (const h of batch) {
+                const link = String(h?.link ?? "");
+                if (!link || seen.has(link)) continue;
+                seen.add(link);
+                hits.push(h);
+              }
+            }
+            // Extract nightly price from snippet — broadened from the
+            // original $X/night-only pattern to also catch "from $X",
+            // "starting at $X", "$X/wk" / "$X/week" (÷ 7 → nightly),
+            // "$X/month" / "$X/mo" (÷ 30 → nightly approximate).
+            // Returns 0 when no price found; the caller treats unpriced
+            // candidates as click-through-only (PR #148 fallback).
             const extractPrice = (text: string): number => {
-              const m = text.match(/\$\s*(\d{3,4})\s*(?:\/|per|a\s+)?\s*(?:night|nt|night)/i)
-                ?? text.match(/(?:from|starting(?:\s+at)?)\s+\$\s*(\d{3,4})/i);
-              return m ? parseInt(m[1], 10) : 0;
+              // Per-night first (most accurate).
+              const perNight = text.match(/\$\s*([\d,]{3,5})\s*(?:\/|per|a\s+)?\s*(?:night|nt|nightly)/i);
+              if (perNight) return parseInt(perNight[1].replace(/,/g, ""), 10);
+              // From / starting at — usually a per-night quote.
+              const startingAt = text.match(/(?:from|starting(?:\s+at)?)\s+\$\s*([\d,]{3,5})(?!\s*(?:\/|per|a\s+)?\s*(?:week|wk|month|mo))/i);
+              if (startingAt) return parseInt(startingAt[1].replace(/,/g, ""), 10);
+              // Per-week — divide by 7 for nightly approximation.
+              const perWeek = text.match(/\$\s*([\d,]{4,6})\s*(?:\/|per|a\s+)?\s*(?:week|wk|weekly)/i);
+              if (perWeek) return Math.round(parseInt(perWeek[1].replace(/,/g, ""), 10) / 7);
+              // Per-month — divide by 30 (rough but useful).
+              const perMonth = text.match(/\$\s*([\d,]{4,6})\s*(?:\/|per|a\s+)?\s*(?:month|mo|monthly)/i);
+              if (perMonth) return Math.round(parseInt(perMonth[1].replace(/,/g, ""), 10) / 30);
+              return 0;
             };
             const candidates: Candidate[] = hits
               .filter((h: any) => {
@@ -2491,6 +2612,39 @@ export async function registerRoutes(
       photoMatches: photoMatchesByUrl.get(c.url) ?? [],
     }));
 
+    // Promote photo-match URLs into the PM source. The reverse-image
+    // matches collected above ARE PM company unit pages (PMs reuse
+    // Airbnb-listed photos verbatim) — they're more actionable than
+    // the generic PM Google search results because they point at the
+    // SAME unit, not just "PM companies that handle this resort." Tag
+    // them with source="pm" so they flow through the same UI section
+    // and into auto-fill's bookable pool. Dedupe against the existing
+    // pm[] array by URL so we don't double-render a domain that the
+    // PM Google search already found.
+    const existingPmUrls = new Set(pm.map((c) => c.url));
+    const photoMatchPmCandidates: Candidate[] = [];
+    for (const matches of photoMatchesByUrl.values()) {
+      for (const m of matches) {
+        if (existingPmUrls.has(m.url)) continue;
+        existingPmUrls.add(m.url);
+        photoMatchPmCandidates.push({
+          source: "pm",
+          sourceLabel: m.domain,
+          title: m.title || `Match on ${m.domain}`,
+          url: m.url,
+          // Photo-match URLs come without prices (Google Lens response
+          // doesn't include rates). They're click-through-only — the
+          // operator opens the link and gets the price from the PM's
+          // own booking page. Auto-fill's unpriced-PM fallback will
+          // pick from these too.
+          nightlyPrice: 0,
+          totalPrice: 0,
+          snippet: `Same photo as Airbnb listing — direct booking page on ${m.domain}`,
+        });
+      }
+    }
+    const pmAugmented: Candidate[] = [...pm, ...photoMatchPmCandidates];
+
     // Combined cheapest (top 2) across BOOKABLE sources that have pricing.
     //
     // Airbnb is INTENTIONALLY excluded from the cheapest pool — Auto-fill
@@ -2506,7 +2660,7 @@ export async function registerRoutes(
     // many Booking.com listings are commercial hotels that DO allow
     // re-rental. PM stays — the whole point of PM is they accept
     // commercial bookings.
-    const priced: Candidate[] = [...booking, ...pm]
+    const priced: Candidate[] = [...booking, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
     // If no priced PM/Booking candidate exists, fall back to the top
@@ -2516,9 +2670,11 @@ export async function registerRoutes(
     // negotiate. Buy-in record gets created with $0 cost; operator
     // updates after talking to the PM. Better than a silent no-op
     // that leaves the slot looking unfilled when there are real PM
-    // links available to click.
+    // links available to click. pmAugmented prefers PM Google search
+    // hits before photo-match-derived URLs (insertion order), so the
+    // fallback picks a curated PM hit when one exists.
     const unpricedFallback: Candidate[] = priced.length === 0
-      ? pm.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
+      ? pmAugmented.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
       : [];
     const cheapest = priced.length > 0 ? priced.slice(0, 2) : unpricedFallback;
     // Telemetry: what would the cheapest have been if we counted Airbnb?
@@ -2533,8 +2689,9 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `booking=${booking.length}/${bookingRawCount} (noResort=${bookingDropped.noResort}, wrongBR=${bookingDropped.wrongBedrooms}) `
-      + `pm=${pm.length}/${pmRawCount} · photoMatches=${totalPhotoMatches} · `
+      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length} (google+photoMatches) · `
+      + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
 
@@ -2549,10 +2706,10 @@ export async function registerRoutes(
       sources: {
         airbnb: airbnbWithMatches.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         booking: booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        pm: pm.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, booking: bookingRawCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, photoMatches: totalPhotoMatches },
         dropped: { airbnb: airbnbDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
