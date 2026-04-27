@@ -348,6 +348,25 @@ established it so you can read the rationale in the commit message.
     didn't republish is much better than one that silently skips the
     step and leaves Guesty out of sync with VRBO.
 
+    **Persistent compliance state lives at
+    `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`** —
+    NOT under `integrations[]`. `/api/builder/push-compliance` writes
+    there; `getChannelStatus` reads it back as `info.vrboLicense` (null
+    when none of the three are set). The VRBO compliance card sub-block
+    surfaces three states from this:
+    - **on file** (green) — Guesty has every field the property record
+      has a value for, and the values match,
+    - **out of date / incomplete** (amber) — Guesty has SOMETHING but
+      it's stale relative to the property record OR missing fields the
+      record carries,
+    - **not yet in Guesty** (blue) — Guesty has no VRBO license data.
+
+    The session-local "done" flag in `vrboComplianceStateByListing` is
+    a fast-path for the gap between the click and the next channel-
+    status refresh; the real source of truth is `info.vrboLicense`. Do
+    NOT regress this back to a session-only flag — it caused a stale UI
+    on every page reload.
+
 ### Dashboard data shape
 
 21. **`home.tsx` properties carry both `community` (display) and
