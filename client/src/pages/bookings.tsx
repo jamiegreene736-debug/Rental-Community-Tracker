@@ -436,35 +436,37 @@ export default function Bookings() {
             break;
           }
 
-          // No priced candidate worked → vision-verify the top unpriced
-          // URL from VRBO and PM in parallel, pick the cheapest verified
-          // price. VRBO has more predictable page structure than random
-          // PM sites so it usually wins extraction; PM is the canonical
-          // bookable channel. Verifying both in parallel keeps slot
-          // wall-time bounded by the slower call (~30-60s) instead of
-          // their sum.
+          // No priced candidate worked → walk multiple unpriced PM URLs
+          // and verify each. The dispatcher in pm-rate-agent picks the
+          // right path per URL: programmatic scrapers for PMs we've
+          // reverse-engineered (Suite Paradise via /rescms/ajax/...),
+          // Browserbase agent for unknown PMs.
           //
-          // 90s client AbortController per call. Failure modes (anti-bot,
-          // no price visible, network) silently degrade to the unpriced
-          // $0 fallback below.
+          // We prioritize known-fast-scraper PMs first: Suite Paradise
+          // returns in ~1s, while the agent path takes 60-180s. Sorting
+          // those URLs to the front means we usually finish in seconds.
+          //
+          // Stop on the first verified price (cheapest available will
+          // usually be one of the first few candidates anyway). If
+          // available:false comes back from a scraper, skip and try
+          // the next URL — the unit's just booked, not a permanent
+          // failure.
           let visionVerified = false;
           if (!pick) {
-            // Vrbo is in sources.vrbo for awareness but skipped here — its
-            // anti-bot serves a CAPTCHA to Playwright, so vision can never
-            // extract a price and the call just wastes ~6s. Operator can
-            // still click 📷 Verify rate on a Vrbo-attached buy-in if
-            // they really want to try (the dialog will surface the
-            // CAPTCHA screenshot + reason).
-            const verifyTargets: LiveCandidate[] = [];
-            const topPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0)[0];
-            if (topPm) verifyTargets.push(topPm);
+            const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0);
+            // Suite Paradise URLs first (fast scraper), then everything else.
+            const isFastScrape = (u: string) => /(?:^|\.)suite-paradise\.com/.test(u);
+            const ordered = [
+              ...allUnpricedPm.filter((c) => isFastScrape(c.url)),
+              ...allUnpricedPm.filter((c) => !isFastScrape(c.url)),
+            ].slice(0, 4); // cap at 4 to bound worst-case wall time
 
-            type Verified = { candidate: LiveCandidate; totalPrice: number };
-            const verified: Verified[] = [];
-            await Promise.all(verifyTargets.map(async (c) => {
+            for (const c of ordered) {
               try {
+                // 25s timeout for fast-scrape PMs; 95s for agent-path.
+                const timeoutMs = isFastScrape(c.url) ? 25000 : 95000;
                 const controller = new AbortController();
-                const t = setTimeout(() => controller.abort(), 90000);
+                const t = setTimeout(() => controller.abort(), timeoutMs);
                 const resp = await fetch("/api/operations/verify-pm-listing", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -482,19 +484,15 @@ export default function Bookings() {
                   typeof ex?.totalPrice === "number" &&
                   ex.totalPrice > 0
                 ) {
-                  verified.push({ candidate: c, totalPrice: ex.totalPrice });
-                } else {
-                  skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
+                  pick = c;
+                  verifiedPrice = ex.totalPrice;
+                  visionVerified = true;
+                  break;
                 }
+                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
               } catch (e: any) {
                 skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
               }
-            }));
-            verified.sort((a, b) => a.totalPrice - b.totalPrice);
-            if (verified[0]) {
-              pick = verified[0].candidate;
-              verifiedPrice = verified[0].totalPrice;
-              visionVerified = true;
             }
           }
 
