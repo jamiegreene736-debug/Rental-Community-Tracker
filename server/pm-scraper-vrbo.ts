@@ -170,6 +170,42 @@ export async function scrapeVrboRate(opts: {
       await page.waitForTimeout(500);
     }
 
+    // Quote-query trigger (per Grok review): on a Vrbo property page
+    // with arrival/departure in the URL, the booking widget's "Reserve"
+    // button fires `PropertyQuoteQuery` (or its current rev's
+    // equivalent), which returns the all-in trip total — base +
+    // cleaning + service + taxes. We don't see this op fire on plain
+    // page load with our capture, so simulate the click ourselves.
+    //
+    // Tries several common Vrbo CTA selectors. If none match, we
+    // continue with whatever ops fired naturally — the all-in
+    // extraction tier scans the full body collection regardless.
+    try {
+      const ctaSelectors = [
+        'button[data-testid="check-availability"]',
+        'button[data-testid="reserve-button"]',
+        'button[data-stid="submit-booking-step1"]',
+        'button:has-text("Reserve")',
+        'button:has-text("Check Availability")',
+        'button:has-text("Book now")',
+        'a[data-testid="reserve"]',
+      ];
+      for (const sel of ctaSelectors) {
+        const button = page.locator(sel).first();
+        const count = await button.count().catch(() => 0);
+        if (count > 0) {
+          const visible = await button.isVisible().catch(() => false);
+          if (visible) {
+            await button.click({ timeout: 5000 }).catch(() => {});
+            console.log(`[vrbo-scraper] clicked widget CTA: ${sel}`);
+            break;
+          }
+        }
+      }
+      // Give the quote query up to 8s to fire after the click.
+      await page.waitForTimeout(8000);
+    } catch { /* CTA click is best-effort */ }
+
     if (!calendarBody) {
       const finalUrl = page.url();
       const title = await page.title().catch(() => "");
@@ -315,7 +351,17 @@ export async function scrapeVrboRate(opts: {
     // Rather than guess the exact op, we scan ALL captured bodies
     // (still skipping the per-night calendar response) with a
     // progressively wider net.
-    for (const { op, body } of graphqlBodies) {
+    // Quote-query bodies first — these are the most likely to carry
+    // the all-in. We sort `quote`/`trip`/`stay`-named ops to the front
+    // of the scan so a real quote total wins over an offer/discount
+    // banner total elsewhere on the page.
+    const quoteFirstOrder = [...graphqlBodies].sort((a, b) => {
+      const aIsQuote = /quote|trip|stay|booking|priceDetails|priceSummary/i.test(a.op) ? 0 : 1;
+      const bIsQuote = /quote|trip|stay|booking|priceDetails|priceSummary/i.test(b.op) ? 0 : 1;
+      return aIsQuote - bIsQuote;
+    });
+
+    for (const { op, body } of quoteFirstOrder) {
       if (op === "propertyRatesDateSelector") continue; // base rates, not total
 
       // Tier A: explicit field names with structured value/amount.
@@ -325,6 +371,13 @@ export async function scrapeVrboRate(opts: {
         /"(?:tripTotal|finalPrice|totalChargesAmount|priceTotal|fullPrice)":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
         /"displayPrice":\s*"\$\s*([\d,]+(?:\.\d+)?)/gi,
         /"formattedAmount":\s*"\$\s*([\d,]+(?:\.\d+)?)/gi,
+        // Quote-query specific shapes (per Grok review):
+        //   { quote: { total: { amount: 22729, currency: "USD" } } }
+        //   { priceDetails: { total: 22729 } }
+        //   { tripQuote: { totalAmount: 22729 } }
+        /"quote"\s*:\s*\{[^}]*?"total"\s*:\s*\{[^}]*?"amount"\s*:\s*([\d.]+)/gi,
+        /"priceDetails"\s*:\s*\{[^}]*?"total"\s*:\s*"?([\d,]+(?:\.\d+)?)"?/gi,
+        /"tripQuote"\s*:\s*\{[^}]*?"total(?:Amount|Price)?"\s*:\s*"?([\d,]+(?:\.\d+)?)"?/gi,
       ];
 
       // Tier B: bare "total":N (catches simpler/older shapes).
