@@ -14,6 +14,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
+import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
@@ -108,6 +109,39 @@ function sourceLabelForUrl(url: string | null | undefined): string {
   } catch {
     return "site";
   }
+}
+
+// Auto-fill progress bar — gives the operator visual confirmation that
+// the mutation is still running (the verify-pm-listing call can take
+// 30-90s per slot, which feels frozen without feedback). Indeterminate
+// in nature: ramps to 95% over the expected duration based on slot
+// count, snaps to 100% only when the mutation completes (parent
+// unmounts this component when autoFilling clears).
+function AutoFillProgress({ slotCount }: { slotCount: number }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+  // Slots run in parallel; budget ~70s for the slowest slot (verify
+  // call worst case is ~90s but typical is 30-60s with Sonnet + popup
+  // dismissal). Capped at 95 — completion will unmount us.
+  const expectedSeconds = 70;
+  const value = Math.min(95, Math.round((elapsed / expectedSeconds) * 100));
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>
+          Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"} in parallel) — vision step can take up to 90s per slot
+        </span>
+        <span className="tabular-nums">{elapsed}s</span>
+      </div>
+      <Progress value={value} className="h-1.5" />
+    </div>
+  );
 }
 
 function nightsBetween(a: string | undefined | null, b: string | undefined | null): number {
@@ -366,21 +400,28 @@ export default function Bookings() {
             break;
           }
 
-          // No priced candidate worked → try to vision-extract a real
-          // price from the top unpriced PM URL before falling back to
-          // $0. Uses /api/operations/verify-pm-listing (Playwright +
-          // Sonnet vision). 90s client timeout per call so a slow PM
-          // site can't hang auto-fill indefinitely.
+          // No priced candidate worked → vision-verify the top unpriced
+          // URL from VRBO and PM in parallel, pick the cheapest verified
+          // price. VRBO has more predictable page structure than random
+          // PM sites so it usually wins extraction; PM is the canonical
+          // bookable channel. Verifying both in parallel keeps slot
+          // wall-time bounded by the slower call (~30-60s) instead of
+          // their sum.
           //
-          // Slots run in parallel via Promise.all upstream so the
-          // wall-clock impact is bounded by the slowest slot (~30-60s
-          // typical for Sonnet on a real PM page, popup dismissed).
-          // Single candidate per slot to keep Railway's parallel
-          // Playwright count to one per slot.
+          // 90s client AbortController per call. Failure modes (anti-bot,
+          // no price visible, network) silently degrade to the unpriced
+          // $0 fallback below.
           let visionVerified = false;
           if (!pick) {
-            const topUnpriced = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).slice(0, 1);
-            for (const c of topUnpriced) {
+            const verifyTargets: LiveCandidate[] = [];
+            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
+            const topPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0)[0];
+            if (topVrbo) verifyTargets.push(topVrbo);
+            if (topPm) verifyTargets.push(topPm);
+
+            type Verified = { candidate: LiveCandidate; totalPrice: number };
+            const verified: Verified[] = [];
+            await Promise.all(verifyTargets.map(async (c) => {
               try {
                 const controller = new AbortController();
                 const t = setTimeout(() => controller.abort(), 90000);
@@ -401,24 +442,33 @@ export default function Bookings() {
                   typeof ex?.totalPrice === "number" &&
                   ex.totalPrice > 0
                 ) {
-                  pick = c;
-                  verifiedPrice = ex.totalPrice;
-                  visionVerified = true;
-                  break;
+                  verified.push({ candidate: c, totalPrice: ex.totalPrice });
+                } else {
+                  skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
                 }
-                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
               } catch (e: any) {
                 skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
               }
+            }));
+            verified.sort((a, b) => a.totalPrice - b.totalPrice);
+            if (verified[0]) {
+              pick = verified[0].candidate;
+              verifiedPrice = verified[0].totalPrice;
+              visionVerified = true;
             }
           }
 
-          // Final fallback: if vision couldn't extract, attach the
-          // server's unpricedFallback URL at $0. Operator can hit the
+          // Final fallback: if vision couldn't extract from any source,
+          // attach the cheapest unpriced URL we have (PM > VRBO order —
+          // PM is the canonical bookable channel). Operator can hit the
           // per-slot 📷 Verify rate button to retry with a fresh
-          // screenshot, or just type the cost manually.
+          // screenshot, or type the cost manually.
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
+          }
+          if (!pick) {
+            const fallbackVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
+            if (fallbackVrbo) pick = fallbackVrbo;
           }
 
           if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
@@ -816,26 +866,31 @@ export default function Bookings() {
                         {/* Auto-fill: one click to search + attach cheapest
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (
-                          <div className="flex items-center justify-between gap-3 bg-primary/5 border border-primary/20 rounded px-3 py-2">
-                            <div className="text-xs text-muted-foreground">
-                              {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
+                          <div className="bg-primary/5 border border-primary/20 rounded px-3 py-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-xs text-muted-foreground">
+                                {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
+                              </div>
+                              <Button
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAutoFilling(r._id);
+                                  autoFillMutation.mutate({ reservation: r });
+                                }}
+                                disabled={autoFillMutation.isPending && autoFilling === r._id}
+                                data-testid={`button-auto-fill-${r._id}`}
+                              >
+                                {autoFillMutation.isPending && autoFilling === r._id ? (
+                                  <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
+                                ) : (
+                                  <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
+                                )}
+                              </Button>
                             </div>
-                            <Button
-                              size="sm"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setAutoFilling(r._id);
-                                autoFillMutation.mutate({ reservation: r });
-                              }}
-                              disabled={autoFillMutation.isPending && autoFilling === r._id}
-                              data-testid={`button-auto-fill-${r._id}`}
-                            >
-                              {autoFillMutation.isPending && autoFilling === r._id ? (
-                                <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
-                              ) : (
-                                <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
-                              )}
-                            </Button>
+                            {autoFillMutation.isPending && autoFilling === r._id && (
+                              <AutoFillProgress slotCount={r.slotsTotal - r.slotsFilled} />
+                            )}
                           </div>
                         )}
                         {r.slots.map((slot) => (
