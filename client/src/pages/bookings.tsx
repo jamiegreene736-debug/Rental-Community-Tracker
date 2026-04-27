@@ -371,16 +371,27 @@ export default function Bookings() {
           // unpriced URL at $0 (operator edits cost after contacting PM).
           let visionVerified: { reason?: string; screenshotBase64?: string } | null = null;
           if (!pick) {
-            // Cap at 2 candidates to bound the auto-fill wall-clock time
-            // (~10s per verify × 2 candidates × 2 slots ≈ 40s worst case).
+            // Cap at 2 candidates per slot. Slots run in parallel via
+            // Promise.all upstream, so total wall time is bounded by
+            // SLOT_VERIFY_BUDGET (~22s for 2 candidates × 11s each).
             const unpricedPmCandidates = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).slice(0, 2);
             for (const c of unpricedPmCandidates) {
               try {
-                const v = await apiRequest("POST", "/api/operations/verify-pm-listing", {
-                  url: c.url,
-                  checkIn: ci,
-                  checkOut: co,
-                }).then((r) => r.json());
+                // Hard 18s timeout per verify call. Without this, a slow
+                // PM site (Suite Paradise's giant page took 70s+ before
+                // viewport-only screenshots) drags the whole auto-fill
+                // past whatever effective client tolerance exists and
+                // starves parallel slots.
+                const controller = new AbortController();
+                const t = setTimeout(() => controller.abort(), 18000);
+                const resp = await fetch("/api/operations/verify-pm-listing", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "include",
+                  body: JSON.stringify({ url: c.url, checkIn: ci, checkOut: co }),
+                  signal: controller.signal,
+                }).finally(() => clearTimeout(t));
+                const v = resp.ok ? await resp.json() : null;
                 const ex = v?.extracted;
                 if (
                   v?.ok &&
@@ -1064,7 +1075,7 @@ function CandidateList({
 // ─── Live search across Airbnb, Vrbo, Booking.com, and PM companies ─────────
 
 type LiveCandidate = {
-  source: "airbnb" | "booking" | "pm";
+  source: "airbnb" | "vrbo" | "booking" | "pm";
   sourceLabel: string;
   title: string;
   url: string;
@@ -1087,18 +1098,21 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
-  // VRBO removed — same TOS subletting restriction as Airbnb makes it
-  // an unusable buy-in channel. Airbnb stays as telemetry/photo-source.
+  // Vrbo is back — surfaced for awareness/manual outreach. Like Airbnb,
+  // it's NOT in the cheapest/auto-fill pool because of the same TOS
+  // subletting restriction. Booking + PM remain the bookable channels.
   sources: {
     airbnb: LiveCandidate[];
+    vrbo: LiveCandidate[];
     booking: LiveCandidate[];
     pm: LiveCandidate[];
   };
   cheapest: LiveCandidate[];
   debug?: {
-    rawCounts?: { airbnb?: number; booking?: number; pm?: number; photoMatches?: number };
+    rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number; photoMatches?: number };
     dropped?: {
       airbnb?: { noResort: number; wrongBedrooms: number };
+      vrbo?: { noResort: number; wrongBedrooms: number };
       booking?: { noResort: number; wrongBedrooms: number };
     };
     searchLocation?: string;
@@ -1194,6 +1208,7 @@ function LiveSearchSection({
   }
 
   const airbnb  = data?.sources.airbnb  ?? [];
+  const vrbo    = data?.sources.vrbo    ?? [];
   const booking = data?.sources.booking ?? [];
   const pm      = data?.sources.pm      ?? [];
   const cheapest = data?.cheapest       ?? [];
@@ -1220,7 +1235,7 @@ function LiveSearchSection({
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
             {typeof (data.debug.rawCounts as any).photoMatches === "number" && (
               <> · photo-matches {(data.debug.rawCounts as any).photoMatches}</>
             )}
@@ -1229,6 +1244,7 @@ function LiveSearchSection({
             <div>
               Dropped (wrong resort / bedrooms):
               {" "}airbnb {data.debug.dropped.airbnb?.noResort ?? 0}/{data.debug.dropped.airbnb?.wrongBedrooms ?? 0} ·
+              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0} ·
               {" "}booking {data.debug.dropped.booking?.noResort ?? 0}/{data.debug.dropped.booking?.wrongBedrooms ?? 0}
             </div>
           )}
@@ -1251,22 +1267,16 @@ function LiveSearchSection({
       )}
 
       {/* By-source sections.
-          VRBO removed — same TOS bar on guest-side subletting as Airbnb,
-          so any VRBO listing surfaced here would be an unusable channel.
-          Airbnb stays as telemetry + photo source for the reverse-image
-          matches rendered inside each Airbnb row (see LiveRow). */}
-      {/* Section open-by-default rules:
-          - Booking.com and PM Companies — ALWAYS open. These are the
-            actually-bookable channels (PR #144 / #145 work — Airbnb's
-            TOS bars subletting, so it's telemetry-only). The operator
-            needs to see PM links every time they Find buy-in; making
-            them click-to-expand was the bug Jamie reported.
-          - Airbnb — open only when a small number of results (otherwise
-            collapsed since it's reference-only, with reverse-image PM
-            matches rendered under each row that the operator can
-            actually click through). */}
+          Airbnb + Vrbo are AWARENESS-ONLY — both have TOS bars on
+          guest-side subletting, so neither feeds the cheapest pool nor
+          auto-fill. Airbnb stays as telemetry + photo source (the
+          reverse-image PM matches under each row are bookable). Vrbo
+          is here because the operator wants to see Vrbo-listed inventory
+          for direct-with-owner outreach. Booking.com + PM Companies are
+          the actually-bookable channels — both ALWAYS open. */}
       {[
         { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
+        { key: "vrbo",    label: "Vrbo (awareness — direct-with-owner outreach)", items: vrbo, defaultOpen: vrbo.length > 0 && vrbo.length <= 3 },
         { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
         { key: "pm",      label: "PM Companies (Google)", items: pm, defaultOpen: true },
       ].map((s) => (

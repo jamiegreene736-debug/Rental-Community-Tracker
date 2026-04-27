@@ -2045,7 +2045,7 @@ export async function registerRoutes(
     console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
     type Candidate = {
-      source: "airbnb" | "booking" | "pm";
+      source: "airbnb" | "vrbo" | "booking" | "pm";
       sourceLabel: string;
       title: string;
       url: string;
@@ -2164,7 +2164,7 @@ export async function registerRoutes(
     // (if we resolved one), and the bedroom count to match.
     const siteSearch = async (
       siteDomain: string,
-      source: "airbnb" | "booking",
+      source: "airbnb" | "vrbo" | "booking",
       sourceLabel: string,
     ): Promise<{ candidates: Candidate[]; raw: number; dropped: { noResort: number; wrongBedrooms: number } }> => {
       const resortQualifier = resortName ? `"${resortName}"` : searchLocation;
@@ -2397,6 +2397,24 @@ export async function registerRoutes(
       return out;
     })();
 
+    // ── Vrbo via Google site: search ─────────────────────────────────────
+    // Re-enabled per operator request — Vrbo's TOS technically prohibits
+    // commercial re-rental same as Airbnb, but the operator wants the
+    // option to surface Vrbo-listed inventory for awareness / direct-with-
+    // owner outreach. We do NOT push Vrbo into the priced pool by default
+    // (caller can opt in via the response shape); auto-fill skips it.
+    // Pricing comes from snippet extraction only — no dedicated Vrbo
+    // engine in SearchAPI, so URLs are typically unpriced (operator
+    // clicks through to see the rate).
+    let vrboRawCount = 0;
+    let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
+    const vrboPromise: Promise<Candidate[]> = (async () => {
+      const { candidates, raw, dropped } = await siteSearch("vrbo.com", "vrbo", "Vrbo");
+      vrboRawCount = raw;
+      vrboDropped = dropped;
+      return candidates;
+    })();
+
     // ── Property-management companies via Google search ────────────────────
     // No live pricing — we return company sites + their booking page as
     // starting points so the host can price-check manually if the OTA results
@@ -2552,7 +2570,7 @@ export async function registerRoutes(
       }
     })();
 
-    const [airbnb, booking, pm] = await Promise.all([airbnbPromise, bookingPromise, pmPromise]);
+    const [airbnb, booking, vrbo, pm] = await Promise.all([airbnbPromise, bookingPromise, vrboPromise, pmPromise]);
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
@@ -2656,10 +2674,13 @@ export async function registerRoutes(
     // bookable — but they don't have prices, so they don't compete on
     // "cheapest" anyway.
     //
-    // VRBO already excluded (TOS, same reason). Booking.com stays —
-    // many Booking.com listings are commercial hotels that DO allow
-    // re-rental. PM stays — the whole point of PM is they accept
-    // commercial bookings.
+    // Vrbo IS surfaced now (operator explicitly opted back in) but stays
+    // OUT of the priced/cheapest pool — Vrbo's TOS has the same sublet
+    // restriction as Airbnb, so picking a Vrbo URL for a buy-in carries
+    // the same risk. It shows up under sources.vrbo for awareness/manual
+    // outreach. Booking.com stays — many Booking.com listings are
+    // commercial hotels that DO allow re-rental. PM stays — the whole
+    // point of PM is they accept commercial bookings.
     const priced: Candidate[] = [...booking, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
@@ -2689,6 +2710,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
+      + `vrbo=${vrbo.length}/${vrboRawCount} (awareness-only — same TOS as airbnb) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length} (google+photoMatches) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
@@ -2705,12 +2727,13 @@ export async function registerRoutes(
       checkOut,
       sources: {
         airbnb: airbnbWithMatches.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        vrbo: vrbo.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         booking: booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, photoMatches: totalPhotoMatches },
-        dropped: { airbnb: airbnbDropped, booking: bookingDropped },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, photoMatches: totalPhotoMatches },
+        dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
         resortName,
@@ -2870,7 +2893,7 @@ export async function registerRoutes(
         ],
       });
       const ctx = await browser.newContext({
-        viewport: { width: 1366, height: 1800 },
+        viewport: { width: 1366, height: 2400 },
         locale: "en-US",
         userAgent:
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -2880,67 +2903,55 @@ export async function registerRoutes(
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       });
       const page = await ctx.newPage();
-      await page.goto(urlWithDates, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.goto(urlWithDates, { waitUntil: "domcontentloaded", timeout: 12000 });
       // SPAs commonly fetch rates after first paint — give them time.
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2500);
 
-      // Most PM sites gate rates behind a "Check Availability" button —
-      // URL params alone don't trigger the rate fetch. Try to fill date
-      // inputs and click a likely search button so the rates render
-      // before we screenshot. All silent — generic selectors that work on
-      // many sites but not all; failure just means we screenshot the
-      // pre-search view (Claude can still note "no prices visible").
+      // Try to fill date inputs and click a search button before
+      // screenshotting — most PM sites gate rates behind that flow.
+      // Bail fast if nothing matches: prior implementation lingered for
+      // 5+ seconds even when no button was found, which dragged the
+      // whole verify call past the client's tolerance and starved the
+      // 2nd auto-fill slot. Now we only wait for rate-fetch render if
+      // we actually clicked something.
+      let clicked = false;
       try {
         const dateInSelectors = [
-          'input[name*="check_in" i]',
-          'input[name*="checkin" i]',
-          'input[name*="arrival" i]',
-          'input[id*="check_in" i]',
-          'input[id*="checkin" i]',
-          'input[id*="arrival" i]',
-          'input[placeholder*="check-in" i]',
-          'input[placeholder*="check in" i]',
-          'input[placeholder*="arrival" i]',
+          'input[name*="check_in" i]', 'input[name*="checkin" i]', 'input[name*="arrival" i]',
+          'input[id*="check_in" i]', 'input[id*="checkin" i]', 'input[id*="arrival" i]',
+          'input[placeholder*="check-in" i]', 'input[placeholder*="check in" i]', 'input[placeholder*="arrival" i]',
         ];
         const dateOutSelectors = [
-          'input[name*="check_out" i]',
-          'input[name*="checkout" i]',
-          'input[name*="departure" i]',
-          'input[id*="check_out" i]',
-          'input[id*="checkout" i]',
-          'input[id*="departure" i]',
-          'input[placeholder*="check-out" i]',
-          'input[placeholder*="check out" i]',
-          'input[placeholder*="departure" i]',
+          'input[name*="check_out" i]', 'input[name*="checkout" i]', 'input[name*="departure" i]',
+          'input[id*="check_out" i]', 'input[id*="checkout" i]', 'input[id*="departure" i]',
+          'input[placeholder*="check-out" i]', 'input[placeholder*="check out" i]', 'input[placeholder*="departure" i]',
         ];
         for (const sel of dateInSelectors) {
           const el = page.locator(sel).first();
-          if ((await el.count().catch(() => 0)) > 0) {
-            await el.fill(checkIn).catch(() => {});
-            break;
-          }
+          if ((await el.count().catch(() => 0)) > 0) { await el.fill(checkIn).catch(() => {}); break; }
         }
         for (const sel of dateOutSelectors) {
           const el = page.locator(sel).first();
-          if ((await el.count().catch(() => 0)) > 0) {
-            await el.fill(checkOut).catch(() => {});
-            break;
-          }
+          if ((await el.count().catch(() => 0)) > 0) { await el.fill(checkOut).catch(() => {}); break; }
         }
         const searchBtn = page.getByRole("button", {
           name: /^(search|check\s*availab|view\s*rates|see\s*rates|book\s*now|get\s*rates|find\s*available)/i,
         }).first();
         if ((await searchBtn.count().catch(() => 0)) > 0) {
-          await searchBtn.click({ timeout: 3000 }).catch(() => {});
-          await page.waitForTimeout(5000);
+          await searchBtn.click({ timeout: 2000 }).catch(() => {});
+          clicked = true;
         }
-      } catch { /* silent — pre-search screenshot is still useful */ }
+      } catch { /* silent */ }
+      if (clicked) await page.waitForTimeout(3500);
 
       const finalUrl = page.url();
       const title = await page.title().catch(() => "");
-      // fullPage so any rates rendered below the fold are visible to
-      // vision. quality:70 keeps the base64 reasonable for the API.
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 70, fullPage: true });
+      // Viewport-only screenshot (1366×2400) — fullPage on Suite Paradise
+      // and similar produces 8000+ px tall jpegs that take 30+s to encode
+      // and inflate the vision payload to multi-MB. Calendar widgets and
+      // rate breakdowns generally render in the top ~2400 px once the
+      // search button is clicked.
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 70, fullPage: false });
       const screenshotBase64 = screenshot.toString("base64");
 
       const prompt = [
@@ -2976,7 +2987,7 @@ export async function registerRoutes(
             ],
           }],
         }),
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(12000),
       });
       if (!visionResp.ok) {
         const body = await visionResp.text().catch(() => "");
