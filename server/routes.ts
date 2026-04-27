@@ -10555,7 +10555,7 @@ export async function registerRoutes(
       return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     }
 
-    const ratesByBR = await fetchAmortizedNightlyByBR(
+    const { ratesByBR, bboxApplied } = await fetchAmortizedNightlyByBR(
       draft.name,
       draft.city,
       draft.state,
@@ -10584,7 +10584,11 @@ export async function registerRoutes(
       ),
       estimatedLowRate,
       estimatedHighRate,
-      usedAddressGeoBounds: !!draft.streetAddress,
+      // True iff geocoding actually succeeded AND the bbox was applied to
+      // the engine query. False means either no streetAddress on the
+      // draft, or geocoding failed, so the function fell back to a
+      // name-token match instead.
+      usedAddressGeoBounds: bboxApplied,
       draft: updated,
     });
   });
@@ -11068,7 +11072,7 @@ export async function registerRoutes(
       } catch { /* non-fatal */ }
     }
 
-    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state, streetAddress);
+    const { ratesByBR } = await fetchAmortizedNightlyByBR(communityName, city, state, streetAddress);
 
     // ── 2. Parse available unit types ─────────────────────────────────────────
     // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
