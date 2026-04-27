@@ -13,6 +13,7 @@ import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
 import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
+import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2030,6 +2031,13 @@ export async function registerRoutes(
     res.json(snap);
   });
 
+  // Same shape as apify-vrbo-debug, for the Outscraper Vrbo path.
+  app.get("/api/operations/outscraper-vrbo-debug", (_req, res) => {
+    const snap = getOutscraperVrboDebugSnapshot();
+    if (!snap) return res.json({ message: "No Outscraper Vrbo call has run since boot." });
+    res.json(snap);
+  });
+
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
@@ -2499,13 +2507,14 @@ export async function registerRoutes(
     let vrboApifyCount = 0;
     let vrboBbCount = 0;
     let vrboSbCount = 0;
+    let vrboOsCount = 0;
     let vrboGoogleCount = 0;
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const bbApiKey = process.env.BROWSERBASE_API_KEY;
       const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
       const targetDestination = resortName ?? community;
 
-      const [apifyResults, browserbaseResults, scrapingbeeResults, googleResults] = await Promise.all([
+      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, googleResults] = await Promise.all([
         // Path 1 — Apify (paid actor; priced when regionId resolves)
         searchVrboViaApify({
           resortName: resortName ?? community,
@@ -2545,7 +2554,19 @@ export async function registerRoutes(
           console.error("[find-buy-in] vrbo (scrapingbee) error:", e?.message ?? e);
           return [] as Awaited<ReturnType<typeof searchVrboViaScrapingBee>>;
         }),
-        // Path 4 — Google site:search (free; unpriced URLs, fallback)
+        // Path 4 — Outscraper (dedicated Vrbo scraper from a different
+        // vendor). Skipped when OUTSCRAPER_API_KEY isn't set.
+        searchVrboViaOutscraper({
+          resortName: resortName ?? community,
+          destination: targetDestination,
+          bedrooms,
+          checkIn,
+          checkOut,
+        }).catch((e: any) => {
+          console.error("[find-buy-in] vrbo (outscraper) error:", e?.message ?? e);
+          return [] as Awaited<ReturnType<typeof searchVrboViaOutscraper>>;
+        }),
+        // Path 5 — Google site:search (free; unpriced URLs, fallback)
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
@@ -2555,9 +2576,10 @@ export async function registerRoutes(
       vrboApifyCount = apifyResults.length;
       vrboBbCount = browserbaseResults.length;
       vrboSbCount = scrapingbeeResults.length;
+      vrboOsCount = outscraperResults.length;
       vrboGoogleCount = googleResults.candidates.length;
       vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + googleResults.raw;
+      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + googleResults.raw;
 
       const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
         source: "vrbo" as const,
@@ -2592,12 +2614,23 @@ export async function registerRoutes(
         image: c.image,
         snippet: c.snippet,
       }));
+      const osCandidates: Candidate[] = outscraperResults.map((c): Candidate => ({
+        source: "vrbo" as const,
+        sourceLabel: "Vrbo",
+        title: c.title,
+        url: withStayDates("vrbo", c.url),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        bedrooms: c.bedrooms,
+        image: c.image,
+        snippet: c.snippet,
+      }));
 
-      // Dedupe by Vrbo listing id across all four paths. Priority order:
-      // Apify (paid actor, maintained externally) → Browserbase (paid,
-      // our scraper) → ScrapingBee (paid, different vendor) → Google
-      // (free, unpriced fallback). First id wins; later occurrences of
-      // the same id are dropped so we don't duplicate cards.
+      // Dedupe by Vrbo listing id across all five paths. Priority order:
+      // Outscraper (dedicated Vrbo scraper, most likely to succeed) →
+      // Apify → Browserbase → ScrapingBee → Google (free, unpriced
+      // fallback). First id wins; later occurrences of the same id
+      // are dropped so we don't duplicate cards.
       const listingIdOf = (url: string): string | null => {
         const m = url.match(/vrbo\.com\/(\d+)/);
         return m ? m[1] : null;
@@ -2610,6 +2643,9 @@ export async function registerRoutes(
         if (id) seenIds.add(id);
         out.push(c);
       };
+      // Outscraper first — it's the dedicated Vrbo vendor and most
+      // likely to return priced+verified candidates.
+      for (const c of osCandidates) pushIfNew(c);
       for (const c of apifyCandidates) pushIfNew(c);
       for (const c of bbCandidates) pushIfNew(c);
       for (const c of sbCandidates) pushIfNew(c);
@@ -3052,7 +3088,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
+      + `vrbo=${vrbo.length} (os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
