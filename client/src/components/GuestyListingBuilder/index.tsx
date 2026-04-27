@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useLocation } from "wouter";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey } from "@/data/pricing-data";
@@ -634,10 +635,16 @@ function ChannelMarkupCard({
 
 export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  // Cached guesty-property-map. We fetch it for the auto-select effect
+  // and re-use it on dropdown change to navigate to the listing's
+  // mapped property (rather than just changing the push target while
+  // the rest of the page stays on the previous property's data).
+  const [propertyMap, setPropertyMap] = useState<Array<{ propertyId: number; guestyListingId: string }>>([]);
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
   // Per-listing "Push Compliance" button state so multiple in-flight
@@ -1520,26 +1527,43 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => { cancelled = true; };
   }, []);
 
-  // ── Auto-select the Guesty listing mapped to this property ─────────────────
-  // Users landing on the pricing tab from a specific property expect the
-  // correct listing to be pre-selected — not a blank dropdown. Pulls the
-  // guestyPropertyMap and matches on propertyId the first time both
-  // `listings` and `propertyId` are populated.
+  // ── Load the guesty-property-map once ──────────────────────────────────────
+  // Used both to pre-select the dropdown when the user lands on a
+  // property AND to navigate when the user picks a different listing
+  // from the dropdown (each Guesty listing maps to at most one
+  // propertyId). One fetch per mount, cached in state.
   useEffect(() => {
-    if (selectedId || !propertyId || listings.length === 0) return;
     let cancelled = false;
     fetch("/api/guesty-property-map")
       .then((r) => r.json())
       .then((maps: Array<{ propertyId: number; guestyListingId: string }>) => {
-        if (cancelled) return;
-        const match = maps.find((m) => m.propertyId === propertyId);
-        if (match && listings.some((l: any) => l._id === match.guestyListingId)) {
-          setSelectedId(match.guestyListingId);
-        }
+        if (!cancelled && Array.isArray(maps)) setPropertyMap(maps);
       })
-      .catch(() => { /* non-fatal */ });
+      .catch(() => { /* non-fatal — auto-select and dropdown-navigate degrade gracefully */ });
     return () => { cancelled = true; };
-  }, [propertyId, listings, selectedId]);
+  }, []);
+
+  // ── Sync the Guesty listing dropdown to the current property ───────────────
+  // Two responsibilities:
+  //   1. Pre-select the dropdown to whichever Guesty listing is mapped
+  //      to the current propertyId — users landing on a property's
+  //      builder expect the correct push target to be ready.
+  //   2. Reset the dropdown to "" when navigating to a property that
+  //      has no mapping. Without this reset, switching from a draft
+  //      (e.g. Caribe Cove, propertyId -1, no Guesty listing yet) to
+  //      another property left the dropdown stuck on the previously-
+  //      selected listing — and the property-keyed tabs (pricing,
+  //      bedding, photos) showed the new property's data while the
+  //      "push target" stayed pointed at the old one.
+  useEffect(() => {
+    if (!propertyId || listings.length === 0 || propertyMap.length === 0) return;
+    const match = propertyMap.find((m) => m.propertyId === propertyId);
+    if (match && listings.some((l) => l._id === match.guestyListingId)) {
+      setSelectedId(match.guestyListingId);
+    } else {
+      setSelectedId("");
+    }
+  }, [propertyId, listings, propertyMap]);
 
   // ── Load channel status when selection changes ─────────────────────────────
   const refreshChannelStatus = useCallback(() => {
@@ -1975,7 +1999,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           <select
             className="glb-sel"
             value={selectedId}
-            onChange={(e) => { setSelectedId(e.target.value); setGuestyLiveAmenities(null); }}
+            onChange={(e) => {
+              const newId = e.target.value;
+              setGuestyLiveAmenities(null);
+              // If the picked listing maps to a property that isn't the
+              // one currently in the URL, navigate there — otherwise the
+              // dropdown only retargets the push button while the
+              // property-keyed tabs (pricing schedule, bedding, photos)
+              // keep showing the previous property's data, which is
+              // exactly the bug the operator hit when switching from
+              // Caribe Cove to a Hawaii listing. The auto-select effect
+              // above will set selectedId on the new page.
+              if (newId) {
+                const mapped = propertyMap.find((m) => m.guestyListingId === newId);
+                if (mapped && mapped.propertyId !== propertyId) {
+                  navigate(`/builder/${mapped.propertyId}`);
+                  return;
+                }
+              }
+              setSelectedId(newId);
+            }}
             data-testid="select-guesty-listing"
             disabled={conn !== "connected"}
           >
