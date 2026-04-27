@@ -2930,7 +2930,7 @@ export async function registerRoutes(
         if (resp.status() >= 200 && resp.status() < 400 && /json/i.test(ct)) {
           // GraphQL responses can be large; capture more so we can see
           // rate fields. JS bundles are skipped to keep payload small.
-          body = (await resp.text().catch(() => "")).slice(0, 100000);
+          body = (await resp.text().catch(() => "")).slice(0, 500000);
         }
         captured.push({ kind: "resp", status: resp.status(), url: u, ct, body });
       });
