@@ -51,18 +51,25 @@ export type ResearchedCommunity = {
 //      a substring match but tight enough to filter "Caribe Royale" out
 //      of a Caribe Cove search.
 //
-// Returns rates grouped by bedroom count: { 2: [125, 130, …], 3: [180, …] }.
-// Nightly rates outside $50-$3000 are dropped (junk / regional outliers).
+// Returns rates grouped by bedroom count + a `bboxApplied` flag so callers
+// can distinguish "geocoded path used (high confidence)" from "name-token
+// fallback used (lower confidence)". Nightly rates outside $50-$3000 are
+// dropped (junk / regional outliers).
 const BBOX_HALF_DEG = 0.005; // ~500 meters at FL/HI latitudes — fits a single resort
+
+export type AmortizedNightlyResult = {
+  ratesByBR: Record<number, number[]>;
+  bboxApplied: boolean;
+};
 
 export async function fetchAmortizedNightlyByBR(
   communityName: string,
   city: string,
   state: string,
   addressHint?: string,
-): Promise<Record<number, number[]>> {
+): Promise<AmortizedNightlyResult> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
-  if (!searchApiKey) return {};
+  if (!searchApiKey) return { ratesByBR: {}, bboxApplied: false };
 
   const now = new Date();
   now.setUTCHours(0, 0, 0, 0);
@@ -119,7 +126,7 @@ export async function fetchAmortizedNightlyByBR(
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
     );
-    if (!resp.ok) return ratesByBR;
+    if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox };
     const data = await resp.json() as any;
     const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
     for (const p of properties) {
@@ -151,7 +158,7 @@ export async function fetchAmortizedNightlyByBR(
   } catch {
     /* network / parse error — return whatever we accumulated */
   }
-  return ratesByBR;
+  return { ratesByBR, bboxApplied: !!bbox };
 }
 
 // Median of a numeric list, or null on empty input.
@@ -218,7 +225,7 @@ export async function researchCommunitiesForCity(
   // it with the priced-engine lookup is both more accurate AND more
   // reliable — same methodology as `/api/community/search-units`.
   async function spotCheckRate(communityName: string): Promise<{ low: number | null; high: number | null }> {
-    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state);
+    const { ratesByBR } = await fetchAmortizedNightlyByBR(communityName, city, state);
     const allRates: number[] = [];
     for (const list of Object.values(ratesByBR)) allRates.push(...list);
     if (allRates.length === 0) return { low: null, high: null };

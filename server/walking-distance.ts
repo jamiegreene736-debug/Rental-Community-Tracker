@@ -1,6 +1,13 @@
-// Nominatim-backed geocoding + Haversine distance for the walking-distance
-// feature. Nominatim is free, no key — usage policy is 1 req/sec so we
-// throttle and cache coords in memory forever (addresses don't move).
+// Geocoding (Nominatim primary, SearchAPI Google Maps fallback) +
+// Haversine distance for the walking-distance feature. Nominatim is
+// free, no key — usage policy is 1 req/sec so we throttle and cache
+// coords in memory forever (addresses don't move). When Nominatim
+// returns no result (private resort lanes, gated communities, freshly
+// built subdivisions are common gaps), we fall back to SearchAPI's
+// `google_maps` engine — which inherits Google's address coverage and
+// resolves things like "9000 Treasure Trove Lane, Kissimmee, FL"
+// (Caribe Cove Resort) that OSM doesn't have. Cache key is shared
+// across both providers; a positive hit from either is sticky.
 
 import {
   haversineFeet,
@@ -22,9 +29,7 @@ async function throttle(): Promise<void> {
   lastNominatimCall = Date.now();
 }
 
-export async function geocode(address: string): Promise<Coord | null> {
-  const key = address.trim().toLowerCase();
-  if (geocodeCache.has(key)) return geocodeCache.get(key) ?? null;
+async function geocodeViaNominatim(address: string): Promise<Coord | null> {
   try {
     await throttle();
     const r = await fetch(
@@ -38,23 +43,56 @@ export async function geocode(address: string): Promise<Coord | null> {
         signal: AbortSignal.timeout(10000),
       },
     );
-    if (!r.ok) {
-      geocodeCache.set(key, null);
-      return null;
-    }
+    if (!r.ok) return null;
     const rows = await r.json() as Array<{ lat: string; lon: string }>;
-    if (!rows.length) {
-      geocodeCache.set(key, null);
-      return null;
-    }
-    const coord: Coord = { lat: parseFloat(rows[0].lat), lng: parseFloat(rows[0].lon) };
-    geocodeCache.set(key, coord);
-    return coord;
+    if (!rows.length) return null;
+    return { lat: parseFloat(rows[0].lat), lng: parseFloat(rows[0].lon) };
   } catch (e: any) {
-    console.warn(`[geocode] ${address}: ${e?.message ?? e}`);
-    geocodeCache.set(key, null);
+    console.warn(`[geocode/nominatim] ${address}: ${e?.message ?? e}`);
     return null;
   }
+}
+
+async function geocodeViaSearchApi(address: string): Promise<Coord | null> {
+  const key = process.env.SEARCHAPI_API_KEY;
+  if (!key) return null;
+  try {
+    const sp = new URLSearchParams({
+      engine: "google_maps",
+      q: address,
+      api_key: key,
+    });
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const data = await r.json() as any;
+    // google_maps engine returns either a `place_results` object (single
+    // hit, e.g. an exact address match) or a `local_results` array (POI /
+    // business hits). Both carry `gps_coordinates: { latitude, longitude }`.
+    const candidates: Array<{ gps_coordinates?: { latitude?: number; longitude?: number } }> = [];
+    if (data?.place_results) candidates.push(data.place_results);
+    if (Array.isArray(data?.local_results)) candidates.push(...data.local_results);
+    for (const c of candidates) {
+      const lat = Number(c?.gps_coordinates?.latitude);
+      const lng = Number(c?.gps_coordinates?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+    }
+    return null;
+  } catch (e: any) {
+    console.warn(`[geocode/searchapi] ${address}: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
+export async function geocode(address: string): Promise<Coord | null> {
+  const key = address.trim().toLowerCase();
+  if (geocodeCache.has(key)) return geocodeCache.get(key) ?? null;
+  // Nominatim first (free), SearchAPI google_maps as fallback (paid but
+  // covers private resorts / gated communities OSM doesn't know).
+  const coord = (await geocodeViaNominatim(address)) ?? (await geocodeViaSearchApi(address));
+  geocodeCache.set(key, coord);
+  return coord;
 }
 
 export async function walkBetween(
