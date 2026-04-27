@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -18,7 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
-  ChevronDown, ChevronRight, Globe, ShoppingCart, Zap,
+  ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -165,6 +165,10 @@ export default function Bookings() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [picker, setPicker] = useState<
     | { reservation: GuestyReservation; slot: SlotInfo }
+    | null
+  >(null);
+  const [verifyTarget, setVerifyTarget] = useState<
+    | { buyIn: BuyIn; reservation: GuestyReservation }
     | null
   >(null);
 
@@ -362,73 +366,31 @@ export default function Bookings() {
             break;
           }
 
-          // No priced candidate verified. Try to extract real pricing from
-          // the unpriced PM URLs by running the headless-screenshot +
-          // Claude-vision verifier against the top few. First one that
-          // yields { isUnitPage: true, available !== false, totalPrice > 0,
-          // dateMatch !== false } wins, and we attach with the verified
-          // price. If all extractions fail, fall back to attaching the top
-          // unpriced URL at $0 (operator edits cost after contacting PM).
-          let visionVerified: { reason?: string; screenshotBase64?: string } | null = null;
-          if (!pick) {
-            // Cap at 2 candidates per slot. Slots run in parallel via
-            // Promise.all upstream, so total wall time is bounded by
-            // SLOT_VERIFY_BUDGET (~22s for 2 candidates × 11s each).
-            const unpricedPmCandidates = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).slice(0, 2);
-            for (const c of unpricedPmCandidates) {
-              try {
-                // Hard 18s timeout per verify call. Without this, a slow
-                // PM site (Suite Paradise's giant page took 70s+ before
-                // viewport-only screenshots) drags the whole auto-fill
-                // past whatever effective client tolerance exists and
-                // starves parallel slots.
-                const controller = new AbortController();
-                const t = setTimeout(() => controller.abort(), 18000);
-                const resp = await fetch("/api/operations/verify-pm-listing", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  credentials: "include",
-                  body: JSON.stringify({ url: c.url, checkIn: ci, checkOut: co }),
-                  signal: controller.signal,
-                }).finally(() => clearTimeout(t));
-                const v = resp.ok ? await resp.json() : null;
-                const ex = v?.extracted;
-                if (
-                  v?.ok &&
-                  ex?.isUnitPage === true &&
-                  ex?.available !== false &&
-                  ex?.dateMatch !== false &&
-                  typeof ex?.totalPrice === "number" &&
-                  ex.totalPrice > 0
-                ) {
-                  pick = c;
-                  verifiedPrice = ex.totalPrice;
-                  visionVerified = { reason: ex.reason, screenshotBase64: v.screenshotBase64 };
-                  break;
-                }
-                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
-              } catch (e: any) {
-                skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
-              }
-            }
-          }
-
-          // Final fallback: server's unpricedFallback at $0. Lets the slot
-          // at least point at a clickable PM URL when vision extraction
-          // also failed (anti-bot interstitials, no unit pages, etc.).
+          // No priced candidate worked → fall back to the server's top
+          // unpriced PM URL (PR #150). Auto-fill stays fast and the
+          // operator can run the per-slot 🔍 Verify rate button on
+          // demand to fetch a screenshot + extracted price.
+          //
+          // Earlier (PR #151-#153) auto-fill itself ran the headless
+          // verify-pm-listing call against unpriced candidates. That
+          // routinely took 70+s per slot on PM sites with readonly
+          // date pickers (Suite Paradise, Parrish Kauai), starved
+          // parallel slots, and rarely extracted a price anyway because
+          // generic input.fill() can't drive jQuery UI / react-datepicker
+          // popups. Decoupled now: auto-fill always finishes in ~5s,
+          // and the verify dialog runs per-slot when the operator wants
+          // to see the page.
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
           }
 
-          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
+          if (!pick) return { slot, picked: null, created: null, skippedReasons };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
           const propertyName =
             (selectedListingId && listingNameById.get(selectedListingId)) ||
             `Property ${selectedPropertyId}`;
-          const noteSuffix = visionVerified
-            ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
-            : "";
+          const noteSuffix = "";
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
             propertyName,
@@ -448,7 +410,7 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
-          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified: visionVerified !== null };
+          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons };
         }),
       );
       return { reservation, results };
@@ -482,18 +444,16 @@ export default function Bookings() {
       } else if (zeroCostFills.length === filled.length) {
         // All picks are unpriced PM URLs.
         toast({
-          title: `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — pricing pending`,
+          title: `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
           description:
-            `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Click the link in the slot to see the PM site's actual price, then edit the buy-in cost.`
+            `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Use the 🔍 Verify rate button on each slot to fetch a screenshot of the page and (when possible) extract the price.`
             + (skipped.length ? ` · No PM URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
-        const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
         toast({
           title: `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-            + (visionVerifiedCount > 0 ? ` · ${visionVerifiedCount} verified via screenshot analysis` : "")
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
             + (skipped.length ? ` · No PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
@@ -879,17 +839,36 @@ export default function Bookings() {
                                 <p className="text-xs text-muted-foreground italic">No buy-in attached for this unit</p>
                               )}
                             </div>
-                            <div className="shrink-0">
+                            <div className="shrink-0 flex items-center gap-1">
                               {slot.buyIn ? (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => slot.buyIn && detachMutation.mutate(slot.buyIn.id)}
-                                  disabled={detachMutation.isPending}
-                                  data-testid={`button-detach-${r._id}-${slot.unitId}`}
-                                >
-                                  <Unlink className="h-3.5 w-3.5 mr-1" /> Detach
-                                </Button>
+                                <>
+                                  {/* Verify rate — on-demand vision check
+                                      against the buy-in's PM URL. Only show
+                                      when there's a URL to verify; the
+                                      dialog handles the loading state and
+                                      manual cost edit. */}
+                                  {slot.buyIn.airbnbListingUrl && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => slot.buyIn && setVerifyTarget({ buyIn: slot.buyIn, reservation: r })}
+                                      data-testid={`button-verify-rate-${r._id}-${slot.unitId}`}
+                                      title="Take a screenshot of the PM page and try to extract the rate"
+                                    >
+                                      <Camera className="h-3.5 w-3.5 mr-1" />
+                                      {parseFloat(String(slot.buyIn.costPaid ?? 0)) === 0 ? "Verify rate" : "Re-verify"}
+                                    </Button>
+                                  )}
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => slot.buyIn && detachMutation.mutate(slot.buyIn.id)}
+                                    disabled={detachMutation.isPending}
+                                    data-testid={`button-detach-${r._id}-${slot.unitId}`}
+                                  >
+                                    <Unlink className="h-3.5 w-3.5 mr-1" /> Detach
+                                  </Button>
+                                </>
                               ) : (
                                 <Button
                                   size="sm"
@@ -943,6 +922,18 @@ export default function Bookings() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Per-slot Verify rate dialog — runs verify-pm-listing on demand
+          and shows the screenshot inline. Decoupled from auto-fill so a
+          slow PM site can't block the broader flow. */}
+      {verifyTarget && (
+        <VerifyRateDialog
+          buyIn={verifyTarget.buyIn}
+          reservationCheckIn={checkInOf(verifyTarget.reservation) ?? verifyTarget.buyIn.checkIn}
+          reservationCheckOut={checkOutOf(verifyTarget.reservation) ?? verifyTarget.buyIn.checkOut}
+          onClose={() => setVerifyTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1392,6 +1383,226 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
         </div>
       )}
     </div>
+  );
+}
+
+// Dialog: per-slot on-demand "verify rate" against the buy-in's PM URL.
+// Calls /api/operations/verify-pm-listing (Playwright + Claude vision),
+// shows the screenshot inline, and lets the operator either accept the
+// extracted price or type a manual cost. Decoupled from auto-fill so a
+// slow/hung verify never blocks the broader flow.
+function VerifyRateDialog({
+  buyIn,
+  reservationCheckIn,
+  reservationCheckOut,
+  onClose,
+}: {
+  buyIn: BuyIn;
+  reservationCheckIn: string;
+  reservationCheckOut: string;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  type Extracted = {
+    isUnitPage?: boolean;
+    available?: boolean | null;
+    totalPrice?: number | null;
+    nightlyPrice?: number | null;
+    dateMatch?: boolean | null;
+    reason?: string;
+  };
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "loaded"; screenshot: string | null; extracted: Extracted | null; reason?: string }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+  const [manualCost, setManualCost] = useState("");
+
+  const toDateOnly = (s: string): string =>
+    /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  const ci = toDateOnly(reservationCheckIn);
+  const co = toDateOnly(reservationCheckOut);
+
+  // Kick off the verify call once when the dialog mounts.
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
+    (async () => {
+      try {
+        const resp = await fetch("/api/operations/verify-pm-listing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            url: buyIn.airbnbListingUrl,
+            checkIn: ci,
+            checkOut: co,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (cancelled) return;
+        if (!resp.ok) {
+          setState({ kind: "error", message: `Server returned ${resp.status}` });
+          return;
+        }
+        const data = await resp.json();
+        if (cancelled) return;
+        setState({
+          kind: "loaded",
+          screenshot: data?.screenshotBase64 ?? null,
+          extracted: data?.extracted ?? null,
+          reason: data?.reason,
+        });
+        if (data?.extracted?.totalPrice && data.extracted.totalPrice > 0) {
+          setManualCost(String(data.extracted.totalPrice));
+        }
+      } catch (e: any) {
+        clearTimeout(timeoutId);
+        if (cancelled) return;
+        setState({
+          kind: "error",
+          message: e?.name === "AbortError" ? "Verify timed out (90s)" : (e?.message ?? "Network error"),
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+    // Only run once on mount — buyIn.id is stable for the dialog's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const updateCost = useMutation({
+    mutationFn: (cost: number) =>
+      apiRequest("PATCH", `/api/buy-ins/${buyIn.id}`, { costPaid: cost.toFixed(2) }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      toast({ title: "Cost updated" });
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Update failed", description: e.message, variant: "destructive" }),
+  });
+
+  const sourceHost = sourceLabelForUrl(buyIn.airbnbListingUrl);
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Verify rate — {sourceHost}</DialogTitle>
+          <DialogDescription>
+            Loading {sourceHost} for {fmtDate(ci)} → {fmtDate(co)}, taking a screenshot, and asking Claude to read the price off the page.
+          </DialogDescription>
+        </DialogHeader>
+
+        {state.kind === "loading" && (
+          <div className="flex flex-col items-center justify-center py-12 gap-3">
+            <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">
+              This usually takes 10-60s — PM sites with read-only date pickers are slow.
+            </p>
+          </div>
+        )}
+
+        {state.kind === "error" && (
+          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
+            <p className="font-medium text-destructive">Verify failed</p>
+            <p className="text-muted-foreground mt-1">{state.message}</p>
+            <p className="text-xs text-muted-foreground mt-2">
+              You can still click the link in the slot row to load the page yourself, then type the cost below.
+            </p>
+          </div>
+        )}
+
+        {state.kind === "loaded" && (
+          <div className="space-y-3">
+            {/* Extracted info badges */}
+            <div className="flex items-center gap-2 flex-wrap text-xs">
+              {state.extracted?.isUnitPage === true && (
+                <Badge className="bg-green-100 text-green-800">Unit page</Badge>
+              )}
+              {state.extracted?.isUnitPage === false && (
+                <Badge variant="outline">Not a unit page</Badge>
+              )}
+              {state.extracted?.dateMatch === true && (
+                <Badge className="bg-green-100 text-green-800">Dates loaded</Badge>
+              )}
+              {state.extracted?.dateMatch === false && (
+                <Badge variant="outline">Dates not entered</Badge>
+              )}
+              {state.extracted?.available === true && (
+                <Badge className="bg-green-100 text-green-800">Available</Badge>
+              )}
+              {state.extracted?.available === false && (
+                <Badge variant="destructive">Unavailable</Badge>
+              )}
+              {typeof state.extracted?.totalPrice === "number" && state.extracted.totalPrice > 0 && (
+                <Badge className="bg-blue-100 text-blue-800">
+                  ${state.extracted.totalPrice.toLocaleString()} total
+                  {state.extracted.nightlyPrice ? ` · $${state.extracted.nightlyPrice}/nt` : ""}
+                </Badge>
+              )}
+            </div>
+            {state.extracted?.reason && (
+              <p className="text-xs text-muted-foreground italic">{state.extracted.reason}</p>
+            )}
+
+            {/* Screenshot */}
+            {state.screenshot && (
+              <div className="border rounded-md overflow-hidden">
+                <img
+                  src={state.screenshot}
+                  alt="PM site screenshot"
+                  className="w-full block"
+                />
+              </div>
+            )}
+
+            {/* Cost input */}
+            <div className="space-y-1.5">
+              <Label htmlFor="verify-cost" className="text-xs">
+                Buy-in cost (USD)
+              </Label>
+              <Input
+                id="verify-cost"
+                type="number"
+                inputMode="decimal"
+                value={manualCost}
+                onChange={(e) => setManualCost(e.target.value)}
+                placeholder="e.g. 4500"
+                min="0"
+                step="0.01"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Pre-filled from the extracted total when available. If the screenshot shows a price the bot missed, type it here.
+              </p>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="flex-row justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button
+            onClick={() => {
+              const n = parseFloat(manualCost);
+              if (!isFinite(n) || n < 0) {
+                toast({ title: "Enter a valid cost", variant: "destructive" });
+                return;
+              }
+              updateCost.mutate(n);
+            }}
+            disabled={updateCost.isPending || state.kind === "loading"}
+          >
+            {updateCost.isPending ? "Saving..." : "Save cost"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
