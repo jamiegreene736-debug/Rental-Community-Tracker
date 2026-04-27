@@ -95,6 +95,14 @@ export async function scrapeVrboRate(opts: {
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   let calendarBody = "";
   const graphqlOps: string[] = []; // for diagnostics
+  // Capture EVERY graphql response body. The calendar query gives base
+  // nightly rates; another op (named `PropertyQuoteQuery` /
+  // `TripQuoteQuery` / `PropertyDealsQuery` depending on the rev — Vrbo
+  // doesn't publish op names) returns the all-in total when the URL
+  // carries arrival/departure. We don't know the exact op name across
+  // Vrbo deploys, so we keep all bodies and pattern-match for a quote
+  // total below. Capped at 50 to bound memory.
+  const graphqlBodies: Array<{ op: string; body: string }> = [];
 
   try {
     browser = await chromium.connectOverCDP(session.connectUrl);
@@ -110,11 +118,10 @@ export async function scrapeVrboRate(opts: {
       const body = await resp.text().catch(() => "");
       // Record operation names that fired so we can debug if the rate
       // query doesn't show up.
-      const ops = body.match(/"data":\{"(\w+)"/g) || [];
-      ops.forEach((m) => {
-        const name = m.match(/"data":\{"(\w+)"/)?.[1];
-        if (name) graphqlOps.push(name);
-      });
+      const opMatch = body.match(/"data":\{"(\w+)"/);
+      const op = opMatch?.[1] ?? "unknown";
+      graphqlOps.push(op);
+      if (graphqlBodies.length < 50) graphqlBodies.push({ op, body });
       if (body.includes("propertyRatesDateSelector")) {
         calendarBody = body;
       }
@@ -232,46 +239,86 @@ export async function scrapeVrboRate(opts: {
       );
     }
 
-    // Now try to read the ALL-IN total from the booking widget DOM.
-    // The calendar's displayPrice is a base nightly rate — for buy-in
-    // accounting we want what the operator would actually pay (base +
-    // cleaning + service + taxes). Vrbo's booking widget renders this
-    // as a "$X total" string near "includes taxes & fees" once the page
-    // settles with arrival/departure params present.
+    // Now try to read the ALL-IN total. The calendar's displayPrice is
+    // base nightly rate — for buy-in accounting we want what the operator
+    // would actually pay (base + cleaning + service + taxes). Two layers:
     //
-    // We give it a short window (~10s) to render after navigation, then
-    // pull the largest "$X" amount that appears next to "total" or
-    // "includes taxes" in the visible page text. The regex looks for:
-    //   "$31,568 total", "$31,568 includes taxes", "Total: $31,568"
+    //   1. JSON: scan every captured Vrbo GraphQL body for a numeric
+    //      "total" field that's > base sum AND <= ~5× base sum. The op
+    //      that returns the quote varies across Vrbo revs, but the field
+    //      shapes are stable: {"totalPrice":{"value":NNNN}},
+    //      {"total":{"amount":NNNN}}, {"grandTotal":NNNN}, etc.
+    //   2. DOM: scan visible page text for "$X" amounts near a "total" /
+    //      "includes tax" / "includes fees" marker (within 100 chars on
+    //      either side). Same plausibility filter (must exceed base).
     //
-    // If the DOM scrape fails, we fall back to the calendar base sum
-    // — preferable to a hard error, but the operator should know the
-    // attached buy-in is base-only (note suffix in caller).
-    let allInTotal = 0;
-    let allInSource: "widget" | "calendar-base" = "calendar-base";
+    // We try both, take the smallest plausible value (fees-included
+    // total should be just barely > base, not crazy 10× — guards against
+    // a rogue page-summary number sneaking in). Bail to calendar base if
+    // neither layer finds anything.
+    //
+    // Timeout for DOM render: 4s. With the new US proxy + dates in URL,
+    // the widget renders quickly when it's going to render at all; a
+    // longer wait just adds latency in the failure case.
+    const candidates: number[] = [];
+
+    // ── Layer 1: GraphQL bodies ──
+    for (const { op, body } of graphqlBodies) {
+      if (op === "propertyRatesDateSelector") continue; // base rates, not total
+      // Match common quote/total field shapes. Order matters — more
+      // specific patterns first.
+      const patterns = [
+        /"total(?:Price|Amount)?":\s*\{\s*"(?:value|amount)":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+        /"grandTotal":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+        /"total":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+      ];
+      for (const re of patterns) {
+        for (const m of body.matchAll(re)) {
+          const n = parseFloat(m[1].replace(/,/g, ""));
+          if (Number.isFinite(n) && n > baseTotal && n < baseTotal * 5) {
+            candidates.push(n);
+          }
+        }
+      }
+    }
+
+    // ── Layer 2: DOM text near "total"/"tax"/"fees" markers ──
+    let domCandidates: number[] = [];
     try {
-      // Wait for ANY total-looking text to appear; the booking widget
-      // can take a beat after domcontentloaded to fully render.
       await page.waitForFunction(
-        () => /\$\s*[\d,]+\s*(?:total|includes\s*tax|includes\s*fees)/i.test(document.body.innerText),
-        { timeout: 10_000 },
+        () => /\$\s*[\d,]+/i.test(document.body.innerText) &&
+              /total|includes\s*tax|includes\s*fees/i.test(document.body.innerText),
+        { timeout: 4_000 },
       ).catch(() => {});
       const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
-      const matches = Array.from(
-        bodyText.matchAll(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|includes\s*tax|includes\s*fees)/gi),
-      );
-      const widgetTotals = matches
-        .map((m) => parseFloat(m[1].replace(/,/g, "")))
-        .filter((n) => Number.isFinite(n) && n > 0);
-      if (widgetTotals.length > 0) {
-        // The widget renders multiple "$X total" strings (per-property
-        // summary, mobile-collapsed view, etc.) — they should all be
-        // the same number; take the max as a paranoia hedge against
-        // a stale per-night value sneaking in.
-        allInTotal = Math.max(...widgetTotals);
-        allInSource = "widget";
+      // Find each "total" / "includes tax" / "includes fees" marker, then
+      // look for $X amounts within 100 chars on either side. This catches
+      // layouts where the price and label are in adjacent DOM elements
+      // (rendered as "$22,729\ntotal\nincludes taxes" by innerText) —
+      // adjacency-required regexes miss those.
+      const markerRegex = /\b(?:total|includes\s+tax(?:es)?|includes\s+fees|total\s+price)\b/gi;
+      for (const marker of bodyText.matchAll(markerRegex)) {
+        const idx = marker.index ?? 0;
+        const window = bodyText.slice(Math.max(0, idx - 100), Math.min(bodyText.length, idx + 100));
+        for (const m of window.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g)) {
+          const n = parseFloat(m[1].replace(/,/g, ""));
+          if (Number.isFinite(n) && n > baseTotal && n < baseTotal * 5) {
+            domCandidates.push(n);
+          }
+        }
       }
-    } catch { /* fall through to base */ }
+    } catch { /* fall through */ }
+    candidates.push(...domCandidates);
+
+    // Take the SMALLEST plausible candidate. If both layers found
+    // numbers, they should be the same; smallest = safety against a
+    // marketing-banner number being scooped up.
+    let allInTotal = 0;
+    let allInSource: "widget" | "calendar-base" = "calendar-base";
+    if (candidates.length > 0) {
+      allInTotal = Math.min(...candidates);
+      allInSource = "widget";
+    }
 
     const total = allInTotal > 0 ? allInTotal : baseTotal;
     const totalRounded = Math.round(total);
@@ -295,7 +342,9 @@ export async function scrapeVrboRate(opts: {
       iterations: 0,
       agentTrace: [
         `vrbo-scraper: base sum=$${baseTotal} from ${stayDays.length} nights`,
-        `vrbo-scraper: widget total=${allInTotal > 0 ? `$${allInTotal}` : "not found"} (using ${allInSource})`,
+        `vrbo-scraper: ${graphqlBodies.length} graphql bodies captured (ops: ${graphqlOps.slice(0, 8).join(", ")})`,
+        `vrbo-scraper: candidate totals=[${candidates.slice(0, 8).join(", ")}] (graphql+DOM, ${domCandidates.length} from DOM)`,
+        `vrbo-scraper: chosen total=${allInTotal > 0 ? `$${allInTotal}` : "calendar-base"} (using ${allInSource})`,
       ],
     };
   } finally {
