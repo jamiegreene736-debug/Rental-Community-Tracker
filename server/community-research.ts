@@ -85,6 +85,10 @@ export type AmortizedNightlyResult = {
     badBedrooms: number;
     nightlyOutOfRange: number;
   };
+  // First-listing diagnostic — surfaced when no rates were captured so
+  // the operator can see why filters dropped everything (e.g. bedrooms
+  // arriving as a string instead of a number).
+  firstListingSample?: unknown;
 };
 
 export async function fetchAmortizedNightlyByBR(
@@ -195,7 +199,46 @@ export async function fetchAmortizedNightlyByBR(
   } catch {
     /* network / parse error — return whatever we accumulated */
   }
-  return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops };
+  // Surface a sample of the first engine result when we collected no
+  // rates — lets the refresh-pricing endpoint diagnose schema drift
+  // (e.g. bedrooms arriving as "2 bedrooms" string instead of `2`).
+  // We can't add this without re-fetching since the loop above doesn't
+  // hold onto the first property; in practice this matters once per
+  // schema-drift incident, so just refetch when we'd otherwise return
+  // empty.
+  let firstListingSample: unknown;
+  const totalCollected = Object.values(ratesByBR).reduce((s, l) => s + l.length, 0);
+  if (totalCollected === 0 && drops.engineCount > 0) {
+    try {
+      const sp: Record<string, string> = {
+        engine: "airbnb",
+        q: `${communityName} ${city} ${state}`,
+        check_in_date: ymd(checkInDate),
+        check_out_date: ymd(checkOutDate),
+        adults: "2",
+        type_of_place: "entire_home",
+        currency: "USD",
+        api_key: searchApiKey,
+      };
+      if (bbox) {
+        sp.sw_lat = String(bbox.sw_lat);
+        sp.sw_lng = String(bbox.sw_lng);
+        sp.ne_lat = String(bbox.ne_lat);
+        sp.ne_lng = String(bbox.ne_lng);
+      }
+      const resp2 = await fetch(
+        `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
+      );
+      if (resp2.ok) {
+        const data2 = await resp2.json() as any;
+        const props2 = Array.isArray(data2?.properties) ? data2.properties : [];
+        if (props2.length > 0) firstListingSample = props2[0];
+      }
+    } catch {
+      /* non-fatal — diagnostic only */
+    }
+  }
+  return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops, firstListingSample };
 }
 
 // Median of a numeric list, or null on empty input.
