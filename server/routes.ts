@@ -2884,9 +2884,63 @@ export async function registerRoutes(
       // SPAs commonly fetch rates after first paint — give them time.
       await page.waitForTimeout(3000);
 
+      // Most PM sites gate rates behind a "Check Availability" button —
+      // URL params alone don't trigger the rate fetch. Try to fill date
+      // inputs and click a likely search button so the rates render
+      // before we screenshot. All silent — generic selectors that work on
+      // many sites but not all; failure just means we screenshot the
+      // pre-search view (Claude can still note "no prices visible").
+      try {
+        const dateInSelectors = [
+          'input[name*="check_in" i]',
+          'input[name*="checkin" i]',
+          'input[name*="arrival" i]',
+          'input[id*="check_in" i]',
+          'input[id*="checkin" i]',
+          'input[id*="arrival" i]',
+          'input[placeholder*="check-in" i]',
+          'input[placeholder*="check in" i]',
+          'input[placeholder*="arrival" i]',
+        ];
+        const dateOutSelectors = [
+          'input[name*="check_out" i]',
+          'input[name*="checkout" i]',
+          'input[name*="departure" i]',
+          'input[id*="check_out" i]',
+          'input[id*="checkout" i]',
+          'input[id*="departure" i]',
+          'input[placeholder*="check-out" i]',
+          'input[placeholder*="check out" i]',
+          'input[placeholder*="departure" i]',
+        ];
+        for (const sel of dateInSelectors) {
+          const el = page.locator(sel).first();
+          if ((await el.count().catch(() => 0)) > 0) {
+            await el.fill(checkIn).catch(() => {});
+            break;
+          }
+        }
+        for (const sel of dateOutSelectors) {
+          const el = page.locator(sel).first();
+          if ((await el.count().catch(() => 0)) > 0) {
+            await el.fill(checkOut).catch(() => {});
+            break;
+          }
+        }
+        const searchBtn = page.getByRole("button", {
+          name: /^(search|check\s*availab|view\s*rates|see\s*rates|book\s*now|get\s*rates|find\s*available)/i,
+        }).first();
+        if ((await searchBtn.count().catch(() => 0)) > 0) {
+          await searchBtn.click({ timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(5000);
+        }
+      } catch { /* silent — pre-search screenshot is still useful */ }
+
       const finalUrl = page.url();
       const title = await page.title().catch(() => "");
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 75, fullPage: false });
+      // fullPage so any rates rendered below the fold are visible to
+      // vision. quality:70 keeps the base64 reasonable for the API.
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 70, fullPage: true });
       const screenshotBase64 = screenshot.toString("base64");
 
       const prompt = [

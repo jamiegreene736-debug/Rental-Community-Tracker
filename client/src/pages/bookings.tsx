@@ -90,6 +90,26 @@ function fmtDate(s: string | undefined | null): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// Best-effort source label from a URL. The buy-in's listing URL field
+// is named airbnbListingUrl for legacy reasons but actually holds any
+// channel's URL (Airbnb / Booking.com / PM company site). Show the user
+// where the link actually points so a Suite Paradise URL doesn't say
+// "view on Airbnb".
+function sourceLabelForUrl(url: string | null | undefined): string {
+  if (!url) return "site";
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (/airbnb\.com$/.test(host)) return "Airbnb";
+    if (/booking\.com$/.test(host)) return "Booking.com";
+    if (/vrbo\.com$/.test(host)) return "Vrbo";
+    if (/expedia\.com$/.test(host)) return "Expedia";
+    if (/tripadvisor\.com$/.test(host)) return "Tripadvisor";
+    return host;
+  } catch {
+    return "site";
+  }
+}
+
 function nightsBetween(a: string | undefined | null, b: string | undefined | null): number {
   if (!a || !b) return 1;
   const da = new Date(a);
@@ -838,7 +858,7 @@ export default function Bookings() {
                                           onClick={(e) => e.stopPropagation()}
                                           className="ml-2 text-primary hover:underline inline-flex items-center gap-0.5"
                                         >
-                                          view on Airbnb <ExternalLink className="h-2.5 w-2.5" />
+                                          view on {sourceLabelForUrl(slot.buyIn.airbnbListingUrl)} <ExternalLink className="h-2.5 w-2.5" />
                                         </a>
                                       )}
                                     </p>
