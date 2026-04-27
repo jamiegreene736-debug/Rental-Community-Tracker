@@ -250,6 +250,55 @@ established it so you can read the rationale in the commit message.
     (`GE-` / `TA-`) skip phone-number filters. See PR that added
     this entry for the full diagnosis flow.
 
+28. **VRBO compliance submission drives Guesty's UI; the form-fill is
+    heuristic, not selector-based; the republish step is automated as
+    part of the same session.** Sister to the Airbnb compliance flow but
+    with a different mechanic. Airbnb publishes a regulations form at
+    `airbnb.com/regulations/{id}/.../existing-registration` that we
+    drive directly with Playwright; VRBO has no equivalent public form,
+    so `/api/admin/guesty/submit-vrbo-compliance` opens
+    `app.guesty.com/properties/{id}/owners-and-license`, edits the
+    "Vrbo license requirements" panel (TMK / TAT / GET), saves, then
+    navigates to `/properties/{id}/distribution` and clicks Publish on
+    the VRBO row. The republish step is the VRBO equivalent of the
+    manual reminder Airbnb's flow leaves to the operator — we automate
+    it because we're already in the same Playwright session, so it
+    costs nothing extra.
+
+    The endpoint uses `openGuestyAdminPage` from
+    `server/guesty-playwright.ts` (Load-Bearing #25 — vanilla
+    rebrowser-playwright, **never** Browserbase, for Guesty admin) and
+    runs synchronously inline (#26). Inspect-first/click-second (#27):
+    `inspect-vrbo-compliance` already dumps the Edit modal's form
+    structure, so the submit-side form-fill targets a confirmed shape.
+
+    The form-fill is **heuristic, not selector-based**. The "Vrbo
+    license requirements" inputs don't have stable IDs and change between
+    Guesty UI revisions, so the endpoint matches by
+    `aria-label`/`name`/`placeholder`/parent-label-text against three
+    patterns:
+    - parcel/TMK/tax-map → fills TMK
+    - tax-id/excise/GET  → fills GET
+    - license/permit/registration/TAT → fills TAT
+
+    Match priority is parcel-first (most specific) so "license" doesn't
+    accidentally claim a parcel field whose container also mentions
+    licensing. If no fields match, the endpoint returns the diagnostic
+    payload + screenshot and points the operator at the inspect endpoint
+    to refresh the form-shape discovery. **Don't promote this to hard-
+    coded selectors** — every Guesty UI rev would break it; the
+    heuristic survives small DOM changes.
+
+    The republish step uses the same heuristic style: walk up from the
+    VRBO/Homeaway text node looking for a row container, then click the
+    nearest publish-like button (`/publish|re-?publish|push|sync now/i`).
+    Falls back to a page-wide search if the row scope finds nothing. If
+    no button matches, the response carries `republishResult.clicked:
+    false` and the UI tells the operator to do it by hand. **Do NOT
+    remove the heuristic fallback** — a partial automation that says it
+    didn't republish is much better than one that silently skips the
+    step and leaves Guesty out of sync with VRBO.
+
 ### Dashboard data shape
 
 21. **`home.tsx` properties carry both `community` (display) and

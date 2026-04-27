@@ -644,6 +644,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // compliance submits don't step on each other if the user switches
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
+  // Same idea, separate state for VRBO so the user can submit Airbnb and
+  // VRBO compliance back-to-back without one button's busy spinner
+  // blocking the other. Server-side, the VRBO push hits Guesty's UI via
+  // the rebrowser-playwright session helper at
+  // /api/admin/guesty/submit-vrbo-compliance — see AGENTS.md #28.
+  const [vrboComplianceStateByListing, setVrboComplianceStateByListing] = useState<Record<string, "idle" | "busy" | "done">>({});
   const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -2300,6 +2306,125 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <div style={{ fontWeight: 600, marginBottom: 2 }}>After this succeeds — one more manual step</div>
                                 Open <a href="https://app.guesty.com/" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: "#92400e", textDecoration: "underline" }}>app.guesty.com</a> → this listing → Distribution → Airbnb row → click <strong>PUBLISH TO CHANNEL</strong>. Guesty won't re-sync on its own; this badge stays stuck until you do.
                               </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* VRBO-only compliance sub-block. Sister to the Airbnb
+                        one above, but the underlying mechanic differs:
+                        Airbnb publishes a regulations form we drive
+                        directly with Playwright; VRBO has no equivalent,
+                        so /api/admin/guesty/submit-vrbo-compliance drives
+                        Guesty's UI (Owners & License → Vrbo license
+                        requirements → Edit → fill TMK/TAT/GET → Save),
+                        then navigates to Distribution and triggers the
+                        Publish-to-channel click on the VRBO row so Guesty
+                        re-syncs to VRBO. Step 4 is the equivalent of
+                        Airbnb's manual republish reminder being automated
+                        for VRBO. See AGENTS.md #28. */}
+                    {ch === "vrbo" && isLive && (() => {
+                      // VRBO compliance state isn't read back from Guesty
+                      // (channels.homeaway.licenseNumber lives on the
+                      // listing payload but getChannelStatus doesn't
+                      // surface it). Track per-session "submitted" state
+                      // locally so the user sees a green check after a
+                      // successful click without needing a page reload.
+                      const localState = vrboComplianceStateByListing[selectedId] ?? "idle";
+                      const isVrboBusy = localState === "busy";
+                      const isVrboDone = localState === "done";
+                      const handlePushVrboCompliance = async () => {
+                        if (!selectedId || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense) {
+                          toast({ title: "Missing data", description: "Need both TMK and TAT to submit VRBO compliance.", variant: "destructive" });
+                          return;
+                        }
+                        setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "busy" }));
+                        try {
+                          const r = await fetch("/api/admin/guesty/submit-vrbo-compliance", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              // Server-side endpoint takes the GUESTY listing
+                              // ID (24-char hex) — unlike Airbnb which takes
+                              // the Airbnb numeric ID — because the
+                              // automation drives Guesty's own URL space.
+                              listingId: selectedId,
+                              taxMapKey: effectivePropertyData.taxMapKey,
+                              tatLicense: effectivePropertyData.tatLicense,
+                              getLicense: effectivePropertyData.getLicense,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          // Surface the most-relevant screenshot URL so the
+                          // operator can verify out-of-band — VRBO has no
+                          // Guesty API round-trip that confirms the channel
+                          // got the update.
+                          const shotPath: string | null =
+                            (typeof data.distributionShotUrl === "string" && data.distributionShotUrl) ||
+                            (typeof data.postSaveShotUrl === "string" && data.postSaveShotUrl) ||
+                            null;
+                          const shotSuffix = shotPath ? ` · Final screenshot: ${window.location.origin}${shotPath}` : "";
+                          const republished = !!data.republishResult?.clicked;
+                          const fieldsFilled: number = data.fillResult?.filled?.length ?? 0;
+                          toast({
+                            title: republished
+                              ? "VRBO compliance submitted + republished"
+                              : "VRBO compliance saved (republish not confirmed)",
+                            description: republished
+                              ? `Filled ${fieldsFilled} field(s) in Guesty's VRBO license form, clicked Save, then triggered a republish to VRBO from Distribution.${shotSuffix}`
+                              : `Filled ${fieldsFilled} field(s) and saved, but the Distribution republish button wasn't found. Open app.guesty.com → this listing → Distribution → VRBO row → click PUBLISH TO CHANNEL manually.${shotSuffix}`,
+                            variant: "default",
+                            duration: 20000,
+                          });
+                          setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "done" }));
+                          refreshChannelStatus?.();
+                        } catch (e: any) {
+                          toast({ title: "VRBO compliance failed", description: e.message, variant: "destructive" });
+                          setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "idle" }));
+                        }
+                      };
+                      return (
+                        <div className="glb-ch-compliance" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed rgba(0,0,0,0.1)", fontSize: 12 }}>
+                          {isVrboDone ? (
+                            <div style={{ color: "#16a34a", display: "flex", alignItems: "center", gap: 6 }}>
+                              <span>✓</span>
+                              <div>
+                                <div style={{ fontWeight: 600 }}>VRBO compliance submitted this session</div>
+                                <div style={{ fontSize: 11, color: "#6b7280" }}>
+                                  Form saved in Guesty + republished to VRBO. Refresh to re-submit if needed.
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <div style={{ color: "#1d4ed8", fontWeight: 600, marginBottom: 6 }}>
+                                ⓘ VRBO compliance
+                              </div>
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                Pushes TMK / TAT / GET into Guesty's "Vrbo license requirements" form, then republishes to VRBO from Distribution — both steps automated.
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  // VRBO card opens the public listing on
+                                  // click when live; stopPropagation so the
+                                  // button click doesn't trigger that.
+                                  e.stopPropagation();
+                                  handlePushVrboCompliance();
+                                }}
+                                disabled={isVrboBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
+                                style={{
+                                  fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                                  border: "1px solid #1d4ed8", background: isVrboBusy ? "#dbeafe" : "#eff6ff",
+                                  color: "#1e3a8a", cursor: isVrboBusy ? "wait" : "pointer", fontWeight: 500,
+                                }}
+                                data-testid="btn-push-vrbo-compliance"
+                                title={!effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense ? "TMK and TAT must both be set on the property record." : undefined}
+                              >
+                                {isVrboBusy ? "⏳ Submitting via Guesty…" : "↗ Push Compliance to VRBO via Guesty"}
+                              </button>
                             </div>
                           )}
                         </div>

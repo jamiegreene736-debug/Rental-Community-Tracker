@@ -6905,6 +6905,337 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // POST /api/admin/guesty/submit-vrbo-compliance
+  //
+  // Sister endpoint to /api/admin/airbnb/submit-compliance, but for the
+  // VRBO side. Airbnb has a public regulations form we drive directly;
+  // VRBO has no equivalent, so we drive Guesty's UI:
+  //   1. open /properties/{id}/owners-and-license,
+  //   2. click Edit on the "Vrbo license requirements" panel,
+  //   3. heuristically fill TMK / TAT / GET in the modal,
+  //   4. click Save,
+  //   5. navigate to Distribution and trigger Publish on the VRBO row
+  //      so Guesty re-syncs the new license fields back to VRBO.
+  //
+  // This is the click-second half of the inspect/submit pair laid out in
+  // AGENTS.md Load-Bearing #27 (inspect-vrbo-compliance dumped the form
+  // shape; this endpoint clicks). It uses openGuestyAdminPage from
+  // server/guesty-playwright.ts — same shared session helper as
+  // inspect-distribution and inspect-vrbo-compliance — so cookie
+  // restoration, Okta storage injection, stealth init, and the
+  // email/password + IMAP-MFA login flow live in one place. **Not
+  // Browserbase** (Load-Bearing #25): Guesty admin is authenticated paid-
+  // customer admin, not CAPTCHA-gated public traffic, so vanilla
+  // rebrowser-playwright + the local /usr/bin/chromium handles it for $0.
+  //
+  // Body: { listingId, taxMapKey?, tatLicense?, getLicense?, dryRun?, skipRepublish? }
+  //   listingId       — 24-char hex Guesty listing ID
+  //   taxMapKey       — TMK (Tax Map Key) — bare 12-digit Hawaii parcel ID
+  //   tatLicense      — Transient Accommodations Tax license (TA-…)
+  //   getLicense      — General Excise Tax license (GE-…) — optional
+  //   dryRun          — fill the form but do NOT click Save
+  //   skipRepublish   — save the form but skip the Distribution republish
+  //                     step (useful for debugging the form-fill in
+  //                     isolation; the operator can re-publish manually)
+  //
+  // Env: see server/guesty-playwright.ts header for the full list.
+  // ============================================================
+  app.post("/api/admin/guesty/submit-vrbo-compliance", async (req: Request, res: Response) => {
+    const { listingId, taxMapKey, tatLicense, getLicense, dryRun, skipRepublish } =
+      (req.body ?? {}) as {
+        listingId?: string;
+        taxMapKey?: string;
+        tatLicense?: string;
+        getLicense?: string;
+        dryRun?: boolean;
+        skipRepublish?: boolean;
+      };
+    if (!listingId || !/^[a-f0-9]{24}$/i.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (24-char hex Guesty listing ID)" });
+    }
+    if (!taxMapKey && !tatLicense && !getLicense) {
+      return res.status(400).json({ error: "At least one of taxMapKey / tatLicense / getLicense required" });
+    }
+
+    const { openGuestyAdminPage } = await import("./guesty-playwright");
+    const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
+
+    const session = await openGuestyAdminPage(targetUrl, {
+      listingId,
+      debugPrefix: "vrbo-compliance",
+      fetchMfaCode: fetchGuestyMfaCodeFromGmail,
+    });
+    if (!session.ok) {
+      return res.json({
+        ok: false,
+        error: session.error,
+        trace: session.trace,
+        finalUrl: session.finalUrl,
+        beforeShotUrl: session.beforeShotUrl,
+      });
+    }
+
+    const { browser, page, trace, saveShot } = session;
+    try {
+      // Scroll to bottom + back to top so any virtualized/lazy panels
+      // mount before we look for the VRBO heading.
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(500);
+
+      const beforeShot = await saveShot(page, "before");
+
+      // ── Click Edit on the Vrbo license requirements panel ─────────────
+      // Same DOM walk as inspect-vrbo-compliance: find the heading text,
+      // then scope upward looking for the nearest "Edit" button.
+      const editClickResult = await page.evaluate(() => {
+        const all = Array.from(document.querySelectorAll("*"));
+        const vrboEl = all.find((el) => {
+          const t = (el.textContent || "").trim().toLowerCase();
+          return t.includes("vrbo license requirements") && t.length < 60;
+        });
+        if (!vrboEl) return { found: false, reason: "no 'Vrbo license requirements' text element" };
+        let container: Element | null = vrboEl;
+        for (let depth = 0; depth < 8 && container; depth++) {
+          const editBtn = Array.from(container.querySelectorAll("button"))
+            .find((b) => /^\s*edit\s*$/i.test(b.textContent || ""));
+          if (editBtn) {
+            (editBtn as HTMLElement).scrollIntoView({ block: "center" });
+            (editBtn as HTMLElement).click();
+            return { found: true, depth };
+          }
+          container = container.parentElement;
+        }
+        return { found: false, reason: "no Edit button within 8 ancestors" };
+      });
+      trace.push({ step: "clicked-edit", detail: JSON.stringify(editClickResult) });
+      if (!editClickResult.found) {
+        const shot = await saveShot(page, "no-edit-button");
+        return res.json({
+          ok: false,
+          error: `Couldn't find VRBO Edit button: ${editClickResult.reason}. The Owners & License page may not have a VRBO section for this listing — verify VRBO OAuth is connected in Guesty.`,
+          finalUrl: page.url(), beforeShotUrl: beforeShot, afterEditShotUrl: shot, trace,
+        });
+      }
+      await page.waitForTimeout(2500);
+      const afterEditShot = await saveShot(page, "after-edit");
+
+      // ── Heuristic field fill ──────────────────────────────────────────
+      // The "Vrbo license requirements" form's input names/IDs aren't
+      // documented and change between Guesty UI revisions. Match by
+      // aria-label / name / placeholder / parent-label-text against three
+      // patterns. Match priority is parcel-first (most specific) so
+      // "license" doesn't accidentally claim a parcel field whose
+      // container also mentions licensing. See AGENTS.md #28.
+      const fillResult = await page.evaluate((vals: { tat: string | null; get: string | null; tmk: string | null }) => {
+        const inputs = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"))
+          .filter((el) => {
+            const t = (el as HTMLInputElement).type || "";
+            return !["checkbox", "radio", "submit", "button", "file", "hidden"].includes(t);
+          });
+        const filled: Array<{ context: string; value: string; via: string }> = [];
+        const skipped: Array<{ context: string; reason: string }> = [];
+
+        const contextOf = (el: Element): string => {
+          const aria = el.getAttribute("aria-label") || "";
+          const name = el.getAttribute("name") || "";
+          const placeholder = el.getAttribute("placeholder") || "";
+          const labelEl = el.closest("label,[class*='field'],[class*='form']") || el.parentElement;
+          const labelText = labelEl ? (labelEl.textContent || "").trim().slice(0, 200) : "";
+          return [aria, name, placeholder, labelText].join(" | ").toLowerCase();
+        };
+
+        const FIELD_RULES: Array<{ key: "tmk" | "get" | "tat"; pattern: RegExp; label: string }> = [
+          { key: "tmk", pattern: /parcel|tmk|tax\s*map/i, label: "Parcel/TMK" },
+          { key: "get", pattern: /tax\s*id|excise|\bget\b/i, label: "Tax ID/GET" },
+          { key: "tat", pattern: /license|permit|registration|\btat\b/i, label: "License/TAT" },
+        ];
+
+        const valueFor = (key: "tmk" | "get" | "tat"): string | null =>
+          key === "tmk" ? vals.tmk : key === "get" ? vals.get : vals.tat;
+
+        const usedKeys = new Set<string>();
+        for (const el of inputs) {
+          const ctx = contextOf(el);
+          let matched = false;
+          for (const rule of FIELD_RULES) {
+            if (usedKeys.has(rule.key)) continue;
+            if (!rule.pattern.test(ctx)) continue;
+            const value = valueFor(rule.key);
+            if (!value) { skipped.push({ context: ctx.slice(0, 80), reason: `no value provided for ${rule.label}` }); matched = true; break; }
+            // React-friendly fill: set via the prototype setter and
+            // dispatch input + change so controlled components update.
+            const setter = Object.getOwnPropertyDescriptor((el as any).constructor.prototype, "value")?.set;
+            if (setter) setter.call(el, value); else (el as HTMLInputElement).value = value;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            filled.push({ context: ctx.slice(0, 80), value, via: rule.label });
+            usedKeys.add(rule.key);
+            matched = true;
+            break;
+          }
+          if (!matched) skipped.push({ context: ctx.slice(0, 80), reason: "no rule matched" });
+        }
+        return { filled, skipped, totalInputs: inputs.length };
+      }, { tat: tatLicense ?? null, get: getLicense ?? null, tmk: taxMapKey ?? null });
+      trace.push({ step: "filled-fields", detail: JSON.stringify({ filled: fillResult.filled.length, skipped: fillResult.skipped.length, total: fillResult.totalInputs }) });
+
+      if (fillResult.filled.length === 0) {
+        const shot = await saveShot(page, "no-fields-filled");
+        return res.json({
+          ok: false,
+          error: "Edit modal opened but no fields matched the License/Tax/Parcel patterns. Run /api/admin/guesty/inspect-vrbo-compliance to capture the current form structure.",
+          fillResult, finalUrl: page.url(),
+          beforeShotUrl: beforeShot, afterEditShotUrl: afterEditShot, postFillShotUrl: shot, trace,
+        });
+      }
+      await page.waitForTimeout(800);
+      const postFillShot = await saveShot(page, "post-fill");
+
+      if (dryRun) {
+        trace.push({ step: "dry-run-stopping-before-save" });
+        return res.json({
+          ok: true, dryRun: true, fillResult, finalUrl: page.url(),
+          beforeShotUrl: beforeShot, afterEditShotUrl: afterEditShot, postFillShotUrl: postFillShot, trace,
+        });
+      }
+
+      // ── Save the form ─────────────────────────────────────────────────
+      const saveResult = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
+        const candidates = buttons.filter((b) => {
+          const txt = (b.textContent || "").trim().toLowerCase();
+          return /^(save( changes)?|save & close|submit|apply|update|confirm)$/i.test(txt) && !b.disabled;
+        });
+        if (candidates.length === 0) return { clicked: false, reason: "no enabled Save/Submit button found" };
+        // Prefer the LAST candidate — modals usually render their primary
+        // action button after Cancel/Close in DOM order.
+        const target = candidates[candidates.length - 1];
+        target.scrollIntoView({ block: "center" });
+        target.click();
+        return { clicked: true, label: (target.textContent || "").trim() };
+      });
+      trace.push({ step: "clicked-save", detail: JSON.stringify(saveResult) });
+      if (!saveResult.clicked) {
+        const shot = await saveShot(page, "no-save-button");
+        return res.json({
+          ok: false, error: `Form filled but no Save button found: ${saveResult.reason}.`,
+          fillResult, finalUrl: page.url(),
+          beforeShotUrl: beforeShot, afterEditShotUrl: afterEditShot,
+          postFillShotUrl: postFillShot, postSaveShotUrl: shot, trace,
+        });
+      }
+      await page.waitForTimeout(4000);
+      const postSaveShot = await saveShot(page, "post-save");
+
+      const saveFeedback = await page.evaluate(() => {
+        const out = new Set<string>();
+        document.querySelectorAll('[role="alert"], [aria-live="polite"], [aria-live="assertive"], [class*="toast" i], [class*="snackbar" i]').forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          if (txt && txt.length > 0 && txt.length < 300) out.add(txt);
+        });
+        return Array.from(out).slice(0, 8);
+      }).catch(() => [] as string[]);
+      trace.push({ step: "save-feedback", detail: JSON.stringify(saveFeedback) });
+
+      // ── Re-publish to VRBO via Distribution ───────────────────────────
+      // Saving the license fields doesn't always trigger Guesty to re-sync
+      // to VRBO automatically. Equivalent to the manual "PUBLISH TO
+      // CHANNEL" reminder the Airbnb flow leaves to the operator — for
+      // VRBO we automate it because we're already in the same Playwright
+      // session. Selectors are heuristic; if the publish button can't be
+      // located we surface diagnostics so the operator can finish manually
+      // (and feed the discovered DOM back into a follow-up wiring).
+      let republishResult: { attempted: boolean; clicked: boolean; reason?: string; label?: string; scope?: string } =
+        { attempted: false, clicked: false };
+      let distributionShot: string | null = null;
+      if (!skipRepublish) {
+        republishResult.attempted = true;
+        const distUrl = `https://app.guesty.com/properties/${listingId}/distribution`;
+        trace.push({ step: "navigating-distribution", detail: distUrl });
+        await page.goto(distUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(5000);
+        // Lazy-load nudge.
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+        await page.waitForTimeout(800);
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        await page.waitForTimeout(400);
+        distributionShot = await saveShot(page, "distribution");
+
+        const clickResult = await page.evaluate(() => {
+          const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
+          const vrboRow = all.find((el) => {
+            const t = (el.textContent || "").trim().toLowerCase();
+            return /(\bvrbo\b|homeaway)/i.test(t) && t.length < 200;
+          });
+          const tryClickIn = (root: Element): { clicked: boolean; label?: string } => {
+            const btns = Array.from(root.querySelectorAll<HTMLButtonElement>("button, a[role='button']"));
+            const target = btns.find((b) => {
+              if ((b as HTMLButtonElement).disabled) return false;
+              const t = (b.textContent || "").trim().toLowerCase();
+              return /publish (to channel|listing)?|re-?publish|push (to channel|to vrbo)|sync now/i.test(t);
+            });
+            if (!target) return { clicked: false };
+            (target as HTMLElement).scrollIntoView({ block: "center" });
+            (target as HTMLElement).click();
+            return { clicked: true, label: (target.textContent || "").trim() };
+          };
+          // 1) Climb up from VRBO text node looking for a row with a publish-like button.
+          if (vrboRow) {
+            let cur: Element | null = vrboRow;
+            for (let d = 0; d < 6 && cur; d++) {
+              const r = tryClickIn(cur);
+              if (r.clicked) return { ...r, scope: `vrbo-row-depth-${d}` };
+              cur = cur.parentElement;
+            }
+          }
+          // 2) Fallback: anything publish-like on the page.
+          const r = tryClickIn(document.body);
+          return r.clicked
+            ? { ...r, scope: "page-fallback" }
+            : { clicked: false, reason: "no Publish button found near VRBO row or page-wide" };
+        });
+        republishResult = { attempted: true, ...clickResult };
+        trace.push({ step: "clicked-republish", detail: JSON.stringify(clickResult) });
+        if (clickResult.clicked) {
+          await page.waitForTimeout(3000);
+          // Some flows pop a confirm modal — try to confirm.
+          await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
+            const yes = btns.find((b) => !(b as HTMLButtonElement).disabled && /^(publish|confirm|yes|ok)$/i.test((b.textContent || "").trim()));
+            if (yes) { (yes as HTMLElement).click(); return true; }
+            return false;
+          }).catch(() => false);
+          await page.waitForTimeout(3000);
+          distributionShot = await saveShot(page, "post-republish");
+        }
+      }
+
+      console.log(`[vrbo-compliance] listing=${listingId} filled=${fillResult.filled.length}/${fillResult.totalInputs} save=${saveResult.clicked} republish=${republishResult.clicked} feedback=${JSON.stringify(saveFeedback)}`);
+
+      return res.json({
+        ok: true,
+        finalUrl: page.url(),
+        fillResult,
+        saveResult,
+        saveFeedback,
+        republishResult,
+        beforeShotUrl: beforeShot,
+        afterEditShotUrl: afterEditShot,
+        postFillShotUrl: postFillShot,
+        postSaveShotUrl: postSaveShot,
+        distributionShotUrl: distributionShot,
+        trace,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
