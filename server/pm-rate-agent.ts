@@ -34,6 +34,8 @@ export type AgentResult = {
   title: string;
   screenshotBase64: string; // data: URL form, ready for client <img>
   iterations: number;
+  agentError?: string; // surfaced when the agent loop fails (HTTP error etc.)
+  agentTrace?: string[]; // stop messages from each iteration for debugging
 };
 
 // 1366×768 keeps screenshot tokens reasonable while leaving room for
@@ -86,6 +88,8 @@ export async function verifyPmRate(opts: {
       title: await page.title().catch(() => ""),
       screenshotBase64: `data:image/jpeg;base64,${finalShot.toString("base64")}`,
       iterations: loop.iterations,
+      agentError: loop.error,
+      agentTrace: loop.trace,
     };
   } finally {
     if (browser) await browser.close().catch(() => {});
@@ -100,7 +104,8 @@ export async function verifyPmRate(opts: {
 async function runAgentLoop(
   page: Page,
   opts: { checkIn: string; checkOut: string; nights: number; anthropicKey: string },
-): Promise<{ iterations: number }> {
+): Promise<{ iterations: number; error?: string; trace: string[] }> {
+  const trace: string[] = [];
   // Two-stage architecture: this loop ONLY drives the page (clicks,
   // typing, scrolling) until the rates for the requested dates are
   // visible. Parsing the price out of the final screenshot is a
@@ -173,8 +178,9 @@ async function runAgentLoop(
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      console.warn(`[pm-agent] iter ${i}: HTTP ${resp.status} ${body.slice(0, 300)}`);
-      return { iterations: i };
+      console.warn(`[pm-agent] iter ${i}: HTTP ${resp.status} ${body.slice(0, 500)}`);
+      trace.push(`iter ${i}: HTTP ${resp.status} ${body.slice(0, 200)}`);
+      return { iterations: i, error: `HTTP ${resp.status}: ${body.slice(0, 300)}`, trace };
     }
     const data = (await resp.json()) as any;
     messages.push({ role: "assistant", content: data.content });
@@ -183,10 +189,11 @@ async function runAgentLoop(
       .filter((c: any) => c.type === "text")
       .map((c: any) => c.text)
       .join(" ");
+    if (textBlocks) trace.push(`iter ${i}: ${textBlocks.slice(0, 120)}`);
 
     if (data.stop_reason === "end_turn" || /\bDONE\b/i.test(textBlocks)) {
       console.log(`[pm-agent] terminated iter ${i + 1}: ${textBlocks.slice(0, 200)}`);
-      return { iterations: i + 1 };
+      return { iterations: i + 1, trace };
     }
 
     if (data.stop_reason === "tool_use") {
@@ -220,11 +227,12 @@ async function runAgentLoop(
     } else {
       // Unknown stop reason — treat as terminated.
       console.warn(`[pm-agent] iter ${i}: unexpected stop_reason=${data.stop_reason}`);
-      return { iterations: i + 1 };
+      trace.push(`iter ${i}: unexpected stop_reason=${data.stop_reason}`);
+      return { iterations: i + 1, trace };
     }
   }
   console.warn(`[pm-agent] hit MAX_ITERATIONS=${MAX_ITERATIONS} without terminating`);
-  return { iterations: MAX_ITERATIONS };
+  return { iterations: MAX_ITERATIONS, trace };
 }
 
 async function executeAction(
