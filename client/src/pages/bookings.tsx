@@ -452,6 +452,14 @@ export default function Bookings() {
           // the next URL — the unit's just booked, not a permanent
           // failure.
           let visionVerified = false;
+          // Track the explicit-unavailable count from scrapers so we can
+          // pick a smarter fallback. When most fast-scraper hits came
+          // back available:false (peak season), the operator wants to
+          // see Vrbo URLs to do their own manual research — Vrbo isn't
+          // bookable for sublet but listings there are useful for
+          // cross-checking.
+          let unavailableCount = 0;
+          let allCheckedUrls: { sourceLabel: string; url: string; status: string }[] = [];
           if (!pick) {
             const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0);
             const allUnpricedVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0);
@@ -466,7 +474,10 @@ export default function Bookings() {
               ...allUnpricedVrbo,
               // Other PM URLs that fall through to the agent (~60-180s)
               ...allUnpricedPm.filter((c) => !isFastScrape(c.url)),
-            ].slice(0, 4); // cap at 4 to bound worst-case wall time
+            ].slice(0, 8); // cap at 8: covers ~3 SP + ~4 Vrbo + 1 PM, enough
+                           // to find availability in normal weeks; in peak
+                           // weeks we'd hit unavailable on all and fall
+                           // through to the alternative-fallback below.
 
             for (const c of ordered) {
               try {
@@ -497,18 +508,33 @@ export default function Bookings() {
                   visionVerified = true;
                   break;
                 }
+                if (ex?.available === false) unavailableCount++;
+                const status = ex?.available === false ? "BOOKED" : (ex?.reason ? "no-price" : "verify-failed");
+                allCheckedUrls.push({ sourceLabel: c.sourceLabel, url: c.url, status });
                 skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
               } catch (e: any) {
+                allCheckedUrls.push({ sourceLabel: c.sourceLabel, url: c.url, status: "error" });
                 skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
               }
             }
           }
 
-          // Final fallback: if vision couldn't extract from any source,
-          // attach the cheapest unpriced URL we have (PM > VRBO order —
-          // PM is the canonical bookable channel). Operator can hit the
-          // per-slot 📷 Verify rate button to retry with a fresh
-          // screenshot, or type the cost manually.
+          // Fallback: if vision couldn't extract from any source, attach
+          // the most-useful unpriced URL we have. Two regimes:
+          //   1. Most candidates explicitly came back available:false
+          //      (peak season, everything's booked) → attach the top
+          //      Vrbo URL so the operator can see what's listed there
+          //      and do manual research. This addresses the "nothing for
+          //      VRBO popped up" complaint when the bookable PMs are
+          //      all confirmed booked.
+          //   2. Otherwise (mixed failures, errors, no-price) → attach
+          //      the server's PM unpriced fallback (Parrish Kauai et al)
+          //      because PM is the canonical bookable channel.
+          const peakSeasonAllBooked = unavailableCount >= 3;
+          if (!pick && peakSeasonAllBooked) {
+            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
+            if (topVrbo) pick = topVrbo;
+          }
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
           }
@@ -526,6 +552,15 @@ export default function Bookings() {
           const noteSuffix = visionVerified
             ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
             : "";
+          // When we attached the URL because of the peak-season fallback
+          // (most/all candidates came back booked), record what was
+          // checked so the operator can see what's listed elsewhere
+          // without having to open Find buy-in. Top 6 entries to keep
+          // the notes field readable.
+          const attemptsNote = allCheckedUrls.length > 0
+            ? `\n\nChecked ${allCheckedUrls.length} alternative${allCheckedUrls.length === 1 ? "" : "s"} — ${unavailableCount} confirmed booked for ${ci} → ${co}:\n` +
+              allCheckedUrls.slice(0, 6).map((a) => `  • [${a.status}] ${a.sourceLabel} — ${a.url}`).join("\n")
+            : "";
           // Wrap create+attach in a try/catch — if one slot fails (DB
           // hiccup, race in attachBuyIn's "same-slot already attached"
           // check, etc.) we don't want the whole Promise.all to reject
@@ -542,7 +577,7 @@ export default function Bookings() {
               costPaid: finalCost.toFixed(2),
               airbnbConfirmation: null,
               airbnbListingUrl: pick.url,
-              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}`,
+              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${attemptsNote}`,
               status: "active",
             }).then((r) => r.json());
             if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -587,12 +622,18 @@ export default function Bookings() {
           variant: "destructive",
         });
       } else if (zeroCostFills.length === filled.length) {
-        // All picks are unpriced PM URLs.
+        // All picks are unpriced. Detect whether at least one slot
+        // attached a Vrbo URL (peak-season fallback when PM scrapers
+        // confirmed booked) so the toast acknowledges that.
+        const hasVrboPick = filled.some((r) => /(?:^|\.)vrbo\.com/.test(r.picked?.url ?? ""));
         toast({
-          title: `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
-          description:
-            `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Use the 🔍 Verify rate button on each slot to fetch a screenshot of the page and (when possible) extract the price.`
-            + (skipped.length ? ` · No PM URL found for: ${skipped.join(", ")}` : ""),
+          title: hasVrboPick
+            ? `Attached ${filled.length} link${filled.length > 1 ? "s" : ""} — peak-season fallback`
+            : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
+          description: hasVrboPick
+            ? `Most candidates were confirmed booked for these dates (peak season). Attached Vrbo URL${filled.length > 1 ? "s" : ""} for cross-check — click through to see what's listed there. The buy-in's Notes show every URL we checked and its booking status.`
+            : `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Use the 🔍 Verify rate button on each slot to fetch a screenshot of the page and (when possible) extract the price.`
+            + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
         const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
