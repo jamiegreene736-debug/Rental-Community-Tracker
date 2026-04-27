@@ -2325,15 +2325,53 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         Airbnb's manual republish reminder being automated
                         for VRBO. See AGENTS.md #28. */}
                     {ch === "vrbo" && isLive && (() => {
-                      // VRBO compliance state isn't read back from Guesty
-                      // (channels.homeaway.licenseNumber lives on the
-                      // listing payload but getChannelStatus doesn't
-                      // surface it). Track per-session "submitted" state
-                      // locally so the user sees a green check after a
-                      // successful click without needing a page reload.
+                      // Persistent VRBO compliance state lives on the
+                      // listing payload at channels.homeaway.{licenseNumber,
+                      // taxId, parcelNumber}. getChannelStatus surfaces it
+                      // as info.vrboLicense (null when nothing's set, else
+                      // an object with each field independently nullable).
+                      // We use that as the source of truth so the green
+                      // check survives page reloads — the session-local
+                      // "done" flag below is just a fast-path for the gap
+                      // between "click Submit" and "next channel-status
+                      // refresh lands".
+                      const vrboLicense = info?.vrboLicense ?? null;
+                      const expectedTat = effectivePropertyData?.tatLicense || null;
+                      const expectedGet = effectivePropertyData?.getLicense || null;
+                      const expectedTmk = effectivePropertyData?.taxMapKey || null;
+                      // "Complete" = every field the property record has
+                      // a value for is also set in Guesty. Property GET is
+                      // optional, so if it's blank we don't require Guesty
+                      // to have it either. Same logic the push endpoint
+                      // uses (only writes fields the caller provided).
+                      const guestyHasTat = !!vrboLicense?.licenseNumber;
+                      const guestyHasTmk = !!vrboLicense?.parcelNumber;
+                      const guestyHasGet = !!vrboLicense?.taxId;
+                      const guestyHasAny = guestyHasTat || guestyHasTmk || guestyHasGet;
+                      const guestyHasAllExpected =
+                        (!expectedTat || guestyHasTat) &&
+                        (!expectedTmk || guestyHasTmk) &&
+                        (!expectedGet || guestyHasGet);
+                      // "Stale" = Guesty has a value that doesn't match
+                      // the property record. Distinct from "missing":
+                      // missing is "we haven't pushed yet", stale is "we
+                      // pushed something old and the property record has
+                      // since changed".
+                      const isStale = guestyHasAny && (
+                        (!!expectedTat && guestyHasTat && vrboLicense?.licenseNumber !== expectedTat) ||
+                        (!!expectedTmk && guestyHasTmk && vrboLicense?.parcelNumber !== expectedTmk) ||
+                        (!!expectedGet && guestyHasGet && vrboLicense?.taxId !== expectedGet)
+                      );
                       const localState = vrboComplianceStateByListing[selectedId] ?? "idle";
                       const isVrboBusy = localState === "busy";
-                      const isVrboDone = localState === "done";
+                      // Show the "on file" state if either (a) we just
+                      // submitted this session OR (b) Guesty already has
+                      // every expected field AND nothing is stale.
+                      const isVrboDone = localState === "done" || (guestyHasAllExpected && guestyHasAny && !isStale);
+                      // Distinguish "Guesty has SOME data but not all /
+                      // not current" from "Guesty has nothing at all" —
+                      // they're different operator-facing prompts.
+                      const needsUpdate = !isVrboDone && (isStale || (guestyHasAny && !guestyHasAllExpected));
                       const handlePushVrboCompliance = async () => {
                         if (!selectedId || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense) {
                           toast({ title: "Missing data", description: "Need both TMK and TAT to submit VRBO compliance.", variant: "destructive" });
@@ -2385,22 +2423,67 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "idle" }));
                         }
                       };
+                      // Compact masked summary of whatever Guesty already
+                      // has, so the operator can confirm at a glance
+                      // (without exposing the full bare TMK in case of
+                      // shoulder-surfing). Shows last-4 digits if present.
+                      const tail = (s: string | null | undefined) => (s && s.length > 4 ? `…${s.slice(-4)}` : (s || "—"));
+                      const guestyValuesLine = vrboLicense
+                        ? `TAT ${tail(vrboLicense.licenseNumber)} · TMK ${tail(vrboLicense.parcelNumber)}${vrboLicense.taxId ? ` · GET ${tail(vrboLicense.taxId)}` : ""}`
+                        : "";
                       return (
                         <div className="glb-ch-compliance" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed rgba(0,0,0,0.1)", fontSize: 12 }}>
                           {isVrboDone ? (
-                            <div style={{ color: "#16a34a", display: "flex", alignItems: "center", gap: 6 }}>
-                              <span>✓</span>
+                            <div style={{ color: "#16a34a", display: "flex", alignItems: "flex-start", gap: 6 }}>
+                              <span style={{ flexShrink: 0 }}>✓</span>
                               <div>
-                                <div style={{ fontWeight: 600 }}>VRBO compliance submitted this session</div>
-                                <div style={{ fontSize: 11, color: "#6b7280" }}>
-                                  Form saved in Guesty + republished to VRBO. Refresh to re-submit if needed.
+                                <div style={{ fontWeight: 600 }}>Compliance on file in Guesty</div>
+                                {guestyValuesLine && (
+                                  <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                                    {guestyValuesLine}
+                                  </div>
+                                )}
+                                <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+                                  {localState === "done"
+                                    ? "Just submitted this session — Guesty re-syncs to VRBO via Distribution."
+                                    : "Read from Guesty's listing payload. Re-push if the property record changes."}
                                 </div>
                               </div>
+                            </div>
+                          ) : needsUpdate ? (
+                            <div>
+                              <div style={{ color: "#b45309", fontWeight: 600, marginBottom: 6 }}>
+                                ⚠ Compliance on file but {isStale ? "out of date" : "incomplete"}
+                              </div>
+                              {guestyValuesLine && (
+                                <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6, fontFamily: "monospace" }}>
+                                  Currently in Guesty: {guestyValuesLine}
+                                </div>
+                              )}
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                {isStale
+                                  ? "Guesty's saved values don't match the property record. Re-push to refresh."
+                                  : "Guesty has some compliance fields but not all of the ones we'd push. Re-push to fill the rest."}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handlePushVrboCompliance(); }}
+                                disabled={isVrboBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
+                                style={{
+                                  fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                                  border: "1px solid #d97706", background: isVrboBusy ? "#fef3c7" : "#fffbeb",
+                                  color: "#92400e", cursor: isVrboBusy ? "wait" : "pointer", fontWeight: 500,
+                                }}
+                                data-testid="btn-push-vrbo-compliance"
+                                title={!effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense ? "TMK and TAT must both be set on the property record." : undefined}
+                              >
+                                {isVrboBusy ? "⏳ Re-pushing via Guesty…" : "↻ Re-push Compliance to VRBO via Guesty"}
+                              </button>
                             </div>
                           ) : (
                             <div>
                               <div style={{ color: "#1d4ed8", fontWeight: 600, marginBottom: 6 }}>
-                                ⓘ VRBO compliance
+                                ⓘ VRBO compliance not yet in Guesty
                               </div>
                               <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
                                 Pushes TMK / TAT / GET into Guesty's "Vrbo license requirements" form, then republishes to VRBO from Distribution — both steps automated.

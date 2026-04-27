@@ -115,6 +115,18 @@ export type ChannelInfo = {
     regulationType: string | null;      // e.g. "registration"
     lastUpdatedOn: string | null;
   } | null;
+  // VRBO only: license fields pulled from listing.channels.homeaway.
+  // Populated by /api/builder/push-compliance and the new VRBO submit-
+  // compliance endpoint. null = none of the three fields are set;
+  // otherwise each field is independently nullable. Used by the VRBO
+  // compliance card sub-block to show a persistent "compliance on file"
+  // state across page reloads (instead of the session-local flag the
+  // first version of the card relied on).
+  vrboLicense?: {
+    licenseNumber: string | null;       // TAT (Transient Accommodations Tax)
+    taxId: string | null;               // GET (General Excise Tax)
+    parcelNumber: string | null;        // TMK (Tax Map Key)
+  } | null;
 };
 
 export type GuestyChannelStatus = {
@@ -448,10 +460,27 @@ class GuestyService {
       airbnbInfo.publicUrl = `https://www.airbnb.com/rooms/${airbnbInfo.id}`;
     }
 
+    // VRBO license fields. Guesty stores these at listing.channels.homeaway,
+    // not on the integrations[] entry — see /api/builder/push-compliance
+    // which writes there and reads back the same path. Surface them on
+    // ChannelInfo so the VRBO compliance card sub-block can show a
+    // persistent green-check after the data lands instead of a session-
+    // local one. null when none of the three fields are set.
+    const vrboInfo = toInfo(vrboData);
+    const vrboChannelData = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
+    const vrboLicense = (() => {
+      const licenseNumber = vrboChannelData.licenseNumber || null;
+      const taxId = vrboChannelData.taxId || null;
+      const parcelNumber = vrboChannelData.parcelNumber || null;
+      if (!licenseNumber && !taxId && !parcelNumber) return null;
+      return { licenseNumber, taxId, parcelNumber };
+    })();
+    vrboInfo.vrboLicense = vrboLicense;
+
     return {
       isListed,
       airbnb: airbnbInfo,
-      vrbo: toInfo(vrboData),
+      vrbo: vrboInfo,
       bookingCom: toInfo(bookingComData),
     };
   }
