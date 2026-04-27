@@ -75,9 +75,22 @@ export async function scrapeVrboRate(opts: {
   const bb = new Browserbase({ apiKey: bbApiKey });
   // Vrbo aggressively rate-limits Browserbase's default IP pool — first
   // few hits work but subsequent ones get a "Too Many Requests" wall
-  // page. Enable Browserbase's residential proxy network (proxies:true)
-  // so each session gets a fresh residential IP.
-  const session = await bb.sessions.create({ projectId: bbProjectId, proxies: true });
+  // page. Enable Browserbase's residential proxy network so each session
+  // gets a fresh residential IP.
+  //
+  // Pin the proxy to a US IP (`geolocation: { country: "US" }`). Without
+  // this Browserbase rotates across regions and a CA IP would make Vrbo
+  // serve prices in CAD — both the calendar GraphQL `displayPrice` and
+  // the booking-widget total would render in CAD. Our number extraction
+  // is currency-naive (regex `\$\s*([\d,]+)`), so a CAD value silently
+  // becomes a USD-tagged number ~28% off. Forcing US locale solves both
+  // currency display and Vrbo's CAD-only locale quirks.
+  const session = await bb.sessions.create({
+    projectId: bbProjectId,
+    proxies: [
+      { type: "browserbase", geolocation: { country: "US" } },
+    ] as any,
+  });
 
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   let calendarBody = "";
@@ -203,12 +216,15 @@ export async function scrapeVrboRate(opts: {
       };
     }
 
-    let total = 0;
+    // Sum the calendar `displayPrice` per night. This is the BASE rate
+    // Vrbo serves through PropertyRatesDateSelectorQuery — does NOT
+    // include cleaning, service fees, or taxes.
+    let baseTotal = 0;
     for (const day of stayDays) {
       const m = (day.displayPrice || "").match(/\$\s*([\d,]+(?:\.\d+)?)/);
-      if (m) total += parseFloat(m[1].replace(/,/g, ""));
+      if (m) baseTotal += parseFloat(m[1].replace(/,/g, ""));
     }
-    if (!(total > 0)) {
+    if (!(baseTotal > 0)) {
       return errResult(
         url,
         "vrbo-no-prices",
@@ -216,8 +232,53 @@ export async function scrapeVrboRate(opts: {
       );
     }
 
+    // Now try to read the ALL-IN total from the booking widget DOM.
+    // The calendar's displayPrice is a base nightly rate — for buy-in
+    // accounting we want what the operator would actually pay (base +
+    // cleaning + service + taxes). Vrbo's booking widget renders this
+    // as a "$X total" string near "includes taxes & fees" once the page
+    // settles with arrival/departure params present.
+    //
+    // We give it a short window (~10s) to render after navigation, then
+    // pull the largest "$X" amount that appears next to "total" or
+    // "includes taxes" in the visible page text. The regex looks for:
+    //   "$31,568 total", "$31,568 includes taxes", "Total: $31,568"
+    //
+    // If the DOM scrape fails, we fall back to the calendar base sum
+    // — preferable to a hard error, but the operator should know the
+    // attached buy-in is base-only (note suffix in caller).
+    let allInTotal = 0;
+    let allInSource: "widget" | "calendar-base" = "calendar-base";
+    try {
+      // Wait for ANY total-looking text to appear; the booking widget
+      // can take a beat after domcontentloaded to fully render.
+      await page.waitForFunction(
+        () => /\$\s*[\d,]+\s*(?:total|includes\s*tax|includes\s*fees)/i.test(document.body.innerText),
+        { timeout: 10_000 },
+      ).catch(() => {});
+      const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+      const matches = Array.from(
+        bodyText.matchAll(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|includes\s*tax|includes\s*fees)/gi),
+      );
+      const widgetTotals = matches
+        .map((m) => parseFloat(m[1].replace(/,/g, "")))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (widgetTotals.length > 0) {
+        // The widget renders multiple "$X total" strings (per-property
+        // summary, mobile-collapsed view, etc.) — they should all be
+        // the same number; take the max as a paranoia hedge against
+        // a stale per-night value sneaking in.
+        allInTotal = Math.max(...widgetTotals);
+        allInSource = "widget";
+      }
+    } catch { /* fall through to base */ }
+
+    const total = allInTotal > 0 ? allInTotal : baseTotal;
     const totalRounded = Math.round(total);
     const nightlyRounded = Math.round(total / nights);
+    const reason = allInSource === "widget"
+      ? `Vrbo widget: $${totalRounded.toLocaleString()} total (incl. fees) for ${nights} nights`
+      : `Vrbo calendar (base): $${totalRounded.toLocaleString()} for ${nights} nights — widget total unreadable, this excludes fees/taxes`;
     return {
       ok: true,
       extracted: {
@@ -226,13 +287,16 @@ export async function scrapeVrboRate(opts: {
         totalPrice: totalRounded,
         nightlyPrice: nightlyRounded,
         dateMatch: true,
-        reason: `Vrbo calendar: $${totalRounded.toLocaleString()} total for ${nights} nights`,
+        reason,
       },
       finalUrl: page.url(),
       title: await page.title().catch(() => "Vrbo"),
       screenshotBase64: "",
       iterations: 0,
-      agentTrace: [`vrbo-scraper: extracted $${total} (${stayDays.length} nights summed)`],
+      agentTrace: [
+        `vrbo-scraper: base sum=$${baseTotal} from ${stayDays.length} nights`,
+        `vrbo-scraper: widget total=${allInTotal > 0 ? `$${allInTotal}` : "not found"} (using ${allInSource})`,
+      ],
     };
   } finally {
     if (browser) await browser.close().catch(() => {});

@@ -2137,8 +2137,18 @@ export async function registerRoutes(
           set("adults", "2");
           break;
         case "vrbo":
+          // Vrbo accepts two URL date conventions; we set both to be safe.
+          // - arrival/departure: legacy params, also what Vrbo's Apollo SSR
+          //   reads to fire the rate-calendar GraphQL on initial load (the
+          //   Vrbo scraper relies on this — see pm-scraper-vrbo.ts).
+          // - startDate/endDate: modern booking-widget params; pre-fills
+          //   the date picker when the operator clicks through to the page.
+          //   Without these, the widget renders with empty date inputs even
+          //   when arrival/departure are present.
           set("arrival", checkIn);
           set("departure", checkOut);
+          set("startDate", checkIn);
+          set("endDate", checkOut);
           break;
         case "booking":
           set("checkin", checkIn);
