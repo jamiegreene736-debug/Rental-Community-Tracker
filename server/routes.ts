@@ -10482,6 +10482,64 @@ export async function registerRoutes(
     res.json({ success: true });
   });
 
+  // Re-run the priced 7-night Airbnb-engine lookup for a saved draft and
+  // write the new low/high back to `estimatedLowRate` / `estimatedHighRate`.
+  //
+  // The draft's `streetAddress` (set on Step 5 of the wizard) is the
+  // critical input here: it gets geocoded into a tight bounding box that
+  // gates the engine results, which is much more reliable than the
+  // name-only filter the original /search-units path uses. Many real
+  // listings at a resort don't name the resort in their title or
+  // description (e.g. Caribe Cove condos call themselves "Disney
+  // Vacation Condo") so a name-only path returns 0 listings even when
+  // the resort has dozens listed. Without `streetAddress`, the endpoint
+  // falls back to the same name-token filter as /search-units.
+  //
+  // Returns the per-BR rate sample so the operator can sanity-check
+  // the live engine numbers before they get committed to the draft.
+  app.post("/api/community/:id/refresh-pricing", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+    const draft = await storage.getCommunityDraft(id);
+    if (!draft) return res.status(404).json({ error: "Not found" });
+    if (!process.env.SEARCHAPI_API_KEY) {
+      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    }
+
+    const ratesByBR = await fetchAmortizedNightlyByBR(
+      draft.name,
+      draft.city,
+      draft.state,
+      draft.streetAddress ?? undefined,
+    );
+    const allRates: number[] = [];
+    for (const list of Object.values(ratesByBR)) allRates.push(...list);
+
+    let estimatedLowRate: number | null = null;
+    let estimatedHighRate: number | null = null;
+    if (allRates.length > 0) {
+      const sorted = [...allRates].sort((a, b) => a - b);
+      estimatedLowRate = sorted[0];
+      estimatedHighRate = sorted[sorted.length - 1];
+    }
+
+    const updated = await storage.updateCommunityDraft(id, {
+      estimatedLowRate,
+      estimatedHighRate,
+    });
+
+    res.json({
+      ok: true,
+      ratesByBR: Object.fromEntries(
+        Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length, samples: v }]),
+      ),
+      estimatedLowRate,
+      estimatedHighRate,
+      usedAddressGeoBounds: !!draft.streetAddress,
+      draft: updated,
+    });
+  });
+
   // POST /api/community/:id/persist-photos
   //
   // Body: { unit1Photos: string[], unit2Photos: string[] }
@@ -10922,8 +10980,8 @@ export async function registerRoutes(
   // Step 3: Generate algorithm-based unit pairing suggestions for a community
   // ============================================================
   app.post("/api/community/search-units", async (req, res) => {
-    const { communityName, city, state, unitTypes: rawUnitTypes } = req.body as {
-      communityName: string; city: string; state: string; unitTypes?: string;
+    const { communityName, city, state, unitTypes: rawUnitTypes, streetAddress } = req.body as {
+      communityName: string; city: string; state: string; unitTypes?: string; streetAddress?: string;
     };
     if (!communityName) return res.status(400).json({ error: "communityName required" });
 
@@ -10961,7 +11019,7 @@ export async function registerRoutes(
       } catch { /* non-fatal */ }
     }
 
-    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state);
+    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state, streetAddress);
 
     // ── 2. Parse available unit types ─────────────────────────────────────────
     // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
