@@ -55,11 +55,25 @@ export type ResearchedCommunity = {
 // can distinguish "geocoded path used (high confidence)" from "name-token
 // fallback used (lower confidence)". Nightly rates outside $50-$3000 are
 // dropped (junk / regional outliers).
-const BBOX_HALF_DEG = 0.005; // ~500 meters at FL/HI latitudes — fits a single resort
+//
+// BBOX_HALF_DEG = 0.015° ≈ 1.65km at FL/HI latitudes. Started at 0.005°
+// (~500m) to fit a single resort, but Airbnb anonymizes coordinates until
+// a booking is confirmed — typically ±0.5-1.0km offset from the actual
+// unit. A 500m box dropped every Caribe Cove listing on the live engine
+// even though the resort has 16+ listings on Airbnb. 1.65km is wide
+// enough to absorb the anonymization without picking up neighbors —
+// for resort-dense areas (Kissimmee, Poipu) the next nearest condo
+// complex is generally >2km away.
+const BBOX_HALF_DEG = 0.015;
 
 export type AmortizedNightlyResult = {
   ratesByBR: Record<number, number[]>;
   bboxApplied: boolean;
+  // Geocoded center of the bbox + radius for debugging. Surfaced by the
+  // refresh-pricing endpoint so the operator can sanity-check the
+  // coordinates without redeploying — e.g. "Treasure Trove Lane"
+  // resolved to the right resort and not a same-named street elsewhere.
+  bboxCenter?: { lat: number; lng: number };
 };
 
 export async function fetchAmortizedNightlyByBR(
@@ -82,10 +96,12 @@ export async function fetchAmortizedNightlyByBR(
   // Geocode the address hint up front (Nominatim, in-memory cached).
   // Treat any failure as "fall back to name match" — never throw.
   let bbox: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number } | null = null;
+  let bboxCenter: { lat: number; lng: number } | undefined;
   if (addressHint && addressHint.trim()) {
     const fullAddress = `${addressHint.trim()}, ${city}, ${state}`;
     const coord = await geocode(fullAddress);
     if (coord) {
+      bboxCenter = coord;
       bbox = {
         sw_lat: coord.lat - BBOX_HALF_DEG,
         sw_lng: coord.lng - BBOX_HALF_DEG,
@@ -126,7 +142,7 @@ export async function fetchAmortizedNightlyByBR(
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
     );
-    if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox };
+    if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox, bboxCenter };
     const data = await resp.json() as any;
     const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
     for (const p of properties) {
@@ -158,7 +174,7 @@ export async function fetchAmortizedNightlyByBR(
   } catch {
     /* network / parse error — return whatever we accumulated */
   }
-  return { ratesByBR, bboxApplied: !!bbox };
+  return { ratesByBR, bboxApplied: !!bbox, bboxCenter };
 }
 
 // Median of a numeric list, or null on empty input.

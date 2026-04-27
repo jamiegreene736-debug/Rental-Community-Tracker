@@ -10609,7 +10609,7 @@ export async function registerRoutes(
       return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     }
 
-    const { ratesByBR, bboxApplied } = await fetchAmortizedNightlyByBR(
+    const { ratesByBR, bboxApplied, bboxCenter } = await fetchAmortizedNightlyByBR(
       draft.name,
       draft.city,
       draft.state,
@@ -10643,6 +10643,7 @@ export async function registerRoutes(
       // draft, or geocoding failed, so the function fell back to a
       // name-token match instead.
       usedAddressGeoBounds: bboxApplied,
+      bboxCenter,
       draft: updated,
     });
   });
