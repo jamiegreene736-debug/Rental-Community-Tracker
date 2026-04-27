@@ -21,6 +21,42 @@ export type ResearchedCommunity = {
   fromWorldKnowledge?: boolean;
 };
 
+// Pull a bedroom count out of a SearchAPI airbnb engine listing. The
+// engine returns `bedrooms` only as part of the title text — never as
+// a structured top-level field — so this function mostly reads the
+// title. `accommodations` (an array of strings like "2 bedrooms",
+// "1 bath") is a fallback when the title is too marketing-heavy to
+// parse.
+//
+//   "Boho Chic 2BR Condo Near Disney"           → 2
+//   "Spacious 3 Bedroom Vacation Home"          → 3
+//   "Studio condo by the pool"                  → 0
+//   "Cozy efficiency unit"                      → 0
+//
+// Returns NaN when nothing matches; callers drop the listing.
+export function extractBedroomsFromListing(p: any): number {
+  const title = String(p?.name ?? p?.title ?? "");
+  const desc = String(p?.description ?? "");
+  const accommodations = Array.isArray(p?.accommodations)
+    ? p.accommodations.join(" ")
+    : "";
+  const text = `${title} ${desc} ${accommodations}`.toLowerCase();
+  if (/\b(studio|efficiency)\b/.test(text)) return 0;
+  // "2BR", "3 br", "2-bedroom", "3 bedroom", "Three Bedroom", etc.
+  const numericMatch = text.match(/(\d+)\s*[-]?\s*(?:br\b|bd\b|bed\b|bedroom)/);
+  if (numericMatch) {
+    const n = parseInt(numericMatch[1], 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 10) return n;
+  }
+  const wordMap: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  };
+  for (const [word, num] of Object.entries(wordMap)) {
+    if (new RegExp(`\\b${word}[- ]bedroom`).test(text)) return num;
+  }
+  return NaN;
+}
+
 // 7-night amortized nightly lookup against SearchAPI's airbnb engine.
 //
 // `extracted_total_price` from the engine includes nightly + cleaning +
@@ -187,11 +223,30 @@ export async function fetchAmortizedNightlyByBR(
           continue;
         }
       }
+      // Engine never surfaces `bedrooms` as a top-level number. The
+      // count lives in the title (e.g. "Boho Chic 2BR Condo …",
+      // "Spacious 3 Bedroom Disney Vacation Home", "Studio condo by
+      // pool"). Fall back to `accommodations` if the title regex
+      // doesn't catch it — some listings encode it there as a
+      // structured field.
+      const br = extractBedroomsFromListing(p);
       const total = Number(p?.price?.extracted_total_price);
-      const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
-      if (!Number.isFinite(total) || total <= 0) { drops.noPrice++; continue; }
+      // Engine pre-computes the per-night rate via
+      // `extracted_price_per_qualifier` when the qualifier is
+      // "X nights x $Y" — that's the same number we'd compute
+      // ourselves from total/7, just without rounding. Prefer the
+      // engine value when present; fall back to total/7.
+      let nightly: number;
+      const perQualifier = Number(p?.price?.extracted_price_per_qualifier);
+      if (Number.isFinite(perQualifier) && perQualifier > 0) {
+        nightly = Math.round(perQualifier);
+      } else if (Number.isFinite(total) && total > 0) {
+        nightly = Math.round(total / 7);
+      } else {
+        drops.noPrice++;
+        continue;
+      }
       if (!Number.isFinite(br) || br < 1 || br > 6) { drops.badBedrooms++; continue; }
-      const nightly = Math.round(total / 7);
       if (nightly < 50 || nightly > 3000) { drops.nightlyOutOfRange++; continue; }
       if (!ratesByBR[br]) ratesByBR[br] = [];
       ratesByBR[br].push(nightly);

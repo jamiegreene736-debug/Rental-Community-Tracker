@@ -431,4 +431,54 @@ assert.equal(
 );
 console.log("  ✓ suggestPricingArea matches by community name first");
 
+// ---------- SearchAPI airbnb engine listing parser ----------
+console.log("\nairbnb engine listing parser suite");
+
+import { extractBedroomsFromListing } from "../server/community-research";
+
+// SearchAPI's airbnb engine never returns `bedrooms` as a top-level
+// number — the count lives in the title. These cases mirror the real
+// shapes Caribe Cove returned during a prod probe (PR that introduced
+// this test). If the engine starts returning a structured `bedrooms`
+// field one day we can simplify, but until then this regex path is
+// what stands between the engine and a useful pricing sample.
+assert.equal(
+  extractBedroomsFromListing({ title: "Boho Chic 2BR Condo Near Disney w/ Scenic Patio" }),
+  2,
+  "title with '2BR' → 2",
+);
+assert.equal(
+  extractBedroomsFromListing({ name: "Spacious 3 Bedroom Vacation Home", description: "Apartment in Kissimmee" }),
+  3,
+  "title with '3 Bedroom' → 3",
+);
+assert.equal(
+  extractBedroomsFromListing({ title: "Studio condo by the pool" }),
+  0,
+  "title with 'Studio' → 0",
+);
+assert.equal(
+  extractBedroomsFromListing({ title: "Cozy efficiency unit" }),
+  0,
+  "title with 'efficiency' → 0",
+);
+assert.equal(
+  extractBedroomsFromListing({ title: "Beautiful Two Bedroom by Disney" }),
+  2,
+  "title with 'Two Bedroom' → 2",
+);
+assert.equal(
+  extractBedroomsFromListing({
+    title: "Condo near parks",
+    accommodations: ["3 bedrooms", "2 baths", "sleeps 8"],
+  }),
+  3,
+  "accommodations array fallback when title is generic",
+);
+assert.ok(
+  Number.isNaN(extractBedroomsFromListing({ title: "Vacation home rental" })),
+  "title with no bedroom signal → NaN",
+);
+console.log("  ✓ extractBedroomsFromListing handles real engine shapes");
+
 console.log("\nall suites passed ✅");
