@@ -1972,6 +1972,36 @@ export async function registerRoutes(
   //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
   //     cheapest: [top 2 cross-source by nightly price]
   //   }
+  // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
+  // Tracks how often each PM-discovery path returns priced+available units
+  // — the data we need to decide when to retire the Google deep-dive in
+  // favor of per-PM sitemap walks (or the other way around). Resets on
+  // each Railway deploy (acceptable: deploys are roughly daily).
+  //
+  // Exposed via GET /api/operations/discovery-stats so the operator can
+  // inspect cumulative numbers without reading server logs.
+  const pmDiscoveryStats = {
+    spCalls: 0,
+    spHits: 0,            // call returned ≥1 priced unit
+    spUnitsTotal: 0,      // sum across all calls
+    googleCalls: 0,
+    googleHits: 0,        // call returned ≥1 priced unit
+    googleUnitsTotal: 0,  // sum across all calls (priced only)
+    googleUnpricedTotal: 0, // sum across all calls (unpriced "click-through" PM URLs)
+    sinceBoot: new Date().toISOString(),
+  };
+  app.get("/api/operations/discovery-stats", (_req, res) => {
+    const spHitRate = pmDiscoveryStats.spCalls > 0
+      ? +(pmDiscoveryStats.spHits / pmDiscoveryStats.spCalls).toFixed(3) : 0;
+    const googleHitRate = pmDiscoveryStats.googleCalls > 0
+      ? +(pmDiscoveryStats.googleHits / pmDiscoveryStats.googleCalls).toFixed(3) : 0;
+    const spAvgUnits = pmDiscoveryStats.spCalls > 0
+      ? +(pmDiscoveryStats.spUnitsTotal / pmDiscoveryStats.spCalls).toFixed(2) : 0;
+    const googleAvgUnits = pmDiscoveryStats.googleCalls > 0
+      ? +(pmDiscoveryStats.googleUnitsTotal / pmDiscoveryStats.googleCalls).toFixed(2) : 0;
+    res.json({ ...pmDiscoveryStats, spHitRate, googleHitRate, spAvgUnits, googleAvgUnits });
+  });
+
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
@@ -2589,9 +2619,17 @@ export async function registerRoutes(
             return [];
           }
         }));
-        return deepResults.flat().slice(0, 20);
+        const flat = deepResults.flat().slice(0, 20);
+        pmDiscoveryStats.googleCalls++;
+        const priced = flat.filter((c) => c.nightlyPrice > 0);
+        const unpriced = flat.length - priced.length;
+        if (priced.length > 0) pmDiscoveryStats.googleHits++;
+        pmDiscoveryStats.googleUnitsTotal += priced.length;
+        pmDiscoveryStats.googleUnpricedTotal += unpriced;
+        return flat;
       } catch (e: any) {
         console.error("[find-buy-in] pm error:", e.message);
+        pmDiscoveryStats.googleCalls++;
         return [];
       }
     })();
@@ -2616,12 +2654,23 @@ export async function registerRoutes(
     const isPoipu = /poipu|pili\s*mai/i.test(community);
     const spDiscoveryPromise: Promise<Candidate[]> = isPoipu
       ? (async () => {
+          pmDiscoveryStats.spCalls++;
           try {
+            // Pass the resolved resort name so SP discovery filters out
+            // units in NEIGHBORING Poipu communities (Kiahuna Golf
+            // Village, Lawai Beach, generic Poipu houses, etc.) that
+            // share the /poipu-vacation-rentals/ URL prefix but aren't
+            // in the target resort. Falls back to `community` when the
+            // resort-name resolver couldn't pull a value from the
+            // Guesty listing title.
             const units = await findAvailableSuiteParadiseUnits({
               bedrooms,
               checkIn,
               checkOut,
+              resortName: resortName ?? community,
             });
+            if (units.length > 0) pmDiscoveryStats.spHits++;
+            pmDiscoveryStats.spUnitsTotal += units.length;
             return units.map((u): Candidate => ({
               source: "pm" as const,
               sourceLabel: "Suite Paradise",

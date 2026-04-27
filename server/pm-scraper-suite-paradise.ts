@@ -267,6 +267,16 @@ type SpUnitMeta = {
   eid: number;
   bedrooms: number;
   title: string;
+  /**
+   * Concatenation of the H1 title, <title>, and meta description. Used by
+   * the discovery caller to match a unit against a target resort/community
+   * — e.g. "Kahala 422 at Poipu Kai Resort..." vs "...Kiahuna Golf Village".
+   * SP's Poipu sitemap lists units across multiple resorts (Poipu Kai,
+   * Kiahuna, Lawai Beach, etc.) under the same /poipu-vacation-rentals/
+   * URL prefix; without this filter, a Poipu Kai search would return
+   * Kiahuna units indiscriminately.
+   */
+  resortHaystack: string;
 };
 
 type CacheEntry<T> = { value: T; expiresAt: number };
@@ -376,13 +386,24 @@ async function fetchUnitMeta(url: string): Promise<SpUnitMeta | null> {
     const bedrooms = extractBedroomsFromHtml(html);
     const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
     const title = (titleMatch?.[1] ?? "").trim();
+    const pageTitleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    const pageTitle = (pageTitleMatch?.[1] ?? "").trim();
+    const metaDescMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)/i);
+    const metaDesc = (metaDescMatch?.[1] ?? "").trim();
     const slug = url.split("/").pop() ?? "";
     if (!eid || bedrooms === null) {
       // Unparseable — cache short to retry sooner next time.
       unitMetaCache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
       return null;
     }
-    const meta: SpUnitMeta = { url, slug, eid, bedrooms, title: title || slug };
+    const meta: SpUnitMeta = {
+      url,
+      slug,
+      eid,
+      bedrooms,
+      title: title || slug,
+      resortHaystack: `${title} ${pageTitle} ${metaDesc}`,
+    };
     unitMetaCache.set(url, { value: meta, expiresAt: Date.now() + META_TTL_MS });
     return meta;
   } catch {
@@ -425,10 +446,32 @@ export async function findAvailableSuiteParadiseUnits(opts: {
   bedrooms: number;
   checkIn: string;
   checkOut: string;
+  /**
+   * Resort/community name to filter by (e.g. "Poipu Kai", "Pili Mai",
+   * "Kiahuna"). Required — SP's Poipu sitemap lists units across many
+   * resorts; without this filter, a Poipu Kai search returns Kiahuna
+   * Golf Village houses, Poipu Beach houses, etc. — surfacing wrong-
+   * community candidates that auto-fill would then attach as buy-ins.
+   *
+   * Matched the same way the OTA filters work: every significant token
+   * (≥3 chars, lowercase, punctuation-stripped) of the resort name must
+   * appear in the unit's resortHaystack (h1 + page title + meta
+   * description).
+   */
+  resortName: string;
   /** Optional cap on number of priced units returned. Default 8. */
   limit?: number;
 }): Promise<SuiteParadiseAvailableUnit[]> {
-  const { bedrooms, checkIn, checkOut, limit = 8 } = opts;
+  const { bedrooms, checkIn, checkOut, resortName, limit = 8 } = opts;
+  // Tokenize resort name the same way routes.ts:mentionsResort does, so
+  // SP filtering is consistent with Airbnb / Vrbo / Booking filtering.
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const resortTokens = normalize(resortName).split(" ").filter((t) => t.length >= 3);
+  const matchesResort = (haystack: string): boolean => {
+    if (resortTokens.length === 0) return true; // shouldn't happen, but safe
+    const n = normalize(haystack);
+    return resortTokens.every((t) => n.includes(t));
+  };
   const nights = Math.max(
     1,
     Math.round(
@@ -448,13 +491,18 @@ export async function findAvailableSuiteParadiseUnits(opts: {
   const metas = await withConcurrency(urls, 8, fetchUnitMeta);
   const matchingBedrooms = metas
     .filter((m): m is SpUnitMeta => m !== null && m.bedrooms === bedrooms);
+  // Apply resort filter — drop units that don't mention the target resort
+  // in their h1/title/meta-description. Without this, a Poipu Kai search
+  // returns Kiahuna Golf Village houses, etc.
+  const matchingResort = matchingBedrooms.filter((m) => matchesResort(m.resortHaystack));
 
   console.log(
     `[sp-discovery] sitemap=${urls.length} metaResolved=${metas.filter(Boolean).length} ` +
-    `matchingBedrooms=${matchingBedrooms.length} (target=${bedrooms}BR)`,
+    `matchingBedrooms=${matchingBedrooms.length} matchingResort=${matchingResort.length} ` +
+    `(target=${bedrooms}BR @ "${resortName}")`,
   );
 
-  if (matchingBedrooms.length === 0) return [];
+  if (matchingResort.length === 0) return [];
 
   // Phase 2: rcapi pricing for every matching unit, in parallel batches.
   // We use scrapeSuiteParadiseRate for consistency, but it re-fetches the
@@ -495,14 +543,14 @@ export async function findAvailableSuiteParadiseUnits(opts: {
     }
   };
 
-  const priced = await withConcurrency(matchingBedrooms, 8, priceOne);
+  const priced = await withConcurrency(matchingResort, 8, priceOne);
   const available = priced
     .filter((u): u is SuiteParadiseAvailableUnit => u !== null)
     .sort((a, b) => a.totalPrice - b.totalPrice)
     .slice(0, limit);
 
   console.log(
-    `[sp-discovery] ${matchingBedrooms.length} ${bedrooms}BR units checked, ` +
+    `[sp-discovery] ${matchingResort.length} ${bedrooms}BR @ "${resortName}" units checked, ` +
     `${available.length} available for ${checkIn}→${checkOut} (${Date.now() - startedAt}ms)`,
   );
   return available;
