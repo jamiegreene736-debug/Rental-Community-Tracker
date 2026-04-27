@@ -2907,6 +2907,36 @@ export async function registerRoutes(
       // SPAs commonly fetch rates after first paint — give them time.
       await page.waitForTimeout(2500);
 
+      // Dismiss newsletter / "book direct" popups that PM sites slap on
+      // first load. Parrish Kauai's modal covers the date picker, so the
+      // screenshot is useless without dismissing it. Try a battery of
+      // common close-button selectors, then press Escape as a final
+      // catch-all (most modal libraries bind Esc to close). All silent —
+      // a missed popup just means the screenshot includes the overlay.
+      try {
+        const closeSelectors = [
+          'button[aria-label*="close" i]',
+          'button[aria-label*="dismiss" i]',
+          '[aria-label="Close"]',
+          '[role="button"][aria-label*="close" i]',
+          'button.close', 'button.modal-close', 'button.close-btn', '.close-button',
+          'button:has-text("×")', 'button:has-text("✕")', 'button:has-text("✖")',
+          '[role="dialog"] button:has-text("Close")',
+          '[role="dialog"] button:has-text("No thanks")',
+          '[role="dialog"] button:has-text("Maybe later")',
+        ];
+        for (const sel of closeSelectors) {
+          const el = page.locator(sel).first();
+          if ((await el.count().catch(() => 0)) > 0) {
+            await el.click({ timeout: 1500, force: true }).catch(() => {});
+          }
+        }
+        // Final nudge: some libraries (Privy, Mailchimp popups) only
+        // close on Escape, not button click.
+        await page.keyboard.press("Escape").catch(() => {});
+        await page.waitForTimeout(400);
+      } catch { /* silent */ }
+
       // Try to fill date inputs and click a search button before
       // screenshotting — most PM sites gate rates behind that flow.
       // Bail fast if nothing matches: prior implementation lingered for
