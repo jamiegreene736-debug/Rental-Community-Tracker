@@ -2981,7 +2981,7 @@ export async function registerRoutes(
       // and inflate the vision payload to multi-MB. Calendar widgets and
       // rate breakdowns generally render in the top ~2400 px once the
       // search button is clicked.
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 70, fullPage: false });
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
       const screenshotBase64 = screenshot.toString("base64");
 
       const prompt = [
@@ -2999,40 +2999,53 @@ export async function registerRoutes(
         `{"isUnitPage":true|false,"available":true|false|null,"totalPrice":N|null,"nightlyPrice":N|null,"dateMatch":true|false|null,"reason":"<=140 chars"}`,
       ].join("\n");
 
-      const visionResp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          // Sonnet 4.6 over Haiku — Haiku missed prices on Parrish Kauai
-          // and Suite Paradise screenshots even when the rate calendar
-          // was clearly visible. Sonnet's extra cost (~$0.015 vs $0.003
-          // per call) is trivial at this volume and the recall is
-          // dramatically better.
-          model: "claude-sonnet-4-6",
-          max_tokens: 250,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: screenshotBase64 } },
-              { type: "text", text: prompt },
-            ],
-          }],
-        }),
-        signal: AbortSignal.timeout(20000),
-      });
+      // Try Sonnet first (better recall on rate calendars), fall back to
+      // Haiku on any non-200 — gives us a working response when Sonnet
+      // 400s on edge-case images even though Haiku accepts them.
+      const callVision = async (model: string) =>
+        fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 250,
+            messages: [{
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/jpeg", data: screenshotBase64 } },
+                { type: "text", text: prompt },
+              ],
+            }],
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+
+      let visionResp = await callVision("claude-sonnet-4-6");
+      let usedFallback = false;
+      let firstAttemptError = "";
+      if (!visionResp.ok) {
+        firstAttemptError = await visionResp.text().catch(() => "");
+        console.warn(`[verify-pm-listing] sonnet HTTP ${visionResp.status} ${firstAttemptError.slice(0, 300)} — falling back to haiku`);
+        visionResp = await callVision("claude-haiku-4-5-20251001");
+        usedFallback = true;
+      }
       if (!visionResp.ok) {
         const body = await visionResp.text().catch(() => "");
-        console.warn(`[verify-pm-listing] vision HTTP ${visionResp.status} ${body.slice(0, 200)}`);
+        console.warn(`[verify-pm-listing] haiku HTTP ${visionResp.status} ${body.slice(0, 300)}`);
         return res.json({
           ok: false,
           reason: `vision-${visionResp.status}`,
+          visionErrorBody: (firstAttemptError || body).slice(0, 500),
           finalUrl, title,
           screenshotBase64: `data:image/jpeg;base64,${screenshotBase64}`,
         });
+      }
+      if (usedFallback) {
+        console.log(`[verify-pm-listing] used haiku fallback after sonnet error`);
       }
       const visionData = await visionResp.json() as any;
       const text: string = visionData?.content?.[0]?.text ?? "";
