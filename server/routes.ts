@@ -10,6 +10,7 @@ import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
+import { searchVrboViaApify } from "./apify-vrbo";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2457,22 +2458,48 @@ export async function registerRoutes(
       return out;
     })();
 
-    // ── Vrbo via Google site: search ─────────────────────────────────────
-    // Re-enabled per operator request — Vrbo's TOS technically prohibits
-    // commercial re-rental same as Airbnb, but the operator wants the
-    // option to surface Vrbo-listed inventory for awareness / direct-with-
-    // owner outreach. We do NOT push Vrbo into the priced pool by default
-    // (caller can opt in via the response shape); auto-fill skips it.
-    // Pricing comes from snippet extraction only — no dedicated Vrbo
-    // engine in SearchAPI, so URLs are typically unpriced (operator
-    // clicks through to see the rate).
+    // ── Vrbo via Apify actor (priced + all-in totals in USD) ─────────────
+    // Replaces the Google site:vrbo.com path that returned unpriced URLs.
+    // The Apify actor (`makework36/vrbo-scraper`) takes a destination
+    // string + check-in/check-out + bedrooms and returns priced
+    // candidates with all-in totals (base + cleaning + service + taxes)
+    // in USD. ~$0.0025/result × ~30 results = ~$0.075 per call; cached
+    // 5 min in-process so repeated find-buy-in calls for the same dates
+    // cost $0.
+    //
+    // Auto-fill still treats Vrbo as awareness-only by default (same
+    // TOS sublet restriction as Airbnb), but with priced candidates the
+    // operator now sees the actual rate without clicking through. The
+    // Apify path lets us retire our Browserbase Vrbo scraper for the
+    // common case — verify-pm-listing for Vrbo URLs becomes a fallback
+    // only.
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const { candidates, raw, dropped } = await siteSearch("vrbo.com", "vrbo", "Vrbo");
-      vrboRawCount = raw;
-      vrboDropped = dropped;
-      return candidates;
+      try {
+        const apifyResults = await searchVrboViaApify({
+          resortName: resortName ?? community,
+          location: resortName ?? community,
+          bedrooms,
+          checkIn,
+          checkOut,
+        });
+        vrboRawCount = apifyResults.length;
+        return apifyResults.map((c): Candidate => ({
+          source: "vrbo" as const,
+          sourceLabel: "Vrbo",
+          title: c.title,
+          url: withStayDates("vrbo", c.url),
+          nightlyPrice: c.nightlyPrice,
+          totalPrice: c.totalPrice,
+          bedrooms: c.bedrooms,
+          image: c.image,
+          snippet: c.snippet,
+        }));
+      } catch (e: any) {
+        console.error("[find-buy-in] vrbo (apify) error:", e.message);
+        return [];
+      }
     })();
 
     // ── Property-management companies via Google search ────────────────────
