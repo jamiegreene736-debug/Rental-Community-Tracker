@@ -387,10 +387,32 @@ export default function Bookings() {
       const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
       const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
 
+      // Deduplicate find-buy-in calls. When a reservation has multiple
+      // empty slots with the SAME bedrooms (Amy Vanbuskirk's 2x 3BR
+      // case), each slot was previously firing its own find-buy-in
+      // call in parallel. Two simultaneous SearchAPI/Google scrape
+      // calls with identical params occasionally return different
+      // result sets (Google rate-limits, transient timeouts in upstream
+      // services) — the slot whose call returned a thinner response
+      // got `picked: null` because its unpricedFallback was empty.
+      // Symptom: 1-of-2 slots filled even though both should have
+      // gotten the same Suite Paradise URL.
+      // Fix: one call per (bedrooms) group, shared across all slots
+      // with that bedroom count. Bonus: half the API spend for
+      // multi-unit reservations.
+      const findBuyInCache = new Map<number, Promise<FindBuyInResponse>>();
+      const getFindBuyInForBedrooms = (bedrooms: number): Promise<FindBuyInResponse> => {
+        const existing = findBuyInCache.get(bedrooms);
+        if (existing) return existing;
+        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}`;
+        const promise = apiRequest("GET", url).then((r) => r.json()) as Promise<FindBuyInResponse>;
+        findBuyInCache.set(bedrooms, promise);
+        return promise;
+      };
+
       const results = await Promise.all(
         emptySlots.map(async (slot) => {
-          const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${slot.bedrooms}&checkIn=${ci}&checkOut=${co}`;
-          const data = (await apiRequest("GET", url).then((r) => r.json())) as FindBuyInResponse;
+          const data = await getFindBuyInForBedrooms(slot.bedrooms);
 
           // Walk cheapest-first and run an availability pre-flight on each
           // Airbnb pick. Non-Airbnb sources aren't verifiable via SearchAPI
@@ -508,26 +530,36 @@ export default function Bookings() {
           const noteSuffix = visionVerified
             ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
             : "";
-          const created = await apiRequest("POST", "/api/buy-ins", {
-            propertyId: selectedPropertyId,
-            propertyName,
-            unitId: slot.unitId,
-            unitLabel: slot.unitLabel,
-            checkIn: ci,
-            checkOut: co,
-            costPaid: finalCost.toFixed(2),
-            airbnbConfirmation: null,
-            airbnbListingUrl: pick.url,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}`,
-            status: "active",
-          }).then((r) => r.json());
-          if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
+          // Wrap create+attach in a try/catch — if one slot fails (DB
+          // hiccup, race in attachBuyIn's "same-slot already attached"
+          // check, etc.) we don't want the whole Promise.all to reject
+          // and leave the OTHER slot dangling with a buy-in created
+          // but never attached.
+          try {
+            const created = await apiRequest("POST", "/api/buy-ins", {
+              propertyId: selectedPropertyId,
+              propertyName,
+              unitId: slot.unitId,
+              unitLabel: slot.unitLabel,
+              checkIn: ci,
+              checkOut: co,
+              costPaid: finalCost.toFixed(2),
+              airbnbConfirmation: null,
+              airbnbListingUrl: pick.url,
+              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}`,
+              status: "active",
+            }).then((r) => r.json());
+            if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
 
-          await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
-            buyInId: created.id,
-          }).then((r) => r.json());
+            await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+              buyInId: created.id,
+            }).then((r) => r.json());
 
-          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified };
+            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified };
+          } catch (e: any) {
+            skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
+            return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
+          }
         }),
       );
       return { reservation, results };
