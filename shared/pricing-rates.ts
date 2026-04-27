@@ -31,10 +31,27 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Princeville":       { "2BR": 492, "3BR": 744, "4BR": 858,  region: "hawaii" },
   "Kekaha Beachfront": { "2BR": 540, "3BR": 810, "4BR": 1080, region: "hawaii" },
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
-  "Southern Dunes":    {            "3BR": 192, "4BR": 200,   region: "florida" },
-  "Windsor Hills":     {            "3BR": 210, "4BR": 294,   region: "florida" },
+  "Southern Dunes":    { "2BR":  85, "3BR": 192, "4BR": 200,  region: "florida" },
+  "Windsor Hills":     { "2BR": 150, "3BR": 210, "4BR": 294,  region: "florida" },
+  // Caribe Cove (Kissimmee, FL) — older mid-tier resort ~5mi from Disney.
+  // 2BR base of $125 reflects what the unit actually rents for on
+  // Airbnb/VRBO including taxes + fees (operator-validated 2026-04, see
+  // PR that introduced this entry). Lower than Windsor Hills which is a
+  // newer, more amenitied build. 3BR set proportionally — refresh
+  // empirically once we have a real 3BR draft to compare against.
+  "Caribe Cove":       { "2BR": 125, "3BR": 175,              region: "florida" },
 };
-const FALLBACK_RATE_PER_BEDROOM = 270;
+
+// Region-aware fallback for areas not in BUY_IN_RATES. Hawaii's $270/BR
+// matches the average 2BR cost basis across our Kauai inventory; Florida's
+// $80/BR matches the Disney-area condo cost basis (Caribe Cove 2BR ≈
+// $62/BR, Southern Dunes 3BR ≈ $64/BR). Using the Hawaii number for a
+// Florida draft inflates the dashboard buy-in by ~3.5×. See the note in
+// `getBuyInRate` for how the fallback is selected.
+const FALLBACK_RATE_PER_BEDROOM: Record<RegionType, number> = {
+  hawaii:  270,
+  florida:  80,
+};
 
 export const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
   hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
@@ -64,12 +81,33 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
-// Suggest a BUY_IN_RATES key based on the city / state a draft is
-// being added in. Used by the Add a New Community wizard's pricing-
-// area picker as the default selection — operator can override.
-// Returns "" when nothing matches; the dashboard treats that as
-// "no pricing area" and falls back to the default per-bedroom rate.
-export function suggestPricingArea(city: string, state: string): string {
+// Suggest a BUY_IN_RATES key for a draft. Used by the Add a New
+// Community wizard's pricing-area picker as the default selection —
+// operator can override. Returns "" when nothing matches; the dashboard
+// treats that as "no pricing area" and falls back to the per-bedroom
+// rate for the region.
+//
+// `communityName` (optional) lets us pin specific named complexes to
+// their own tier when one exists in BUY_IN_RATES. This matters because
+// city/state alone can't distinguish "Caribe Cove" (older mid-tier,
+// ~$125/night per 2BR) from "Windsor Hills" (newer premium, ~$210+
+// for 3BR) — both are in Kissimmee. The name match runs first so a
+// known complex always lands on its own tier.
+export function suggestPricingArea(
+  city: string,
+  state: string,
+  communityName?: string,
+): string {
+  const name = (communityName || "").toLowerCase();
+  if (name) {
+    // Match against every BUY_IN_RATES key. A community draft named
+    // "Caribe Cove Resort" should resolve to "Caribe Cove"; allowing
+    // a substring match handles "Resort" / "Condos" suffixes that
+    // operators add to the name field.
+    for (const key of Object.keys(BUY_IN_RATES)) {
+      if (name.includes(key.toLowerCase())) return key;
+    }
+  }
   const c = (city || "").toLowerCase();
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
@@ -81,16 +119,14 @@ export function suggestPricingArea(city: string, state: string): string {
     return "";
   }
   if (s === "florida" || s === "fl") {
-    // Two FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
-    // Davenport, ~15-25mi from Disney, lower buy-in) and Windsor
-    // Hills (Disney-proximate vacation-rental tier). Kissimmee is
-    // broad but most STR-eligible communities there (Caribe Cove,
-    // Windsor Palms, Windsor Hills itself) are within ~5mi of the
-    // parks, so default to Windsor Hills tier and let the operator
-    // downshift to Southern Dunes if a specific Kissimmee community
-    // is south of the 192 corridor. Earlier logic listed Kissimmee
-    // under Southern Dunes which under-priced everything closer to
-    // Disney.
+    // Three FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
+    // Davenport, ~15-25mi from Disney, lower buy-in), Caribe Cove
+    // (older Kissimmee resort), and Windsor Hills (Disney-proximate
+    // newer-build tier). Kissimmee is broad but most STR-eligible
+    // communities there are within ~5mi of the parks, so default to
+    // Windsor Hills tier when no specific name matched above and let
+    // the operator downshift to Caribe Cove or Southern Dunes if the
+    // build is older or further out.
     if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
     if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
     return "";
@@ -103,7 +139,12 @@ export function getBuyInRate(community: string, bedrooms: number): number {
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
   if (typeof rate === "number") return rate;
-  return FALLBACK_RATE_PER_BEDROOM * bedrooms;
+  // No exact rate. Fall back per region — Florida and Hawaii cost
+  // bases differ by ~3.5×, so a global per-BR fallback would inflate
+  // one market or under-price the other. If the community isn't in
+  // the table at all, getCommunityRegion defaults to hawaii.
+  const region = entry?.region ?? getCommunityRegion(community);
+  return FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
 }
 
 export function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {

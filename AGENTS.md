@@ -134,6 +134,35 @@ established it so you can read the rationale in the commit message.
     change the constant in `server/routes.ts` under
     `/api/availability/weekly-pricing` and note the new value here.
 
+30. **`FALLBACK_RATE_PER_BEDROOM` is region-keyed, NOT a single global
+    number.** Hawaii is `$270/BR`, Florida is `$80/BR`. Earlier revision
+    used `$270` globally — calibrated against Kauai 2BR rates ($516 ÷ 2
+    ≈ $258/BR) — which inflated the dashboard buy-in for any Florida
+    draft missing an exact `BUY_IN_RATES[area][${br}BR]` entry by ~3.5×.
+    Concrete failure: a 2BR + 2BR Caribe Cove draft showed $1,080/night
+    buy-in (`$540 × 2`) when the operator-validated cost basis is closer
+    to $250/night. The Florida-specific number is calibrated against
+    Caribe Cove 2BR ($125 ÷ 2 ≈ $62/BR) and Southern Dunes 3BR ($192 ÷ 3
+    ≈ $64/BR). If you add a community in a new region (Tennessee, the
+    Carolinas, etc.), add a fallback entry for that region rather than
+    bumping the Hawaii or Florida numbers.
+
+31. **`spotCheckRate` in `server/community-research.ts` uses the priced
+    Airbnb engine over a 7-night window — NOT regex-grep over Google
+    snippets.** The earlier revision regex-matched `$XXX/night` patterns
+    out of raw Google JSON, which caught (a) headline "from $X" rates
+    that are typically 1-night quotes inflated by cleaning fees, (b)
+    peak-season rates from review sites, and (c) rates from unrelated
+    nearby properties. For Caribe Cove specifically, that path returned
+    `null` entirely because Florida resort pages don't carry the exact
+    `$XXX/night` token. The current path delegates to
+    `fetchAmortizedNightlyByBR` (also used by `/api/community/search-units`)
+    which queries SearchAPI's `airbnb` engine for a 7-night window 30
+    days out and divides `extracted_total_price` by 7 — amortizing
+    cleaning + service fees the way a real booking would. Per-unit
+    rates land within ~10-15% of operator-validated prices. Do NOT
+    revert to Google-snippet scraping for pricing data.
+
 ### Database & deploy
 
 15. **Schema migrations run via `npm run db:push` on Railway boot.**

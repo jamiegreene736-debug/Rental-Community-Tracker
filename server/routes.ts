@@ -15,7 +15,12 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
-import { researchCommunitiesForCity, TOP_MARKET_SEEDS } from "./community-research";
+import {
+  researchCommunitiesForCity,
+  TOP_MARKET_SEEDS,
+  fetchAmortizedNightlyByBR,
+  medianRate,
+} from "./community-research";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -10634,12 +10639,8 @@ export async function registerRoutes(
     //       a 1-night quote, where the cleaning fee inflates the apparent
     //       nightly by ~50%.
     //   (b) SearchAPI airbnb engine — actual priced listings with a 7-night
-    //       check_in/check_out window (the assumption being that a typical
-    //       vacation-rental booking is a week, so cleaning + service fees
-    //       should amortize over 7 nights, not 1). extracted_total_price
-    //       includes nightly + cleaning + service, so total/7 is the proper
-    //       amortized buy-in cost per night.
-    const ratesByBR: Record<number, number[]> = {};
+    //       window (see fetchAmortizedNightlyByBR in community-research.ts
+    //       for the methodology and date-window rationale).
     let airbnbListingCount = 0;
 
     const listingCountQueries = [
@@ -10660,48 +10661,7 @@ export async function registerRoutes(
       } catch { /* non-fatal */ }
     }
 
-    // Live priced lookup: a 7-night window 30 days out. We pick 30 days
-    // ahead so the calendar is open (Airbnb often blocks last-minute on
-    // popular listings) and far enough to dodge the next-7-days surge
-    // pricing. The exact dates are arbitrary — the methodology is what
-    // matters: total / 7 = amortized nightly inclusive of cleaning/svc.
-    const now = new Date(); now.setUTCHours(0, 0, 0, 0);
-    const checkInDate = new Date(now); checkInDate.setUTCDate(checkInDate.getUTCDate() + 30);
-    const checkOutDate = new Date(checkInDate); checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
-    const ymd = (d: Date) => d.toISOString().slice(0, 10);
-    try {
-      const sp: Record<string, string> = {
-        engine: "airbnb",
-        q: `${communityName} ${city} ${state}`,
-        check_in_date: ymd(checkInDate),
-        check_out_date: ymd(checkOutDate),
-        adults: "2",
-        type_of_place: "entire_home",
-        currency: "USD",
-        api_key: searchApiKey,
-      };
-      const resp = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-      if (resp.ok) {
-        const data = await resp.json() as any;
-        const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-        const cnameLower = communityName.toLowerCase();
-        for (const p of properties) {
-          const title = String(p?.name ?? p?.title ?? "");
-          const desc = String(p?.description ?? "");
-          // Engine bbox is generous — restrict to listings whose title or
-          // description actually names this community.
-          if (!title.toLowerCase().includes(cnameLower) && !desc.toLowerCase().includes(cnameLower)) continue;
-          const total = Number(p?.price?.extracted_total_price);
-          const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
-          if (!Number.isFinite(total) || total <= 0) continue;
-          if (!Number.isFinite(br) || br < 1 || br > 6) continue;
-          const nightly = Math.round(total / 7);
-          if (nightly < 50 || nightly > 3000) continue;
-          if (!ratesByBR[br]) ratesByBR[br] = [];
-          ratesByBR[br].push(nightly);
-        }
-      }
-    } catch { /* fall through to per-BR default */ }
+    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state);
 
     // ── 2. Parse available unit types ─────────────────────────────────────────
     // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
@@ -10721,11 +10681,6 @@ export async function registerRoutes(
     const availableTypes = Array.from(parsedTypes).sort((a, b) => a - b);
 
     // ── 3. Calculate median rate per bedroom type ─────────────────────────────
-    const medianRate = (arr: number[]) => {
-      if (!arr?.length) return null;
-      const s = [...arr].sort((a, b) => a - b);
-      return s[Math.floor(s.length / 2)];
-    };
     // Estimate per-unit nightly rate for each BR type (if not found in search, use location-based estimate)
     const baseRatePerBR: Record<number, number> = {};
     const isHawaii = state === "Hawaii" || state === "HI";
