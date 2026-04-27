@@ -95,6 +95,26 @@ function normalize(s: string): string {
 // when they're absent. If we hit destinations where this fails, we
 // can build a small lookup table or hit Vrbo's destination
 // autocomplete to resolve them.
+// Map a resort name to the destination string Vrbo's destination search
+// actually recognizes. Vrbo's search resolves CITIES / regions, not
+// individual resorts — passing "Poipu Kai" returned 0 raw results from
+// the actor because Vrbo's autocomplete couldn't resolve it. We swap to
+// the city the resort sits in, then narrow back via the post-hoc
+// `mentionsResort` filter on title + location.description + propertyType.
+//
+// Hawaii destinations covered for now (matches our PM coverage). New
+// destinations fall through to the original resort name (better than
+// nothing — sometimes Vrbo does match resort names directly).
+function resolveVrboDestination(resortOrLocation: string): string {
+  const s = resortOrLocation.toLowerCase();
+  if (/poipu|pili\s*mai|kiahuna/.test(s)) return "Koloa, HI, United States";
+  if (/wailea|kihei/.test(s)) return "Wailea, HI, United States";
+  if (/kaanapali|kapalua/.test(s)) return "Lahaina, HI, United States";
+  if (/princeville|hanalei|anini/.test(s)) return "Princeville, HI, United States";
+  if (/wailua|kapaa/.test(s)) return "Kapaa, HI, United States";
+  return resortOrLocation;
+}
+
 function buildVrboSearchUrl(opts: {
   destination: string;
   checkIn: string;
@@ -109,10 +129,14 @@ function buildVrboSearchUrl(opts: {
     endDate: opts.checkOut,
     flexibility: "0_DAY",
     adults: "2",
-    minBedrooms: String(opts.bedrooms),
     isInvalidatedDate: "false",
     sort: "RECOMMENDED",
   });
+  // Note: we deliberately DO NOT pass `minBedrooms` to Vrbo. The data
+  // is sparse on listings and Vrbo's filter often drops valid results
+  // that just don't have the field set. The post-hoc bedroom filter
+  // in the response parser handles this — and it's permissive (keeps
+  // unknowns) so we don't lose candidates with missing metadata.
   return `https://www.vrbo.com/search?${params.toString()}`;
 }
 
@@ -140,7 +164,7 @@ function buildActorInput(opts: {
   const { actor, location, bedrooms, checkIn, checkOut, maxResults } = opts;
   if (/easyapi/.test(actor)) {
     const searchUrl = buildVrboSearchUrl({
-      destination: location,
+      destination: resolveVrboDestination(location),
       checkIn,
       checkOut,
       bedrooms,
