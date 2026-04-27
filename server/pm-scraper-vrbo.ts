@@ -78,19 +78,15 @@ export async function scrapeVrboRate(opts: {
   // page. Enable Browserbase's residential proxy network so each session
   // gets a fresh residential IP.
   //
-  // Pin the proxy to a US IP (`geolocation: { country: "US" }`). Without
-  // this Browserbase rotates across regions and a CA IP would make Vrbo
-  // serve prices in CAD — both the calendar GraphQL `displayPrice` and
-  // the booking-widget total would render in CAD. Our number extraction
-  // is currency-naive (regex `\$\s*([\d,]+)`), so a CAD value silently
-  // becomes a USD-tagged number ~28% off. Forcing US locale solves both
-  // currency display and Vrbo's CAD-only locale quirks.
-  const session = await bb.sessions.create({
-    projectId: bbProjectId,
-    proxies: [
-      { type: "browserbase", geolocation: { country: "US" } },
-    ] as any,
-  });
+  // Earlier (PR #187) we tried pinning the proxy to a US IP via
+  // `proxies: [{ type: "browserbase", geolocation: { country: "US" } }]`
+  // to stop Vrbo serving CAD when the proxy landed in Canada. That
+  // syntax broke Vrbo entirely — sessions returned 0 GraphQL ops and a
+  // blank page title (some combination of bad SDK shape, US-IP
+  // anti-bot variance, or both). Reverting to `proxies: true` and
+  // forcing USD locale via the `Accept-Language` header + Vrbo's
+  // currency cookie + a `?currency=USD` URL hint instead.
+  const session = await bb.sessions.create({ projectId: bbProjectId, proxies: true });
 
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   let calendarBody = "";
@@ -108,6 +104,23 @@ export async function scrapeVrboRate(opts: {
     browser = await chromium.connectOverCDP(session.connectUrl);
     const ctx = browser.contexts()[0];
     const page = ctx.pages()[0] || (await ctx.newPage());
+
+    // Force USD locale — defense in depth across three vectors:
+    //   1. Accept-Language: en-US — Vrbo's locale resolver checks this
+    //      header before falling back to GeoIP.
+    //   2. `set_pi_session_currency=USD` cookie — Vrbo's product-info
+    //      service reads this for the booking widget's currency.
+    //   3. `?currency=USD` URL param (added below) — last-resort hint.
+    //
+    // Together these pin the page to USD even when Browserbase rotates
+    // to a Canadian IP. Earlier version (PR #187) tried the cleaner
+    // `proxies.geolocation.country: "US"` route — broke Vrbo entirely,
+    // see comment on the session creation above.
+    await ctx.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+    await ctx.addCookies([
+      { name: "set_pi_session_currency", value: "USD", domain: ".vrbo.com", path: "/" },
+      { name: "preferred_currency", value: "USD", domain: ".vrbo.com", path: "/" },
+    ]);
 
     // Tap every graphql response and grab the rate-calendar one when it lands.
     page.on("response", async (resp) => {
@@ -139,6 +152,9 @@ export async function scrapeVrboRate(opts: {
       if (!u.searchParams.has("arrival")) u.searchParams.set("arrival", checkIn);
       if (!u.searchParams.has("departure")) u.searchParams.set("departure", checkOut);
       if (!u.searchParams.has("adults")) u.searchParams.set("adults", "2");
+      // USD nudge alongside the cookie + Accept-Language. Vrbo accepts
+      // this for its booking widget when set explicitly.
+      if (!u.searchParams.has("currency")) u.searchParams.set("currency", "USD");
       urlWithDates = u.toString();
     } catch { /* invalid URL — fall back to original */ }
 
@@ -221,6 +237,24 @@ export async function scrapeVrboRate(opts: {
         iterations: 0,
         agentTrace: [`vrbo-scraper: ${unavailableCount}/${stayDays.length} nights unavailable`],
       };
+    }
+
+    // CAD-leak guard. If any displayPrice carries a non-USD prefix
+    // ("CA$", "C$", "AU$", "£", "€"), abort — the locale forcing didn't
+    // land and we'd silently store a non-USD number as USD. Better to
+    // bail than to write wrong data; the caller falls through to other
+    // channels and a future session may get a different IP that does
+    // serve USD.
+    const allPrices = stayDays.map((d) => String(d?.displayPrice || ""));
+    const hasNonUsdPrefix = allPrices.some((p) =>
+      /\bCA\$|\bC\$|\bA\$|\bAU\$|£\s*[\d,]|€\s*[\d,]|MXN/i.test(p),
+    );
+    if (hasNonUsdPrefix) {
+      return errResult(
+        url,
+        "vrbo-non-usd-locale",
+        `Vrbo served prices in a non-USD currency despite locale nudges. Sample displayPrice: "${allPrices[0]}"`,
+      );
     }
 
     // Sum the calendar `displayPrice` per night. This is the BASE rate
