@@ -377,25 +377,35 @@ export default function Bookings() {
       );
       const estProfit = payout - existingCost - totalCost;
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
-      // When auto-fill picked nothing for any slot, that means the
-      // bookable-channels pool (Booking.com + PM) had no priced
-      // candidates. Tell the operator explicitly so they know to
-      // expand the per-slot Find buy-in panel and click through to
-      // a PM company manually — Airbnb is intentionally excluded
-      // from auto-fill since we can't sublet from there.
+      // Some picks can come back at $0 — that's the unpriced-PM
+      // fallback (server-side, /api/operations/find-buy-in): when no
+      // priced PM/Booking candidate exists, auto-fill grabs a top PM
+      // URL and attaches it with totalPrice=0 so the slot at least
+      // points at a clickable PM company instead of staying empty.
+      // Operator updates the cost after contacting the PM.
+      const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
       if (filled.length === 0) {
         toast({
           title: "No auto-fill candidates",
           description:
-            "Booking.com and PM Companies didn't return a priced candidate for the dates. Click 'Find buy-in' on any slot to see Airbnb listings (with reverse-image PM matches you can click through to book direct).",
+            "Booking.com and PM Companies didn't return any candidates for the dates. Click 'Find buy-in' on any slot to see Airbnb listings (with reverse-image PM matches you can click through to book direct).",
           variant: "destructive",
+        });
+      } else if (zeroCostFills.length === filled.length) {
+        // All picks are unpriced PM URLs.
+        toast({
+          title: `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — pricing pending`,
+          description:
+            `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Click the link in the slot to see the PM site's actual price, then edit the buy-in cost.`
+            + (skipped.length ? ` · No PM URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
         toast({
           title: `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-            + (skipped.length ? ` · No priced PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
+            + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
+            + (skipped.length ? ` · No PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
       }
       setAutoFilling(null);
@@ -1166,18 +1176,31 @@ function LiveSearchSection({
           so any VRBO listing surfaced here would be an unusable channel.
           Airbnb stays as telemetry + photo source for the reverse-image
           matches rendered inside each Airbnb row (see LiveRow). */}
+      {/* Section open-by-default rules:
+          - Booking.com and PM Companies — ALWAYS open. These are the
+            actually-bookable channels (PR #144 / #145 work — Airbnb's
+            TOS bars subletting, so it's telemetry-only). The operator
+            needs to see PM links every time they Find buy-in; making
+            them click-to-expand was the bug Jamie reported.
+          - Airbnb — open only when a small number of results (otherwise
+            collapsed since it's reference-only, with reverse-image PM
+            matches rendered under each row that the operator can
+            actually click through). */}
       {[
-        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb  },
-        { key: "booking", label: "Booking.com",   items: booking },
-        { key: "pm",      label: "PM Companies (Google)", items: pm },
+        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
+        { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
+        { key: "pm",      label: "PM Companies (Google)", items: pm, defaultOpen: true },
       ].map((s) => (
-        <details key={s.key} open={s.items.length > 0 && s.items.length <= 3}>
+        <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
             <Badge className={`text-[10px] ${sourceBadgeClass(s.key)}`}>{s.label}</Badge>
             <span>{s.items.length} results</span>
           </summary>
           {s.items.length === 0 ? (
-            <p className="text-xs text-muted-foreground pl-2 py-2">No results.</p>
+            <p className="text-xs text-muted-foreground pl-2 py-2">
+              No results.
+              {s.key === "pm" && " (Try clicking 'Open' on the top Airbnb row above — its reverse-image PM matches give you direct booking links even when this section is empty.)"}
+            </p>
           ) : (
             <div className="space-y-2 mt-1.5 pl-2">
               {s.items.map((c, i) => (

@@ -2509,7 +2509,18 @@ export async function registerRoutes(
     const priced: Candidate[] = [...booking, ...pm]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
-    const cheapest = priced.slice(0, 2);
+    // If no priced PM/Booking candidate exists, fall back to the top
+    // unpriced PM URL so auto-fill still has SOMETHING to attach. PM
+    // sites often don't surface live prices in Google snippets — but
+    // the URL itself is what the operator needs to click through and
+    // negotiate. Buy-in record gets created with $0 cost; operator
+    // updates after talking to the PM. Better than a silent no-op
+    // that leaves the slot looking unfilled when there are real PM
+    // links available to click.
+    const unpricedFallback: Candidate[] = priced.length === 0
+      ? pm.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
+      : [];
+    const cheapest = priced.length > 0 ? priced.slice(0, 2) : unpricedFallback;
     // Telemetry: what would the cheapest have been if we counted Airbnb?
     // Useful to see how often Airbnb is undercutting the bookable channels.
     const airbnbCheapest = airbnbWithMatches
