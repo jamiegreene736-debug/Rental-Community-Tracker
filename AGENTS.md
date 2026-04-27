@@ -185,6 +185,53 @@ established it so you can read the rationale in the commit message.
     and writes only weeks that actually failed. Do NOT reintroduce
     baseline-to-52-weeks fanout. See PR #38.
 
+### Browser automation against Guesty admin
+
+25. **Vanilla rebrowser-playwright + the Dockerfile's Chromium — never
+    Browserbase — for app.guesty.com automation.** Browserbase is in
+    the dependency tree (`@browserbasehq/sdk`) because Vrbo's PUBLIC
+    site CAPTCHAs anonymous traffic, and `pm-scraper-vrbo.ts` uses
+    Browserbase + residential proxy to get past it. Guesty's
+    AUTHENTICATED admin UI for paying customers does not have that
+    problem — vanilla Playwright with the local
+    `/usr/bin/chromium` (already in the Dockerfile) and
+    rebrowser-playwright's CDP-leak patch handles Okta's bot
+    detection. This saves the ~$0.10/click Browserbase session cost
+    and the API-key footprint. If you find yourself reaching for
+    Browserbase for a Guesty automation, first check whether the
+    existing `openGuestyAdminPage` helper in
+    `server/guesty-playwright.ts` works — it almost certainly does.
+
+26. **Guesty admin endpoints are synchronous, not queued.** The
+    pattern (`/api/admin/guesty/inspect-vrbo-compliance`,
+    `/api/admin/guesty/inspect-distribution`,
+    `/api/admin/airbnb/submit-compliance`) runs Playwright inline in
+    the request handler and returns `{ ok, finalUrl, screenshotUrl,
+    trace, errorMessages? }` directly. A click-and-verify against
+    Guesty completes in ~10-30s — well under HTTP timeout — and the
+    operator usually wants the screenshot back immediately, not a
+    job-status page to poll. Don't introduce a `publish_jobs` table
+    or worker process unless we hit a concrete reason synchronous
+    can't scale (e.g. multiple concurrent Railway requests
+    fighting over Chromium memory). The single-process, one-call-at-
+    a-time shape is also the cheapest — no DB writes, no extra
+    process, browser lifetime exactly equals the request.
+
+27. **Inspect-first, click-second.** Every Guesty automation against
+    a new admin page lands as TWO PRs: an `inspect-X` endpoint that
+    dumps DOM structure (headings, buttons, channel-row containers,
+    publish-candidate buttons + their `data-testid`s) and a
+    screenshot, then a `submit-X` / `publish-X` endpoint that
+    actually clicks. The operator hits inspect on a real account,
+    pastes back the dump, and the click selectors get wired against
+    confirmed DOM rather than guesses. Guesty's admin UI varies per
+    account (which channels are connected, what state each is in,
+    beta-flag-gated controls) so this is materially cheaper than
+    iterating blindly on a deploy → screenshot loop. Precedent:
+    `inspect-vrbo-compliance` shipped before `submit-vrbo-compliance`
+    was written. See `server/guesty-playwright.ts` for the shared
+    session helpers both phases lean on.
+
 ### Compliance & channel sync
 
 20. **Tax Map Key (TMK) is NEVER written to
@@ -369,6 +416,13 @@ Examples:
   multipliers. Edit here to change seasonality.
 - `shared/schema.ts` — Drizzle schema, single source of truth for the
   database.
+- `server/guesty-playwright.ts` — shared building blocks for any
+  Playwright automation against `app.guesty.com`: cookie restoration,
+  Okta storage injection, stealth init script, the email/password +
+  IMAP-MFA login flow, and `openGuestyAdminPage()` which composes them
+  all into a one-call session opener. Add new admin automations on
+  top of these helpers; don't re-implement the 500 lines of session
+  boilerplate per endpoint. See Load-Bearing #25–27 for the policy.
 
 ## Addressed to Codex specifically
 
