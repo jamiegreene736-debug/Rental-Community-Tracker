@@ -40,11 +40,19 @@ export type AgentResult = {
 
 // 1366×768 keeps screenshot tokens reasonable while leaving room for
 // most PM booking widgets to fully render.
-const VIEWPORT_W = 1366;
+// Smaller viewport = fewer image tokens per screenshot. 1024×768 still
+// gives the agent enough room to see calendars and price tables, and
+// stays well under Anthropic's 30K-tokens-per-minute tier-1 cap when
+// combined with truncated history below.
+const VIEWPORT_W = 1024;
 const VIEWPORT_H = 768;
-// Bound: most PMs converge in 4-7 iterations. 12 leaves headroom for
-// awkward date-pickers without unbounded spend on stuck sites.
 const MAX_ITERATIONS = 12;
+// Keep only the last N message-pair turns in the rolling context.
+// Each turn (assistant + tool_result with screenshot) is ~2-3K tokens.
+// Capping at 4 turns leaves the system prompt + ~10K tokens of history
+// per request — well under the per-minute rate limit even at fast
+// iteration rates.
+const HISTORY_TURNS = 4;
 // Sonnet 4.6 doesn't support the `computer_20250124` tool type (it's a
 // coding-focused variant). The latest Sonnet that does support
 // computer-use is 4.5. Reserve 4.6 for non-computer-use vision calls.
@@ -146,7 +154,7 @@ async function runAgentLoop(
           type: "image",
           source: {
             type: "base64",
-            media_type: "image/png",
+            media_type: "image/jpeg",
             data: await screenshotPngBase64(page),
           },
         },
@@ -155,6 +163,13 @@ async function runAgentLoop(
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    // Trim history every iteration: keep the initial user message
+    // (goal + first screenshot) plus the last HISTORY_TURNS turns
+    // (assistant + tool_result). Older turns are dropped to stay under
+    // the 30K-tokens-per-minute rate limit. The agent still has enough
+    // recent context to know what it just did.
+    const messagesForRequest = trimMessages(messages, HISTORY_TURNS);
+
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -175,7 +190,7 @@ async function runAgentLoop(
             display_height_px: VIEWPORT_H,
           },
         ],
-        messages,
+        messages: messagesForRequest,
       }),
       signal: AbortSignal.timeout(30000),
     });
@@ -211,7 +226,7 @@ async function runAgentLoop(
           if (result.image)
             content.push({
               type: "image",
-              source: { type: "base64", media_type: "image/png", data: result.image },
+              source: { type: "base64", media_type: "image/jpeg", data: result.image },
             });
           toolResults.push({
             type: "tool_result",
@@ -313,8 +328,22 @@ async function executeAction(
   }
 }
 
+// Keep messages[0] (initial goal + first screenshot) plus the last
+// keepTurns × 2 messages (assistant + tool_result pair per turn).
+// Drops older turns to control per-request token cost. The agent's
+// system prompt holds the goal; recent turns hold what it just did.
+function trimMessages(messages: any[], keepTurns: number): any[] {
+  const keepRecent = keepTurns * 2;
+  if (messages.length <= 1 + keepRecent) return messages;
+  return [messages[0], ...messages.slice(messages.length - keepRecent)];
+}
+
 async function screenshotPngBase64(page: Page): Promise<string> {
-  const buf = await page.screenshot({ type: "png", fullPage: false });
+  // JPEG quality 65 over PNG — Anthropic counts image tokens by pixel
+  // dimensions, not file size, but smaller payloads upload faster and
+  // we don't need pixel-perfect for UI driving. Quality 65 is still
+  // plenty legible for calendars and rate breakdowns.
+  const buf = await page.screenshot({ type: "jpeg", quality: 65, fullPage: false });
   return buf.toString("base64");
 }
 
