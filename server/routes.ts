@@ -9,7 +9,7 @@ import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
-import { findAvailableParrishKauaiUnits } from "./pm-scraper-parrish-kauai";
+import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -1988,6 +1988,9 @@ export async function registerRoutes(
     pkCalls: 0,
     pkHits: 0,
     pkUnitsTotal: 0,
+    cbCalls: 0,
+    cbHits: 0,
+    cbUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -2003,9 +2006,11 @@ export async function registerRoutes(
       ...pmDiscoveryStats,
       spHitRate: rate(pmDiscoveryStats.spHits, pmDiscoveryStats.spCalls),
       pkHitRate: rate(pmDiscoveryStats.pkHits, pmDiscoveryStats.pkCalls),
+      cbHitRate: rate(pmDiscoveryStats.cbHits, pmDiscoveryStats.cbCalls),
       googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
       spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
       pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
+      cbAvgUnits: avg(pmDiscoveryStats.cbUnitsTotal, pmDiscoveryStats.cbCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
   });
@@ -2697,60 +2702,73 @@ export async function registerRoutes(
       : Promise.resolve([]);
 
     // ── Parrish Kauai inventory discovery (sitemap + WP vrp endpoints) ────
-    // Same pattern as Suite Paradise but using PK's two cheap public
-    // AJAX endpoints (getUnitRates, getUnitBookedDates). PK runs on a
-    // custom WP plugin — every unit page has data-unit-* attrs (`beds`,
-    // `slug`, `unit-id`, `name`, `city`) so metadata extraction is just
-    // attribute-reading. Pricing + availability is two GETs per unit.
+    // vrp_main-powered PMs (Parrish Kauai, CB Island Vacations, …) all
+    // expose the same sitemap + per-unit AJAX endpoints. We fan out to
+    // each one in parallel via the generic vrp scraper. PK covers all
+    // of Kauai (Poipu, Princeville, Hanalei, …); CB Island spans all
+    // Hawaiian islands. The resort filter handles narrowing — a Poipu
+    // Kai search across CB Island will return only CB Island's Poipu
+    // Kai inventory (if any).
     //
-    // PK covers all of Kauai (Poipu, Princeville, Hanalei, …), so the
-    // resort filter is essential — without it a Poipu Kai search would
-    // return Princeville rentals indiscriminately. Runs for ANY Kauai
-    // search, not just Poipu, since PK isn't Poipu-exclusive.
-    const isKauai = /kauai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai/i.test(community);
-    const pkDiscoveryPromise: Promise<Candidate[]> = isKauai
-      ? (async () => {
-          pmDiscoveryStats.pkCalls++;
-          try {
-            const units = await findAvailableParrishKauaiUnits({
-              bedrooms,
-              checkIn,
-              checkOut,
-              resortName: resortName ?? community,
-            });
-            if (units.length > 0) pmDiscoveryStats.pkHits++;
-            pmDiscoveryStats.pkUnitsTotal += units.length;
-            return units.map((u): Candidate => ({
-              source: "pm" as const,
-              sourceLabel: "Parrish Kauai",
-              title: u.name,
-              url: withStayDates("pm", u.url),
-              nightlyPrice: u.nightlyPrice,
-              totalPrice: u.totalPrice,
-              bedrooms: u.bedrooms,
-              snippet: `Parrish Kauai · ${u.bedrooms}BR · sitemap-discovered, vrp-priced`,
-            }));
-          } catch (e: any) {
-            console.error("[find-buy-in] pk-discovery error:", e.message);
-            return [];
-          }
-        })()
-      : Promise.resolve([]);
+    // Gating: the discovery is bedroom + resort-token-match driven, so
+    // an off-topic site (e.g. CB Island for an Oahu-only search) just
+    // returns 0 matches via the resort filter rather than wasting a
+    // sitemap walk. We still gate to "is Hawaii" because both PMs are
+    // HI-only and we don't want to walk their sitemaps for, say, a
+    // Florida search.
+    const isHawaii = /hawaii|kauai|maui|oahu|honolulu|big\s*island|hawai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai|wailea|kaanapali|kihei|lahaina|kaneohe/i.test(community);
 
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered] = await Promise.all([
-      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise,
+    const vrpDiscoveryPromise = (siteKey: keyof typeof VRP_SITES, statsKey: "pkCalls" | "cbCalls"): Promise<Candidate[]> => {
+      if (!isHawaii) return Promise.resolve([]);
+      const site = VRP_SITES[siteKey];
+      const hitsKey = statsKey.replace("Calls", "Hits") as "pkHits" | "cbHits";
+      const totalKey = statsKey.replace("Calls", "UnitsTotal") as "pkUnitsTotal" | "cbUnitsTotal";
+      return (async () => {
+        pmDiscoveryStats[statsKey]++;
+        try {
+          const units = await findAvailableVrpUnits({
+            site,
+            bedrooms,
+            checkIn,
+            checkOut,
+            resortName: resortName ?? community,
+          });
+          if (units.length > 0) pmDiscoveryStats[hitsKey]++;
+          pmDiscoveryStats[totalKey] += units.length;
+          return units.map((u): Candidate => ({
+            source: "pm" as const,
+            sourceLabel: site.label,
+            title: u.name,
+            url: withStayDates("pm", u.url),
+            nightlyPrice: u.nightlyPrice,
+            totalPrice: u.totalPrice,
+            bedrooms: u.bedrooms,
+            snippet: `${site.label} · ${u.bedrooms}BR · sitemap-discovered, vrp-priced`,
+          }));
+        } catch (e: any) {
+          console.error(`[find-buy-in] vrp-discovery:${site.label} error:`, e.message);
+          return [];
+        }
+      })();
+    };
+    const pkDiscoveryPromise = vrpDiscoveryPromise("parrishKauai", "pkCalls");
+    const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
+
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered] = await Promise.all([
+      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise, cbDiscoveryPromise,
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
-    // surface the same unit, in which case we prefer the priced version.
-    // SP and PK won't overlap (different domains), so just union them.
+    // surface the same unit. Per-PM domains don't overlap, so just union.
     const seenPmUrls = new Set<string>([
       ...spDiscovered.map((c) => c.url),
       ...pkDiscovered.map((c) => c.url),
+      ...cbDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
       ...spDiscovered,
       ...pkDiscovered,
+      ...cbDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
@@ -2894,7 +2912,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length}/${vrboRawCount} (awareness-only — same TOS as airbnb) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length} (google+photoMatches+sp-sitemap+pk-sitemap) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
@@ -2914,7 +2932,7 @@ export async function registerRoutes(
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, photoMatches: totalPhotoMatches },
         dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
