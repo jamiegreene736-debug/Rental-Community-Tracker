@@ -108,9 +108,12 @@ export async function searchVrboViaApify(opts: {
 }): Promise<ApifyVrboCandidate[]> {
   const { resortName, bedrooms, checkIn, checkOut } = opts;
   const location = opts.location ?? resortName;
+  // Resolve maxResults: explicit opts > APIFY_VRBO_MAX_RESULTS env > default.
+  // Mixing `??` and `||` directly is a syntax error per ECMA — the env
+  // parse + default fallback is parenthesized into a helper expression.
+  const envMax = parseInt(process.env.APIFY_VRBO_MAX_RESULTS ?? "", 10);
   const maxResults = opts.maxResults
-    ?? parseInt(process.env.APIFY_VRBO_MAX_RESULTS ?? "", 10)
-    || DEFAULT_MAX_RESULTS;
+    ?? (Number.isFinite(envMax) && envMax > 0 ? envMax : DEFAULT_MAX_RESULTS);
 
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
