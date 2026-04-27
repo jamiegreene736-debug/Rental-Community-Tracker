@@ -400,8 +400,31 @@ export default function Bookings() {
         return promise;
       };
 
-      const results = await Promise.all(
-        emptySlots.map(async (slot) => {
+      // Sequential per-slot picking with shared pickedUrls. Multi-unit
+      // reservations (e.g. Amy's 2× 3BR) need DIFFERENT physical units
+      // attached to each slot — same Vrbo URL on both Unit 721 and Unit
+      // 812 means we'd be paying for one listing twice and have nothing
+      // for the second guest's actual unit. The shared find-buy-in cache
+      // (`getFindBuyInForBedrooms`) means both slots see the same ranked
+      // candidate list; without de-duplication, both would pick the
+      // cheapest verified candidate and end up with the same URL.
+      //
+      // Trade-off: we lose parallelism (slots process serially), so a
+      // 2-slot reservation takes ~2× the verify time of a 1-slot one.
+      // Accepted because (a) most reservations are 1-2 slots, (b) the
+      // verify loop already takes the bulk of the time and runs PMs
+      // sequentially within a single slot anyway.
+      const pickedUrls = new Set<string>();
+      const results: Array<{
+        slot: typeof emptySlots[number];
+        picked: (LiveCandidate & { totalPrice: number }) | null;
+        created: any;
+        skippedReasons: string[];
+        visionVerified: boolean;
+        airbnbLastResort: boolean;
+      }> = [];
+      for (const slot of emptySlots) {
+        const slotResult = await (async () => {
           const data = await getFindBuyInForBedrooms(slot.bedrooms);
 
           // Walk cheapest-first and run an availability pre-flight on each
@@ -415,9 +438,14 @@ export default function Bookings() {
           // priced exists. Split them so the verification loop only runs
           // on priced ones, and we still attach the unpriced PM URL when
           // the fallback fires (operator edits cost after booking).
+          //
+          // `pickedUrls` carries URLs already attached to earlier slots
+          // in this same auto-fill run; filter them out so each slot
+          // gets a distinct candidate.
+          const notAlreadyPicked = (c: LiveCandidate) => !pickedUrls.has(c.url);
           const allCheapest = data.cheapest ?? [];
-          const pricedCandidates = allCheapest.filter((c) => c.totalPrice > 0);
-          const unpricedFallback = allCheapest.filter((c) => c.totalPrice === 0);
+          const pricedCandidates = allCheapest.filter((c) => c.totalPrice > 0).filter(notAlreadyPicked);
+          const unpricedFallback = allCheapest.filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
           let pick: LiveCandidate | null = null;
           let verifiedPrice: number | null = null;
           let skippedReasons: string[] = [];
@@ -461,8 +489,8 @@ export default function Bookings() {
           let unavailableCount = 0;
           let allCheckedUrls: { sourceLabel: string; url: string; status: string }[] = [];
           if (!pick) {
-            const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0);
-            const allUnpricedVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0);
+            const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
+            const allUnpricedVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
             // Fast-scrape PMs (~1-10s): Suite Paradise direct rcapi,
             // Vrbo via Browserbase + GraphQL calendar parse.
             const isFastScrape = (u: string) =>
@@ -532,7 +560,7 @@ export default function Bookings() {
           //      because PM is the canonical bookable channel.
           const peakSeasonAllBooked = unavailableCount >= 3;
           if (!pick && peakSeasonAllBooked) {
-            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
+            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked)[0];
             if (topVrbo) pick = topVrbo;
           }
           if (!pick && unpricedFallback.length > 0) {
@@ -552,7 +580,7 @@ export default function Bookings() {
           // tracked separately so the toast and notes can flag it.
           let airbnbLastResort = false;
           if (!pick) {
-            const airbnbPriced = (data.sources?.airbnb ?? []).filter((c) => c.totalPrice > 0);
+            const airbnbPriced = (data.sources?.airbnb ?? []).filter((c) => c.totalPrice > 0).filter(notAlreadyPicked);
             for (const c of airbnbPriced.slice(0, 4)) {
               const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
               const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
@@ -573,7 +601,7 @@ export default function Bookings() {
             }
           }
           if (!pick) {
-            const fallbackVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
+            const fallbackVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked)[0];
             if (fallbackVrbo) pick = fallbackVrbo;
           }
 
@@ -600,9 +628,8 @@ export default function Bookings() {
             : "";
           // Wrap create+attach in a try/catch — if one slot fails (DB
           // hiccup, race in attachBuyIn's "same-slot already attached"
-          // check, etc.) we don't want the whole Promise.all to reject
-          // and leave the OTHER slot dangling with a buy-in created
-          // but never attached.
+          // check, etc.) we don't want the whole sequential loop to
+          // throw and leave LATER slots without a chance to fill at all.
           try {
             const created = await apiRequest("POST", "/api/buy-ins", {
               propertyId: selectedPropertyId,
@@ -628,8 +655,12 @@ export default function Bookings() {
             skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
             return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false };
           }
-        }),
-      );
+        })();
+        // Reserve the picked URL so subsequent slots in this same
+        // auto-fill run skip it and find a different unit.
+        if (slotResult.picked?.url) pickedUrls.add(slotResult.picked.url);
+        results.push(slotResult);
+      }
       return { reservation, results };
     },
     onSuccess: ({ reservation, results }) => {
