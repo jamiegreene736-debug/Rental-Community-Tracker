@@ -7246,6 +7246,243 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // POST /api/admin/guesty/publish-channel
+  //
+  // Drives Guesty's Distribution page to click the per-channel
+  // publish/create-listing button for a single channel. Generalizes
+  // the republish step embedded in submit-vrbo-compliance — same
+  // heuristic, but exposed as its own endpoint so the UI can offer a
+  // "Publish to Channel" button on each of the three channel cards
+  // (Airbnb / VRBO / Booking.com).
+  //
+  // What "publish" means in Guesty:
+  //   - Channel is connected (OAuth done) but not yet listed → clicking
+  //     Publish CREATES the listing on the channel.
+  //   - Channel is already listed → clicking Publish RE-PUBLISHES the
+  //     latest Guesty state to the channel (same as the manual
+  //     "PUBLISH TO CHANNEL" step the Airbnb compliance flow leaves to
+  //     the operator).
+  //   - Channel has no integration → no Publish button exists; the
+  //     operator needs to set up OAuth in Guesty UI first. The endpoint
+  //     surfaces this as `clicked: false, reason: "..."` rather than
+  //     guessing.
+  //
+  // The click logic walks up from any text node mentioning the requested
+  // channel (`airbnb` / `vrbo|homeaway` / `booking.com`) to find a
+  // container that holds a publish-like button (text matching
+  // `/publish|connect|enable|sync now|push|create listing|activate/i`),
+  // scrolls it into view, and clicks. Falls back to a page-wide search
+  // if no row-scoped match. After the click, attempts to confirm any
+  // resulting modal (Yes / Confirm / OK) so the operator doesn't end up
+  // with a half-clicked dialog.
+  //
+  // Body: { listingId, channel }
+  //   listingId — 24-char hex Guesty listing ID
+  //   channel   — one of "airbnb" | "vrbo" | "bookingCom"
+  //
+  // Response: { ok, clicked, label?, reason?, scope?, modalConfirmed,
+  //             beforeShotUrl, postClickShotUrl, finalUrl, trace }
+  //
+  // Env: see server/guesty-playwright.ts header.
+  // ============================================================
+  app.post("/api/admin/guesty/publish-channel", async (req: Request, res: Response) => {
+    const { listingId, channel } = (req.body ?? {}) as {
+      listingId?: string;
+      channel?: string;
+    };
+    if (!listingId || !/^[a-f0-9]{24}$/i.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (24-char hex Guesty listing ID)" });
+    }
+    const ALLOWED_CHANNELS = ["airbnb", "vrbo", "bookingCom"] as const;
+    type ChannelKey = typeof ALLOWED_CHANNELS[number];
+    if (!channel || !ALLOWED_CHANNELS.includes(channel as ChannelKey)) {
+      return res.status(400).json({ error: `channel required, one of: ${ALLOWED_CHANNELS.join(", ")}` });
+    }
+    const ch = channel as ChannelKey;
+    // Per-channel needles for matching the channel-row text node.
+    // VRBO needs to also match "homeaway" because Guesty's Distribution
+    // UI sometimes labels the row by the legacy channel platform key
+    // rather than the consumer-facing brand. Booking.com tolerates the
+    // dot variant and the spelled-out form.
+    const CHANNEL_TEXT_RE: Record<ChannelKey, string> = {
+      airbnb: "airbnb",
+      vrbo: "vrbo|homeaway|home\\s*away",
+      bookingCom: "booking\\.?com|booking dot com",
+    };
+    const channelNeedle = CHANNEL_TEXT_RE[ch];
+
+    const { openGuestyAdminPage } = await import("./guesty-playwright");
+    const targetUrl = `https://app.guesty.com/properties/${listingId}/distribution`;
+
+    const session = await openGuestyAdminPage(targetUrl, {
+      listingId,
+      debugPrefix: `publish-${ch}`,
+      fetchMfaCode: fetchGuestyMfaCodeFromGmail,
+    });
+    if (!session.ok) {
+      return res.json({
+        ok: false,
+        error: session.error,
+        trace: session.trace,
+        finalUrl: session.finalUrl,
+        beforeShotUrl: session.beforeShotUrl,
+      });
+    }
+
+    const { browser, page, trace, saveShot } = session;
+    try {
+      // Lazy-load nudge: scroll to bottom + back to top so virtualized
+      // channel rows mount before we look for the click target.
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await page.waitForTimeout(500);
+
+      const beforeShot = await saveShot(page, "before");
+
+      // The click logic. Mirrors the heuristic in submit-vrbo-compliance's
+      // republish step but parameterized on channel. Returns enough
+      // diagnostics that a missed click can be debugged from the
+      // response without needing to re-deploy.
+      const clickResult = await page.evaluate((channelRePattern: string) => {
+        const channelRe = new RegExp(channelRePattern, "i");
+        const actionRe = /publish|connect|enable|sync now|push (to )?(channel|listing|airbnb|vrbo|booking)|create listing|activate|list on/i;
+
+        // Step 1: find every text node mentioning the requested channel,
+        // bounded to short text segments so we don't match the whole
+        // page body. Sorted by text length so we prefer the tightest
+        // match (a button label wins over a paragraph).
+        const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
+        const channelHits = all.filter((el) => {
+          const t = (el.textContent || "").trim();
+          if (t.length === 0 || t.length > 200) return false;
+          return channelRe.test(t);
+        }).sort((a, b) => (a.textContent?.length || 0) - (b.textContent?.length || 0));
+
+        const tryClickIn = (root: Element): { clicked: boolean; label?: string; testId?: string | null } => {
+          const btns = Array.from(root.querySelectorAll<HTMLElement>("button, a[role='button']"));
+          const target = btns.find((b) => {
+            if ((b as HTMLButtonElement).disabled) return false;
+            const txt = (b.textContent || "").trim();
+            const aria = b.getAttribute("aria-label") || "";
+            const haystack = `${txt} ${aria}`;
+            return actionRe.test(haystack);
+          });
+          if (!target) return { clicked: false };
+          (target as HTMLElement).scrollIntoView({ block: "center" });
+          (target as HTMLElement).click();
+          return {
+            clicked: true,
+            label: (target.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80),
+            testId: target.getAttribute("data-testid"),
+          };
+        };
+
+        // Step 2: for each channel hit, climb up to 6 ancestors looking
+        // for a container that has a publish-like button.
+        for (const hit of channelHits.slice(0, 5)) {
+          let cur: Element | null = hit;
+          for (let depth = 0; depth < 6 && cur; depth++) {
+            const r = tryClickIn(cur);
+            if (r.clicked) return { ...r, scope: `channel-row-depth-${depth}` };
+            cur = cur.parentElement;
+          }
+        }
+
+        // Step 3: fallback — any publish-like button on the page,
+        // scoped to ones whose containing element ALSO mentions the
+        // channel. This catches layouts where the channel name is a
+        // sibling of (rather than ancestor of) the button.
+        const allBtns = Array.from(document.querySelectorAll<HTMLElement>("button, a[role='button']"));
+        for (const b of allBtns) {
+          if ((b as HTMLButtonElement).disabled) continue;
+          const txt = (b.textContent || "").trim();
+          const aria = b.getAttribute("aria-label") || "";
+          if (!actionRe.test(`${txt} ${aria}`)) continue;
+          // Check that some nearby element mentions the channel (look at
+          // the button's parent and its 5 ancestors).
+          let cur: Element | null = b.parentElement;
+          for (let depth = 0; depth < 5 && cur; depth++) {
+            if (channelRe.test((cur.textContent || "").slice(0, 500))) {
+              (b as HTMLElement).scrollIntoView({ block: "center" });
+              (b as HTMLElement).click();
+              return {
+                clicked: true,
+                label: txt.replace(/\s+/g, " ").slice(0, 80),
+                testId: b.getAttribute("data-testid"),
+                scope: `sibling-fallback-depth-${depth}`,
+              };
+            }
+            cur = cur.parentElement;
+          }
+        }
+
+        return {
+          clicked: false,
+          reason: `no enabled publish-like button found near a '${channelRePattern}' text node`,
+        };
+      }, channelNeedle);
+      trace.push({ step: "clicked-publish", detail: JSON.stringify(clickResult) });
+
+      let modalConfirmed = false;
+      let postClickShot: string | null = null;
+      if (clickResult.clicked) {
+        // Wait for any resulting modal/confirmation to mount, then try
+        // to confirm. Guesty's Distribution publishes typically don't
+        // pop a confirm — but some channel-specific publishes do (e.g.
+        // a "Are you sure you want to publish to Booking.com?" dialog).
+        // Best-effort: if a Yes/Confirm/Publish button appears within
+        // 3s, click it.
+        await page.waitForTimeout(2500);
+        modalConfirmed = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
+          const yes = btns.find((b) => !b.disabled && /^(publish|confirm|yes|ok|continue|i agree)$/i.test((b.textContent || "").trim()));
+          if (!yes) return false;
+          (yes as HTMLElement).click();
+          return true;
+        }).catch(() => false);
+        if (modalConfirmed) {
+          trace.push({ step: "confirmed-modal" });
+          await page.waitForTimeout(2500);
+        }
+        postClickShot = await saveShot(page, "post-click");
+      } else {
+        postClickShot = await saveShot(page, "no-button");
+      }
+
+      // Capture any visible feedback (toast / inline message) so the
+      // caller knows what Guesty thought of the click. Same source-set
+      // as submit-vrbo-compliance.
+      const feedback = await page.evaluate(() => {
+        const out = new Set<string>();
+        document.querySelectorAll('[role="alert"], [aria-live="polite"], [aria-live="assertive"], [class*="toast" i], [class*="snackbar" i]').forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          if (txt && txt.length > 0 && txt.length < 300) out.add(txt);
+        });
+        return Array.from(out).slice(0, 8);
+      }).catch(() => [] as string[]);
+
+      console.log(`[publish-channel] listing=${listingId} channel=${ch} clicked=${(clickResult as any).clicked} label=${(clickResult as any).label || ""} scope=${(clickResult as any).scope || ""} modalConfirmed=${modalConfirmed} feedback=${JSON.stringify(feedback)}`);
+
+      return res.json({
+        ok: true,
+        channel: ch,
+        clickResult,
+        modalConfirmed,
+        feedback,
+        beforeShotUrl: beforeShot,
+        postClickShotUrl: postClickShot,
+        finalUrl: page.url(),
+        trace,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
