@@ -310,27 +310,44 @@ async function fetchSitemapUnitUrls(): Promise<string[]> {
   }
 }
 
-// Pull bedroom count from the unit page's <title> tag. SP titles follow
-// the pattern "3BR Poipu Condo Rental w/ ... | Regency 620 | Suite
-// Paradise". Falls back to "X bedroom" / "X-bedroom" mentions if the BR
-// shorthand isn't present.
+// Pull bedroom count from the unit page HTML. SP renders the unit's bed
+// count in a stable element on every page:
+//
+//   <span class="rc-lodging-beds rc-lodging-detail">3 BR</span>
+//
+// This is the canonical signal — every SP unit page has it, and the
+// number is authoritative. Earlier versions tried to read it from the
+// <title> tag, which works on some units ("3BR Poipu Condo Rental ... |
+// Regency 620") but most SP unit titles are generic ("Poipu Beach
+// Rentals - Kahala 422 | Suite Paradise") with no bedroom mention,
+// which dropped 80%+ of units to bedrooms=null and silently filtered
+// them out of discovery results.
+//
+// Title and body word-form mentions are kept as last-resort fallbacks
+// for any unit whose page doesn't render the lodging-beds detail.
 function extractBedroomsFromHtml(html: string): number | null {
+  // Primary: rc-lodging-beds class (every SP unit page has it).
+  const lodging = html.match(/class=["'][^"']*\brc-lodging-beds\b[^"']*["'][^>]*>\s*(\d+)\s*BR/i);
+  if (lodging) {
+    const n = parseInt(lodging[1], 10);
+    if (n > 0 && n < 20) return n;
+  }
   const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
   const title = titleMatch?.[1] ?? "";
-  // Primary: "3BR" / "3 BR" in the title.
+  // Secondary: "3BR" / "3 BR" in the title.
   const brShort = title.match(/(\d+)\s*BR\b/i);
   if (brShort) {
     const n = parseInt(brShort[1], 10);
     if (n > 0 && n < 20) return n;
   }
-  // Secondary: "three bedroom" / "3-bedroom" in title.
+  // Tertiary: "X-bedroom" in title.
   const brLong = title.match(/(\d+)[\s-]*bedroom/i);
   if (brLong) {
     const n = parseInt(brLong[1], 10);
     if (n > 0 && n < 20) return n;
   }
-  // Tertiary: word-form "two-bedroom" / "three bedroom" anywhere in body.
-  // Cheap fallback for edge cases where the title omits the count.
+  // Last resort: word-form ("three-bedroom") anywhere in body. Cheap
+  // catch-all for unusual unit pages.
   const wordMap: Record<string, number> = {
     studio: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
   };
