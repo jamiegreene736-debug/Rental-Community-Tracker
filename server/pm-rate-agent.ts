@@ -18,6 +18,7 @@ import Browserbase from "@browserbasehq/sdk";
 import { chromium, type Page } from "playwright";
 import { manualEntryForUrl, manualOnlyResult } from "./pm-scrapers";
 import { scrapeSuiteParadiseRate } from "./pm-scraper-suite-paradise";
+import { scrapeVrboRate } from "./pm-scraper-vrbo";
 
 export type AgentExtraction = {
   isUnitPage: boolean | null;
@@ -83,10 +84,18 @@ export async function verifyPmRate(opts: {
 
   // Fast path 1: per-PM programmatic scrapers. Suite Paradise has a
   // public rcapi endpoint we replicate directly — ~1s response, free,
-  // exact prices. Other PMs get added here as we recon them.
-  if (/(?:^|\.)suite-paradise\.com$/i.test(safeHost(url))) {
+  // exact prices. Vrbo's frontend auto-fires a GraphQL query that
+  // returns a per-night rate calendar in the page's initial load —
+  // we just intercept the response and parse it. Other PMs get
+  // added here as we recon them.
+  const host = safeHost(url);
+  if (/(?:^|\.)suite-paradise\.com$/i.test(host)) {
     console.log(`[pm-agent] suite-paradise: using programmatic scraper`);
     return scrapeSuiteParadiseRate({ url, checkIn, checkOut });
+  }
+  if (/(?:^|\.)vrbo\.com$/i.test(host)) {
+    console.log(`[pm-agent] vrbo: using programmatic scraper`);
+    return scrapeVrboRate({ url, checkIn, checkOut, bbApiKey, bbProjectId });
   }
 
   // Fast path 2: manual-only PMs (sites with NO programmatic rate
