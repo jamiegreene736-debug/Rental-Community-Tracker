@@ -297,21 +297,61 @@ export async function scrapeVrboRate(opts: {
     const candidates: number[] = [];
 
     // ── Layer 1: GraphQL bodies ──
+    // Three-tier scan, increasing in breadth. Plausibility filter
+    // (n > baseTotal AND n < baseTotal × 5) protects against false
+    // positives — per-night rates won't pass; ID/timestamp numbers
+    // won't pass; multi-trip booking page totals won't pass.
+    //
+    // Recon notes (Vrbo deploy as of 2026-04): observed op names
+    // include `getSessionConfig`, `oneKeyUniversalOnboarding`,
+    // `socialShareButton`, `notification`, `propertyOffers`,
+    // `propertyInfo`, `randomAccessOne`, `productSpotlight`. None
+    // of those obviously screams "trip quote", but `propertyInfo`
+    // and `propertyOffers` are the most likely to carry pricing.
+    // Rather than guess the exact op, we scan ALL captured bodies
+    // (still skipping the per-night calendar response) with a
+    // progressively wider net.
     for (const { op, body } of graphqlBodies) {
       if (op === "propertyRatesDateSelector") continue; // base rates, not total
-      // Match common quote/total field shapes. Order matters — more
-      // specific patterns first.
-      const patterns = [
-        /"total(?:Price|Amount)?":\s*\{\s*"(?:value|amount)":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+
+      // Tier A: explicit field names with structured value/amount.
+      const tierA = [
+        /"total(?:Price|Amount|Charges|Cost|Charge|Quote)?":\s*\{\s*"(?:value|amount|formatted|raw)":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
         /"grandTotal":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
-        /"total":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+        /"(?:tripTotal|finalPrice|totalChargesAmount|priceTotal|fullPrice)":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+        /"displayPrice":\s*"\$\s*([\d,]+(?:\.\d+)?)/gi,
+        /"formattedAmount":\s*"\$\s*([\d,]+(?:\.\d+)?)/gi,
       ];
-      for (const re of patterns) {
+
+      // Tier B: bare "total":N (catches simpler/older shapes).
+      const tierB = [
+        /"total":\s*"?\$?([\d,]+(?:\.\d+)?)/gi,
+        /"amount":\s*([\d.]+)\s*,\s*"currency":\s*"USD"/gi,
+      ];
+
+      // Tier C: "$X" string within ~50 chars of total/trip/price/charge
+      // keyword. Catches localized formatting like "Total: $22,729" or
+      // "Trip total $22,729 USD" embedded in a stringified amount field.
+      const tierCWindow = 50;
+
+      const collect = (n: number) => {
+        if (Number.isFinite(n) && n > baseTotal && n < baseTotal * 5) {
+          candidates.push(n);
+        }
+      };
+
+      for (const re of [...tierA, ...tierB]) {
         for (const m of body.matchAll(re)) {
-          const n = parseFloat(m[1].replace(/,/g, ""));
-          if (Number.isFinite(n) && n > baseTotal && n < baseTotal * 5) {
-            candidates.push(n);
-          }
+          collect(parseFloat(m[1].replace(/,/g, "")));
+        }
+      }
+
+      // Tier C: scan keyword positions and look for $N nearby.
+      for (const kw of body.matchAll(/\b(?:total|trip|grand|charge|booking|stay|reservation)\b/gi)) {
+        const idx = kw.index ?? 0;
+        const around = body.slice(Math.max(0, idx - tierCWindow), Math.min(body.length, idx + tierCWindow));
+        for (const dm of around.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g)) {
+          collect(parseFloat(dm[1].replace(/,/g, "")));
         }
       }
     }
