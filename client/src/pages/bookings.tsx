@@ -413,10 +413,14 @@ export default function Bookings() {
           // $0 fallback below.
           let visionVerified = false;
           if (!pick) {
+            // Vrbo is in sources.vrbo for awareness but skipped here — its
+            // anti-bot serves a CAPTCHA to Playwright, so vision can never
+            // extract a price and the call just wastes ~6s. Operator can
+            // still click 📷 Verify rate on a Vrbo-attached buy-in if
+            // they really want to try (the dialog will surface the
+            // CAPTCHA screenshot + reason).
             const verifyTargets: LiveCandidate[] = [];
-            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
             const topPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0)[0];
-            if (topVrbo) verifyTargets.push(topVrbo);
             if (topPm) verifyTargets.push(topPm);
 
             type Verified = { candidate: LiveCandidate; totalPrice: number };
@@ -1363,7 +1367,7 @@ function LiveSearchSection({
           the actually-bookable channels — both ALWAYS open. */}
       {[
         { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (awareness — direct-with-owner outreach)", items: vrbo, defaultOpen: vrbo.length > 0 && vrbo.length <= 3 },
+        { key: "vrbo",    label: "Vrbo (awareness — direct-with-owner outreach)", items: vrbo, defaultOpen: vrbo.length > 0 },
         { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
         { key: "pm",      label: "PM Companies (Google)", items: pm, defaultOpen: true },
       ].map((s) => (
