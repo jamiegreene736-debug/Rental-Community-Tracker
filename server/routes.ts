@@ -6661,6 +6661,250 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // POST /api/admin/guesty/inspect-distribution
+  //
+  // Loads Guesty's Distribution / Channels page for a listing and dumps
+  // its DOM structure so we can wire up the per-channel "Publish to
+  // Channel" automation in a follow-up PR with confirmed selectors
+  // instead of guesswork. Inspection-only — does NOT click anything.
+  //
+  // The companion endpoint that DOES click is intentionally not built
+  // yet: this codebase's pattern (mirroring inspect-vrbo-compliance →
+  // submit-compliance) is to ship the inspect endpoint first, hit it on
+  // a real listing in production, and only then write the click logic
+  // against the actual DOM. Distribution pages on Guesty render
+  // differently per account (which channels are connected, which are in
+  // an error state, which OTAs are in beta, etc.) so confirming the
+  // selectors against the operator's real page is materially cheaper
+  // than iterating blindly on a deploy → screenshot loop.
+  //
+  // Body: {
+  //   listingId,    — 24-char hex Guesty listing ID
+  //   urlPath?,     — optional override for the path on app.guesty.com
+  //                   (default: "/properties/{listingId}/distribution").
+  //                   If Guesty's Distribution URL turns out to be
+  //                   different (e.g. /properties/{id}/channels), set it
+  //                   here without redeploying.
+  // }
+  //
+  // Response:
+  //   - structure.headings[]:    visible H1-H6 / role=heading texts
+  //   - structure.buttons[]:     all visible buttons + aria-label +
+  //                              data-testid
+  //   - channelRows[]:           rows / sections containing the words
+  //                              "Airbnb" / "Vrbo" / "Booking" along
+  //                              with their nearest button + buttons'
+  //                              testIds. This is the killer dump for
+  //                              writing the click selector — gives us
+  //                              a tight container to scope the
+  //                              "Publish to Channel" search to.
+  //   - publishCandidates[]:     buttons whose text or aria-label
+  //                              matches /publish|connect|enable|sync/i
+  //                              with the channel name they appear
+  //                              nearest to (best guess).
+  //   - beforeShotUrl:           full-page screenshot of the page as
+  //                              loaded.
+  //   - finalUrl, trace:         standard diagnostic fields.
+  //
+  // Env: see server/guesty-playwright.ts header for the full list.
+  // ============================================================
+  app.post("/api/admin/guesty/inspect-distribution", async (req: Request, res: Response) => {
+    const { listingId, urlPath } = (req.body ?? {}) as {
+      listingId?: string;
+      urlPath?: string;
+    };
+    if (!listingId || !/^[a-f0-9]{24}$/i.test(listingId)) {
+      return res.status(400).json({ error: "listingId required (24-char hex Guesty listing ID)" });
+    }
+
+    const { openGuestyAdminPage } = await import("./guesty-playwright");
+    const safePath = (urlPath || `/properties/${listingId}/distribution`).replace(/^\/?/, "/");
+    const targetUrl = `https://app.guesty.com${safePath}`;
+
+    const session = await openGuestyAdminPage(targetUrl, {
+      listingId,
+      debugPrefix: "guesty-distribution",
+      fetchMfaCode: fetchGuestyMfaCodeFromGmail,
+    });
+
+    if (!session.ok) {
+      // Mirror the existing inspect endpoint's response shape so the UI
+      // can render the screenshot + trace identically regardless of
+      // which step failed.
+      return res.json({
+        ok: false,
+        error: session.error,
+        trace: session.trace,
+        finalUrl: session.finalUrl,
+        beforeShotUrl: session.beforeShotUrl,
+      });
+    }
+
+    const { browser, page, trace, saveShot } = session;
+    try {
+      // Scroll to bottom + back to top so any virtualized / lazy-loaded
+      // channel rows mount before we snapshot.
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(500);
+
+      const beforeShot = await saveShot(page, "before");
+
+      // Top-level structure dump — same shape as the VRBO inspect
+      // endpoint so the UI can render both with one renderer.
+      const structure = await page.evaluate(() => {
+        const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,[role='heading']"))
+          .map((h) => (h.textContent || "").trim().replace(/\s+/g, " "))
+          .filter((t) => t.length > 0 && t.length < 200)
+          .slice(0, 80);
+        const buttons = Array.from(document.querySelectorAll("button, a[role='button']"))
+          .map((b) => ({
+            text: (b.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100),
+            ariaLabel: b.getAttribute("aria-label"),
+            dataTestId: b.getAttribute("data-testid"),
+            disabled: (b as HTMLButtonElement).disabled ?? false,
+          }))
+          .filter((b) => b.text.length > 0 || b.ariaLabel)
+          .slice(0, 120);
+        return { headings, buttons };
+      }).catch(() => ({ headings: [], buttons: [] }));
+
+      // Per-channel slice — find sections containing each channel name
+      // and pull their nearest interactive elements. We climb up to 6
+      // ancestors looking for a container that holds at least one
+      // button, then dump everything inside that container so the
+      // selector author can see exactly what neighborhood each
+      // "Publish" button lives in.
+      const channelRows = await page.evaluate(() => {
+        const wanted = [
+          { key: "airbnb", needle: /airbnb/i },
+          { key: "vrbo", needle: /vrbo|homeaway|home\s*away/i },
+          { key: "bookingCom", needle: /booking\.?com|booking dot com/i },
+        ] as const;
+        const out: Array<{
+          channel: string;
+          containerTag: string;
+          containerClass: string;
+          containerTestId: string | null;
+          containerHtmlPreview: string;
+          buttons: Array<{
+            text: string;
+            ariaLabel: string | null;
+            dataTestId: string | null;
+            disabled: boolean;
+          }>;
+        }> = [];
+        for (const { key, needle } of wanted) {
+          const all = Array.from(document.querySelectorAll("*"));
+          // Find the smallest text node carrying the channel name.
+          const matches = all.filter((el) => {
+            const t = (el.textContent || "").trim();
+            // Skip huge container that contains the whole page text.
+            if (t.length > 300) return false;
+            return needle.test(t);
+          });
+          for (const el of matches.slice(0, 3)) {
+            let container: Element | null = el;
+            for (let depth = 0; depth < 6 && container; depth++) {
+              const buttons = Array.from(
+                container.querySelectorAll("button, a[role='button']"),
+              );
+              if (buttons.length > 0) {
+                out.push({
+                  channel: key,
+                  containerTag: container.tagName,
+                  containerClass: (container.getAttribute("class") || "").slice(0, 200),
+                  containerTestId: container.getAttribute("data-testid"),
+                  containerHtmlPreview: (container.outerHTML || "").replace(/\s+/g, " ").slice(0, 800),
+                  buttons: buttons.slice(0, 8).map((b) => ({
+                    text: (b.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80),
+                    ariaLabel: b.getAttribute("aria-label"),
+                    dataTestId: b.getAttribute("data-testid"),
+                    disabled: (b as HTMLButtonElement).disabled ?? false,
+                  })),
+                });
+                break;
+              }
+              container = container.parentElement;
+            }
+          }
+        }
+        return out;
+      }).catch(() => [] as Array<unknown>);
+
+      // Highest-confidence guess at the action button per channel —
+      // anything textually matching publish/connect/enable/sync that
+      // sits inside a channel-named container. Lets the operator
+      // sanity-check at a glance whether the inspect dump found what
+      // we need before wiring the actual selector in PR #2.
+      const publishCandidates = await page.evaluate(() => {
+        const channelRe = /airbnb|vrbo|homeaway|booking\.?com/i;
+        const actionRe = /publish|connect|enable|sync|activate|push/i;
+        const out: Array<{
+          channel: string;
+          buttonText: string;
+          ariaLabel: string | null;
+          dataTestId: string | null;
+          disabled: boolean;
+          contextSnippet: string;
+        }> = [];
+        const buttons = Array.from(
+          document.querySelectorAll("button, a[role='button']"),
+        );
+        for (const b of buttons) {
+          const text = (b.textContent || "").trim().replace(/\s+/g, " ");
+          const aria = b.getAttribute("aria-label") || "";
+          const haystack = `${text} ${aria}`;
+          if (!actionRe.test(haystack)) continue;
+          // Walk up looking for a channel name in nearby text.
+          let cursor: Element | null = b;
+          let context = "";
+          let channel = "";
+          for (let depth = 0; depth < 6 && cursor; depth++) {
+            const t = (cursor.textContent || "").trim();
+            if (channelRe.test(t)) {
+              const m = t.match(/airbnb|vrbo|homeaway|booking\.?com/i);
+              channel = (m?.[0] || "").toLowerCase();
+              context = t.replace(/\s+/g, " ").slice(0, 200);
+              break;
+            }
+            cursor = cursor.parentElement;
+          }
+          if (channel) {
+            out.push({
+              channel,
+              buttonText: text.slice(0, 80),
+              ariaLabel: aria || null,
+              dataTestId: b.getAttribute("data-testid"),
+              disabled: (b as HTMLButtonElement).disabled ?? false,
+              contextSnippet: context,
+            });
+          }
+        }
+        return out.slice(0, 30);
+      }).catch(() => [] as Array<unknown>);
+
+      console.log(`[guesty-distribution-inspect] listing=${listingId} url=${page.url()} channelRows=${(channelRows as any[]).length} publishCandidates=${(publishCandidates as any[]).length}`);
+
+      return res.json({
+        ok: true,
+        trace,
+        targetUrl,
+        finalUrl: page.url(),
+        beforeShotUrl: beforeShot,
+        structure,
+        channelRows,
+        publishCandidates,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e), trace });
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  });
+
   // ── Scheduler (Phase 4) ──
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
