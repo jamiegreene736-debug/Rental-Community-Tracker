@@ -1,52 +1,36 @@
-// Vrbo search via Apify actor `makework36/vrbo-scraper`.
+// Vrbo search via Apify actor.
 //
-// Takes a destination string + check-in/check-out + bedrooms, returns
-// PRICED Vrbo properties with all-in totals (e.g. "$1,868 total for 5
-// nights") in USD. Replaces the Google site:vrbo.com step in find-buy-in
-// which only returned unpriced URLs that the operator had to click
-// through to see the rate.
+// Replaces the Google site:vrbo.com step in find-buy-in (which only
+// returned unpriced URLs) with a paid Apify actor that returns priced
+// candidates with all-in totals.
 //
-// Why an Apify actor instead of our own Browserbase Vrbo scraper:
-// - Apify maintains the actor — Vrbo's frontend rev churn becomes their
-//   problem, not ours.
-// - Returns the all-in total (base + cleaning + service + taxes), which
-//   our Browserbase calendar-GraphQL parsing was missing entirely.
-// - Forces USD via explicit `currency: "USD"` + `locale: "en_US"` —
-//   sidesteps the locale-leak issues we hit with Browserbase proxy
-//   rotation.
-// - ~$0.0025 per result. With maxResults=30 that's ~$0.075 per search;
-//   we cache for 5 min so a re-run for the same dates costs $0.
+// Two actor families supported via dispatch on `APIFY_VRBO_ACTOR`:
+//
+//   1. `easyapi/vrbo-property-listing-scraper` (default)
+//      Input: { searchUrls: [{ url: "<vrbo search URL with d1/d2>" }],
+//               maxItems: N, proxyConfiguration: {...} }
+//      We construct a Vrbo search URL: `vrbo.com/search?destination=
+//      <community>&d1=<checkIn>&d2=<checkOut>&adults=2&minBedrooms=N`
+//
+//   2. `makework36/vrbo-scraper`
+//      Input: { locations: [name], checkIn, checkOut, adults,
+//               maxResults, currency, locale }
+//      Tried first (returned 0 consistently — actor is brand new with
+//      only ~21 lifetime runs and may not be reliable yet). Kept as
+//      a fallback path.
+//
+// Both return per-result objects with similar fields (url, title,
+// description, price formatted, bedrooms, images). Field names vary
+// slightly so the response parser is defensive across both shapes.
 //
 // Env:
 //   APIFY_API_TOKEN              — required (already used for Zillow)
-//   APIFY_VRBO_ACTOR             — optional, override default
+//   APIFY_VRBO_ACTOR             — optional, defaults to easyapi
 //   APIFY_VRBO_MAX_RESULTS       — optional, default 30
-//
-// Response shape (what the actor returns per result, observed):
-//   {
-//     id: string,
-//     url: string,                  // canonical Vrbo URL
-//     name: string,                 // listing title
-//     priceFormatted: string,       // "$1,868 total for 5 nights"
-//     priceLabel: string,           // alt label
-//     bedrooms: number,
-//     guests: number,
-//     images: string[],
-//     description: string,
-//     ...
-//   }
-//
-// We're careful to:
-//   1. Filter to results that pass the resort-name match (same rule as
-//      Airbnb / Booking / SP / PK use).
-//   2. Filter to bedroom count ≥ requested (some actors return 4BR
-//      results for a 3BR query — keep them, they upcover).
-//   3. Parse the all-in total out of `priceFormatted` since the
-//      structured numeric field isn't documented to exist.
 
-const DEFAULT_ACTOR = "makework36~vrbo-scraper";
+const DEFAULT_ACTOR = "easyapi~vrbo-property-listing-scraper";
 const DEFAULT_MAX_RESULTS = 30;
-const RUN_TIMEOUT_MS = 120_000;
+const RUN_TIMEOUT_MS = 180_000;
 
 export type ApifyVrboCandidate = {
   url: string;
@@ -67,6 +51,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
 // or re-running (and re-paying for) the actor each time.
 type ApifyVrboDebugSnapshot = {
   at: string;
+  actor: string;
   input: Record<string, unknown>;
   httpStatus: number | null;
   errorBody: string | null;
@@ -84,6 +69,73 @@ export function getApifyVrboDebugSnapshot(): ApifyVrboDebugSnapshot {
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Build the Vrbo search URL the easyapi actor expects. Vrbo uses `d1`
+// and `d2` for check-in / check-out, `destination` for the search
+// keyword, and `minBedrooms` for the bedroom floor. Encoding is
+// straightforward — no path-style colons, plain query string.
+function buildVrboSearchUrl(opts: {
+  destination: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+}): string {
+  const params = new URLSearchParams({
+    destination: opts.destination,
+    d1: opts.checkIn,
+    d2: opts.checkOut,
+    adults: "2",
+    minBedrooms: String(opts.bedrooms),
+  });
+  return `https://www.vrbo.com/search?${params.toString()}`;
+}
+
+// Build the input payload for whichever Apify actor we're calling.
+// Both actors live behind the same `searchVrboViaApify` API, but
+// expect different input shapes:
+//
+//   - easyapi/vrbo-property-listing-scraper:
+//       { searchUrls: [{ url }], maxItems, proxyConfiguration }
+//   - makework36/vrbo-scraper:
+//       { locations, checkIn, checkOut, adults, maxResults,
+//         currency, locale }
+//
+// Default + recommended is easyapi (more mature, takes a real Vrbo
+// search URL with d1/d2 dates so the actor doesn't have to interpret
+// "Poipu Kai" — Vrbo's own search engine handles that).
+function buildActorInput(opts: {
+  actor: string;
+  location: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  maxResults: number;
+}): Record<string, unknown> {
+  const { actor, location, bedrooms, checkIn, checkOut, maxResults } = opts;
+  if (/easyapi/.test(actor)) {
+    const searchUrl = buildVrboSearchUrl({
+      destination: location,
+      checkIn,
+      checkOut,
+      bedrooms,
+    });
+    return {
+      searchUrls: [{ url: searchUrl }],
+      maxItems: maxResults,
+      proxyConfiguration: { useApifyProxy: true },
+    };
+  }
+  // makework36 (and other location-based actors) — fall through.
+  return {
+    locations: [location],
+    checkIn,
+    checkOut,
+    adults: 2,
+    maxResults,
+    currency: "USD",
+    locale: "en_US",
+  };
 }
 
 // Parse "$1,868 total for 5 nights" → 1868. Falls back to first
@@ -168,15 +220,14 @@ export async function searchVrboViaApify(opts: {
   };
 
   const startedAt = Date.now();
-  const inputObj: Record<string, unknown> = {
-    locations: [location],
+  const inputObj: Record<string, unknown> = buildActorInput({
+    actor,
+    location,
+    bedrooms,
     checkIn,
     checkOut,
-    adults: 2,
     maxResults,
-    currency: "USD",
-    locale: "en_US",
-  };
+  });
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
@@ -190,6 +241,7 @@ export async function searchVrboViaApify(opts: {
       console.warn(`[apify-vrbo] HTTP ${r.status} ${body.slice(0, 200)}`);
       lastDebugSnapshot = {
         at: new Date().toISOString(),
+        actor,
         input: inputObj,
         httpStatus: r.status,
         errorBody: body.slice(0, 600),
@@ -208,6 +260,7 @@ export async function searchVrboViaApify(opts: {
       console.warn(`[apify-vrbo] non-array response`);
       lastDebugSnapshot = {
         at: new Date().toISOString(),
+        actor,
         input: inputObj,
         httpStatus: r.status,
         errorBody: "non-array response",
@@ -226,10 +279,16 @@ export async function searchVrboViaApify(opts: {
     let droppedWrongBedrooms = 0;
     let droppedNoPrice = 0;
     for (const item of items) {
-      const url = String(item?.url ?? item?.link ?? "").trim();
+      // URL — easyapi tends to use `propertyUrl`; makework36 uses `url`.
+      const url = String(
+        item?.url ?? item?.propertyUrl ?? item?.link ?? "",
+      ).trim();
       if (!url || !/vrbo\.com/i.test(url)) continue;
-      const title = String(item?.name ?? item?.title ?? "Vrbo listing").slice(0, 120);
-      const description = String(item?.description ?? "");
+      // Title — easyapi `propertyName` / `headline`; makework36 `name`/`title`.
+      const title = String(
+        item?.name ?? item?.title ?? item?.propertyName ?? item?.headline ?? "Vrbo listing",
+      ).slice(0, 120);
+      const description = String(item?.description ?? item?.summary ?? "");
 
       // Resort filter
       const haystack = `${title} ${description}`;
@@ -238,24 +297,37 @@ export async function searchVrboViaApify(opts: {
         continue;
       }
 
-      // Bedroom filter: keep equal or larger (covers our needs)
-      const itemBeds = typeof item?.bedrooms === "number" ? item.bedrooms : undefined;
+      // Bedroom filter — accept several field name variants. easyapi
+      // sometimes nests this under `details.bedrooms` or similar.
+      const itemBedsRaw = item?.bedrooms ?? item?.numBedrooms ?? item?.beds ?? item?.details?.bedrooms;
+      const itemBeds = typeof itemBedsRaw === "number"
+        ? itemBedsRaw
+        : (typeof itemBedsRaw === "string" && /^\d+/.test(itemBedsRaw) ? parseInt(itemBedsRaw, 10) : undefined);
       if (typeof itemBeds === "number" && itemBeds < bedrooms) {
         droppedWrongBedrooms++;
         continue;
       }
 
-      // Price extraction — try structured fields first, then formatted string.
+      // Price extraction — try structured numeric fields first, then
+      // formatted strings. easyapi often surfaces `price` as either a
+      // string ("$1,868 total for 5 nights") or an object with `total`/
+      // `amount`. makework36 uses `priceFormatted`.
+      const priceField = item?.price;
       const structuredTotal = Number(
         item?.totalPrice ??
         item?.priceTotal ??
-        item?.price?.total ??
-        item?.price?.amount ??
+        item?.totalAmount ??
+        (typeof priceField === "object" ? priceField?.total ?? priceField?.amount : 0) ??
         0,
       );
+      const formattedCandidate =
+        item?.priceFormatted ??
+        item?.priceLabel ??
+        item?.totalPriceFormatted ??
+        (typeof priceField === "string" ? priceField : null);
       const total = structuredTotal > 0
         ? structuredTotal
-        : parseTotal(item?.priceFormatted ?? item?.priceLabel ?? item?.price);
+        : parseTotal(formattedCandidate);
       if (!(total > 0)) {
         droppedNoPrice++;
         continue;
@@ -298,6 +370,7 @@ export async function searchVrboViaApify(opts: {
     }
     lastDebugSnapshot = {
       at: new Date().toISOString(),
+      actor,
       input: inputObj,
       httpStatus: r.status,
       errorBody: null,
