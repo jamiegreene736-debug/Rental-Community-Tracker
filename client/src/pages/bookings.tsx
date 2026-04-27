@@ -140,16 +140,18 @@ function AutoFillProgress({ slotCount }: { slotCount: number }) {
     }, 500);
     return () => clearInterval(id);
   }, []);
-  // Slots run in parallel; budget ~70s for the slowest slot (verify
-  // call worst case is ~90s but typical is 30-60s with Sonnet + popup
-  // dismissal). Capped at 95 — completion will unmount us.
-  const expectedSeconds = 70;
+  // Slots run SEQUENTIALLY (each slot needs to know which URLs earlier
+  // slots picked, so it can choose a different unit). Budget ~70s per
+  // slot for the slowest verify, scaled by slotCount. Without this
+  // scaling the bar pegs at 95% halfway through a multi-slot run and
+  // looks frozen for ~60s while the remaining slots finish.
+  const expectedSeconds = Math.max(70, 70 * slotCount);
   const value = Math.min(95, Math.round((elapsed / expectedSeconds) * 100));
   return (
     <div className="mt-2 space-y-1">
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>
-          Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"} in parallel) — vision step can take up to 90s per slot
+          Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"}, sequential — each slot waits for the previous to finish so they pick different units) — vision step can take up to 90s per slot
         </span>
         <span className="tabular-nums">{elapsed}s</span>
       </div>
