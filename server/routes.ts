@@ -2677,7 +2677,13 @@ export async function registerRoutes(
       // See https://open-api-docs.guesty.com/docs/how-to-search-for-reservations
       const filterArr: Array<Record<string, unknown>> = [
         { field: "listingId", operator: "$eq", value: listingId },
-        { field: "status", operator: "$in", value: ["confirmed", "inquiry", "awaitingPayment"] },
+        // Bookings page = real bookings only. Inquiries belong in the
+        // inbox; pulling them in here clutters the list with messages
+        // that haven't actually committed to dates. `awaitingPayment`
+        // stays because that's a confirmed booking that just hasn't
+        // settled the first payment yet — still a real booking from
+        // the operator's POV (units are blocked, dates are committed).
+        { field: "status", operator: "$in", value: ["confirmed", "awaitingPayment"] },
       ];
       if (!includePast) {
         filterArr.push({ field: "checkOut", operator: "$gte", value: today });
