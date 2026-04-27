@@ -10,7 +10,7 @@ import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
-import { searchVrboViaApify } from "./apify-vrbo";
+import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2014,6 +2014,18 @@ export async function registerRoutes(
       cbAvgUnits: avg(pmDiscoveryStats.cbUnitsTotal, pmDiscoveryStats.cbCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
+  });
+
+  // Diagnostic for the Apify Vrbo path. Returns the last call's raw
+  // response shape (HTTP status, items count, first item keys + 2KB
+  // sample, filter drop counts) so we can tell whether 0-candidate
+  // returns are: actor returning 0 items, item shape changed, resort
+  // filter too strict, etc. Snapshot lives in module memory so this
+  // adds no extra Apify cost.
+  app.get("/api/operations/apify-vrbo-debug", (_req, res) => {
+    const snap = getApifyVrboDebugSnapshot();
+    if (!snap) return res.json({ message: "No Apify Vrbo call has run since boot." });
+    res.json(snap);
   });
 
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
