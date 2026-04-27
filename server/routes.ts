@@ -2809,6 +2809,162 @@ export async function registerRoutes(
     }
   });
 
+  // ── PM listing verifier (headless screenshot + Claude vision) ───────────
+  // For unpriced PM URLs that auto-fill is about to attach at $0, navigate
+  // the page in a real browser with the stay dates injected, screenshot
+  // the priced view, and ask claude-haiku to extract
+  // { isUnitPage, available, totalPrice, nightlyPrice, dateMatch }.
+  // Replaces the "$0 pricing pending" UX with real numbers when
+  // extraction succeeds; falls back to $0 when it doesn't (anti-bot
+  // interstitials, non-unit pages, vision refusals — the caller is
+  // expected to re-use the existing zero-cost-attach path).
+  //
+  // ~8-12s per call (Playwright cold-start + 4s render wait + vision).
+  // ~$0.003 per call (claude-haiku, one ~75% jpeg).
+  app.post("/api/operations/verify-pm-listing", async (req: Request, res: Response) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+    const { url, checkIn, checkOut } = (req.body ?? {}) as {
+      url?: string; checkIn?: string; checkOut?: string;
+    };
+    if (!url || typeof url !== "string") return res.status(400).json({ error: "url required" });
+    if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+    const nights = Math.max(
+      1,
+      Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86400000),
+    );
+
+    // Inject every common date param style without overwriting any the URL
+    // already carries — different PM platforms use different names and we
+    // don't know which the host site reads. The page either honors one of
+    // these and shows priced rates, or falls back to defaults (which
+    // dateMatch will flag).
+    let urlWithDates: string;
+    try {
+      const u = new URL(url);
+      const setIfMissing = (k: string, v: string) => { if (!u.searchParams.has(k)) u.searchParams.set(k, v); };
+      setIfMissing("check_in", checkIn);
+      setIfMissing("check_out", checkOut);
+      setIfMissing("checkin", checkIn);
+      setIfMissing("checkout", checkOut);
+      setIfMissing("arrival", checkIn);
+      setIfMissing("departure", checkOut);
+      setIfMissing("adults", "2");
+      urlWithDates = u.toString();
+    } catch {
+      return res.status(400).json({ error: "invalid url" });
+    }
+
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled",
+        ],
+      });
+      const ctx = await browser.newContext({
+        viewport: { width: 1366, height: 1800 },
+        locale: "en-US",
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      });
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      const page = await ctx.newPage();
+      await page.goto(urlWithDates, { waitUntil: "domcontentloaded", timeout: 15000 });
+      // SPAs commonly fetch rates after first paint — give them time.
+      await page.waitForTimeout(3000);
+
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => "");
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 75, fullPage: false });
+      const screenshotBase64 = screenshot.toString("base64");
+
+      const prompt = [
+        `You are looking at a vacation rental booking page.`,
+        `The user wants to stay from ${checkIn} to ${checkOut} (${nights} nights).`,
+        ``,
+        `Examine the screenshot and answer:`,
+        `1. Is this a SPECIFIC unit's booking page (vs a search results / category / index page)?`,
+        `2. Is the unit shown as available for the requested dates ${checkIn} → ${checkOut}? Look for booking buttons, "available", or rate calendars matching these dates.`,
+        `3. What is the TOTAL price for the entire ${nights}-night stay shown on the page? (USD integer, no symbols, no commas)`,
+        `4. What is the per-night price? (USD integer)`,
+        `5. Are the prices shown tied to the requested dates ${checkIn} → ${checkOut}, or default/placeholder rates for different dates?`,
+        ``,
+        `Use null when truly unknown. Respond with ONLY a single line of minified JSON:`,
+        `{"isUnitPage":true|false,"available":true|false|null,"totalPrice":N|null,"nightlyPrice":N|null,"dateMatch":true|false|null,"reason":"<=140 chars"}`,
+      ].join("\n");
+
+      const visionResp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 250,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: screenshotBase64 } },
+              { type: "text", text: prompt },
+            ],
+          }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!visionResp.ok) {
+        const body = await visionResp.text().catch(() => "");
+        console.warn(`[verify-pm-listing] vision HTTP ${visionResp.status} ${body.slice(0, 200)}`);
+        return res.json({
+          ok: false,
+          reason: `vision-${visionResp.status}`,
+          finalUrl, title,
+          screenshotBase64: `data:image/jpeg;base64,${screenshotBase64}`,
+        });
+      }
+      const visionData = await visionResp.json() as any;
+      const text: string = visionData?.content?.[0]?.text ?? "";
+      const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
+      let extracted: {
+        isUnitPage?: boolean;
+        available?: boolean | null;
+        totalPrice?: number | null;
+        nightlyPrice?: number | null;
+        dateMatch?: boolean | null;
+        reason?: string;
+      } | null = null;
+      if (jsonMatch) {
+        try { extracted = JSON.parse(jsonMatch[0]); } catch { /* leave null */ }
+      }
+
+      return res.json({
+        ok: true,
+        finalUrl,
+        title,
+        extracted,
+        screenshotBase64: `data:image/jpeg;base64,${screenshotBase64}`,
+      });
+    } catch (e: any) {
+      console.error(`[verify-pm-listing] error:`, e?.message ?? e);
+      return res.json({ ok: false, reason: "playwright-error", error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+  });
+
   // ========== BOOKINGS ↔ BUY-INS (Layer A: per-unit-slot attachment) ==========
   //
   // A multi-unit Guesty listing (e.g. 6-BR = 3-BR Unit 721 + 3-BR Unit 812) requires
