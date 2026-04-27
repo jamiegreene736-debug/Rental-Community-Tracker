@@ -299,9 +299,12 @@ established it so you can read the rationale in the commit message.
     (`GE-` / `TA-`) skip phone-number filters. See PR that added
     this entry for the full diagnosis flow.
 
-28. **VRBO compliance submission drives Guesty's UI; the form-fill is
+30. **VRBO compliance submission drives Guesty's UI; the form-fill is
     heuristic, not selector-based; the republish step is automated as
-    part of the same session.** Sister to the Airbnb compliance flow but
+    part of the same session.** *(Originally numbered #28 in PR #186;
+    renumbered here because PRs #183/#184 also claimed #28/#29 under
+    "Browser automation against Guesty admin" — first one to merge wins
+    the slot.)* Sister to the Airbnb compliance flow but
     with a different mechanic. Airbnb publishes a regulations form at
     `airbnb.com/regulations/{id}/.../existing-registration` that we
     drive directly with Playwright; VRBO has no equivalent public form,
@@ -366,6 +369,58 @@ established it so you can read the rationale in the commit message.
     status refresh; the real source of truth is `info.vrboLicense`. Do
     NOT regress this back to a session-only flag — it caused a stale UI
     on every page reload.
+
+31. **`/api/admin/guesty/publish-channel` is one heuristic clicker for
+    all three channels.** Generic Distribution publish endpoint: takes
+    `{listingId, channel}` where channel is `"airbnb" | "vrbo" |
+    "bookingCom"`, opens Guesty's Distribution page via
+    `openGuestyAdminPage`, scopes a click to the requested channel's
+    row, and clicks whatever publish-like button lives there
+    (`/publish|connect|enable|sync now|push|create listing|activate|list
+    on/i`). Same backend code path handles three observable user
+    actions:
+    - **Create listing** — channel is connected (OAuth done) but the
+      listing hasn't been pushed to it yet → the click creates the
+      listing on the channel.
+    - **Re-publish** — channel is already listed → the click pushes
+      Guesty's latest state (e.g. compliance fields just saved) back to
+      the channel.
+    - **No publish button** — channel has no integration at all → the
+      endpoint returns `clicked: false, reason: "..."` and the UI tells
+      the operator to set up OAuth in Guesty UI first.
+
+    The match scope is **channel-row-first, page-fallback-second**: it
+    walks up from any short text node mentioning the channel name to
+    look for an enclosing button container, then falls back to a page-
+    wide search where each candidate button must have a channel mention
+    in its ancestor chain. This avoids two failure modes the simpler
+    "first publish-like button on the page" heuristic hits: (a) clicking
+    Airbnb's Publish button when the operator asked to publish to VRBO,
+    and (b) clicking a stray top-level "Connect more channels" CTA that
+    isn't tied to any specific channel.
+
+    The endpoint also tries a one-shot confirm-modal click after the
+    publish click (matches `/^(publish|confirm|yes|ok|continue|i agree)$/i`
+    on visible buttons) so the operator doesn't end up with a half-
+    clicked dialog. **Do NOT** chain more than one confirm step or wait
+    longer than 3s — Guesty's publish modals are typically single-step,
+    and a multi-step waterfall would risk clicking through a CAPTCHA or
+    OAuth re-prompt the operator should see.
+
+    UI: each channel card shows a single full-width "+ Create listing"
+    or "↑ Re-publish" button (label adapts to `info.live`). The button
+    is hidden when `!info.connected` because there's no integration to
+    publish to. Per-channel busy state lives in
+    `publishStateByListingChannel` keyed `${listingId}:${channel}` so
+    all three buttons can be in-flight independently — they each spawn
+    their own Playwright session server-side.
+
+    **Don't merge the form-fill heuristic from VRBO compliance into this
+    one.** This endpoint clicks ONE button on a Distribution page; the
+    VRBO compliance endpoint navigates a completely different page and
+    fills a multi-input form. Sharing code between them today would
+    couple two flows that may need to evolve independently as Guesty's
+    UI changes per page.
 
 ### Dashboard data shape
 

@@ -650,6 +650,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // the rebrowser-playwright session helper at
   // /api/admin/guesty/submit-vrbo-compliance — see AGENTS.md #28.
   const [vrboComplianceStateByListing, setVrboComplianceStateByListing] = useState<Record<string, "idle" | "busy" | "done">>({});
+  // Per-listing per-channel "Publish to Channel" busy state. Three
+  // channels can be in flight independently (Airbnb / VRBO / Booking.com)
+  // because each runs in its own /api/admin/guesty/publish-channel
+  // request, so the state is keyed `${listingId}:${channel}`. Server-
+  // side this hits Guesty's Distribution page and clicks the publish-
+  // like button scoped to the channel's row — see AGENTS.md #29.
+  const [publishStateByListingChannel, setPublishStateByListingChannel] = useState<Record<string, "idle" | "busy">>({});
   const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -2189,6 +2196,93 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         Public URL not yet in Guesty payload — check the channel dashboard.
                       </div>
                     )}
+
+                    {/* Publish-to-channel button. Hits
+                        /api/admin/guesty/publish-channel which drives
+                        Guesty's Distribution page and clicks the publish-
+                        like button scoped to this channel's row. The
+                        same backend click works for both:
+                          * "Create listing" — channel is connected (OAuth
+                            done) but not yet listed → click creates the
+                            listing on the channel
+                          * "Re-publish" — channel is already listed →
+                            click pushes the latest Guesty state to the
+                            channel (same as the manual PUBLISH TO CHANNEL
+                            step the Airbnb compliance flow leaves to the
+                            operator)
+                        Hidden when no integration exists at all (`No
+                        Account` state) because there's nothing to
+                        publish — the operator needs to set up OAuth in
+                        Guesty UI first. See AGENTS.md #29. */}
+                    {isConnected && (() => {
+                      const publishKey = `${selectedId}:${ch}`;
+                      const publishBusy = publishStateByListingChannel[publishKey] === "busy";
+                      const buttonLabel = isLive
+                        ? `↑ Re-publish to ${LABELS[ch]}`
+                        : `+ Create listing on ${LABELS[ch]}`;
+                      const handlePublishChannel = async () => {
+                        if (!selectedId) return;
+                        setPublishStateByListingChannel((prev) => ({ ...prev, [publishKey]: "busy" }));
+                        try {
+                          const r = await fetch("/api/admin/guesty/publish-channel", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ listingId: selectedId, channel: ch }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          const clicked = !!data.clickResult?.clicked;
+                          // The most useful screenshot for the operator
+                          // is the post-click one — shows whether Guesty
+                          // accepted the publish or surfaced an error
+                          // toast.
+                          const shotPath: string | null =
+                            (typeof data.postClickShotUrl === "string" && data.postClickShotUrl) || null;
+                          const shotSuffix = shotPath ? ` · Screenshot: ${window.location.origin}${shotPath}` : "";
+                          toast({
+                            title: clicked
+                              ? `Clicked publish on ${LABELS[ch]}${data.modalConfirmed ? " + confirmed modal" : ""}`
+                              : `Couldn't find a publish button for ${LABELS[ch]}`,
+                            description: clicked
+                              ? `Label: "${data.clickResult?.label ?? "?"}" · Scope: ${data.clickResult?.scope ?? "?"}.${shotSuffix}`
+                              : `${data.clickResult?.reason ?? "no reason given"}. Verify the channel's OAuth is connected in Guesty's Distribution page.${shotSuffix}`,
+                            variant: clicked ? "default" : "destructive",
+                            duration: 20000,
+                          });
+                          refreshChannelStatus?.();
+                        } catch (e: any) {
+                          toast({ title: `Publish to ${LABELS[ch]} failed`, description: e.message, variant: "destructive" });
+                        } finally {
+                          setPublishStateByListingChannel((prev) => ({ ...prev, [publishKey]: "idle" }));
+                        }
+                      };
+                      return (
+                        <div style={{ marginTop: 8 }}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              // Channel cards become click-to-open-listing
+                              // when live. Stop bubbling so this button
+                              // doesn't also fire that handler.
+                              e.stopPropagation();
+                              handlePublishChannel();
+                            }}
+                            disabled={publishBusy}
+                            style={{
+                              fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                              border: "1px solid #16a34a",
+                              background: publishBusy ? "#dcfce7" : "#f0fdf4",
+                              color: "#14532d", cursor: publishBusy ? "wait" : "pointer", fontWeight: 500,
+                              width: "100%",
+                            }}
+                            data-testid={`btn-publish-channel-${ch}`}
+                            title={`Drive Guesty's Distribution page and click the publish-to-${LABELS[ch]} button. Same as the manual click in app.guesty.com → Distribution → ${LABELS[ch]} row.`}
+                          >
+                            {publishBusy ? `⏳ Driving Guesty…` : buttonLabel}
+                          </button>
+                        </div>
+                      );
+                    })()}
 
                     {/* Airbnb-only compliance sub-block. Appears once the listing
                         is live on Airbnb (so the regulations form page exists).
