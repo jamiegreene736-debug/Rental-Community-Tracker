@@ -225,7 +225,7 @@ export async function searchVrboViaBrowserbase(opts: {
 
     await ctx.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     await ctx.addCookies([
-      { name: "set_pi_session_currency", value: "USD", domain: ".vrbo.com", path: "/" },
+      { name: "pi_session_currency", value: "USD", domain: ".vrbo.com", path: "/" },
       { name: "preferred_currency", value: "USD", domain: ".vrbo.com", path: "/" },
     ]);
 

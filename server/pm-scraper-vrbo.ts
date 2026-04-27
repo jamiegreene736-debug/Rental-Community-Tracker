@@ -108,8 +108,12 @@ export async function scrapeVrboRate(opts: {
     // Force USD locale — defense in depth across three vectors:
     //   1. Accept-Language: en-US — Vrbo's locale resolver checks this
     //      header before falling back to GeoIP.
-    //   2. `set_pi_session_currency=USD` cookie — Vrbo's product-info
-    //      service reads this for the booking widget's currency.
+    //   2. `pi_session_currency=USD` cookie — Vrbo's product-info
+    //      service reads this for the booking widget's currency. (We
+    //      had `set_pi_session_currency` earlier, which is the
+    //      response-side header name Vrbo emits when SETTING this
+    //      cookie — but the cookie itself is `pi_session_currency`.
+    //      Per Grok review.)
     //   3. `?currency=USD` URL param (added below) — last-resort hint.
     //
     // Together these pin the page to USD even when Browserbase rotates
@@ -118,7 +122,7 @@ export async function scrapeVrboRate(opts: {
     // see comment on the session creation above.
     await ctx.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     await ctx.addCookies([
-      { name: "set_pi_session_currency", value: "USD", domain: ".vrbo.com", path: "/" },
+      { name: "pi_session_currency", value: "USD", domain: ".vrbo.com", path: "/" },
       { name: "preferred_currency", value: "USD", domain: ".vrbo.com", path: "/" },
     ]);
 
