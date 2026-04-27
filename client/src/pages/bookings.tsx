@@ -115,24 +115,14 @@ function sourceLabelForUrl(url: string | null | undefined): string {
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
 // contact info inline so the operator knows the next action is a
-// phone call, not clicking through to look for a price that isn't
-// there. Keep in sync with server/pm-scrapers.ts.
+// phone call. Keep in sync with server/pm-scrapers.ts.
+//
+// Empty for now — Suite Paradise was here briefly until we found their
+// rcapi endpoint and built a programmatic scraper. New PMs land here
+// when recon shows they truly have no scrapable rate path.
 type ManualOnlyPm = { name: string; phone?: string; emailUrl?: string };
-function manualOnlyPmForUrl(url: string | null | undefined): ManualOnlyPm | null {
-  if (!url) return null;
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    if (host.endsWith("suite-paradise.com")) {
-      return {
-        name: "Suite Paradise",
-        phone: "(855) 994-4148",
-        emailUrl: "https://www.suite-paradise.com/vacation-rental-inquiry",
-      };
-    }
-    return null;
-  } catch {
-    return null;
-  }
+function manualOnlyPmForUrl(_url: string | null | undefined): ManualOnlyPm | null {
+  return null;
 }
 
 // Auto-fill progress bar — gives the operator visual confirmation that

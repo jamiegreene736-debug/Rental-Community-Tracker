@@ -38,16 +38,12 @@ export type ManualOnlyEntry = {
 
 // PMs we've confirmed cannot be scraped. Keep growing this list as we
 // recon more PMs and find ones that need manual quotes.
-const MANUAL_ONLY: ManualOnlyEntry[] = [
-  {
-    domain: "suite-paradise.com",
-    name: "Suite Paradise",
-    reason:
-      "Suite Paradise's public site doesn't display rates inline — their booking flow is a Drupal inquiry form (reCAPTCHA-protected) that emails their team for a manual quote. No XHR or page state to scrape.",
-    phone: "(855) 994-4148",
-    emailUrl: "https://www.suite-paradise.com/vacation-rental-inquiry",
-  },
-];
+//
+// Suite Paradise was here — we found their actual rate API
+// (/rescms/ajax/item/pricing/simple) and now scrape it directly via
+// pm-scraper-suite-paradise.ts. Left empty for now; new entries land
+// here as we encounter PMs with no programmatic rate path.
+const MANUAL_ONLY: ManualOnlyEntry[] = [];
 
 export function manualEntryForUrl(url: string): ManualOnlyEntry | null {
   try {
