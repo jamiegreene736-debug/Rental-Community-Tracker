@@ -15,6 +15,7 @@ import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
 import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
+import { probeOutscraperVrbo } from "./outscraper-probe";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2037,6 +2038,20 @@ export async function registerRoutes(
     const snap = getOutscraperVrboDebugSnapshot();
     if (!snap) return res.json({ message: "No Outscraper Vrbo call has run since boot." });
     res.json(snap);
+  });
+
+  // One-off discovery: hit ~10 candidate Outscraper Vrbo paths in
+  // parallel and report each HTTP status + body preview. Whichever
+  // returns 200 reveals the canonical slug; set
+  // OUTSCRAPER_VRBO_ENDPOINT env var to that path. Cheap (single
+  // metadata request per path, no actor runs).
+  app.get("/api/operations/outscraper-probe", async (_req, res) => {
+    try {
+      const data = await probeOutscraperVrbo();
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
   });
 
   // One-off endpoint: consult xAI's Grok about our Vrbo scraping
