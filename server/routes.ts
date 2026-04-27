@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
+import { verifyPmRate } from "./pm-rate-agent";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2832,21 +2833,28 @@ export async function registerRoutes(
     }
   });
 
-  // ── PM listing verifier (headless screenshot + Claude vision) ───────────
-  // For unpriced PM URLs that auto-fill is about to attach at $0, navigate
-  // the page in a real browser with the stay dates injected, screenshot
-  // the priced view, and ask claude-haiku to extract
+  // ── PM listing verifier (Browserbase + Claude computer-use agent) ───────
+  // For unpriced PM URLs, drive the page through Browserbase's stealth
+  // Chrome via a `computer-use` agent loop: Claude sees screenshots,
+  // clicks calendar dates, dismisses popups, presses Search, then a
+  // separate single-shot extractor parses the final state for
   // { isUnitPage, available, totalPrice, nightlyPrice, dateMatch }.
-  // Replaces the "$0 pricing pending" UX with real numbers when
-  // extraction succeeds; falls back to $0 when it doesn't (anti-bot
-  // interstitials, non-unit pages, vision refusals — the caller is
-  // expected to re-use the existing zero-cost-attach path).
   //
-  // ~8-12s per call (Playwright cold-start + 4s render wait + vision).
-  // ~$0.003 per call (claude-haiku, one ~75% jpeg).
+  // Generalizes across arbitrary PM sites without per-site code (the
+  // agent reads the page like a human). ~$0.20-0.50 per call combined
+  // (Browserbase session + 4-12 Sonnet rounds). 60-90s typical.
+  //
+  // Replaces the static "fill input + click search" Playwright flow,
+  // which couldn't drive readonly date pickers (Suite Paradise,
+  // Parrish Kauai) and got CAPTCHA-blocked on Vrbo.
   app.post("/api/operations/verify-pm-listing", async (req: Request, res: Response) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const bbApiKey = process.env.BROWSERBASE_API_KEY;
+    const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+    if (!bbApiKey) return res.status(500).json({ error: "BROWSERBASE_API_KEY not configured" });
+    if (!bbProjectId) return res.status(500).json({ error: "BROWSERBASE_PROJECT_ID not configured" });
+
     const { url, checkIn, checkOut } = (req.body ?? {}) as {
       url?: string; checkIn?: string; checkOut?: string;
     };
@@ -2854,227 +2862,25 @@ export async function registerRoutes(
     if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
       return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
     }
-    const nights = Math.max(
-      1,
-      Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86400000),
-    );
+    try { new URL(url); } catch { return res.status(400).json({ error: "invalid url" }); }
 
-    // Inject every common date param style without overwriting any the URL
-    // already carries — different PM platforms use different names and we
-    // don't know which the host site reads. The page either honors one of
-    // these and shows priced rates, or falls back to defaults (which
-    // dateMatch will flag).
-    let urlWithDates: string;
     try {
-      const u = new URL(url);
-      const setIfMissing = (k: string, v: string) => { if (!u.searchParams.has(k)) u.searchParams.set(k, v); };
-      setIfMissing("check_in", checkIn);
-      setIfMissing("check_out", checkOut);
-      setIfMissing("checkin", checkIn);
-      setIfMissing("checkout", checkOut);
-      setIfMissing("arrival", checkIn);
-      setIfMissing("departure", checkOut);
-      setIfMissing("adults", "2");
-      urlWithDates = u.toString();
-    } catch {
-      return res.status(400).json({ error: "invalid url" });
-    }
-
-    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
-    try {
-      browser = await chromium.launch({
-        headless: true,
-        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-blink-features=AutomationControlled",
-        ],
+      const result = await verifyPmRate({
+        url, checkIn, checkOut,
+        anthropicKey, bbApiKey, bbProjectId,
       });
-      const ctx = await browser.newContext({
-        viewport: { width: 1366, height: 2400 },
-        locale: "en-US",
-        userAgent:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-      });
-      await ctx.addInitScript(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-      });
-      const page = await ctx.newPage();
-      await page.goto(urlWithDates, { waitUntil: "domcontentloaded", timeout: 12000 });
-      // SPAs commonly fetch rates after first paint — give them time.
-      await page.waitForTimeout(2500);
-
-      // Dismiss newsletter / "book direct" popups that PM sites slap on
-      // first load. Parrish Kauai's modal covers the date picker, so the
-      // screenshot is useless without dismissing it. Try a battery of
-      // common close-button selectors, then press Escape as a final
-      // catch-all (most modal libraries bind Esc to close). All silent —
-      // a missed popup just means the screenshot includes the overlay.
-      try {
-        const closeSelectors = [
-          'button[aria-label*="close" i]',
-          'button[aria-label*="dismiss" i]',
-          '[aria-label="Close"]',
-          '[role="button"][aria-label*="close" i]',
-          'button.close', 'button.modal-close', 'button.close-btn', '.close-button',
-          'button:has-text("×")', 'button:has-text("✕")', 'button:has-text("✖")',
-          '[role="dialog"] button:has-text("Close")',
-          '[role="dialog"] button:has-text("No thanks")',
-          '[role="dialog"] button:has-text("Maybe later")',
-        ];
-        for (const sel of closeSelectors) {
-          const el = page.locator(sel).first();
-          if ((await el.count().catch(() => 0)) > 0) {
-            await el.click({ timeout: 1500, force: true }).catch(() => {});
-          }
-        }
-        // Final nudge: some libraries (Privy, Mailchimp popups) only
-        // close on Escape, not button click.
-        await page.keyboard.press("Escape").catch(() => {});
-        await page.waitForTimeout(400);
-      } catch { /* silent */ }
-
-      // Try to fill date inputs and click a search button before
-      // screenshotting — most PM sites gate rates behind that flow.
-      // Bail fast if nothing matches: prior implementation lingered for
-      // 5+ seconds even when no button was found, which dragged the
-      // whole verify call past the client's tolerance and starved the
-      // 2nd auto-fill slot. Now we only wait for rate-fetch render if
-      // we actually clicked something.
-      let clicked = false;
-      try {
-        const dateInSelectors = [
-          'input[name*="check_in" i]', 'input[name*="checkin" i]', 'input[name*="arrival" i]',
-          'input[id*="check_in" i]', 'input[id*="checkin" i]', 'input[id*="arrival" i]',
-          'input[placeholder*="check-in" i]', 'input[placeholder*="check in" i]', 'input[placeholder*="arrival" i]',
-        ];
-        const dateOutSelectors = [
-          'input[name*="check_out" i]', 'input[name*="checkout" i]', 'input[name*="departure" i]',
-          'input[id*="check_out" i]', 'input[id*="checkout" i]', 'input[id*="departure" i]',
-          'input[placeholder*="check-out" i]', 'input[placeholder*="check out" i]', 'input[placeholder*="departure" i]',
-        ];
-        for (const sel of dateInSelectors) {
-          const el = page.locator(sel).first();
-          if ((await el.count().catch(() => 0)) > 0) { await el.fill(checkIn).catch(() => {}); break; }
-        }
-        for (const sel of dateOutSelectors) {
-          const el = page.locator(sel).first();
-          if ((await el.count().catch(() => 0)) > 0) { await el.fill(checkOut).catch(() => {}); break; }
-        }
-        const searchBtn = page.getByRole("button", {
-          name: /^(search|check\s*availab|view\s*rates|see\s*rates|book\s*now|get\s*rates|find\s*available)/i,
-        }).first();
-        if ((await searchBtn.count().catch(() => 0)) > 0) {
-          await searchBtn.click({ timeout: 2000 }).catch(() => {});
-          clicked = true;
-        }
-      } catch { /* silent */ }
-      if (clicked) await page.waitForTimeout(3500);
-
-      const finalUrl = page.url();
-      const title = await page.title().catch(() => "");
-      // Viewport-only screenshot (1366×2400) — fullPage on Suite Paradise
-      // and similar produces 8000+ px tall jpegs that take 30+s to encode
-      // and inflate the vision payload to multi-MB. Calendar widgets and
-      // rate breakdowns generally render in the top ~2400 px once the
-      // search button is clicked.
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
-      const screenshotBase64 = screenshot.toString("base64");
-
-      const prompt = [
-        `You are looking at a vacation rental booking page.`,
-        `The user wants to stay from ${checkIn} to ${checkOut} (${nights} nights).`,
-        ``,
-        `Examine the screenshot and answer:`,
-        `1. Is this a SPECIFIC unit's booking page (vs a search results / category / index page)?`,
-        `2. Is the unit shown as available for the requested dates ${checkIn} → ${checkOut}? Look for booking buttons, "available", or rate calendars matching these dates.`,
-        `3. What is the TOTAL price for the entire ${nights}-night stay shown on the page? (USD integer, no symbols, no commas)`,
-        `4. What is the per-night price? (USD integer)`,
-        `5. Are the prices shown tied to the requested dates ${checkIn} → ${checkOut}, or default/placeholder rates for different dates?`,
-        ``,
-        `Use null when truly unknown. Respond with ONLY a single line of minified JSON:`,
-        `{"isUnitPage":true|false,"available":true|false|null,"totalPrice":N|null,"nightlyPrice":N|null,"dateMatch":true|false|null,"reason":"<=140 chars"}`,
-      ].join("\n");
-
-      // Try Sonnet first (better recall on rate calendars), fall back to
-      // Haiku on any non-200 — gives us a working response when Sonnet
-      // 400s on edge-case images even though Haiku accepts them.
-      const callVision = async (model: string) =>
-        fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: 250,
-            messages: [{
-              role: "user",
-              content: [
-                { type: "image", source: { type: "base64", media_type: "image/jpeg", data: screenshotBase64 } },
-                { type: "text", text: prompt },
-              ],
-            }],
-          }),
-          signal: AbortSignal.timeout(25000),
-        });
-
-      let visionResp = await callVision("claude-sonnet-4-6");
-      let usedFallback = false;
-      let firstAttemptError = "";
-      if (!visionResp.ok) {
-        firstAttemptError = await visionResp.text().catch(() => "");
-        console.warn(`[verify-pm-listing] sonnet HTTP ${visionResp.status} ${firstAttemptError.slice(0, 300)} — falling back to haiku`);
-        visionResp = await callVision("claude-haiku-4-5-20251001");
-        usedFallback = true;
-      }
-      if (!visionResp.ok) {
-        const body = await visionResp.text().catch(() => "");
-        console.warn(`[verify-pm-listing] haiku HTTP ${visionResp.status} ${body.slice(0, 300)}`);
-        return res.json({
-          ok: false,
-          reason: `vision-${visionResp.status}`,
-          visionErrorBody: (firstAttemptError || body).slice(0, 500),
-          finalUrl, title,
-          screenshotBase64: `data:image/jpeg;base64,${screenshotBase64}`,
-        });
-      }
-      if (usedFallback) {
-        console.log(`[verify-pm-listing] used haiku fallback after sonnet error`);
-      }
-      const visionData = await visionResp.json() as any;
-      const text: string = visionData?.content?.[0]?.text ?? "";
-      const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
-      let extracted: {
-        isUnitPage?: boolean;
-        available?: boolean | null;
-        totalPrice?: number | null;
-        nightlyPrice?: number | null;
-        dateMatch?: boolean | null;
-        reason?: string;
-      } | null = null;
-      if (jsonMatch) {
-        try { extracted = JSON.parse(jsonMatch[0]); } catch { /* leave null */ }
-      }
-
       return res.json({
-        ok: true,
-        finalUrl,
-        title,
-        extracted,
-        screenshotBase64: `data:image/jpeg;base64,${screenshotBase64}`,
+        ok: result.ok,
+        reason: result.reason,
+        finalUrl: result.finalUrl,
+        title: result.title,
+        extracted: result.extracted,
+        screenshotBase64: result.screenshotBase64,
+        iterations: result.iterations,
       });
     } catch (e: any) {
-      console.error(`[verify-pm-listing] error:`, e?.message ?? e);
-      return res.json({ ok: false, reason: "playwright-error", error: e?.message ?? String(e) });
-    } finally {
-      if (browser) await browser.close().catch(() => {});
+      console.error(`[verify-pm-listing] agent error:`, e?.message ?? e);
+      return res.json({ ok: false, reason: "agent-error", error: e?.message ?? String(e) });
     }
   });
 
