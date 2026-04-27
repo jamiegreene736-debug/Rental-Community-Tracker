@@ -13,6 +13,10 @@
 import { type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
+import { buildDraftPropertyPricing } from "@/data/draft-pricing";
+import { buildDraftBeddingConfig } from "@/data/draft-bedding";
+import { registerDraftBeddingDefaults, type PropertyBeddingConfig } from "@/data/bedding-config";
+import { registerDraftPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 
 // Sample license placeholders for promoted drafts. Active properties
 // in unit-builder-data have hand-curated values for the four
@@ -37,14 +41,53 @@ type LicenseSamples = {
   taxMapKey: string;
   getLicense: string;
   tatLicense: string;
+  strPermit: string;
 };
-function sampleLicensesForState(state: string): LicenseSamples {
+
+// Map a city → Hawaii county. Used to pick the right STR permit format
+// (each county has its own — Kauai uses TVR/TVNC, Big Island STVR,
+// Maui STRH, Oahu NUC). VDA = Visitor Destination Area, the Kauai
+// distinction between resort zones (TVR) and residential (TVNC).
+function hawaiiCountyFromCity(city: string): "kauai-vda" | "kauai-non-vda" | "big-island" | "maui" | "oahu" | "unknown" {
+  const c = (city || "").toLowerCase();
+  // Oahu: Honolulu / Waikiki / Kailua / North Shore / Pearl City etc.
+  if (/honolulu|waikiki|kailua|kaneohe|aiea|pearl|wahiawa|haleiwa|kapolei|ewa|north shore/.test(c)) return "oahu";
+  // Maui County: Maui island + Lanai + Molokai
+  if (/maui|lahaina|kihei|wailea|kaanapali|kapalua|kahului|hana|paia|makawao|lanai|molokai/.test(c)) return "maui";
+  // Big Island (Hawaii County)
+  if (/keauhou|kona|kailua-kona|hilo|waikoloa|mauna|volcano|pahoa|naalehu|big island|hawaii island/.test(c)) return "big-island";
+  // Kauai VDA zones (resort areas)
+  if (/poipu|princeville|kapaa beachfront|hanalei|koloa/.test(c)) return "kauai-vda";
+  // Kauai non-VDA (residential)
+  if (/kekaha|waimea|lihue|kapaa|kalaheo|wailua/.test(c)) return "kauai-non-vda";
+  return "unknown";
+}
+
+function strPermitSampleHawaii(city: string): string {
+  switch (hawaiiCountyFromCity(city)) {
+    case "kauai-vda":
+      return "TVR-2024-XX (sample — Kauai VDA-zone Transient Vacation Rental permit)";
+    case "kauai-non-vda":
+      return "TVNC-XXXX (sample — Kauai non-VDA Transient Vacation Non-Conforming permit)";
+    case "big-island":
+      return "STVR-2024-XXXXXX (sample — Hawaii County Short-Term Vacation Rental permit)";
+    case "maui":
+      return "STRH-XXXXXXXX (sample — Maui County Short-Term Rental Home permit)";
+    case "oahu":
+      return "NUC-XX-XXX-XXXX (sample — Honolulu Non-Conforming Use Certificate)";
+    default:
+      return "(verify county-specific STR permit format)";
+  }
+}
+
+function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
     return {
-      taxMapKey: "XXXXXXXXXXXX (sample — replace with the 12-digit TMK)",
+      taxMapKey: "XX-X-X-XXX-XXX-XXXX (sample — replace with 12-digit TMK: county-district-section-parcel)",
       getLicense: "GE-XXX-XXX-XXXX-XX (sample — replace with GE Tax license)",
       tatLicense: "TA-XXX-XXX-XXXX-XX (sample — replace with TAT Tax license)",
+      strPermit: strPermitSampleHawaii(city),
     };
   }
   if (s === "florida" || s === "fl") {
@@ -52,12 +95,14 @@ function sampleLicensesForState(state: string): LicenseSamples {
       taxMapKey: "DWE/COND-XXXXXXXXXX (sample — Florida DBPR Vacation Rental Dwelling/Condo License)",
       getLicense: "XX-XXXXXXXXXX-X (sample — Florida DOR Sales & Use Tax Certificate)",
       tatLicense: "Account # XXXXXXX (sample — county Tourist Development Tax registration)",
+      strPermit: "BTR-XXXXXX (sample — Local Business Tax Receipt)",
     };
   }
   return {
     taxMapKey: "(no parcel/license id required for this state — verify with local jurisdiction)",
     getLicense: "(no state sales tax cert required — verify with local jurisdiction)",
     tatLicense: "(no occupancy tax registration required — verify with local jurisdiction)",
+    strPermit: "(verify local short-term rental permit requirements)",
   };
 }
 
@@ -68,7 +113,7 @@ export function adaptDraftToPropertyUnitBuilder(
   const u1Br = draft.unit1Bedrooms ?? 2;
   const u2Br = draft.unit2Bedrooms ?? 2;
   const blank = "";
-  const licenseSamples = sampleLicensesForState(draft.state);
+  const licenseSamples = sampleLicensesForLocation(draft.city, draft.state);
   const filesToPhotos = (folder: string | null | undefined) => {
     if (!folder) return [];
     const files = photoFiles[folder] ?? [];
@@ -97,7 +142,9 @@ export function adaptDraftToPropertyUnitBuilder(
     taxMapKey: licenseSamples.taxMapKey,
     tatLicense: licenseSamples.tatLicense,
     getLicense: licenseSamples.getLicense,
-    strPermit: draft.strPermit ?? blank,
+    // Use the operator-entered STR permit if they typed one on Step 5,
+    // otherwise drop in the county-appropriate sample format.
+    strPermit: draft.strPermit && draft.strPermit.trim() ? draft.strPermit : licenseSamples.strPermit,
     hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
                  (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,
     communityPhotos: [],
@@ -138,6 +185,25 @@ export function adaptDraftToPropertyUnitBuilder(
 export async function loadDraftPropertyByNegativeId(
   propertyId: number,
 ): Promise<PropertyUnitBuilder | null> {
+  const full = await loadDraftFullDataByNegativeId(propertyId);
+  return full?.property ?? null;
+}
+
+// All-in-one loader: fetches the draft, adapts it to the builder shape,
+// AND generates pricing/bedding defaults so the Pricing and Bedding
+// tabs have something to render. The bedding default also gets
+// registered with the bedding-config cache as a side effect, since
+// the Bedding tab loads its config sync via buildDefaultBeddingConfig.
+export type DraftFullData = {
+  draft: CommunityDraft;
+  property: PropertyUnitBuilder;
+  pricing: PropertyPricing;
+  bedding: PropertyBeddingConfig;
+};
+
+export async function loadDraftFullDataByNegativeId(
+  propertyId: number,
+): Promise<DraftFullData | null> {
   if (propertyId >= 0) return null;
   const draftId = -propertyId;
   const r = await apiRequest("GET", "/api/community/drafts");
@@ -158,5 +224,12 @@ export async function loadDraftPropertyByNegativeId(
       }
     }),
   );
-  return adaptDraftToPropertyUnitBuilder(match, filesByFolder);
+  const property = adaptDraftToPropertyUnitBuilder(match, filesByFolder);
+  const pricing = buildDraftPropertyPricing(match, propertyId);
+  const bedding = buildDraftBeddingConfig(match, propertyId);
+  // Register so sync helpers (loadBeddingConfig, getPropertyPricing)
+  // find the draft data when called inside the GuestyListingBuilder.
+  registerDraftBeddingDefaults(propertyId, bedding);
+  registerDraftPropertyPricing(propertyId, pricing);
+  return { draft: match, property, pricing, bedding };
 }

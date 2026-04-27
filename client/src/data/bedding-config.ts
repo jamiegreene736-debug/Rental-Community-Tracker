@@ -187,7 +187,29 @@ function buildDefaultUnitBedding(
   };
 }
 
+// Cache of draft-derived defaults populated by the builder page when it
+// loads a community-draft property (propertyId < 0). The Bedding tab
+// calls `loadBeddingConfig(propertyId)` → `buildDefaultBeddingConfig`,
+// and we don't have draft data inside this module — so the parent
+// registers the generated config here ahead of render. Keeps the
+// async draft fetch isolated to the page level instead of pushing
+// React Query into every data helper.
+const draftBeddingDefaults = new Map<number, PropertyBeddingConfig>();
+export function registerDraftBeddingDefaults(
+  propertyId: number,
+  config: PropertyBeddingConfig,
+): void {
+  draftBeddingDefaults.set(propertyId, config);
+}
+
 export function buildDefaultBeddingConfig(propertyId: number): PropertyBeddingConfig {
+  // Promoted-draft fast path: the builder page registered a default
+  // for this negative propertyId before the Bedding tab rendered.
+  if (propertyId < 0) {
+    const cached = draftBeddingDefaults.get(propertyId);
+    if (cached) return cached;
+    return { propertyId, units: [] };
+  }
   const guestyConfig = GUESTY_PROPERTY_CONFIGS.find(c => c.propertyId === propertyId);
   const propData = getUnitBuilderByPropertyId(propertyId);
 

@@ -411,7 +411,27 @@ const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConf
 // EXPORTED FUNCTIONS
 // ─────────────────────────────────────────────────────────────
 
+// Cache of draft-derived pricing populated by the builder page when it
+// loads a community-draft property (propertyId < 0). The Pricing tab
+// inside GuestyListingBuilder calls getPropertyPricing(propertyId)
+// directly, so the parent page can't just pass pricing through props
+// — we register it here ahead of render and the helper checks the
+// cache first for negative propertyIds. Same pattern as
+// registerDraftBeddingDefaults() in bedding-config.ts.
+const draftPricingCache = new Map<number, PropertyPricing>();
+export function registerDraftPropertyPricing(
+  propertyId: number,
+  pricing: PropertyPricing,
+): void {
+  draftPricingCache.set(propertyId, pricing);
+}
+
 export function getPropertyPricing(propertyId: number): PropertyPricing | null {
+  // Promoted-draft fast path: the builder page registered pricing for
+  // this negative propertyId before any tab rendered.
+  if (propertyId < 0) {
+    return draftPricingCache.get(propertyId) ?? null;
+  }
   const config = PROPERTY_UNIT_CONFIGS[propertyId];
   if (!config) return null;
 
