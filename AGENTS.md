@@ -258,6 +258,29 @@ established it so you can read the rationale in the commit message.
     device-trusted by one successful login. Don't expand the SSO path
     to handle 2SV; expand the cookie-refresh ergonomics instead.
 
+29. **Google's identifier-step CAPTCHA is solved via 2captcha; 2SV
+    and "verify it's you" challenges still aren't.** The SSO path
+    routinely trips Google's "Type the text you hear or see" image
+    CAPTCHA on the email step because Railway's IP has no device
+    history. `loginToGuestyViaGoogleSso` detects this state — still
+    on `/signin/identifier` after submit + a CAPTCHA `<img>` present
+    — and submits the image to 2captcha (`server/captcha-solver.ts`)
+    with `TWOCAPTCHA_API_KEY`. Cost: ~$0.001/solve, typically once
+    every 4-7 days because the device-trust cookie persists. Up to 2
+    solves per run (Google sometimes chains a second CAPTCHA after a
+    correct first one); past that it's a session-suspect signal and
+    we bail with the cookie-refresh recommendation. Bad solutions
+    are reported back to 2captcha for credit refund.
+
+    What 2captcha does NOT solve: the post-password challenges (2SV
+    Google Prompt, authenticator code, security key, "verify it's
+    you" device check, "this browser may not be secure" wall). Those
+    are genuine hard-blockers per #28; the answer remains refreshing
+    `GUESTY_SESSION_COOKIES`. The CAPTCHA gate just removes the most
+    common failure mode — the one that fires every single first
+    login from Railway — and turns a daily intervention into a
+    monthly one.
+
 ### Compliance & channel sync
 
 20. **Tax Map Key (TMK) is NEVER written to
