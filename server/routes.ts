@@ -2887,6 +2887,73 @@ export async function registerRoutes(
     }
   });
 
+  // TEMPORARY recon endpoint — load any URL through Browserbase, capture
+  // every non-static request, return URLs + post bodies for inspection.
+  // Used to reverse-engineer rate APIs on PMs / OTAs that block local
+  // Playwright with CAPTCHA. REMOVE once we've cracked Vrbo's API.
+  app.post("/api/operations/recon-network", async (req: Request, res: Response) => {
+    const bbApiKey = process.env.BROWSERBASE_API_KEY;
+    const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    if (!bbApiKey || !bbProjectId) return res.status(500).json({ error: "Browserbase not configured" });
+    const { url, dwell = 8000 } = (req.body ?? {}) as { url?: string; dwell?: number };
+    if (!url) return res.status(400).json({ error: "url required" });
+
+    const Browserbase = (await import("@browserbasehq/sdk")).default;
+    const { chromium } = await import("playwright");
+    const bb = new Browserbase({ apiKey: bbApiKey });
+    const session = await bb.sessions.create({ projectId: bbProjectId });
+    let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+
+    type Captured = { kind: "req" | "resp"; method?: string; status?: number; url: string; postData?: string; body?: string; ct?: string };
+    const captured: Captured[] = [];
+
+    try {
+      browser = await chromium.connectOverCDP(session.connectUrl);
+      const ctx = browser.contexts()[0];
+      const page = ctx.pages()[0] || await ctx.newPage();
+
+      page.on("request", (req) => {
+        const u = req.url();
+        // Filter out static assets and ad-tech to keep the dump small.
+        if (/\.(?:png|jpe?g|gif|svg|woff2?|css|ico|webp|map|ttf|eot)/i.test(u)) return;
+        if (/google|googletag|facebook|doubleclick|adobedtm|omtrdc|adservice|criteo|bing|amazon-adsystem|hotjar|sentry|datadog|segment\.io|cookielaw|cdn\.jsdelivr/i.test(u)) return;
+        captured.push({ kind: "req", method: req.method(), url: u, postData: req.postData()?.slice(0, 1500) });
+      });
+      page.on("response", async (resp) => {
+        const u = resp.url();
+        if (/\.(?:png|jpe?g|gif|svg|woff2?|css|ico|webp|map|ttf|eot)/i.test(u)) return;
+        if (/google|googletag|facebook|doubleclick|adobedtm|omtrdc|adservice|criteo|bing|amazon-adsystem|hotjar|sentry|datadog|segment\.io|cookielaw|cdn\.jsdelivr/i.test(u)) return;
+        const ct = resp.headers()["content-type"] || "";
+        let body = "";
+        if (resp.status() >= 200 && resp.status() < 400 && /json|javascript|html|text/i.test(ct)) {
+          body = (await resp.text().catch(() => "")).slice(0, 3000);
+        }
+        captured.push({ kind: "resp", status: resp.status(), url: u, ct, body });
+      });
+
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(Math.max(2000, Math.min(20000, dwell)));
+
+      // Filter to interesting calls (api/graphql/rate/quote/avail)
+      const interesting = captured.filter((c) => /(?:graphql|api|rate|price|quote|avail|tariff|booking|reservation)/i.test(c.url));
+
+      return res.json({
+        finalUrl: page.url(),
+        capturedCount: captured.length,
+        interestingCount: interesting.length,
+        // Just URLs of every request (helps spot patterns)
+        allRequestUrls: captured.filter((c) => c.kind === "req").map((c) => `${c.method} ${c.url}`).slice(0, 100),
+        // Full data on interesting ones
+        interesting,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+      await bb.sessions.update(session.id, { projectId: bbProjectId, status: "REQUEST_RELEASE" }).catch(() => {});
+    }
+  });
+
   // ========== BOOKINGS ↔ BUY-INS (Layer A: per-unit-slot attachment) ==========
   //
   // A multi-unit Guesty listing (e.g. 6-BR = 3-BR Unit 721 + 3-BR Unit 812) requires
