@@ -230,3 +230,263 @@ export async function scrapeSuiteParadiseRate(opts: {
     agentTrace: [`sp-scraper: unparseable response, body[:200]=${body.slice(0, 200)}`],
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inventory discovery — find ALL Suite Paradise units matching a bedroom
+// count and price-check each against rcapi for the requested dates.
+//
+// Why: find-buy-in's PM source previously relied on Google site:search to
+// surface SP unit URLs, capped at 3 hits. Whichever 3 SP units Google's
+// index ranks highest got into the candidate pool — regardless of whether
+// they were available for the requested dates. Real-world consequence: on
+// Amy Vanbuskirk's reservation (3BR Dec 20–Jan 2), Google surfaced 3 SP
+// units, all of which the rcapi reported booked. Other 3BR SP units that
+// WERE available never entered the pool.
+//
+// New approach: SP publishes a sitemap.xml listing every unit. We fetch it
+// (cached 24h), pull each unit's `eid` + bedroom count from its page (cached
+// 7 days — that metadata effectively never changes), filter to matching
+// bedrooms, then run rcapi pricing for every candidate in parallel batches
+// of 8. Returns priced+available units only.
+//
+// First-call cost: ~10–15s for the metadata warmup over ~130 unit pages
+// (8-wide concurrency). Subsequent calls within the cache TTL: just the
+// rcapi pricing batches, ~3-5s.
+
+const SITEMAP_URL = "https://www.suite-paradise.com/sitemap.xml";
+const POIPU_UNIT_PATH_RE = /^https:\/\/www\.suite-paradise\.com\/poipu-vacation-rentals\/[a-z0-9-]+$/i;
+// Excluded slugs are filter/category landing pages, not actual unit pages.
+const NON_UNIT_SLUGS = new Set([
+  "amenity", "bedrooms", "book-direct", "maps", "poipu-kai",
+  "search-location", "search-resort", "all",
+]);
+
+type SpUnitMeta = {
+  url: string;
+  slug: string;
+  eid: number;
+  bedrooms: number;
+  title: string;
+};
+
+type CacheEntry<T> = { value: T; expiresAt: number };
+
+// Module-level caches. find-buy-in calls run on the same process so a
+// simple Map is fine; if we ever scale beyond a single Railway dyno
+// these would need to move to Redis or the DB.
+const sitemapCache: { entry: CacheEntry<string[]> | null } = { entry: null };
+const unitMetaCache = new Map<string, CacheEntry<SpUnitMeta | null>>();
+const SITEMAP_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const META_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7d
+
+async function fetchSitemapUnitUrls(): Promise<string[]> {
+  const cached = sitemapCache.entry;
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const r = await fetch(SITEMAP_URL, {
+      headers: { "User-Agent": COMMON_HEADERS["User-Agent"] },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) {
+      console.warn(`[sp-discovery] sitemap fetch HTTP ${r.status}`);
+      return cached?.value ?? [];
+    }
+    const xml = await r.text();
+    // <loc>https://www.suite-paradise.com/poipu-vacation-rentals/regency-620</loc>
+    const matches = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/g));
+    const urls = matches
+      .map((m) => m[1].trim())
+      .filter((u) => POIPU_UNIT_PATH_RE.test(u))
+      .filter((u) => {
+        const slug = u.split("/").pop() ?? "";
+        return !NON_UNIT_SLUGS.has(slug);
+      });
+    const deduped = Array.from(new Set(urls));
+    sitemapCache.entry = { value: deduped, expiresAt: Date.now() + SITEMAP_TTL_MS };
+    return deduped;
+  } catch (e: any) {
+    console.warn(`[sp-discovery] sitemap error: ${e?.message ?? e}`);
+    return cached?.value ?? [];
+  }
+}
+
+// Pull bedroom count from the unit page's <title> tag. SP titles follow
+// the pattern "3BR Poipu Condo Rental w/ ... | Regency 620 | Suite
+// Paradise". Falls back to "X bedroom" / "X-bedroom" mentions if the BR
+// shorthand isn't present.
+function extractBedroomsFromHtml(html: string): number | null {
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+  const title = titleMatch?.[1] ?? "";
+  // Primary: "3BR" / "3 BR" in the title.
+  const brShort = title.match(/(\d+)\s*BR\b/i);
+  if (brShort) {
+    const n = parseInt(brShort[1], 10);
+    if (n > 0 && n < 20) return n;
+  }
+  // Secondary: "three bedroom" / "3-bedroom" in title.
+  const brLong = title.match(/(\d+)[\s-]*bedroom/i);
+  if (brLong) {
+    const n = parseInt(brLong[1], 10);
+    if (n > 0 && n < 20) return n;
+  }
+  // Tertiary: word-form "two-bedroom" / "three bedroom" anywhere in body.
+  // Cheap fallback for edge cases where the title omits the count.
+  const wordMap: Record<string, number> = {
+    studio: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+  };
+  const wordMatch = html.match(/\b(studio|one|two|three|four|five|six|seven|eight)[\s-]*bedroom/i);
+  if (wordMatch) {
+    const n = wordMap[wordMatch[1].toLowerCase()];
+    if (n !== undefined) return n;
+  }
+  return null;
+}
+
+async function fetchUnitMeta(url: string): Promise<SpUnitMeta | null> {
+  const cached = unitMetaCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": COMMON_HEADERS["User-Agent"] },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) {
+      unitMetaCache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+      return null;
+    }
+    const html = await r.text();
+    const eid = extractEid(html);
+    const bedrooms = extractBedroomsFromHtml(html);
+    const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+    const title = (titleMatch?.[1] ?? "").trim();
+    const slug = url.split("/").pop() ?? "";
+    if (!eid || bedrooms === null) {
+      // Unparseable — cache short to retry sooner next time.
+      unitMetaCache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+      return null;
+    }
+    const meta: SpUnitMeta = { url, slug, eid, bedrooms, title: title || slug };
+    unitMetaCache.set(url, { value: meta, expiresAt: Date.now() + META_TTL_MS });
+    return meta;
+  } catch {
+    unitMetaCache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+    return null;
+  }
+}
+
+// Run an array of async tasks with a concurrency cap. Built-in alternative
+// to importing p-limit. Concurrency=8 balances SP's tolerance for
+// concurrent requests (no documented rate limit, but a polite ceiling)
+// against total wall-clock time on cold cache.
+async function withConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export type SuiteParadiseAvailableUnit = {
+  url: string;
+  title: string;
+  bedrooms: number;
+  totalPrice: number;
+  nightlyPrice: number;
+  eid: number;
+};
+
+export async function findAvailableSuiteParadiseUnits(opts: {
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  /** Optional cap on number of priced units returned. Default 8. */
+  limit?: number;
+}): Promise<SuiteParadiseAvailableUnit[]> {
+  const { bedrooms, checkIn, checkOut, limit = 8 } = opts;
+  const nights = Math.max(
+    1,
+    Math.round(
+      (new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86400000,
+    ),
+  );
+
+  const startedAt = Date.now();
+  const urls = await fetchSitemapUnitUrls();
+  if (urls.length === 0) {
+    console.warn(`[sp-discovery] sitemap returned 0 units`);
+    return [];
+  }
+
+  // Phase 1: warm metadata for any URLs we haven't seen, in parallel.
+  // Already-cached URLs return instantly so this is a no-op on warm cache.
+  const metas = await withConcurrency(urls, 8, fetchUnitMeta);
+  const matchingBedrooms = metas
+    .filter((m): m is SpUnitMeta => m !== null && m.bedrooms === bedrooms);
+
+  console.log(
+    `[sp-discovery] sitemap=${urls.length} metaResolved=${metas.filter(Boolean).length} ` +
+    `matchingBedrooms=${matchingBedrooms.length} (target=${bedrooms}BR)`,
+  );
+
+  if (matchingBedrooms.length === 0) return [];
+
+  // Phase 2: rcapi pricing for every matching unit, in parallel batches.
+  // We use scrapeSuiteParadiseRate for consistency, but it re-fetches the
+  // page to extract the eid — wasteful here since we already have the eid
+  // from the metadata pass. Inline the rcapi call instead.
+  const priceOne = async (meta: SpUnitMeta): Promise<SuiteParadiseAvailableUnit | null> => {
+    const params = new URLSearchParams({
+      "rcav[begin]": toMdYY(checkIn),
+      "rcav[end]": toMdYY(checkOut),
+      "rcav[adult]": "2",
+      "rcav[child]": "0",
+      "rcav[eid]": String(meta.eid),
+      "rcav[flex_type]": "d",
+    });
+    try {
+      const r = await fetch(`${PRICING_ENDPOINT}?${params.toString()}`, {
+        headers: { ...COMMON_HEADERS, Referer: meta.url },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return null;
+      const body = await r.text();
+      let parsed: { status?: number; content?: string } = {};
+      try { parsed = JSON.parse(body); } catch { return null; }
+      const content = parsed.content ?? "";
+      if (/class=["'][^"']*\brc-na\b/.test(content)) return null; // unavailable
+      const priced = parsePrice(content);
+      if (!priced) return null;
+      return {
+        url: meta.url,
+        title: meta.title,
+        bedrooms: meta.bedrooms,
+        totalPrice: Math.round(priced.totalPrice),
+        nightlyPrice: Math.round(priced.totalPrice / nights),
+        eid: meta.eid,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const priced = await withConcurrency(matchingBedrooms, 8, priceOne);
+  const available = priced
+    .filter((u): u is SuiteParadiseAvailableUnit => u !== null)
+    .sort((a, b) => a.totalPrice - b.totalPrice)
+    .slice(0, limit);
+
+  console.log(
+    `[sp-discovery] ${matchingBedrooms.length} ${bedrooms}BR units checked, ` +
+    `${available.length} available for ${checkIn}→${checkOut} (${Date.now() - startedAt}ms)`,
+  );
+  return available;
+}

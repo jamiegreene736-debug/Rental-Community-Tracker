@@ -8,6 +8,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
+import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2553,7 +2554,16 @@ export async function registerRoutes(
               // Reject bare-homepage URLs — the whole point of the deep-dive
               // is to land on a specific listing page.
               .filter((h: any) => h?.link && isDetailUrl("pm", String(h.link)))
-              .slice(0, 3)
+              // Cap at 10 hits per PM domain (was 3). Whichever 3 units Google's
+              // index ranked highest got into the candidate pool, regardless of
+              // whether they were available for the requested dates — and on
+              // peak weeks (Christmas / NYE) those 3 are exactly the ones MOST
+              // likely to be booked. Bumping to 10 broadens coverage so the
+              // verify-pm-listing walk has a fighting chance of finding an
+              // available unit. The walk still caps at 8 candidates total
+              // (Suite Paradise + Vrbo + others), so this widens the funnel
+              // without unbounded API spend.
+              .slice(0, 10)
               .map((h: any) => {
                 const snippetText = String(h?.snippet ?? "");
                 const nightly = extractPrice(snippetText + " " + String(h?.title ?? ""));
@@ -2586,7 +2596,60 @@ export async function registerRoutes(
       }
     })();
 
-    const [airbnb, booking, vrbo, pm] = await Promise.all([airbnbPromise, bookingPromise, vrboPromise, pmPromise]);
+    // ── Suite Paradise inventory discovery (sitemap-driven) ────────────────
+    // Stage-1/Stage-2 Google deep-dive above caps at 10 hits per PM and is
+    // capped by what Google's index ranks highest for the resort+bedroom
+    // query. For Suite Paradise specifically (Poipu's largest PM) the
+    // sitemap.xml lists every unit; we walk it directly to surface ALL 3BR
+    // units, then run rcapi pricing in parallel batches. Returns priced +
+    // available units only — no double-checking needed downstream.
+    //
+    // This addresses cases where Google's top 3 SP units happen to be
+    // booked for the requested dates while OTHER SP units are wide open.
+    // On Amy Vanbuskirk's reservation (Christmas/NYE 2026), all 3 Google-
+    // surfaced SP units came back unavailable; the sitemap walk finds
+    // whichever 3BR units actually ARE available.
+    //
+    // Only runs for Poipu — SP's footprint is Poipu only, so no point
+    // hitting the sitemap from a non-Poipu search. `community.toLowerCase()`
+    // contains "poipu" for both "Poipu Kai" and "Pili Mai at Poipu".
+    const isPoipu = /poipu|pili\s*mai/i.test(community);
+    const spDiscoveryPromise: Promise<Candidate[]> = isPoipu
+      ? (async () => {
+          try {
+            const units = await findAvailableSuiteParadiseUnits({
+              bedrooms,
+              checkIn,
+              checkOut,
+            });
+            return units.map((u): Candidate => ({
+              source: "pm" as const,
+              sourceLabel: "Suite Paradise",
+              title: u.title,
+              url: withStayDates("pm", u.url),
+              nightlyPrice: u.nightlyPrice,
+              totalPrice: u.totalPrice,
+              bedrooms: u.bedrooms,
+              snippet: `Suite Paradise · ${u.bedrooms}BR · sitemap-discovered, rcapi-priced`,
+            }));
+          } catch (e: any) {
+            console.error("[find-buy-in] sp-discovery error:", e.message);
+            return [];
+          }
+        })()
+      : Promise.resolve([]);
+
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered] = await Promise.all([
+      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise,
+    ]);
+    // Merge SP-discovered (priced) ahead of Google-deep-dive (mostly
+    // unpriced), but dedupe by URL — sitemap walk and Google may both
+    // surface the same unit, in which case we prefer the priced version.
+    const seenPmUrls = new Set<string>(spDiscovered.map((c) => c.url));
+    const pm: Candidate[] = [
+      ...spDiscovered,
+      ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
+    ];
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
@@ -2728,7 +2791,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length}/${vrboRawCount} (awareness-only — same TOS as airbnb) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length} (google+photoMatches) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length} (google+photoMatches+sp-sitemap) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
@@ -2748,7 +2811,7 @@ export async function registerRoutes(
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, photoMatches: totalPhotoMatches },
         dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
