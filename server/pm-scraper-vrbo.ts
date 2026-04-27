@@ -103,7 +103,22 @@ export async function scrapeVrboRate(opts: {
       }
     });
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS });
+    // Vrbo's frontend is lazy about firing PropertyRatesDateSelectorQuery
+    // — without date params in the URL, it only fires the discovery
+    // module + session config and waits for the user to pick dates.
+    // Injecting arrival/departure/adults into the URL triggers the
+    // rate calendar query on initial load. Recon confirmed this is
+    // the difference between firing 2 ops vs 18+.
+    let urlWithDates = url;
+    try {
+      const u = new URL(url);
+      if (!u.searchParams.has("arrival")) u.searchParams.set("arrival", checkIn);
+      if (!u.searchParams.has("departure")) u.searchParams.set("departure", checkOut);
+      if (!u.searchParams.has("adults")) u.searchParams.set("adults", "2");
+      urlWithDates = u.toString();
+    } catch { /* invalid URL — fall back to original */ }
+
+    await page.goto(urlWithDates, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS });
 
     // Wait up to CALENDAR_WAIT_MS for the rate query to fire.
     const waitStart = Date.now();
