@@ -2879,6 +2879,7 @@ export async function registerRoutes(
         iterations: result.iterations,
         agentError: result.agentError,
         agentTrace: result.agentTrace,
+        manualOnly: (result as any).manualOnly ?? false,
       });
     } catch (e: any) {
       console.error(`[verify-pm-listing] agent error:`, e?.message ?? e);

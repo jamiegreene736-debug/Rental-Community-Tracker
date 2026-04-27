@@ -111,6 +111,30 @@ function sourceLabelForUrl(url: string | null | undefined): string {
   }
 }
 
+// Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
+// expose rates programmatically — auto-fill / Verify-rate calls return
+// instantly with manualOnly:true and the slot row should show the
+// contact info inline so the operator knows the next action is a
+// phone call, not clicking through to look for a price that isn't
+// there. Keep in sync with server/pm-scrapers.ts.
+type ManualOnlyPm = { name: string; phone?: string; emailUrl?: string };
+function manualOnlyPmForUrl(url: string | null | undefined): ManualOnlyPm | null {
+  if (!url) return null;
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (host.endsWith("suite-paradise.com")) {
+      return {
+        name: "Suite Paradise",
+        phone: "(855) 994-4148",
+        emailUrl: "https://www.suite-paradise.com/vacation-rental-inquiry",
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Auto-fill progress bar — gives the operator visual confirmation that
 // the mutation is still running (the verify-pm-listing call can take
 // 30-90s per slot, which feels frozen without feedback). Indeterminate
@@ -932,6 +956,18 @@ export default function Bookings() {
                                           view on {sourceLabelForUrl(slot.buyIn.airbnbListingUrl)} <ExternalLink className="h-2.5 w-2.5" />
                                         </a>
                                       )}
+                                      {/* Manual-quote PMs (Suite Paradise, etc.) — show
+                                          phone number inline so the operator knows the
+                                          next action is a call, not a click-through. */}
+                                      {(() => {
+                                        const m = manualOnlyPmForUrl(slot.buyIn.airbnbListingUrl);
+                                        if (!m || !m.phone) return null;
+                                        return (
+                                          <span className="ml-2 text-amber-700 dark:text-amber-400 inline-flex items-center gap-0.5">
+                                            · 📞 quote: <a href={`tel:${m.phone.replace(/[^\d+]/g, "")}`} onClick={(e) => e.stopPropagation()} className="underline hover:no-underline">{m.phone}</a>
+                                          </span>
+                                        );
+                                      })()}
                                     </p>
                                   </div>
                                 </div>
@@ -1513,10 +1549,11 @@ function VerifyRateDialog({
   };
   const [state, setState] = useState<
     | { kind: "loading" }
-    | { kind: "loaded"; screenshot: string | null; extracted: Extracted | null; reason?: string }
+    | { kind: "loaded"; screenshot: string | null; extracted: Extracted | null; reason?: string; manualOnly?: boolean }
     | { kind: "error"; message: string }
   >({ kind: "loading" });
   const [manualCost, setManualCost] = useState("");
+  const manualPm = manualOnlyPmForUrl(buyIn.airbnbListingUrl);
 
   const toDateOnly = (s: string): string =>
     /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
@@ -1554,6 +1591,7 @@ function VerifyRateDialog({
           screenshot: data?.screenshotBase64 ?? null,
           extracted: data?.extracted ?? null,
           reason: data?.reason,
+          manualOnly: data?.manualOnly === true,
         });
         if (data?.extracted?.totalPrice && data.extracted.totalPrice > 0) {
           setManualCost(String(data.extracted.totalPrice));
@@ -1619,7 +1657,58 @@ function VerifyRateDialog({
           </div>
         )}
 
-        {state.kind === "loaded" && (
+        {state.kind === "loaded" && state.manualOnly && manualPm && (
+          <div className="space-y-3">
+            <div className="rounded-md border-2 border-amber-500/50 bg-amber-50 dark:bg-amber-950/30 p-4 space-y-2">
+              <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                {manualPm.name} requires a manual quote
+              </p>
+              <p className="text-xs text-amber-800 dark:text-amber-300">
+                {state.extracted?.reason ?? `${manualPm.name}'s public site doesn't display rates inline. Their booking flow is a contact form (reCAPTCHA-protected) that emails their team for a quote.`}
+              </p>
+              {manualPm.phone && (
+                <p className="text-sm">
+                  <span className="text-muted-foreground">Call: </span>
+                  <a
+                    href={`tel:${manualPm.phone.replace(/[^\d+]/g, "")}`}
+                    className="font-mono font-semibold text-amber-900 dark:text-amber-200 underline"
+                  >
+                    {manualPm.phone}
+                  </a>
+                </p>
+              )}
+              {manualPm.emailUrl && (
+                <p className="text-xs">
+                  <span className="text-muted-foreground">Or fill their inquiry form: </span>
+                  <a
+                    href={manualPm.emailUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary underline hover:no-underline"
+                  >
+                    Request Info <ExternalLink className="h-2.5 w-2.5 inline" />
+                  </a>
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="verify-cost" className="text-xs">
+                Once you have the quote, enter the buy-in cost (USD)
+              </Label>
+              <Input
+                id="verify-cost"
+                type="number"
+                inputMode="decimal"
+                value={manualCost}
+                onChange={(e) => setManualCost(e.target.value)}
+                placeholder="e.g. 4500"
+                min="0"
+                step="0.01"
+              />
+            </div>
+          </div>
+        )}
+        {state.kind === "loaded" && !(state.manualOnly && manualPm) && (
           <div className="space-y-3">
             {/* Extracted info badges */}
             <div className="flex items-center gap-2 flex-wrap text-xs">
