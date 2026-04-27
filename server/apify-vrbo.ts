@@ -71,10 +71,30 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-// Build the Vrbo search URL the easyapi actor expects. Vrbo uses `d1`
-// and `d2` for check-in / check-out, `destination` for the search
-// keyword, and `minBedrooms` for the bedroom floor. Encoding is
-// straightforward — no path-style colons, plain query string.
+// Build the Vrbo search URL the easyapi actor expects. Modeled after
+// the actor's documented working example, which uses the FULL set of
+// query params Vrbo's frontend emits when a real user searches:
+//
+//   destination=Lake%20Tahoe%2C%20United%20States%20of%20America
+//   regionId=652645981589159936     ← optional but helps disambiguate
+//   latLong=39.09605908133315,-120.0334518044189   ← also optional
+//   flexibility=0_DAY
+//   d1=2025-01-25 & startDate=2025-01-25
+//   d2=2025-02-08 & endDate=2025-02-08
+//   adults=2
+//   isInvalidatedDate=false
+//   sort=RECOMMENDED
+//
+// Without `startDate`/`endDate` (alongside `d1`/`d2`) and `sort`, the
+// actor was getting empty result sets on initial recon — Vrbo's
+// frontend either showed the autocomplete interstitial or a blank
+// state. We send both date conventions to maximize compatibility.
+//
+// `regionId` and `latLong` are omitted: we don't have them per
+// destination, and Vrbo does auto-resolve a free-text destination
+// when they're absent. If we hit destinations where this fails, we
+// can build a small lookup table or hit Vrbo's destination
+// autocomplete to resolve them.
 function buildVrboSearchUrl(opts: {
   destination: string;
   checkIn: string;
@@ -84,9 +104,14 @@ function buildVrboSearchUrl(opts: {
   const params = new URLSearchParams({
     destination: opts.destination,
     d1: opts.checkIn,
+    startDate: opts.checkIn,
     d2: opts.checkOut,
+    endDate: opts.checkOut,
+    flexibility: "0_DAY",
     adults: "2",
     minBedrooms: String(opts.bedrooms),
+    isInvalidatedDate: "false",
+    sort: "RECOMMENDED",
   });
   return `https://www.vrbo.com/search?${params.toString()}`;
 }
@@ -279,45 +304,65 @@ export async function searchVrboViaApify(opts: {
     let droppedWrongBedrooms = 0;
     let droppedNoPrice = 0;
     for (const item of items) {
-      // URL — easyapi tends to use `propertyUrl`; makework36 uses `url`.
+      // URL — easyapi documents `detailUrl` as the property page URL.
+      // `searchUrl` on the item is the source search URL, NOT the
+      // property — checking it would link the operator to a search
+      // page, not a specific property. Falls back to `url`/`propertyUrl`
+      // / `link` for makework36 + future actors.
       const url = String(
-        item?.url ?? item?.propertyUrl ?? item?.link ?? "",
+        item?.detailUrl ?? item?.url ?? item?.propertyUrl ?? item?.link ?? "",
       ).trim();
       if (!url || !/vrbo\.com/i.test(url)) continue;
-      // Title — easyapi `propertyName` / `headline`; makework36 `name`/`title`.
+      // Title — `name` is documented in easyapi; fall through to the
+      // makework36 / generic variants.
       const title = String(
         item?.name ?? item?.title ?? item?.propertyName ?? item?.headline ?? "Vrbo listing",
       ).slice(0, 120);
+      // Description — easyapi's `location.description` carries the
+      // location string ("Poipu Beach, HI" etc) which is what we want
+      // for the resort match. Plus `propertyType` ("House · 4 BR · 3 BA")
+      // for bedroom signal.
+      const locationDesc = String(item?.location?.description ?? "");
+      const propertyType = String(item?.propertyType ?? "");
       const description = String(item?.description ?? item?.summary ?? "");
 
-      // Resort filter
-      const haystack = `${title} ${description}`;
+      // Resort filter — combine title + location + propertyType +
+      // description into one haystack. easyapi's `location.description`
+      // is the most reliable resort/area indicator.
+      const haystack = `${title} ${locationDesc} ${propertyType} ${description}`;
       if (!matchesResort(haystack)) {
         droppedNoResort++;
         continue;
       }
 
-      // Bedroom filter — accept several field name variants. easyapi
-      // sometimes nests this under `details.bedrooms` or similar.
+      // Bedroom filter — easyapi packs bed count into `propertyType`
+      // ("House · 4 BR · 3 BA"). Parse "(\d+)\s*BR" out of the string
+      // when no structured field is present.
       const itemBedsRaw = item?.bedrooms ?? item?.numBedrooms ?? item?.beds ?? item?.details?.bedrooms;
-      const itemBeds = typeof itemBedsRaw === "number"
-        ? itemBedsRaw
+      let itemBeds: number | undefined =
+        typeof itemBedsRaw === "number" ? itemBedsRaw
         : (typeof itemBedsRaw === "string" && /^\d+/.test(itemBedsRaw) ? parseInt(itemBedsRaw, 10) : undefined);
+      if (itemBeds === undefined && propertyType) {
+        const m = propertyType.match(/(\d+)\s*BR\b/i);
+        if (m) itemBeds = parseInt(m[1], 10);
+      }
       if (typeof itemBeds === "number" && itemBeds < bedrooms) {
         droppedWrongBedrooms++;
         continue;
       }
 
-      // Price extraction — try structured numeric fields first, then
-      // formatted strings. easyapi often surfaces `price` as either a
-      // string ("$1,868 total for 5 nights") or an object with `total`/
-      // `amount`. makework36 uses `priceFormatted`.
+      // Price extraction — easyapi documents `price` as an object with
+      // `perNight`, `total`, and `fees`. `total` IS the all-in for the
+      // requested dates (the whole point of using this actor). Falls
+      // back to alt structured fields and formatted-string parsing for
+      // makework36 / other actors.
       const priceField = item?.price;
       const structuredTotal = Number(
+        (typeof priceField === "object" ? priceField?.total : null) ??
+        (typeof priceField === "object" ? priceField?.amount : null) ??
         item?.totalPrice ??
         item?.priceTotal ??
         item?.totalAmount ??
-        (typeof priceField === "object" ? priceField?.total ?? priceField?.amount : 0) ??
         0,
       );
       const formattedCandidate =
