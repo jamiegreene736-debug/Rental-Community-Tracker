@@ -383,4 +383,52 @@ assert.deepEqual(
 );
 console.log("  ✓ live config has no duplicates");
 
+// ---------- Pricing tables (shared/pricing-rates) ----------
+console.log("\npricing tables suite");
+
+import { getBuyInRate, suggestPricingArea, BUY_IN_RATES } from "../shared/pricing-rates";
+
+// Caribe Cove (Kissimmee, FL) is the operator-validated 2BR low tier —
+// $125/unit base × 2 units = $250 buy-in, matching what the unit
+// actually rents for on Airbnb/VRBO including taxes + fees. If this
+// number drifts up the dashboard reverts to its old $1,080-for-two-2BR
+// behavior that triggered the original bug report.
+assert.equal(getBuyInRate("Caribe Cove", 2), 125, "Caribe Cove 2BR base should be $125");
+assert.equal(BUY_IN_RATES["Caribe Cove"]?.region, "florida");
+console.log("  ✓ Caribe Cove 2BR pinned at $125");
+
+// Windsor Hills now carries a 2BR entry too — without it the dashboard
+// fell through to the FALLBACK_RATE_PER_BEDROOM (Hawaii-tier $270/BR)
+// for any 2BR Disney-area draft.
+assert.equal(getBuyInRate("Windsor Hills", 2), 150, "Windsor Hills 2BR base should be $150");
+assert.equal(getBuyInRate("Southern Dunes", 2), 85, "Southern Dunes 2BR base should be $85");
+console.log("  ✓ Florida 2BR rates filled in");
+
+// Region-aware fallback: a Florida community not in the table picks
+// the FL per-BR rate, NOT the Hawaii one. The bug we just fixed had a
+// global $270/BR fallback that produced $540 per 2BR unit on Florida
+// drafts where the real cost basis is closer to $125.
+assert.equal(
+  getBuyInRate("Southern Dunes", 5),
+  80 * 5,
+  "unknown bedroom count on a Florida community should use the FL fallback ($80/BR)",
+);
+console.log("  ✓ Florida fallback is $80/BR");
+
+// suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
+// resolve to "Caribe Cove" via the new community-name match — not to
+// "Windsor Hills" via the city regex. Same draft without the name
+// should still default to Windsor Hills.
+assert.equal(
+  suggestPricingArea("Kissimmee", "Florida", "Caribe Cove Resort"),
+  "Caribe Cove",
+  "community name should override city default",
+);
+assert.equal(
+  suggestPricingArea("Kissimmee", "Florida"),
+  "Windsor Hills",
+  "Kissimmee with no community name still defaults to Windsor Hills",
+);
+console.log("  ✓ suggestPricingArea matches by community name first");
+
 console.log("\nall suites passed ✅");

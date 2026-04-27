@@ -42,6 +42,7 @@ const MARKET_RATE_PER_BR: Record<string, number> = {
   "Keauhou":           390,  // Big Island ocean-view estates
   "Southern Dunes":    290,  // Florida vacation home comps
   "Windsor Hills":     300,  // Florida Orlando area
+  "Caribe Cove":       260,  // Older Kissimmee resort; standalone 4BR comps run ~$1,000/night
 };
 
 const DEFAULT_MARKET_RATE_PER_BR = 430; // Generic fallback
@@ -62,6 +63,7 @@ const LOCATION_DEMAND: Record<string, number> = {
   "Keauhou":           1.50,
   "Southern Dunes":    1.00,
   "Windsor Hills":     0.90,
+  "Caribe Cove":       0.85,  // Disney-proximate but older build than Windsor Hills
 };
 
 // ─────────────────────────────────────────────────────────────

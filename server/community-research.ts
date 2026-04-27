@@ -20,6 +20,87 @@ export type ResearchedCommunity = {
   fromWorldKnowledge?: boolean;
 };
 
+// 7-night amortized nightly lookup against SearchAPI's airbnb engine.
+//
+// `extracted_total_price` from the engine includes nightly + cleaning +
+// service fees for the date range, so dividing by 7 gives the *amortized*
+// per-night cost the way a real booking would actually price out — which
+// is what we need for buy-in (cost basis) numbers.
+//
+// Why 7 nights / 30 days out:
+//   - 7 nights = the assumption that a typical vacation-rental booking is
+//     a week, so cleaning + service fees should amortize over 7 nights,
+//     not 1. A 1-night quote inflates the apparent nightly by ~50% on
+//     properties with $150-$300 cleaning fees.
+//   - 30 days out = far enough that popular listings haven't blocked the
+//     calendar (Airbnb often blocks last-minute) and that we dodge the
+//     next-7-days surge pricing.
+//
+// Returns rates grouped by bedroom count: { 2: [125, 130, …], 3: [180, …] }.
+// Listings whose title or description doesn't name `communityName` are
+// dropped (engine's bbox is generous), as are nightly rates outside
+// $50-$3000 (junk data, regional outliers).
+export async function fetchAmortizedNightlyByBR(
+  communityName: string,
+  city: string,
+  state: string,
+): Promise<Record<number, number[]>> {
+  const searchApiKey = process.env.SEARCHAPI_API_KEY;
+  if (!searchApiKey) return {};
+
+  const now = new Date();
+  now.setUTCHours(0, 0, 0, 0);
+  const checkInDate = new Date(now);
+  checkInDate.setUTCDate(checkInDate.getUTCDate() + 30);
+  const checkOutDate = new Date(checkInDate);
+  checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
+  const ymd = (d: Date) => d.toISOString().slice(0, 10);
+
+  const ratesByBR: Record<number, number[]> = {};
+  try {
+    const sp: Record<string, string> = {
+      engine: "airbnb",
+      q: `${communityName} ${city} ${state}`,
+      check_in_date: ymd(checkInDate),
+      check_out_date: ymd(checkOutDate),
+      adults: "2",
+      type_of_place: "entire_home",
+      currency: "USD",
+      api_key: searchApiKey,
+    };
+    const resp = await fetch(
+      `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
+    );
+    if (!resp.ok) return ratesByBR;
+    const data = await resp.json() as any;
+    const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    const cnameLower = communityName.toLowerCase();
+    for (const p of properties) {
+      const title = String(p?.name ?? p?.title ?? "");
+      const desc = String(p?.description ?? "");
+      if (!title.toLowerCase().includes(cnameLower) && !desc.toLowerCase().includes(cnameLower)) continue;
+      const total = Number(p?.price?.extracted_total_price);
+      const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
+      if (!Number.isFinite(total) || total <= 0) continue;
+      if (!Number.isFinite(br) || br < 1 || br > 6) continue;
+      const nightly = Math.round(total / 7);
+      if (nightly < 50 || nightly > 3000) continue;
+      if (!ratesByBR[br]) ratesByBR[br] = [];
+      ratesByBR[br].push(nightly);
+    }
+  } catch {
+    /* network / parse error — return whatever we accumulated */
+  }
+  return ratesByBR;
+}
+
+// Median of a numeric list, or null on empty input.
+export function medianRate(arr: number[]): number | null {
+  if (!arr?.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
 export async function researchCommunitiesForCity(
   city: string,
   state: string,
@@ -59,26 +140,30 @@ export async function researchCommunitiesForCity(
 
   if (unique.length === 0) return [];
 
+  // Spot-check the typical per-unit nightly rate for a community by
+  // hitting SearchAPI's airbnb engine for a 7-night window 30 days out
+  // and averaging across the cheapest bedroom tier (so a 2BR draft and
+  // a 3BR draft don't get the same `estimatedLowRate`). Per-night is
+  // amortized via total / 7, which matches what a real guest would pay
+  // including cleaning + service fees — a 1-night quote inflates the
+  // apparent rate by ~50% because cleaning fees fall on a single night.
+  //
+  // Earlier revision regex-grepped `$XXX/night` headlines from the raw
+  // Google JSON. That swept in headline "from $X" rates (often 1-night
+  // quotes), peak-season screenshots from review sites, and rates from
+  // unrelated nearby properties — producing a `low` ~3x the actual cost
+  // basis. For Caribe Cove specifically (operator-validated 2BR ≈ $125
+  // all-in), the regex hack returned null entirely on Florida pages
+  // because Google snippets don't carry that exact format. Replacing
+  // it with the priced-engine lookup is both more accurate AND more
+  // reliable — same methodology as `/api/community/search-units`.
   async function spotCheckRate(communityName: string): Promise<{ low: number | null; high: number | null }> {
-    try {
-      const q = `${communityName} ${city} ${state} nightly rate VRBO Airbnb`;
-      const resp = await fetch(
-        `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=5&api_key=${searchApiKey}`,
-      );
-      if (!resp.ok) return { low: null, high: null };
-      const data = await resp.json() as any;
-      const text = JSON.stringify(data).toLowerCase();
-      const prices: number[] = [];
-      const matches = text.match(/\$\s*(\d{3,4})\s*(?:\/night|per night|a night)/g) || [];
-      for (const m of matches) {
-        const n = parseInt(m.replace(/[^\d]/g, ""));
-        if (n >= 100 && n <= 5000) prices.push(n);
-      }
-      if (prices.length === 0) return { low: null, high: null };
-      return { low: Math.min(...prices), high: Math.max(...prices) };
-    } catch {
-      return { low: null, high: null };
-    }
+    const ratesByBR = await fetchAmortizedNightlyByBR(communityName, city, state);
+    const allRates: number[] = [];
+    for (const list of Object.values(ratesByBR)) allRates.push(...list);
+    if (allRates.length === 0) return { low: null, high: null };
+    const sorted = [...allRates].sort((a, b) => a - b);
+    return { low: sorted[0], high: sorted[sorted.length - 1] };
   }
 
   const results: ResearchedCommunity[] = [];
