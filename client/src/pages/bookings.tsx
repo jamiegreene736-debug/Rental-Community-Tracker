@@ -316,12 +316,19 @@ export default function Bookings() {
           // first candidate that's verified-available or unknown. This
           // catches races where the listing got booked between initial
           // search and the attach click.
-          const candidates = (data.cheapest ?? []).filter((c) => c.totalPrice > 0);
+          // The server's `cheapest` is either up to 2 priced candidates OR
+          // the single-entry unpriced PM fallback (PR #148) when nothing
+          // priced exists. Split them so the verification loop only runs
+          // on priced ones, and we still attach the unpriced PM URL when
+          // the fallback fires (operator edits cost after booking).
+          const allCheapest = data.cheapest ?? [];
+          const pricedCandidates = allCheapest.filter((c) => c.totalPrice > 0);
+          const unpricedFallback = allCheapest.filter((c) => c.totalPrice === 0);
           let pick: LiveCandidate | null = null;
           let verifiedPrice: number | null = null;
           let skippedReasons: string[] = [];
 
-          for (const c of candidates.slice(0, 4)) {
+          for (const c of pricedCandidates.slice(0, 4)) {
             const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
             const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
             if (v?.available === false) {
@@ -333,6 +340,14 @@ export default function Bookings() {
               verifiedPrice = v.currentTotalPrice;
             }
             break;
+          }
+
+          // Fall back to the unpriced PM URL the server surfaced when no
+          // priced PM/Booking candidate existed. Skip verification — PM
+          // sites aren't verifiable via SearchAPI and we have no price to
+          // verify anyway.
+          if (!pick && unpricedFallback.length > 0) {
+            pick = unpricedFallback[0];
           }
 
           if (!pick) return { slot, picked: null, created: null, skippedReasons };
