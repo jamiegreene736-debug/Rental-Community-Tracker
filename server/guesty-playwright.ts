@@ -420,6 +420,234 @@ export async function isOnGuestyLoginPage(page: Page): Promise<boolean> {
  * server/routes.ts today and we don't want a circular import; callers
  * pull the dependency in themselves.
  */
+/**
+ * Run Guesty's "Sign in with Google" path. Used when the operator's
+ * Guesty account is provisioned via Google SSO (no native password
+ * configured) — typical for Google Workspace tenants. Requires
+ * GOOGLE_EMAIL (or GUESTY_EMAIL as fallback) + GOOGLE_PASSWORD env vars.
+ *
+ * Honest failure modes you should expect (none of these are bugs):
+ * 1. **"Verify it's you"** — Google challenges first logins from new
+ *    datacenter IPs. Headless Chrome from Railway is ALWAYS a new
+ *    location to Google. Fix: log in once from a residential browser
+ *    using the same Google account so the IP gets device-trusted, OR
+ *    refresh `GUESTY_SESSION_COOKIES` instead.
+ * 2. **2-Step Verification** — Workspace accounts almost always have
+ *    2SV on. Google sends prompts to phone / authenticator app — no
+ *    automatable second factor for service accounts (the Gmail IMAP
+ *    code path doesn't work for Google's own 2SV). Caller will see a
+ *    diagnostic + screenshot; the only fix is fresh cookies.
+ * 3. **"This browser may not be secure"** — Google detects headless
+ *    Chrome on cloud IPs. Stealth init script helps but isn't
+ *    bulletproof against Google's signal collection.
+ *
+ * Returns the same shape as `loginToGuestyIfNeeded` so the dispatcher
+ * can forward the result verbatim.
+ */
+export async function loginToGuestyViaGoogleSso(
+  page: Page,
+  trace: Trace,
+  saveShot: SaveShot,
+): Promise<
+  | { ok: true; loggedIn: boolean }
+  | {
+      ok: false;
+      error: string;
+      finalUrl: string;
+      beforeShotUrl: string | null;
+    }
+> {
+  const googleEmail = process.env.GOOGLE_EMAIL || process.env.GUESTY_EMAIL;
+  const googlePassword = process.env.GOOGLE_PASSWORD;
+  if (!googleEmail || !googlePassword) {
+    const shot = await saveShot(page, "google-no-creds");
+    return {
+      ok: false,
+      error:
+        "Google SSO path entered but GOOGLE_EMAIL/GUESTY_EMAIL or GOOGLE_PASSWORD not set.",
+      finalUrl: page.url(),
+      beforeShotUrl: shot,
+    };
+  }
+
+  trace.push({ step: "google-sso-starting" });
+
+  // STEP 0: Find and click the "Sign in with Google" button on Guesty's
+  // login page. The Guesty button has Google's "G" logo + label text;
+  // selector tries both the visible text and the typical SSO data
+  // attributes.
+  const googleBtn = await page
+    .waitForSelector(
+      'button:has-text("Sign in with Google"), button:has-text("Continue with Google"), button:has-text("Log in with Google"), [data-provider="google" i], button[aria-label*="Google" i]',
+      { timeout: 10000 },
+    )
+    .catch(() => null);
+  if (!googleBtn) {
+    const shot = await saveShot(page, "google-button-missing");
+    return {
+      ok: false,
+      error:
+        "GOOGLE_PASSWORD is set but no 'Sign in with Google' button was found on Guesty's login page. The login form may have changed, or this account isn't actually SSO-configured.",
+      finalUrl: page.url(),
+      beforeShotUrl: shot,
+    };
+  }
+
+  // OAuth typically opens a popup. Race the popup event against the
+  // same-tab navigation in case Guesty configured it as a redirect.
+  const ctx = page.context();
+  const popupPromise = ctx
+    .waitForEvent("page", { timeout: 8000 })
+    .catch(() => null);
+  await googleBtn.click().catch(() => {});
+  trace.push({ step: "google-sso-button-clicked" });
+
+  let workPage: Page = page;
+  const popup = await popupPromise;
+  if (popup) {
+    workPage = popup;
+    trace.push({ step: "google-sso-popup-opened" });
+    // Wait for the popup to land on accounts.google.com. Some tenants
+    // route through an Okta IdP first.
+    await workPage
+      .waitForURL((u) => /accounts\.google\.com/.test(u.toString()), {
+        timeout: 20000,
+      })
+      .catch(() => {
+        /* best-effort; we'll fall through and probe for the email field */
+      });
+  } else {
+    // Same-window redirect — wait for the URL to leave guesty.
+    await page
+      .waitForURL((u) => /accounts\.google\.com/.test(u.toString()), {
+        timeout: 15000,
+      })
+      .catch(() => {
+        trace.push({ step: "google-sso-no-popup-no-redirect" });
+      });
+  }
+  trace.push({
+    step: "google-sso-on-google-page",
+    detail: workPage.url(),
+  });
+
+  // STEP 1: Email. Google's login uses input[id="identifierId"] (most
+  // stable) but some experiments use a different name; cover the
+  // common variants.
+  const emailField = await workPage
+    .waitForSelector(
+      'input[type="email"], input[name="identifier"], input#identifierId',
+      { timeout: 15000 },
+    )
+    .catch(() => null);
+  if (!emailField) {
+    // Possible an account chooser is showing (the email is already
+    // remembered from a prior session). Try clicking the matching tile.
+    const tile = await workPage
+      .$(
+        `[data-email="${googleEmail}"], [data-identifier="${googleEmail}"], li:has-text("${googleEmail}")`,
+      )
+      .catch(() => null);
+    if (tile) {
+      await tile.click().catch(() => {});
+      trace.push({ step: "google-sso-clicked-account-chooser-tile" });
+    } else {
+      const shot = await saveShot(workPage, "google-no-email-field");
+      return {
+        ok: false,
+        error:
+          "Google didn't show an email field or a recognizable account-chooser tile. May be a 'verify it's you' challenge or 'this browser may not be secure' page — check the screenshot.",
+        finalUrl: workPage.url(),
+        beforeShotUrl: shot,
+      };
+    }
+  } else {
+    await emailField.fill(googleEmail);
+    trace.push({ step: "google-sso-email-filled" });
+    await workPage
+      .click('#identifierNext button, button:has-text("Next")', {
+        timeout: 8000,
+      })
+      .catch(() => {});
+    trace.push({ step: "google-sso-email-submitted" });
+  }
+
+  // STEP 2: Password. Google sometimes shows an interstitial ("Not your
+  // device? Sign in with a private window") between email and password
+  // — the password field still mounts after a beat, so we just wait
+  // patiently here. Cap at 25s; longer than that is almost always a
+  // hard-block challenge.
+  await workPage.waitForTimeout(2000);
+  const pwField = await workPage
+    .waitForSelector(
+      'input[type="password"], input[name="Passwd"], input#password',
+      { timeout: 25000 },
+    )
+    .catch(() => null);
+  if (!pwField) {
+    // Common reasons: "verify it's you" prompt, 2SV-from-new-device
+    // challenge, or Google's "this browser or app may not be secure"
+    // wall. None of these have a clean automatable path — surface the
+    // screenshot so the operator can see what challenge Google is
+    // serving and decide whether to refresh cookies instead.
+    const shot = await saveShot(workPage, "google-no-password-field");
+    const url = workPage.url();
+    return {
+      ok: false,
+      error:
+        /signin\/v2\/challenge|signin\/identifier\?.*signinChooser|signin\/rejected|disabled_client/i.test(
+          url,
+        )
+          ? `Google served a challenge page instead of password (URL hint: ${url}). Likely 'verify it's you' / 2SV / 'browser may not be secure'. The cleanest fix is to refresh GUESTY_SESSION_COOKIES + GUESTY_OKTA_TOKEN_STORAGE from a logged-in browser session, rather than fighting Google's bot detection. See the screenshot for the exact prompt.`
+          : "Google didn't show a password field within 25s after email submit. Almost always a Google challenge — see the screenshot. Refresh cookies as the fallback path.",
+      finalUrl: url,
+      beforeShotUrl: shot,
+    };
+  }
+  await pwField.fill(googlePassword);
+  trace.push({ step: "google-sso-password-filled" });
+  await workPage
+    .click('#passwordNext button, button:has-text("Next")', { timeout: 8000 })
+    .catch(() => {});
+  trace.push({ step: "google-sso-password-submitted" });
+
+  // STEP 3: Wait for Guesty to come back. Two cases:
+  //   a) Popup flow — the popup posts auth back to the parent and
+  //      closes; the parent's URL changes from /auth/login to a real
+  //      Guesty page. We watch the ORIGINAL `page`, not workPage,
+  //      because workPage closes.
+  //   b) Same-window redirect — workPage IS page; URL changes to
+  //      app.guesty.com.
+  // Either way, we wait on `page` for the post-auth state.
+  try {
+    await page.waitForURL(
+      (u) => {
+        const s = u.toString();
+        return /app\.guesty\.com/i.test(s) && !/\/auth\//i.test(s);
+      },
+      { timeout: 45000 },
+    );
+    trace.push({
+      step: "google-sso-redirected-back-to-guesty",
+      detail: page.url(),
+    });
+    return { ok: true, loggedIn: true };
+  } catch {
+    // If the popup is still alive, capture its state for diagnosis —
+    // it's probably stuck on a 2SV / "verify it's you" prompt that
+    // Google surfaces AFTER password submit.
+    const stuckPage = popup && !popup.isClosed() ? popup : page;
+    const shot = await saveShot(stuckPage, "google-stuck-after-password");
+    return {
+      ok: false,
+      error:
+        "Google accepted the password but didn't redirect back to Guesty within 45s. Almost always a post-password 2SV challenge (Google Prompt to phone, authenticator code, security key) — there's no automatable second factor for this. Refresh cookies as the fallback.",
+      finalUrl: stuckPage.url(),
+      beforeShotUrl: shot,
+    };
+  }
+}
+
 export async function loginToGuestyIfNeeded(
   page: Page,
   trace: Trace,
@@ -441,6 +669,27 @@ export async function loginToGuestyIfNeeded(
 > {
   if (!(await isOnGuestyLoginPage(page))) return { ok: true, loggedIn: false };
 
+  // Branch: Google SSO. If GOOGLE_PASSWORD is set AND Guesty's login
+  // page actually shows a "Sign in with Google" button, take the SSO
+  // path instead of the native email/password flow. Google Workspace
+  // tenants on Guesty are typically SSO-only — they have no native
+  // password to fill — and detection by button presence avoids
+  // misrouting on accounts where SSO isn't configured.
+  if (process.env.GOOGLE_PASSWORD) {
+    const hasGoogleBtn = await page
+      .$(
+        'button:has-text("Sign in with Google"), button:has-text("Continue with Google"), button:has-text("Log in with Google"), [data-provider="google" i], button[aria-label*="Google" i]',
+      )
+      .catch(() => null);
+    if (hasGoogleBtn) {
+      trace.push({
+        step: "routing-to-google-sso",
+        detail: "GOOGLE_PASSWORD set + Guesty showed 'Sign in with Google'",
+      });
+      return loginToGuestyViaGoogleSso(page, trace, saveShot);
+    }
+  }
+
   const guestyEmail = process.env.GUESTY_EMAIL;
   const guestyPassword = process.env.GUESTY_PASSWORD;
   if (!guestyEmail || !guestyPassword) {
@@ -448,7 +697,7 @@ export async function loginToGuestyIfNeeded(
     return {
       ok: false,
       error:
-        "Guesty redirected to login and GUESTY_EMAIL / GUESTY_PASSWORD env vars are not set. Token/storage injection alone doesn't bypass Guesty's server-side session check — set the email+password env vars to enable the Playwright login flow.",
+        "Guesty redirected to login and no usable credentials are set. For native login: GUESTY_EMAIL + GUESTY_PASSWORD. For Google SSO: GOOGLE_PASSWORD (and GOOGLE_EMAIL if different from GUESTY_EMAIL). Token/storage injection alone doesn't bypass Guesty's server-side session check.",
       finalUrl: page.url(),
       beforeShotUrl: beforeShot,
     };
