@@ -14,6 +14,7 @@ import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
 import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
+import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2036,6 +2037,21 @@ export async function registerRoutes(
     const snap = getOutscraperVrboDebugSnapshot();
     if (!snap) return res.json({ message: "No Outscraper Vrbo call has run since boot." });
     res.json(snap);
+  });
+
+  // One-off endpoint: consult xAI's Grok about our Vrbo scraping
+  // methodology and ask for improvement recommendations. Sends a
+  // detailed brief with all five paths' failure modes + constraints +
+  // available tools, returns Grok's full response. ~2-5 second call.
+  // Plain text response for readability.
+  app.get("/api/operations/grok-vrbo-consult", async (_req, res) => {
+    try {
+      const text = await consultGrokAboutVrbo();
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(text);
+    } catch (e: any) {
+      res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
   });
 
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
