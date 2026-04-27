@@ -46,7 +46,13 @@ export type AgentResult = {
 // agent loops. 800×600 keeps each screenshot ~1100 tokens.
 const VIEWPORT_W = 800;
 const VIEWPORT_H = 600;
-const MAX_ITERATIONS = 12;
+// Lower iteration cap + hard wall-clock budget. Some PM sites
+// (Suite Paradise's month dropdown, anything with non-standard date
+// pickers) loop forever burning tokens. 8 iters is enough for the
+// majority of well-built date pickers; the wall budget protects us
+// when a site is genuinely uncrackable.
+const MAX_ITERATIONS = 8;
+const TOTAL_WALL_BUDGET_MS = 75_000;
 // Keep only the last 1 turn of history (assistant + tool_result with
 // the latest screenshot). The agent gets fresh ground truth every
 // iteration via the new screenshot; older screenshots are stale
@@ -171,7 +177,16 @@ async function runAgentLoop(
     },
   ];
 
+  const startedAt = Date.now();
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    // Hard wall-clock budget — if the agent's been at it for too long
+    // we bail and let the caller fall back to $0 attach. Better to
+    // attach a $0 PM link the operator can verify manually than
+    // leave them staring at a spinner for 5 minutes.
+    if (Date.now() - startedAt > TOTAL_WALL_BUDGET_MS) {
+      trace.push(`iter ${i}: wall budget exceeded (${TOTAL_WALL_BUDGET_MS}ms) — bailing`);
+      return { iterations: i, error: "wall-budget-exceeded", trace };
+    }
     // Pacing: pause between iterations (skip on the first one) to
     // smooth token consumption against Anthropic's per-minute window.
     if (i > 0) await new Promise((r) => setTimeout(r, ITERATION_DELAY_MS));
