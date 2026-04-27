@@ -538,12 +538,46 @@ export default function Bookings() {
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
           }
+          // Last-resort Airbnb walk. Operator opted Airbnb back into the
+          // bookable pool as a final safety net when no PM/Booking/Vrbo
+          // candidate produced a usable URL — better than leaving the
+          // slot empty. Walk priced Airbnb candidates (cheapest first)
+          // and verify each via verify-listing; take the first verified
+          // one. If verification fails for all (or returns unknown),
+          // attach the cheapest priced Airbnb URL anyway — the operator
+          // can confirm availability themselves.
+          //
+          // Airbnb's TOS prohibits sublet, so the buy-in record gets a
+          // TOS-warning suffix in its notes (added below). This is
+          // tracked separately so the toast and notes can flag it.
+          let airbnbLastResort = false;
+          if (!pick) {
+            const airbnbPriced = (data.sources?.airbnb ?? []).filter((c) => c.totalPrice > 0);
+            for (const c of airbnbPriced.slice(0, 4)) {
+              const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
+              const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
+              if (v?.available === false) {
+                skippedReasons.push(`Airbnb: ${v.reason ?? "unavailable"}`);
+                continue;
+              }
+              pick = c;
+              airbnbLastResort = true;
+              if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
+                verifiedPrice = v.currentTotalPrice;
+              }
+              break;
+            }
+            if (!pick && airbnbPriced.length > 0) {
+              pick = airbnbPriced[0];
+              airbnbLastResort = true;
+            }
+          }
           if (!pick) {
             const fallbackVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0)[0];
             if (fallbackVrbo) pick = fallbackVrbo;
           }
 
-          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
+          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
           const propertyName =
@@ -551,6 +585,9 @@ export default function Bookings() {
             `Property ${selectedPropertyId}`;
           const noteSuffix = visionVerified
             ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
+            : "";
+          const tosSuffix = airbnbLastResort
+            ? ` · ⚠️ Last-resort Airbnb pick — Airbnb TOS prohibits sublet. No PM/Booking/Vrbo candidate was available for these dates. Open Find buy-in on this slot for reverse-image PM matches you can book direct.`
             : "";
           // When we attached the URL because of the peak-season fallback
           // (most/all candidates came back booked), record what was
@@ -577,7 +614,7 @@ export default function Bookings() {
               costPaid: finalCost.toFixed(2),
               airbnbConfirmation: null,
               airbnbListingUrl: pick.url,
-              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${attemptsNote}`,
+              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${tosSuffix}${attemptsNote}`,
               status: "active",
             }).then((r) => r.json());
             if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -586,10 +623,10 @@ export default function Bookings() {
               buyInId: created.id,
             }).then((r) => r.json());
 
-            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified };
+            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified, airbnbLastResort };
           } catch (e: any) {
             skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
-            return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
+            return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false };
           }
         }),
       );
@@ -618,7 +655,7 @@ export default function Bookings() {
         toast({
           title: "No auto-fill candidates",
           description:
-            "Booking.com and PM Companies didn't return any candidates for the dates. Click 'Find buy-in' on any slot to see Airbnb listings (with reverse-image PM matches you can click through to book direct).",
+            "Booking.com, PM Companies, Vrbo, and Airbnb all returned nothing for these dates. Click 'Find buy-in' on any slot to retry the search manually (and to see reverse-image PM matches under each Airbnb row that you can click through to book direct).",
           variant: "destructive",
         });
       } else if (zeroCostFills.length === filled.length) {
@@ -637,13 +674,17 @@ export default function Bookings() {
         });
       } else {
         const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
+        const airbnbLastResortCount = filled.filter((r) => r.airbnbLastResort).length;
         toast({
-          title: `Filled ${filled.length} / ${results.length} units`,
+          title: airbnbLastResortCount > 0
+            ? `Filled ${filled.length} / ${results.length} units — ${airbnbLastResortCount} via Airbnb last-resort`
+            : `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
             + (visionVerifiedCount > 0 ? ` · ${visionVerifiedCount} verified via screenshot analysis` : "")
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
-            + (skipped.length ? ` · No PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
+            + (airbnbLastResortCount > 0 ? ` · ⚠️ ${airbnbLastResortCount} Airbnb URL${airbnbLastResortCount > 1 ? "s" : ""} attached as last-resort (TOS prohibits sublet — see slot notes)` : "")
+            + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
       }
       setAutoFilling(null);
@@ -1294,9 +1335,13 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
-  // Vrbo is back — surfaced for awareness/manual outreach. Like Airbnb,
-  // it's NOT in the cheapest/auto-fill pool because of the same TOS
-  // subletting restriction. Booking + PM remain the bookable channels.
+  // Booking + PM are the preferred bookable channels and populate the
+  // server's `cheapest` array. Vrbo is surfaced for awareness/manual
+  // outreach. Airbnb is the CLIENT-SIDE last-resort: when nothing else
+  // returns a usable URL, auto-fill walks `sources.airbnb` and attaches
+  // the cheapest verified-priced one with a TOS-warning suffix in the
+  // buy-in notes (Airbnb TOS prohibits sublet — operator handles the
+  // booking channel manually).
   sources: {
     airbnb: LiveCandidate[];
     vrbo: LiveCandidate[];
