@@ -3,6 +3,7 @@
 // (/api/community/scan-top-markets) can reuse the same Google + Claude pipeline.
 
 import { checkCommunityType } from "@shared/community-type";
+import { geocode } from "./walking-distance";
 
 export type ResearchedCommunity = {
   name: string;
@@ -36,14 +37,29 @@ export type ResearchedCommunity = {
 //     calendar (Airbnb often blocks last-minute) and that we dodge the
 //     next-7-days surge pricing.
 //
+// Listing matching is layered (most specific to least):
+//   1. If `addressHint` is provided AND geocodes successfully, the
+//      function passes a tight ~500m bounding box to SearchAPI as
+//      `sw_lat`/`ne_lat`/`sw_lng`/`ne_lng` AND post-filters listings
+//      whose `gps_coordinates` fall outside that box. This is the most
+//      reliable path: many listings don't name the resort in title or
+//      description (e.g. Caribe Cove condos call themselves "Disney
+//      Vacation Condo") so a name-only filter drops them all.
+//   2. If `addressHint` is missing or geocode fails, the function falls
+//      back to token-based name match: every word of length ≥3 in the
+//      community name must appear in title or description. Looser than
+//      a substring match but tight enough to filter "Caribe Royale" out
+//      of a Caribe Cove search.
+//
 // Returns rates grouped by bedroom count: { 2: [125, 130, …], 3: [180, …] }.
-// Listings whose title or description doesn't name `communityName` are
-// dropped (engine's bbox is generous), as are nightly rates outside
-// $50-$3000 (junk data, regional outliers).
+// Nightly rates outside $50-$3000 are dropped (junk / regional outliers).
+const BBOX_HALF_DEG = 0.005; // ~500 meters at FL/HI latitudes — fits a single resort
+
 export async function fetchAmortizedNightlyByBR(
   communityName: string,
   city: string,
   state: string,
+  addressHint?: string,
 ): Promise<Record<number, number[]>> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   if (!searchApiKey) return {};
@@ -55,6 +71,32 @@ export async function fetchAmortizedNightlyByBR(
   const checkOutDate = new Date(checkInDate);
   checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
   const ymd = (d: Date) => d.toISOString().slice(0, 10);
+
+  // Geocode the address hint up front (Nominatim, in-memory cached).
+  // Treat any failure as "fall back to name match" — never throw.
+  let bbox: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number } | null = null;
+  if (addressHint && addressHint.trim()) {
+    const fullAddress = `${addressHint.trim()}, ${city}, ${state}`;
+    const coord = await geocode(fullAddress);
+    if (coord) {
+      bbox = {
+        sw_lat: coord.lat - BBOX_HALF_DEG,
+        sw_lng: coord.lng - BBOX_HALF_DEG,
+        ne_lat: coord.lat + BBOX_HALF_DEG,
+        ne_lng: coord.lng + BBOX_HALF_DEG,
+      };
+    }
+  }
+
+  // Token-based name match — every word of length ≥3 in the community
+  // name must appear in the haystack. Used when bbox is unavailable.
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const nameTokens = norm(communityName).split(" ").filter((t) => t.length >= 3);
+  const nameMatches = (haystack: string): boolean => {
+    if (nameTokens.length === 0) return true;
+    const n = norm(haystack);
+    return nameTokens.every((t) => n.includes(t));
+  };
 
   const ratesByBR: Record<number, number[]> = {};
   try {
@@ -68,17 +110,35 @@ export async function fetchAmortizedNightlyByBR(
       currency: "USD",
       api_key: searchApiKey,
     };
+    if (bbox) {
+      sp.sw_lat = String(bbox.sw_lat);
+      sp.sw_lng = String(bbox.sw_lng);
+      sp.ne_lat = String(bbox.ne_lat);
+      sp.ne_lng = String(bbox.ne_lng);
+    }
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
     );
     if (!resp.ok) return ratesByBR;
     const data = await resp.json() as any;
     const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-    const cnameLower = communityName.toLowerCase();
     for (const p of properties) {
-      const title = String(p?.name ?? p?.title ?? "");
-      const desc = String(p?.description ?? "");
-      if (!title.toLowerCase().includes(cnameLower) && !desc.toLowerCase().includes(cnameLower)) continue;
+      // Geo filter (when active) — drop listings whose coordinates fall
+      // outside the bbox. Listings without coordinates are kept since
+      // the engine already honored the bbox query param; missing coords
+      // is more often a data-shape quirk than an out-of-bounds listing.
+      if (bbox) {
+        const lat = Number(p?.gps_coordinates?.latitude);
+        const lng = Number(p?.gps_coordinates?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          if (lat < bbox.sw_lat || lat > bbox.ne_lat || lng < bbox.sw_lng || lng > bbox.ne_lng) continue;
+        }
+      } else {
+        // No bbox — fall back to name match against title + description.
+        const title = String(p?.name ?? p?.title ?? "");
+        const desc = String(p?.description ?? "");
+        if (!nameMatches(`${title} ${desc}`)) continue;
+      }
       const total = Number(p?.price?.extracted_total_price);
       const br = typeof p?.bedrooms === "number" ? p.bedrooms : NaN;
       if (!Number.isFinite(total) || total <= 0) continue;

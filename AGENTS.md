@@ -163,6 +163,33 @@ established it so you can read the rationale in the commit message.
     rates land within ~10-15% of operator-validated prices. Do NOT
     revert to Google-snippet scraping for pricing data.
 
+32. **`fetchAmortizedNightlyByBR` matches listings by GEOCODED address
+    bounds when an `addressHint` is provided, falling back to token-
+    based name match otherwise.** Many listings at a resort don't name
+    the resort in title or description — Caribe Cove condos commonly
+    list themselves as "Disney Vacation Condo" or similar generics —
+    so a name-only filter returned 0 listings even on resorts with
+    dozens listed. The geo path geocodes `addressHint, city, state`
+    via Nominatim (cached in-memory by `server/walking-distance.ts`),
+    builds a ~500m bounding box around the result, passes it to the
+    Airbnb engine as `sw_lat`/`ne_lat`/`sw_lng`/`ne_lng`, and
+    post-filters returned listings whose `gps_coordinates` fall outside
+    the box. Listings without coordinates are kept (the engine already
+    honored the bbox query param; missing coords is more often a
+    data-shape quirk than an out-of-bounds listing). When no address is
+    available — typically Step 3 of the Add Community wizard, before
+    the operator has set `streetAddress` — the function falls back to
+    the same token-based name match that `mentionsResort` in
+    `routes.ts` uses. This is intentionally layered: don't collapse to
+    name-match-only, the false-negative rate is too high.
+
+    **Refresh path:** `POST /api/community/:id/refresh-pricing` re-runs
+    the lookup using the saved draft's `streetAddress` and writes the
+    new low/high back to `estimatedLowRate` / `estimatedHighRate`. Use
+    this whenever a draft's pricing looks stale — it's idempotent and
+    only costs one SearchAPI call + one Nominatim call (or zero, on a
+    cache hit).
+
 ### Database & deploy
 
 15. **Schema migrations run via `npm run db:push` on Railway boot.**
