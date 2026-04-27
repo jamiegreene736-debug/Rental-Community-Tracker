@@ -2917,7 +2917,9 @@ export async function registerRoutes(
         // Filter out static assets and ad-tech to keep the dump small.
         if (/\.(?:png|jpe?g|gif|svg|woff2?|css|ico|webp|map|ttf|eot)/i.test(u)) return;
         if (/google|googletag|facebook|doubleclick|adobedtm|omtrdc|adservice|criteo|bing|amazon-adsystem|hotjar|sentry|datadog|segment\.io|cookielaw|cdn\.jsdelivr/i.test(u)) return;
-        captured.push({ kind: "req", method: req.method(), url: u, postData: req.postData()?.slice(0, 1500) });
+        // Capture full post body — we need the persistedQuery hash and
+        // full variables to replicate GraphQL calls.
+        captured.push({ kind: "req", method: req.method(), url: u, postData: req.postData()?.slice(0, 8000) });
       });
       page.on("response", async (resp) => {
         const u = resp.url();
@@ -2925,8 +2927,10 @@ export async function registerRoutes(
         if (/google|googletag|facebook|doubleclick|adobedtm|omtrdc|adservice|criteo|bing|amazon-adsystem|hotjar|sentry|datadog|segment\.io|cookielaw|cdn\.jsdelivr/i.test(u)) return;
         const ct = resp.headers()["content-type"] || "";
         let body = "";
-        if (resp.status() >= 200 && resp.status() < 400 && /json|javascript|html|text/i.test(ct)) {
-          body = (await resp.text().catch(() => "")).slice(0, 3000);
+        if (resp.status() >= 200 && resp.status() < 400 && /json/i.test(ct)) {
+          // GraphQL responses can be large; capture more so we can see
+          // rate fields. JS bundles are skipped to keep payload small.
+          body = (await resp.text().catch(() => "")).slice(0, 20000);
         }
         captured.push({ kind: "resp", status: resp.status(), url: u, ct, body });
       });
