@@ -40,19 +40,25 @@ export type AgentResult = {
 
 // 1366×768 keeps screenshot tokens reasonable while leaving room for
 // most PM booking widgets to fully render.
-// Smaller viewport = fewer image tokens per screenshot. 1024×768 still
-// gives the agent enough room to see calendars and price tables, and
-// stays well under Anthropic's 30K-tokens-per-minute tier-1 cap when
-// combined with truncated history below.
-const VIEWPORT_W = 1024;
-const VIEWPORT_H = 768;
+// Smaller viewport = fewer image tokens. Anthropic tier-1's 30K
+// tokens/min cap is the binding constraint here, not credits — even
+// a fully-loaded org-tier user account can hit this on bursty
+// agent loops. 800×600 keeps each screenshot ~1100 tokens.
+const VIEWPORT_W = 800;
+const VIEWPORT_H = 600;
 const MAX_ITERATIONS = 12;
-// Keep only the last N message-pair turns in the rolling context.
-// Each turn (assistant + tool_result with screenshot) is ~2-3K tokens.
-// Capping at 4 turns leaves the system prompt + ~10K tokens of history
-// per request — well under the per-minute rate limit even at fast
-// iteration rates.
-const HISTORY_TURNS = 4;
+// Keep only the last 1 turn of history (assistant + tool_result with
+// the latest screenshot). The agent gets fresh ground truth every
+// iteration via the new screenshot; older screenshots are stale
+// anyway. Combined with inter-iteration delay below, this keeps the
+// 30K-per-minute envelope.
+const HISTORY_TURNS = 1;
+// Pause between iterations to spread token consumption. With ~4K
+// tokens per request and 4s pacing, average is 60K/min in burst but
+// rate limiter sees the smoothed window — Anthropic enforces a
+// sliding window so this pacing buys headroom without slowing the
+// happy path much (most pages converge in 4-7 iterations).
+const ITERATION_DELAY_MS = 4000;
 // Sonnet 4.6 doesn't support the `computer_20250124` tool type (it's a
 // coding-focused variant). The latest Sonnet that does support
 // computer-use is 4.5. Reserve 4.6 for non-computer-use vision calls.
@@ -130,9 +136,12 @@ async function runAgentLoop(
     ``,
     `Typical steps:`,
     `1. If a newsletter / "book direct" / cookie modal is blocking the page, dismiss it (click its X button or press Escape).`,
-    `2. Open the date picker. Click ${opts.checkIn} as the check-in date. Click ${opts.checkOut} as the check-out date. You may need to navigate the calendar forward by clicking the next-month arrow.`,
-    `3. Click the Search / Check Availability / View Rates / Book Now button.`,
-    `4. Wait for the rate to render. Scroll if the price is below the fold.`,
+    `2. Open the date picker. Look for a clickable MONTH/YEAR header in the calendar — clicking it usually opens a fast year/month picker that lets you jump directly to ${opts.checkIn.slice(0, 7)} without paging through every month. Use that whenever possible. Only use the next-month arrow if no faster option exists.`,
+    `3. Click ${opts.checkIn} as the check-in date and ${opts.checkOut} as the check-out date.`,
+    `4. Click the Search / Check Availability / View Rates / Book Now button.`,
+    `5. Wait for the rate to render. Scroll if the price is below the fold.`,
+    ``,
+    `IMPORTANT: be efficient with tool calls. Each screenshot costs tokens against a per-minute rate limit. Prefer one decisive click that opens a year-picker over many month-arrow clicks. If you find yourself clicking the same arrow more than 3 times, stop and look for a year/month dropdown.`,
     ``,
     `Stop conditions — emit a final text response (no more tool use):`,
     `- "DONE: rates visible" when the total price for these specific dates is on screen.`,
@@ -163,6 +172,10 @@ async function runAgentLoop(
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    // Pacing: pause between iterations (skip on the first one) to
+    // smooth token consumption against Anthropic's per-minute window.
+    if (i > 0) await new Promise((r) => setTimeout(r, ITERATION_DELAY_MS));
+
     // Trim history every iteration: keep the initial user message
     // (goal + first screenshot) plus the last HISTORY_TURNS turns
     // (assistant + tool_result). Older turns are dropped to stay under
