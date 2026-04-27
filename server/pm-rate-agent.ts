@@ -17,6 +17,7 @@
 import Browserbase from "@browserbasehq/sdk";
 import { chromium, type Page } from "playwright";
 import { manualEntryForUrl, manualOnlyResult } from "./pm-scrapers";
+import { scrapeSuiteParadiseRate } from "./pm-scraper-suite-paradise";
 
 export type AgentExtraction = {
   isUnitPage: boolean | null;
@@ -80,10 +81,18 @@ export async function verifyPmRate(opts: {
 }): Promise<AgentResult & { manualOnly?: boolean }> {
   const { url, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId } = opts;
 
-  // Fast path: manual-only PMs (Suite Paradise, etc.) — return
-  // immediately without burning a Browserbase session or Anthropic
-  // tokens. The client renders contact info instead of trying to
-  // verify a price.
+  // Fast path 1: per-PM programmatic scrapers. Suite Paradise has a
+  // public rcapi endpoint we replicate directly — ~1s response, free,
+  // exact prices. Other PMs get added here as we recon them.
+  if (/(?:^|\.)suite-paradise\.com$/i.test(safeHost(url))) {
+    console.log(`[pm-agent] suite-paradise: using programmatic scraper`);
+    return scrapeSuiteParadiseRate({ url, checkIn, checkOut });
+  }
+
+  // Fast path 2: manual-only PMs (sites with NO programmatic rate
+  // path AND not browser-driveable) — return immediately without
+  // burning a Browserbase session or Anthropic tokens. Client
+  // renders contact info instead.
   const manual = manualEntryForUrl(url);
   if (manual) {
     console.log(`[pm-agent] ${manual.name}: manual-only PM, skipping agent`);
@@ -378,6 +387,12 @@ async function executeAction(
     default:
       return { text: `unsupported action: ${action}` };
   }
+}
+
+// Best-effort URL → hostname. Used by the dispatcher to route URLs
+// to per-PM scrapers without throwing on malformed inputs.
+function safeHost(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
 }
 
 // Keep messages[0] (initial goal + first screenshot) plus the last
