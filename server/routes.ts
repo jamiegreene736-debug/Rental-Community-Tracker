@@ -11,6 +11,7 @@ import { verifyPmRate } from "./pm-rate-agent";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
+import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2495,10 +2496,15 @@ export async function registerRoutes(
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
     let vrboApifyCount = 0;
+    let vrboBbCount = 0;
     let vrboGoogleCount = 0;
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const [apifyResults, googleResults] = await Promise.all([
-        // Apify path — returns priced when working
+      const bbApiKey = process.env.BROWSERBASE_API_KEY;
+      const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+      const targetDestination = resortName ?? community;
+
+      const [apifyResults, browserbaseResults, googleResults] = await Promise.all([
+        // Path 1 — Apify (paid actor; priced when regionId resolves)
         searchVrboViaApify({
           resortName: resortName ?? community,
           location: resortName ?? community,
@@ -2509,7 +2515,23 @@ export async function registerRoutes(
           console.error("[find-buy-in] vrbo (apify) error:", e?.message ?? e);
           return [] as Awaited<ReturnType<typeof searchVrboViaApify>>;
         }),
-        // Google site:search — returns unpriced URLs, used to be the only path
+        // Path 2 — Browserbase-driven Vrbo search (priced; independent
+        // of Apify regionId). Skipped when Browserbase isn't configured.
+        bbApiKey && bbProjectId
+          ? searchVrboViaBrowserbase({
+              resortName: resortName ?? community,
+              destination: targetDestination,
+              bedrooms,
+              checkIn,
+              checkOut,
+              bbApiKey,
+              bbProjectId,
+            }).catch((e: any) => {
+              console.error("[find-buy-in] vrbo (browserbase) error:", e?.message ?? e);
+              return [] as Awaited<ReturnType<typeof searchVrboViaBrowserbase>>;
+            })
+          : Promise.resolve([] as Awaited<ReturnType<typeof searchVrboViaBrowserbase>>),
+        // Path 3 — Google site:search (free; unpriced URLs, fallback)
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
@@ -2517,6 +2539,11 @@ export async function registerRoutes(
       ]);
 
       vrboApifyCount = apifyResults.length;
+      vrboBbCount = browserbaseResults.length;
+      vrboGoogleCount = googleResults.candidates.length;
+      vrboDropped = googleResults.dropped;
+      vrboRawCount = vrboApifyCount + vrboBbCount + googleResults.raw;
+
       const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
         source: "vrbo" as const,
         sourceLabel: "Vrbo",
@@ -2528,30 +2555,38 @@ export async function registerRoutes(
         image: c.image,
         snippet: c.snippet,
       }));
+      const bbCandidates: Candidate[] = browserbaseResults.map((c): Candidate => ({
+        source: "vrbo" as const,
+        sourceLabel: "Vrbo",
+        title: c.title,
+        url: withStayDates("vrbo", c.url),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        bedrooms: c.bedrooms,
+        image: c.image,
+        snippet: c.snippet,
+      }));
 
-      vrboGoogleCount = googleResults.candidates.length;
-      vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + googleResults.raw;
-
-      // Dedupe by Vrbo listing id when both paths surface the same unit.
-      // Vrbo URLs follow `vrbo.com/<id>` or `vrbo.com/<id>?...`.
+      // Dedupe by Vrbo listing id across all three paths. Priority
+      // order: Apify (priced + actor-maintained) → Browserbase
+      // (priced via our own scraper) → Google (unpriced fallback).
+      // First listing id wins; later occurrences of the same id are
+      // dropped so we don't duplicate cards.
       const listingIdOf = (url: string): string | null => {
         const m = url.match(/vrbo\.com\/(\d+)/);
         return m ? m[1] : null;
       };
       const seenIds = new Set<string>();
       const out: Candidate[] = [];
-      for (const c of apifyCandidates) {
+      const pushIfNew = (c: Candidate) => {
         const id = listingIdOf(c.url);
+        if (id && seenIds.has(id)) return;
         if (id) seenIds.add(id);
         out.push(c);
-      }
-      for (const c of googleResults.candidates) {
-        const id = listingIdOf(c.url);
-        if (id && seenIds.has(id)) continue;
-        if (id) seenIds.add(id);
-        out.push(c);
-      }
+      };
+      for (const c of apifyCandidates) pushIfNew(c);
+      for (const c of bbCandidates) pushIfNew(c);
+      for (const c of googleResults.candidates) pushIfNew(c);
       return out;
     })();
 
@@ -2990,7 +3025,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (apify=${vrboApifyCount} priced, google=${vrboGoogleCount} unpriced — TOS awareness-only) `
+      + `vrbo=${vrbo.length} (apify=${vrboApifyCount}, browserbase=${vrboBbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
