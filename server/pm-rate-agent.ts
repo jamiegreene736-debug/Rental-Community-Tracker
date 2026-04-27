@@ -46,25 +46,23 @@ export type AgentResult = {
 // agent loops. 800×600 keeps each screenshot ~1100 tokens.
 const VIEWPORT_W = 800;
 const VIEWPORT_H = 600;
-// Lower iteration cap + hard wall-clock budget. Some PM sites
-// (Suite Paradise's month dropdown, anything with non-standard date
-// pickers) loop forever burning tokens. 8 iters is enough for the
-// majority of well-built date pickers; the wall budget protects us
-// when a site is genuinely uncrackable.
-const MAX_ITERATIONS = 8;
-const TOTAL_WALL_BUDGET_MS = 75_000;
+// Bigger budget after recon confirmed some PMs (Suite Paradise) have
+// genuinely complex calendar UIs that need ~10-15 iterations. With
+// rate-limit retry-with-backoff the agent paces itself naturally —
+// the old fixed ITERATION_DELAY_MS was over-pacing in the common case
+// and under-pacing during burst periods.
+const MAX_ITERATIONS = 20;
+const TOTAL_WALL_BUDGET_MS = 180_000;
 // Keep only the last 1 turn of history (assistant + tool_result with
 // the latest screenshot). The agent gets fresh ground truth every
 // iteration via the new screenshot; older screenshots are stale
 // anyway. Combined with inter-iteration delay below, this keeps the
 // 30K-per-minute envelope.
 const HISTORY_TURNS = 1;
-// Pause between iterations to spread token consumption. With ~4K
-// tokens per request and 4s pacing, average is 60K/min in burst but
-// rate limiter sees the smoothed window — Anthropic enforces a
-// sliding window so this pacing buys headroom without slowing the
-// happy path much (most pages converge in 4-7 iterations).
-const ITERATION_DELAY_MS = 4000;
+// Removed fixed ITERATION_DELAY_MS — replaced by 429 retry-with-backoff
+// in the loop. Anthropic's rate limiter sends `retry-after` (seconds)
+// on 429 so we wait the exact required delay and only when needed,
+// rather than over-pacing every iteration.
 // Sonnet 4.6 doesn't support the `computer_20250124` tool type (it's a
 // coding-focused variant). The latest Sonnet that does support
 // computer-use is 4.5. Reserve 4.6 for non-computer-use vision calls.
@@ -142,12 +140,16 @@ async function runAgentLoop(
     ``,
     `Typical steps:`,
     `1. If a newsletter / "book direct" / cookie modal is blocking the page, dismiss it (click its X button or press Escape).`,
-    `2. Open the date picker. Look for a clickable MONTH/YEAR header in the calendar — clicking it usually opens a fast year/month picker that lets you jump directly to ${opts.checkIn.slice(0, 7)} without paging through every month. Use that whenever possible. Only use the next-month arrow if no faster option exists.`,
-    `3. Click ${opts.checkIn} as the check-in date and ${opts.checkOut} as the check-out date.`,
-    `4. Click the Search / Check Availability / View Rates / Book Now button.`,
+    `2. Open the date picker. Then in PRIORITY ORDER:`,
+    `   a) If the date input accepts typing, type "${opts.checkIn}" or "${opts.checkIn.slice(5,7)}/${opts.checkIn.slice(8)}/${opts.checkIn.slice(0,4)}" directly. This is the fastest path — try it first.`,
+    `   b) If the input is read-only, look for a clickable MONTH or YEAR header in the calendar. Clicking it usually opens a year/month picker — jump straight to ${opts.checkIn.slice(0, 7)} from there.`,
+    `   c) If the dropdown closes when you scroll, try keyboard arrow keys (Down/PageDown) to navigate it instead of mouse-scrolling.`,
+    `   d) Last resort: click the next-month arrow repeatedly. But STOP after 4 arrow clicks if you're not making progress and try a different approach.`,
+    `3. Once on the right month, click ${opts.checkIn} as check-in. Then ${opts.checkOut} as check-out.`,
+    `4. Click Search / Check Availability / View Rates / Book Now.`,
     `5. Wait for the rate to render. Scroll if the price is below the fold.`,
     ``,
-    `IMPORTANT: be efficient with tool calls. Each screenshot costs tokens against a per-minute rate limit. Prefer one decisive click that opens a year-picker over many month-arrow clicks. If you find yourself clicking the same arrow more than 3 times, stop and look for a year/month dropdown.`,
+    `IMPORTANT — efficiency: be decisive. Each screenshot costs tokens against a per-minute rate limit. If an approach isn't working after 2-3 attempts, switch tactics rather than repeating.`,
     ``,
     `Stop conditions — emit a final text response (no more tool use):`,
     `- "DONE: rates visible" when the total price for these specific dates is on screen.`,
@@ -179,49 +181,59 @@ async function runAgentLoop(
 
   const startedAt = Date.now();
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    // Hard wall-clock budget — if the agent's been at it for too long
-    // we bail and let the caller fall back to $0 attach. Better to
-    // attach a $0 PM link the operator can verify manually than
-    // leave them staring at a spinner for 5 minutes.
+    // Hard wall-clock budget.
     if (Date.now() - startedAt > TOTAL_WALL_BUDGET_MS) {
       trace.push(`iter ${i}: wall budget exceeded (${TOTAL_WALL_BUDGET_MS}ms) — bailing`);
       return { iterations: i, error: "wall-budget-exceeded", trace };
     }
-    // Pacing: pause between iterations (skip on the first one) to
-    // smooth token consumption against Anthropic's per-minute window.
-    if (i > 0) await new Promise((r) => setTimeout(r, ITERATION_DELAY_MS));
 
     // Trim history every iteration: keep the initial user message
-    // (goal + first screenshot) plus the last HISTORY_TURNS turns
-    // (assistant + tool_result). Older turns are dropped to stay under
-    // the 30K-tokens-per-minute rate limit. The agent still has enough
-    // recent context to know what it just did.
+    // (goal + first screenshot) plus the last HISTORY_TURNS turns.
     const messagesForRequest = trimMessages(messages, HISTORY_TURNS);
 
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": opts.anthropicKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "computer-use-2025-01-24",
-      },
-      body: JSON.stringify({
-        model: AGENT_MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        tools: [
-          {
-            type: "computer_20250124",
-            name: "computer",
-            display_width_px: VIEWPORT_W,
-            display_height_px: VIEWPORT_H,
-          },
-        ],
-        messages: messagesForRequest,
-      }),
-      signal: AbortSignal.timeout(30000),
-    });
+    // Anthropic call with 429 retry-with-backoff. The retry-after
+    // header tells us EXACTLY how long the rate limiter wants us to
+    // wait, so honor it instead of guessing a fixed delay.
+    let resp: Response | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": opts.anthropicKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "computer-use-2025-01-24",
+        },
+        body: JSON.stringify({
+          model: AGENT_MODEL,
+          max_tokens: 1024,
+          system: systemPrompt,
+          tools: [
+            {
+              type: "computer_20250124",
+              name: "computer",
+              display_width_px: VIEWPORT_W,
+              display_height_px: VIEWPORT_H,
+            },
+          ],
+          messages: messagesForRequest,
+        }),
+        signal: AbortSignal.timeout(35000),
+      });
+      if (resp.status !== 429) break;
+      const retryAfter = parseInt(resp.headers.get("retry-after") ?? "5", 10);
+      const waitMs = Math.min(30, Math.max(2, retryAfter)) * 1000;
+      console.log(`[pm-agent] iter ${i}: 429, retry-after=${retryAfter}s, sleeping ${waitMs}ms (attempt ${attempt + 1})`);
+      // Don't blow the wall budget waiting on rate limits.
+      if (Date.now() - startedAt + waitMs > TOTAL_WALL_BUDGET_MS) {
+        trace.push(`iter ${i}: 429 retry would exceed wall budget — bailing`);
+        return { iterations: i, error: "wall-budget-exceeded-during-rate-limit-wait", trace };
+      }
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    if (!resp) {
+      return { iterations: i, error: "no response after retries", trace };
+    }
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
