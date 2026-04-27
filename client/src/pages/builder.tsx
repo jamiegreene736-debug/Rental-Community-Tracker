@@ -6,11 +6,11 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
 import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
-import { getPropertyPricing } from "@/data/pricing-data";
+import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { usePhotoLabels } from "@/hooks/use-photo-labels";
-import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
+import { loadDraftFullDataByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -45,26 +45,36 @@ export default function Builder() {
 
   // Promoted-draft fallback: when the static lookup misses AND id is
   // negative (the synthetic -draftId convention from the dashboard),
-  // fetch /api/community/drafts and adapt the matching draft. Mirrors
-  // the same pattern in builder-preflight.tsx so "Continue to Builder"
-  // doesn't dead-end on "Property #-N not found" for promoted drafts.
+  // fetch /api/community/drafts and adapt the matching draft into the
+  // PropertyUnitBuilder shape + draft-derived pricing + bedding
+  // defaults. Mirrors the pattern in builder-preflight.tsx so "Continue
+  // to Builder" doesn't dead-end on "Property #-N not found".
   const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
+  const [draftPricing, setDraftPricing] = useState<PropertyPricing | null>(null);
   const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && propertyId < 0);
   useEffect(() => {
     if (staticProperty || propertyId >= 0) return;
     setDraftLoading(true);
-    loadDraftPropertyByNegativeId(propertyId)
-      .then((p) => { if (p) setDraftProperty(p); })
+    loadDraftFullDataByNegativeId(propertyId)
+      .then((data) => {
+        if (data) {
+          setDraftProperty(data.property);
+          setDraftPricing(data.pricing);
+        }
+      })
       .catch(() => { /* leave draftProperty null → renders the not-found state */ })
       .finally(() => setDraftLoading(false));
   }, [propertyId, staticProperty]);
   const property = staticProperty ?? draftProperty;
 
-  // Pricing data is keyed off PROPERTY_UNIT_CONFIGS (the static 11);
-  // returns null for drafts. The builder reads `pricing?.totalBaseSellRate`
-  // with optional chaining so null is safe — operator adjusts in the
-  // Pricing tab once the draft is in the builder.
-  const pricing = getPropertyPricing(propertyId);
+  // For active properties, pricing comes from the static
+  // PROPERTY_UNIT_CONFIGS-based generator. For promoted drafts, the
+  // 24-month schedule is generated from the draft's pricingArea (or
+  // estimatedLowRate fallback) so the Pricing tab renders something
+  // editable instead of being blank.
+  const pricing = staticProperty
+    ? getPropertyPricing(propertyId)
+    : draftPricing;
 
   // Pull Claude-generated labels for every photo folder we'll render.
   // Override the static unit-builder-data.ts labels with these when present;
