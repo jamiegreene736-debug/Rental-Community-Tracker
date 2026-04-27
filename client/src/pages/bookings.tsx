@@ -342,20 +342,62 @@ export default function Bookings() {
             break;
           }
 
-          // Fall back to the unpriced PM URL the server surfaced when no
-          // priced PM/Booking candidate existed. Skip verification — PM
-          // sites aren't verifiable via SearchAPI and we have no price to
-          // verify anyway.
+          // No priced candidate verified. Try to extract real pricing from
+          // the unpriced PM URLs by running the headless-screenshot +
+          // Claude-vision verifier against the top few. First one that
+          // yields { isUnitPage: true, available !== false, totalPrice > 0,
+          // dateMatch !== false } wins, and we attach with the verified
+          // price. If all extractions fail, fall back to attaching the top
+          // unpriced URL at $0 (operator edits cost after contacting PM).
+          let visionVerified: { reason?: string; screenshotBase64?: string } | null = null;
+          if (!pick) {
+            // Cap at 2 candidates to bound the auto-fill wall-clock time
+            // (~10s per verify × 2 candidates × 2 slots ≈ 40s worst case).
+            const unpricedPmCandidates = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).slice(0, 2);
+            for (const c of unpricedPmCandidates) {
+              try {
+                const v = await apiRequest("POST", "/api/operations/verify-pm-listing", {
+                  url: c.url,
+                  checkIn: ci,
+                  checkOut: co,
+                }).then((r) => r.json());
+                const ex = v?.extracted;
+                if (
+                  v?.ok &&
+                  ex?.isUnitPage === true &&
+                  ex?.available !== false &&
+                  ex?.dateMatch !== false &&
+                  typeof ex?.totalPrice === "number" &&
+                  ex.totalPrice > 0
+                ) {
+                  pick = c;
+                  verifiedPrice = ex.totalPrice;
+                  visionVerified = { reason: ex.reason, screenshotBase64: v.screenshotBase64 };
+                  break;
+                }
+                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
+              } catch (e: any) {
+                skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
+              }
+            }
+          }
+
+          // Final fallback: server's unpricedFallback at $0. Lets the slot
+          // at least point at a clickable PM URL when vision extraction
+          // also failed (anti-bot interstitials, no unit pages, etc.).
           if (!pick && unpricedFallback.length > 0) {
             pick = unpricedFallback[0];
           }
 
-          if (!pick) return { slot, picked: null, created: null, skippedReasons };
+          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
           const propertyName =
             (selectedListingId && listingNameById.get(selectedListingId)) ||
             `Property ${selectedPropertyId}`;
+          const noteSuffix = visionVerified
+            ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
+            : "";
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
             propertyName,
@@ -366,7 +408,7 @@ export default function Bookings() {
             costPaid: finalCost.toFixed(2),
             airbnbConfirmation: null,
             airbnbListingUrl: pick.url,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}`,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}`,
             status: "active",
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -375,7 +417,7 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
-          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons };
+          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified: visionVerified !== null };
         }),
       );
       return { reservation, results };
@@ -415,10 +457,12 @@ export default function Bookings() {
             + (skipped.length ? ` · No PM URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
+        const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
         toast({
           title: `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
+            + (visionVerifiedCount > 0 ? ` · ${visionVerifiedCount} verified via screenshot analysis` : "")
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
             + (skipped.length ? ` · No PM/Booking candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
