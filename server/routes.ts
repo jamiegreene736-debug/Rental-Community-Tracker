@@ -10609,7 +10609,7 @@ export async function registerRoutes(
       return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     }
 
-    const { ratesByBR, bboxApplied, bboxCenter, drops, firstListingSample } = await fetchAmortizedNightlyByBR(
+    const { ratesByBR, bboxApplied, bboxCenter, drops } = await fetchAmortizedNightlyByBR(
       draft.name,
       draft.city,
       draft.state,
@@ -10645,7 +10645,6 @@ export async function registerRoutes(
       usedAddressGeoBounds: bboxApplied,
       bboxCenter,
       drops,
-      firstListingSample,
       draft: updated,
     });
   });
