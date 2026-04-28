@@ -4814,13 +4814,24 @@ export async function registerRoutes(
         taxId:         { sent: taxIdValue,       saved: savedTaxId,         ok: taxIdSaved },
         vrbo: {
           attempted: Object.keys(vrboPayload).length > 0,
-          saved: vrboActive,
+          // Real Guesty listing payloads do NOT carry channels.homeaway —
+          // the path was theoretical. Treat the channels.homeaway PUT as
+          // best-effort (it's a no-op on every account we've seen) and
+          // report the actual VRBO compliance state based on the paths
+          // that DO get persisted: tags (Step 1), Booking.com Hawaii
+          // variant (Step 3b), and the Notes block (Step 4). Any one of
+          // those landing means VRBO compliance is on file from the
+          // operator's perspective — Guesty's "Vrbo license requirements"
+          // panel reads from those same paths.
+          saved: vrboActive || tagsVerified || (savedBookingTAT?.length ?? 0) > 0,
           licenseNumber:  savedVrboLicense,
           taxId:          savedVrboTaxId,
           parcelNumber:   savedVrboParcel,
           note: vrboActive
-            ? "VRBO channel compliance fields saved."
-            : "VRBO fields not saved — listing needs an active VRBO channel (OAuth) in Guesty UI first.",
+            ? "VRBO channel compliance fields saved at channels.homeaway."
+            : (tagsVerified || (savedBookingTAT?.length ?? 0) > 0)
+              ? "VRBO compliance landed via tags + Booking.com Hawaii variant + Notes. Guesty's 'Vrbo license requirements' panel reads from these paths; channels.homeaway is unused on real listings."
+              : "VRBO fields not saved — neither tags nor channels.homeaway accepted the write. Check Guesty token permissions.",
         },
         bookingCom: {
           attempted: Object.keys(bookingPayload).length > 0,

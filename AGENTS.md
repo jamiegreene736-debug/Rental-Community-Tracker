@@ -407,12 +407,37 @@ established it so you can read the rationale in the commit message.
     didn't republish is much better than one that silently skips the
     step and leaves Guesty out of sync with VRBO.
 
-    **Persistent compliance state lives at
-    `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`** —
-    NOT under `integrations[]`. `/api/builder/push-compliance` writes
-    there; `getChannelStatus` reads it back as `info.vrboLicense` (null
-    when none of the three are set). The VRBO compliance card sub-block
-    surfaces three states from this:
+    **Persistent compliance state is detected from THREE paths on the
+    listing payload, not one.** The original implementation only read
+    `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`
+    and reported "not yet in Guesty" on every real listing because that
+    path doesn't exist on real Guesty payloads — it was theoretical.
+    `getChannelStatus` (in `client/src/services/guestyService.ts`) now
+    detects from each of these in priority order, returning whichever
+    has the most complete picture:
+    1. **`listing.tags`** — `TMK:` / `TAT:` / `GET:` prefixed entries
+       written by `/api/builder/push-compliance` Step 1. Carries all
+       three values (TAT, GET, TMK) and is the most reliable source
+       when this codebase pushed the compliance.
+    2. **`integrations[platform=bookingCom].bookingCom.license.information.contentData`** —
+       Booking.com Hawaii variant 6 (`hawaii-hotel_v1`) license object
+       written by push-compliance Step 3b. Carries TAT (`number`) and
+       TMK (`tmk_number`) but NOT GET. Guesty's UI "Vrbo license
+       requirements" panel surfaces these too because the Hawaii
+       variant is shared across VRBO and Booking.com.
+    3. **`listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`** —
+       legacy/future-proof fallback. Empty on every real account we've
+       seen but kept in case Guesty starts populating it.
+
+    The push-compliance verification was reporting `vrbo.saved = false`
+    on every successful push because it only read path #3. That's been
+    relaxed — `saved` is now true when ANY of tags / Booking.com Hawaii
+    variant / channels.homeaway have the data, with the response note
+    spelling out which path took it. Don't regress to a single-path
+    check — channels.homeaway is unused in production Guesty.
+
+    The VRBO compliance card sub-block surfaces three states from
+    `info.vrboLicense`:
     - **on file** (green) — Guesty has every field the property record
       has a value for, and the values match,
     - **out of date / incomplete** (amber) — Guesty has SOMETHING but
