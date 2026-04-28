@@ -3979,12 +3979,20 @@ export async function registerRoutes(
     "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
     "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
     "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
-    // Kaha Lani Resort is in Wailua (zip 96746), not Lihue. Backfill
-    // probe on property 23 returned 18 listings, 17 dropped by
-    // outsideBbox at the prior 22.0079, -159.3471 — Nominatim's match
-    // for "Kaha Lani Resort, Nehe Road, Wailua" lands at 22.0358,
-    // -159.3369, ~3km north of where I had it.
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0358, lng: -159.3369 },
+    // Kaha Lani Resort sits in Wailua at 22.036, -159.337. PR #250
+    // moved the bbox there from Lihue, but the resulting 1.65km bbox
+    // returned 19 listings with NONE matching the 2BR/3BR units we
+    // need (Wailua/Lihue is dominated by 1BR studios + 4+BR estates).
+    // The operator's hand-curated `COMMUNITY_BOUNDS["Kapaa
+    // Beachfront"]` targets ~22.072, -159.320 (Kapaa proper) where
+    // condo comps like Lae Nani / Pono Kai live. Centering the bbox
+    // at the midpoint (22.050, -159.328) extends the 1.65km box from
+    // Kaha Lani's actual location north into Kapaa Beachfront proper,
+    // catching east-shore 2BR/3BR condos that price comparably to
+    // Kaha Lani's units. Same Kapaa Beachfront pricing tier the
+    // operator already uses for buy-in calculations, just with a
+    // richer sample set.
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0500, lng: -159.3280 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
