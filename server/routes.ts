@@ -3979,7 +3979,12 @@ export async function registerRoutes(
     "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
     "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
     "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Lihue",       state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0079, lng: -159.3471 },
+    // Kaha Lani Resort is in Wailua (zip 96746), not Lihue. Backfill
+    // probe on property 23 returned 18 listings, 17 dropped by
+    // outsideBbox at the prior 22.0079, -159.3471 — Nominatim's match
+    // for "Kaha Lani Resort, Nehe Road, Wailua" lands at 22.0358,
+    // -159.3369, ~3km north of where I had it.
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0358, lng: -159.3369 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
