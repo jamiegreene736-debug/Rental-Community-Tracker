@@ -1264,10 +1264,6 @@ export default function Bookings() {
               reservation={picker.reservation}
               propertyId={selectedPropertyId}
               slot={picker.slot}
-              onAttach={(buyInId) =>
-                attachMutation.mutate({ reservationId: picker.reservation._id, buyInId })
-              }
-              isPending={attachMutation.isPending}
             />
           )}
         </DialogContent>
@@ -1294,128 +1290,22 @@ function CandidateList({
   reservation,
   propertyId,
   slot,
-  onAttach,
-  isPending,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
-  onAttach: (buyInId: number) => void;
-  isPending: boolean;
 }) {
-  // Server validates YYYY-MM-DD — slice off the time portion of Guesty's ISO
-  // timestamps, or use the already-localized date-only field when available.
-  const toDateOnly = (s: string | undefined): string => {
-    if (!s) return "";
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    return s.slice(0, 10);
-  };
-  const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
-  const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
-
-  const { data, isLoading, isError, error } = useQuery<{ candidates: Candidate[]; bookingNights: number; count: number }>({
-    queryKey: [
-      "/api/bookings/candidates",
-      reservation._id,
-      propertyId,
-      slot.unitId,
-      checkInYmd,
-      checkOutYmd,
-    ],
-    queryFn: () => {
-      const url = `/api/bookings/${reservation._id}/buy-in-candidates?propertyId=${propertyId}&unitId=${encodeURIComponent(slot.unitId)}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}`;
-      return apiRequest("GET", url).then((r) => r.json());
-    },
-    enabled: !!checkInYmd && !!checkOutYmd,
-  });
-
-  if (isLoading) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground">
-        <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-        Finding candidates…
-      </div>
-    );
-  }
-
-  if (isError) {
-    return (
-      <div className="py-6 text-center text-sm text-destructive">
-        <AlertCircle className="h-5 w-5 mx-auto mb-2" />
-        {(error as Error).message}
-      </div>
-    );
-  }
-
-  const candidates = data?.candidates ?? [];
-
-  // Skip the "no eligible buy-ins" dead-end — we go straight to live search
-  // instead of asking the user to maintain their own buy-in portfolio.
+  // Existing-buy-ins picker was removed (was here historically): when
+  // auto-fill creates buy-in records and the operator detaches them,
+  // the records stay in the DB with `guestyReservationId=NULL` and
+  // pile up as ghost rows of the same listing repeated N times. The
+  // canonical path is now ALWAYS a fresh live search via
+  // <LiveSearchSection> below — so this dialog skips the DB picker
+  // entirely. Buy-ins that were intentionally pre-purchased can still
+  // be attached from the buy-in tracker page directly.
 
   return (
     <div className="space-y-4 max-h-[60vh] overflow-y-auto">
-      {/* ── Existing buy-ins from DB (hidden if none — no need to nag) ─── */}
-      {candidates.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Existing buy-ins ({candidates.length})
-          </p>
-          {candidates.map((c, idx) => (
-            <div
-              key={c.buyIn.id}
-              className={`border rounded-lg p-3 flex items-center gap-3 ${idx === 0 ? "border-green-500 bg-green-50/50 dark:bg-green-950/20" : ""}`}
-              data-testid={`candidate-${c.buyIn.id}`}
-            >
-              <div className="grow min-w-0">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <p className="font-medium text-sm truncate">{c.buyIn.unitLabel}</p>
-                  {idx === 0 && <Badge className="bg-green-600 text-white text-[10px]">Cheapest</Badge>}
-                  {c.wastedNights > 0 && (
-                    <Badge variant="outline" className="text-[10px]">{c.wastedNights} unused nights</Badge>
-                  )}
-                </div>
-                <div className="text-xs text-muted-foreground flex items-center gap-3">
-                  <span>
-                    <Calendar className="h-3 w-3 inline mr-0.5" />
-                    {fmtDate(c.buyIn.checkIn)} → {fmtDate(c.buyIn.checkOut)} · {c.buyInNights}n
-                  </span>
-                  {c.buyIn.airbnbConfirmation && (
-                    <span className="font-mono">#{c.buyIn.airbnbConfirmation}</span>
-                  )}
-                </div>
-              </div>
-              <div className="text-right shrink-0">
-                <p className="font-semibold text-sm">{fmtMoney(c.totalCost)}</p>
-                <p className="text-[10px] text-muted-foreground">
-                  {fmtMoney(c.costPerNight)}/night
-                </p>
-              </div>
-              <div className="flex flex-col gap-1 shrink-0">
-                {c.buyIn.airbnbListingUrl && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => window.open(c.buyIn.airbnbListingUrl!, "_blank", "noopener,noreferrer")}
-                    data-testid={`button-open-${c.buyIn.id}`}
-                  >
-                    <ExternalLink className="h-3 w-3 mr-1" /> Open
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  onClick={() => onAttach(c.buyIn.id)}
-                  disabled={isPending}
-                  data-testid={`button-attach-${c.buyIn.id}`}
-                >
-                  <Link2 className="h-3.5 w-3.5 mr-1" /> Attach
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* ── Live multi-source search (auto-runs) ─────────────────────── */}
       <LiveSearchSection
         reservation={reservation}
