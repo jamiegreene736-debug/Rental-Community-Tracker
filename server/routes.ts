@@ -7889,6 +7889,44 @@ export async function registerRoutes(
       return res.status(400).json({ error: "At least one of taxMapKey / tatLicense / getLicense required" });
     }
 
+    // Sync to the open API first via /api/builder/push-compliance.
+    // This writes the values to the listing's tags + top-level
+    // licenseNumber/taxId fields, which is what the readback in
+    // `getChannelStatus` (client/src/services/guestyService.ts) uses
+    // to detect compliance state. Without this step, the Playwright
+    // panel-fill below would update Guesty's admin UI but the
+    // listing's API payload would still report the stale values —
+    // leaving the operator stuck in a "Compliance on file but
+    // incomplete" loop where re-clicking this button does nothing
+    // detectable to the comparison logic. See the Kaha Lani case
+    // 2026-04-28 for the failure pattern.
+    //
+    // Best-effort — failures here log a warning but don't abort the
+    // Playwright path, since the Playwright-filled Guesty UI is the
+    // primary target VRBO actually reads from for license checks.
+    const port = process.env.PORT || "5000";
+    const apiSyncResult: { ok: boolean; reason?: string } = { ok: false };
+    if (!dryRun) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/builder/push-compliance`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId, taxMapKey, tatLicense, getLicense }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (r.ok) {
+          apiSyncResult.ok = true;
+        } else {
+          const errText = await r.text().catch(() => "");
+          apiSyncResult.reason = `push-compliance HTTP ${r.status}: ${errText.slice(0, 200)}`;
+          console.warn(`[submit-vrbo-compliance] api sync failed: ${apiSyncResult.reason}`);
+        }
+      } catch (e: any) {
+        apiSyncResult.reason = `push-compliance error: ${e?.message ?? e}`;
+        console.warn(`[submit-vrbo-compliance] api sync threw: ${apiSyncResult.reason}`);
+      }
+    }
+
     const { openGuestyAdminPage } = await import("./guesty-playwright");
     const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
 
@@ -8153,6 +8191,7 @@ export async function registerRoutes(
         saveResult,
         saveFeedback,
         republishResult,
+        apiSync: apiSyncResult, // open-API push (tags + top-level licenseNumber/taxId)
         beforeShotUrl: beforeShot,
         afterEditShotUrl: afterEditShot,
         postFillShotUrl: postFillShot,
