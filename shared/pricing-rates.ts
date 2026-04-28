@@ -27,7 +27,17 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Poipu Oceanfront":  { "2BR": 630, "3BR": 792, "4BR": 936,  region: "hawaii" },
   "Poipu Brenneckes":  { "2BR": 510, "3BR": 618, "4BR": 864,  region: "hawaii" },
   "Pili Mai":          { "2BR": 576, "3BR": 744, "4BR": 840,  region: "hawaii" },
-  "Kapaa Beachfront":  { "2BR": 588, "3BR": 840, "4BR": 1020, region: "hawaii" },
+  // 3BR re-set 2026-04-28 from $840 to $615 to match the live-data
+  // methodology operator chose to keep. The live Airbnb-engine
+  // backfill landed Kapaa Beachfront 2BR at $430/n=4 (vs the prior
+  // static $588 — 27% drop), but Kapaa proper has no 3BR condo comps
+  // in the operator's COMMUNITY_BOUNDS zone, so the per-property
+  // refresh persists no 3BR row and the Pricing tab falls through to
+  // this static value for unit A on prop 23. Extrapolation: $430 ×
+  // 1.43 (the prior static 3BR/2BR ratio for this community) = $615 —
+  // keeps prop 23's 3BR component consistent with the rest of the
+  // live-data table.
+  "Kapaa Beachfront":  { "2BR": 588, "3BR": 615, "4BR": 1020, region: "hawaii" },
   "Princeville":       { "2BR": 492, "3BR": 744, "4BR": 858,  region: "hawaii" },
   "Kekaha Beachfront": { "2BR": 540, "3BR": 810, "4BR": 1080, region: "hawaii" },
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
