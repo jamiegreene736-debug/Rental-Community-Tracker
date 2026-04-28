@@ -3134,10 +3134,14 @@ export async function registerRoutes(
     // Widen the Airbnb→Lens cap. The Airbnb-anchored PM match is the
     // CANONICAL priced path (per operator direction): Airbnb gives us
     // verified-available + priced inventory, Google Lens bridges to
-    // the bookable PM URL for the same physical unit. Cap at 8 covers
-    // typical Airbnb result sets without unbounded SearchAPI cost
-    // (~$0.01/lens call → $0.08/cold-cache find-buy-in; cached 5min).
-    const TOP_AIRBNB_FOR_LENS = 8;
+    // the bookable PM URL for the same physical unit. Operator
+    // explicitly opted for "maximum candidate surface area" over
+    // tighter cost control — cap at 15 covers essentially every
+    // Airbnb result for our resort searches (~10-12 priced typical;
+    // hard cap at 15 in case Airbnb opens up to a wider geo). Cost:
+    // ~$0.01/lens call × up to 15 = $0.15/cold-cache find-buy-in;
+    // cached 5min so re-runs free.
+    const TOP_AIRBNB_FOR_LENS = 15;
     const topAirbnb = airbnb
       .filter((c) => c.image && c.nightlyPrice > 0)
       .slice(0, TOP_AIRBNB_FOR_LENS);
@@ -3175,9 +3179,11 @@ export async function registerRoutes(
     let droppedNoResortMatch = 0;
     for (const anchor of topAirbnb) {
       const matches = photoMatchesByUrl.get(anchor.url) ?? [];
-      // Per-anchor cap. Top match is the highest-confidence visual hit;
-      // expanding beyond 2 starts pulling in similar-looking-but-different
-      // properties.
+      // Per-anchor cap. Lens returns up to 3 visual matches per photo
+      // (the lensMatches helper caps at 3). Operator opted for max
+      // candidate surface, so use all 3 — the resort filter below
+      // catches similar-looking-but-different properties anyway, so
+      // there's no real noise floor introduced by widening this.
       const filteredMatches = matches.filter((m) => {
         const haystack = `${m.url} ${m.title} ${m.domain}`;
         if (!mentionsResort(haystack)) {
@@ -3185,7 +3191,7 @@ export async function registerRoutes(
           return false;
         }
         return true;
-      }).slice(0, 2);
+      }).slice(0, 3);
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
@@ -3244,7 +3250,15 @@ export async function registerRoutes(
     const unpricedFallback: Candidate[] = priced.length === 0
       ? pmAugmented.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
       : [];
-    const cheapest = priced.length > 0 ? priced.slice(0, 2) : unpricedFallback;
+    // Widened from 2 → 20 per operator direction: maximum candidate
+    // surface area for auto-fill. Multi-slot reservations (e.g. Amy's
+    // 2× 3BR) need distinct units per slot — with the prior cap of 2,
+    // slot 2 fell through to unpriced fallbacks once slot 1 took the
+    // cheapest. With 20 priced candidates available, slot 2 gets a
+    // priced pick from sitemap discovery (SP/PK/CB) or photo-match
+    // (Airbnb-anchored). Find-buy-in dialog also shows more priced
+    // options to the operator for manual selection.
+    const cheapest = priced.length > 0 ? priced.slice(0, 20) : unpricedFallback;
     // Telemetry: what would the cheapest have been if we counted Airbnb?
     // Useful to see how often Airbnb is undercutting the bookable channels.
     const airbnbCheapest = airbnbWithMatches
