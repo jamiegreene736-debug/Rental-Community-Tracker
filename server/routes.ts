@@ -8,6 +8,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
+import { verifyPmAvailability } from "./verify-pm-availability";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
@@ -3623,6 +3624,40 @@ export async function registerRoutes(
     } catch (e: any) {
       console.error(`[verify-pm-listing] agent error:`, e?.message ?? e);
       return res.json({ ok: false, reason: "agent-error", error: e?.message ?? String(e) });
+    }
+  });
+
+  // Lightweight per-row availability verifier — Stagehand DOM extract
+  // backed by Haiku 4.5. Cost target: ~$0.01 per click. Used by the
+  // find-buy-in dialog's live-search candidate table when an operator
+  // wants a one-click "is this actually bookable?" check on an
+  // Airbnb-anchored photo-match before recording. Cheaper / faster
+  // alternative to the full verifyPmRate (Sonnet CUA, $0.10–0.30).
+  app.post("/api/buy-in-candidates/verify-availability", async (req: Request, res: Response) => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const bbApiKey = process.env.BROWSERBASE_API_KEY;
+    const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+    if (!bbApiKey) return res.status(500).json({ error: "BROWSERBASE_API_KEY not configured" });
+    if (!bbProjectId) return res.status(500).json({ error: "BROWSERBASE_PROJECT_ID not configured" });
+
+    const { url, checkIn, checkOut } = (req.body ?? {}) as {
+      url?: string; checkIn?: string; checkOut?: string;
+    };
+    if (!url || typeof url !== "string") return res.status(400).json({ error: "url required" });
+    if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+    try { new URL(url); } catch { return res.status(400).json({ error: "invalid url" }); }
+
+    try {
+      const result = await verifyPmAvailability({
+        url, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId,
+      });
+      return res.json(result);
+    } catch (e: any) {
+      console.error(`[verify-availability] error:`, e?.message ?? e);
+      return res.status(500).json({ error: "verifier error", message: e?.message ?? String(e) });
     }
   });
 
