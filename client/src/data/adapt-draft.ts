@@ -80,6 +80,38 @@ function strPermitSampleHawaii(city: string): string {
   }
 }
 
+// Map a Florida city → county. Drives the Florida sample set, since
+// Tourist Development Tax and Local Business Tax Receipts are issued
+// per-county, and the sales-tax certificate's leading two digits encode
+// the county the business registered in (Osceola=49, Orange=48,
+// Polk=53). Davenport sits across the Polk/Osceola line — most resort
+// communities ("ChampionsGate", Reunion-area condos) bill from Osceola
+// addresses, so Davenport is grouped with Osceola here. Operators with
+// a Polk-side Davenport address should overwrite the BTR/TDT/sales-tax
+// samples with their actual numbers; the fields aren't used until the
+// operator pushes compliance to Guesty.
+function floridaCountyFromCity(city: string): "osceola" | "orange" | "polk" | "lake" | "brevard" | "unknown" {
+  const c = (city || "").toLowerCase();
+  if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud|championsgate|reunion)/.test(c)) return "osceola";
+  if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka|winter\s+garden|dr\.?\s*phillips)/.test(c)) return "orange";
+  if (/(haines\s*city|lakeland|winter\s+haven|auburndale|bartow|lake\s+wales)/.test(c)) return "polk";
+  if (/(clermont|groveland|minneola|mascotte|mount\s+dora|tavares|leesburg)/.test(c)) return "lake";
+  if (/(melbourne|cocoa|titusville|palm\s+bay|merritt\s+island|cape\s+canaveral|viera|rockledge)/.test(c)) return "brevard";
+  return "unknown";
+}
+
+type FloridaCountyLabel = { label: string; salesTaxCountyCode: string };
+function floridaCountyLabel(c: ReturnType<typeof floridaCountyFromCity>): FloridaCountyLabel {
+  switch (c) {
+    case "osceola": return { label: "Osceola County",  salesTaxCountyCode: "49" };
+    case "orange":  return { label: "Orange County",   salesTaxCountyCode: "48" };
+    case "polk":    return { label: "Polk County",     salesTaxCountyCode: "53" };
+    case "lake":    return { label: "Lake County",     salesTaxCountyCode: "35" };
+    case "brevard": return { label: "Brevard County",  salesTaxCountyCode: "05" };
+    default:        return { label: "FL county",       salesTaxCountyCode: "XX" };
+  }
+}
+
 function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
@@ -91,11 +123,13 @@ function sampleLicensesForLocation(city: string, state: string): LicenseSamples 
     };
   }
   if (s === "florida" || s === "fl") {
+    const fc = floridaCountyFromCity(city);
+    const { label, salesTaxCountyCode } = floridaCountyLabel(fc);
     return {
-      taxMapKey: "DWE/COND-XXXXXXXXXX (sample — Florida DBPR Vacation Rental Dwelling/Condo License)",
-      getLicense: "XX-XXXXXXXXXX-X (sample — Florida DOR Sales & Use Tax Certificate)",
-      tatLicense: "Account # XXXXXXX (sample — county Tourist Development Tax registration)",
-      strPermit: "BTR-XXXXXX (sample — Local Business Tax Receipt)",
+      taxMapKey: "DWE/COND-XXXXXXX (sample — Florida DBPR Vacation Rental Dwelling/Condo License, 7-digit cert)",
+      getLicense: `${salesTaxCountyCode}-XXXXXXXXXX-X (sample — Florida DOR Sales & Use Tax Certificate; ${salesTaxCountyCode === "XX" ? "first two digits = your county code" : `${salesTaxCountyCode} = ${label} code`})`,
+      tatLicense: `${label} TDT Acct # XXXXXXX (sample — ${label} Tourist Development Tax registration${fc === "osceola" ? ", 6% local lodging tax" : ""})`,
+      strPermit: `LBTR-XXXXXX (sample — ${label} Local Business Tax Receipt for short-term rental)`,
     };
   }
   return {
@@ -104,6 +138,21 @@ function sampleLicensesForLocation(city: string, state: string): LicenseSamples 
     tatLicense: "(no occupancy tax registration required — verify with local jurisdiction)",
     strPermit: "(verify local short-term rental permit requirements)",
   };
+}
+
+// True when the saved value looks like a sample placeholder we generated
+// (contains "sample —" / "sample -", or is purely the verify-with-
+// jurisdiction fallback). When the operator typed a real permit, the
+// string won't contain those markers, and we keep their value verbatim.
+//
+// Drafts created before location detection landed (or before the
+// current Florida county-aware samples) saved the older generic
+// fallback as `draft.strPermit`. Treating those as "no real value"
+// lets the freshly adapted draft display the new, location-specific
+// sample without the operator having to clear the field by hand.
+function looksLikeSamplePlaceholder(value: string): boolean {
+  const v = value.toLowerCase();
+  return v.includes("sample —") || v.includes("sample -") || v.includes("(verify ") || v.includes("verify with local");
 }
 
 export function adaptDraftToPropertyUnitBuilder(
@@ -143,8 +192,13 @@ export function adaptDraftToPropertyUnitBuilder(
     tatLicense: licenseSamples.tatLicense,
     getLicense: licenseSamples.getLicense,
     // Use the operator-entered STR permit if they typed one on Step 5,
-    // otherwise drop in the county-appropriate sample format.
-    strPermit: draft.strPermit && draft.strPermit.trim() ? draft.strPermit : licenseSamples.strPermit,
+    // otherwise drop in the county-appropriate sample format. Drafts
+    // saved before the Florida county-aware samples landed have the
+    // old generic placeholder stored as `draft.strPermit`; treat those
+    // as "no real value typed" so the new county-specific sample wins.
+    strPermit: draft.strPermit && draft.strPermit.trim() && !looksLikeSamplePlaceholder(draft.strPermit)
+      ? draft.strPermit
+      : licenseSamples.strPermit,
     hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
                  (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,
     communityPhotos: [],

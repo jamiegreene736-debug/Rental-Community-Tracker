@@ -11847,17 +11847,28 @@ export async function registerRoutes(
         return "TVR-YYYY-XX or TVNC-XXXX (sample — confirm permit type with the right HI county)";
       }
       if (s.includes("florida") || s === "fl") {
-        // Osceola County (Kissimmee, Davenport, Celebration, Poinciana)
-        if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Osceola County Local Business Tax Receipt for STR)";
+        // Osceola County (Kissimmee, Davenport, Celebration, Poinciana,
+        // ChampionsGate, Reunion). Davenport sits across the
+        // Polk/Osceola line — most resort communities bill from
+        // Osceola addresses, so it's grouped here.
+        if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud|championsgate|reunion)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Osceola County Local Business Tax Receipt for short-term rental)";
         }
-        // Orange County (Orlando, Windermere, Lake Buena Vista)
-        if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Orange County Local Business Tax Receipt for STR)";
+        // Orange County (Orlando, Windermere, Lake Buena Vista, Dr Phillips)
+        if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka|winter\s+garden|dr\.?\s*phillips)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Orange County Local Business Tax Receipt for short-term rental)";
         }
-        // Polk County (Haines City, Davenport-adjacent)
-        if (/(haines\s*city|lakeland|winter\s+haven|auburndale)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Polk County Local Business Tax Receipt for STR)";
+        // Polk County (Haines City, Lakeland, Winter Haven, Bartow)
+        if (/(haines\s*city|lakeland|winter\s+haven|auburndale|bartow|lake\s+wales)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Polk County Local Business Tax Receipt for short-term rental)";
+        }
+        // Lake County (Clermont, Mount Dora)
+        if (/(clermont|groveland|minneola|mascotte|mount\s+dora|tavares|leesburg)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Lake County Local Business Tax Receipt for short-term rental)";
+        }
+        // Brevard County (Space Coast)
+        if (/(melbourne|cocoa|titusville|palm\s+bay|merritt\s+island|cape\s+canaveral|viera|rockledge)/i.test(c)) {
+          return "LBTR-XXXXXX (sample — Brevard County Local Business Tax Receipt for short-term rental)";
         }
         return "LBTR-XXXXXX (sample — confirm permit type with the right FL county tax collector)";
       }
