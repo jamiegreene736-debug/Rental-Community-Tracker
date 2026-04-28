@@ -3085,7 +3085,18 @@ export async function registerRoutes(
     // Filter list mirrors the major OTAs we already track + a handful of
     // meta-search aggregators (kayak, trivago, hotels.com) that don't add
     // a useful new booking surface for the operator.
-    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.com|vrbo\.com|booking\.com|tripadvisor\.com|expedia\.com|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com)$/i;
+    // Airbnb localized variants (airbnb.co.in, airbnb.co.uk, airbnb.fr, …)
+    // were leaking through. The base hostname pattern with explicit `.com$`
+    // missed them, so a Lens hit on a localized Airbnb URL was being
+    // treated as a "PM match" with the same TOS sublet issue we wanted
+    // to avoid.
+    //
+    // to-hawaii.com is a Hawaii vacation-rental aggregator/directory —
+    // it surfaces inventory but isn't itself a bookable PM. Same for
+    // a couple of similar aggregator domains. Filtering these keeps
+    // the photo-match pool to ACTUAL property-management company
+    // websites the operator can book direct on.
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
       try {
         const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
