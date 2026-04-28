@@ -831,7 +831,21 @@ export default function Bookings() {
       setAutoFilling(null);
     },
     onError: (e: any) => {
-      toast({ title: "Auto-fill failed", description: e.message, variant: "destructive" });
+      const raw = String(e?.message ?? "");
+      // Railway returns a 502 JSON envelope when the find-buy-in
+      // handler exceeds its edge timeout. Translate that into an
+      // operator-friendly retry hint instead of dumping JSON in the
+      // toast. The server's per-source wall-budget should prevent
+      // this in steady state — if you're still seeing 502s, it
+      // means several sources are simultaneously slow.
+      const is502 = /\b502\b/.test(raw) && /Application failed to respond/.test(raw);
+      toast({
+        title: is502 ? "Search took too long — retry in a moment" : "Auto-fill failed",
+        description: is502
+          ? "The buy-in search exceeded the upstream timeout (likely a slow scraper). Click Auto-fill cheapest again — the second run usually warms the cache and completes in under 30s."
+          : raw,
+        variant: "destructive",
+      });
       setAutoFilling(null);
     },
   });
