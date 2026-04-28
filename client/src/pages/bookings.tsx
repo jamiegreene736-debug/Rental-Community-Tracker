@@ -225,6 +225,22 @@ export default function Bookings() {
     | { buyIn: BuyIn; reservation: GuestyReservation }
     | null
   >(null);
+  // Slots whose inline live-search panel is expanded. Auto-fill flips
+  // every slot it touched into this set so the operator sees the
+  // scanned-options table for each slot inline (per operator request:
+  // "auto-fill should also show me the tables"). Operators can also
+  // toggle any slot manually via the chevron button.
+  const [expandedSlots, setExpandedSlots] = useState<Set<string>>(new Set());
+  const slotKey = (reservationId: string, unitId: string) => `${reservationId}__${unitId}`;
+  const toggleSlotSearch = (reservationId: string, unitId: string) => {
+    setExpandedSlots((prev) => {
+      const next = new Set(prev);
+      const k = slotKey(reservationId, unitId);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  };
 
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
@@ -681,6 +697,17 @@ export default function Bookings() {
     onSuccess: ({ reservation, results }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      // Per operator request: auto-fill should also surface the live-
+      // search table for each slot it touched, so the operator can see
+      // what was scanned and override the auto-pick if needed. Flip the
+      // expanded-search bit for every slot in this reservation.
+      setExpandedSlots((prev) => {
+        const next = new Set(prev);
+        for (const r of results) {
+          next.add(slotKey(reservation._id, r.slot.unitId));
+        }
+        return next;
+      });
       const filled = results.filter((r) => r.picked);
       const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
       const payout = reservation.money?.hostPayout ?? 0;
@@ -1077,11 +1104,16 @@ export default function Bookings() {
                             )}
                           </div>
                         )}
-                        {r.slots.map((slot) => (
+                        {r.slots.map((slot) => {
+                          const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
+                          return (
                           <div
                             key={slot.unitId}
-                            className="flex items-center gap-3 bg-background rounded border px-3 py-2.5"
+                            className="bg-background rounded border"
                             data-testid={`slot-${r._id}-${slot.unitId}`}
+                          >
+                          <div
+                            className="flex items-center gap-3 px-3 py-2.5"
                           >
                             <div className="shrink-0 w-24">
                               <p className="text-sm font-medium">{slot.unitLabel}</p>
@@ -1171,9 +1203,35 @@ export default function Bookings() {
                                   Find {slot.bedrooms}BR buy-in
                                 </Button>
                               )}
+                              {/* Per-slot toggle for the inline live-search
+                                  panel. Auto-fill flips this on for every
+                                  slot it touches; operators can also open
+                                  it manually to compare alternatives. */}
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => toggleSlotSearch(r._id, slot.unitId)}
+                                data-testid={`button-toggle-search-${r._id}-${slot.unitId}`}
+                                title={slotIsExpanded ? "Hide live search" : "Show live search"}
+                              >
+                                {slotIsExpanded
+                                  ? <ChevronDown className="h-3.5 w-3.5" />
+                                  : <ChevronRight className="h-3.5 w-3.5" />}
+                              </Button>
                             </div>
                           </div>
-                        ))}
+                          {slotIsExpanded && selectedPropertyId && (
+                            <div className="border-t bg-muted/20 px-3 py-3">
+                              <LiveSearchSection
+                                reservation={r}
+                                propertyId={selectedPropertyId}
+                                slot={slot}
+                              />
+                            </div>
+                          )}
+                          </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
