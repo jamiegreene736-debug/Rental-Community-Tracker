@@ -2153,6 +2153,23 @@ export async function registerRoutes(
       const n = norm(haystack);
       return resortTokens.every(t => n.includes(t));
     };
+    // Looser variant for photo-match promotion: at least ONE long token
+    // (>= 4 chars) of the resort name must appear in the haystack. Used
+    // to drop Lens false positives where the interior decor matches but
+    // the unit is on a totally different island (Kona / Mauna Lani
+    // listings showing up under "Poipu Kai" anchors). The strict
+    // `mentionsResort` was too aggressive for Lens matches (PR #227
+    // dropped it for that path), but no filter at all lets through
+    // wrong-island noise (PR #231's smoke test). This is the middle
+    // ground: any of Poipu / Pili / Princeville / Kapaa / etc. must
+    // appear, but secondary tokens like "Kai" (too generic — matches
+    // "Kayak", "Kaiser", etc.) don't trigger inclusion alone.
+    const significantResortTokens = resortTokens.filter((t) => t.length >= 4);
+    const mentionsResortLoose = (haystack: string): boolean => {
+      if (!resortName || significantResortTokens.length === 0) return true;
+      const n = norm(haystack);
+      return significantResortTokens.some((t) => n.includes(t));
+    };
 
     // Bedroom extraction from free text — looks for "2BR", "2 bedroom",
     // "two bedroom", "three-bedroom", "studio" (=0), "efficiency" (=0), etc.
@@ -3247,6 +3264,7 @@ export async function registerRoutes(
     // double-render a domain that the PM Google search already found.
     const existingPmUrls = new Set(pm.map((c) => c.url));
     const photoMatchPmCandidates: Candidate[] = [];
+    let photoMatchWrongResortDropped = 0;
     for (const anchor of topAirbnb) {
       const matches = photoMatchesByUrl.get(anchor.url) ?? [];
       // No resort filter on photo-matches per operator direction
@@ -3272,12 +3290,30 @@ export async function registerRoutes(
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
+        // Soft resort-token filter (see `mentionsResortLoose` for the
+        // why). Without this, Lens surfaces visually-similar interiors
+        // at totally different resorts (Kona / Mauna Lani / Big Island
+        // hits under a "Poipu Kai" anchor) and they all inherit the
+        // anchor's price + dates, creating bogus "available" rows that
+        // dead-end when the operator clicks through.
+        const hay = `${m.url} ${m.title} ${m.domain}`;
+        if (!mentionsResortLoose(hay)) {
+          photoMatchWrongResortDropped++;
+          continue;
+        }
         existingPmUrls.add(m.url);
         photoMatchPmCandidates.push({
           source: "pm",
           sourceLabel: m.domain,
+          // Wrap with `withStayDates("pm", ...)` so the URL carries
+          // common check-in / check-out param spellings. PMs that use
+          // any of `checkin`/`check_in`/`arrival` will pre-fill their
+          // date pickers when the operator clicks through; PMs that
+          // don't will ignore the params. Doesn't guarantee
+          // availability (that's verifyPmRate's job) but at least the
+          // page lands on the right window when it does support it.
+          url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
-          url: m.url,
           // Inherit price from the Airbnb anchor. This is what makes
           // the Airbnb-anchored path a PRIMARY priced channel rather
           // than an unpriced fallback.
@@ -3285,7 +3321,11 @@ export async function registerRoutes(
           totalPrice: anchor.totalPrice,
           bedrooms: anchor.bedrooms,
           image: anchor.image,
-          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}) — same unit, bookable on PM site. PM rate may differ slightly (Airbnb adds service fee).`,
+          // Honest snippet: anchor confirmed available + priced; PM
+          // availability for these dates is NOT verified server-side
+          // (would cost $0.10–0.30 per row to drive the PM widget).
+          // Operator should click Open to confirm before recording.
+          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Airbnb confirmed available; PM availability not verified — verify before recording. Rate may differ slightly.`,
           airbnbAnchorUrl: anchor.url,
           airbnbAnchorPrice: anchor.totalPrice,
         });
@@ -3412,7 +3452,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
