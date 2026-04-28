@@ -2487,6 +2487,14 @@ export async function registerRoutes(
                   bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
                   image: Array.isArray(p?.images) ? p.images[0] : undefined,
                   snippet: String(p?.description ?? "").slice(0, 160),
+                  // Airbnb engine queried with check_in / check_out, so
+                  // the listings returned are filtered by date-specific
+                  // availability AND the price is the date-specific
+                  // total. Auto-verified — no need to spend a Stagehand
+                  // session on something the engine already confirmed.
+                  verified: "yes",
+                  verifiedNightlyPrice: Math.round(total / Math.max(1, nights)),
+                  verifiedReason: "Airbnb engine returned this listing as available for the requested dates with a date-specific total_price",
                 };
               });
           } catch (e: any) {
@@ -3522,25 +3530,26 @@ export async function registerRoutes(
 
     const pmAugmented: Candidate[] = [...pm, ...photoMatchPmCandidates, ...pmFinderCandidates];
 
-    // Combined cheapest (top 2) across BOOKABLE sources that have pricing.
+    // Combined priced pool across all bookable sources.
     //
-    // Airbnb is excluded from the SERVER-SIDE `cheapest` pool — Auto-fill
-    // pulls from `cheapest` first, and the Booking.com / PM channels
-    // remain the preferred bookable surface (no TOS sublet issue). The
-    // CLIENT'S auto-fill walks Airbnb separately as an explicit
-    // last-resort step (see bookings.tsx — only fires when nothing else,
-    // including the unpriced-PM and peak-season-Vrbo fallbacks, returned
-    // a usable URL). The buy-in note surfaces "last-resort Airbnb pick —
-    // Airbnb TOS prohibits sublet" so the operator handles the booking
-    // channel choice consciously rather than thinking it's a normal pick.
+    // Operator directive 2026-04-28: include Airbnb fully in cheapest,
+    // overriding the previous "Airbnb is auto-fill last resort only"
+    // posture. Airbnb engine results are date-specific by construction
+    // (the engine query carries check_in / check_out and returns only
+    // available units), so they're auto-marked verified=yes upstream
+    // and join the priced pool alongside Booking + PM. The TOS-sublet
+    // warning still appears in client-side auto-fill notes when an
+    // Airbnb URL is picked — that's a billing-flow concern, not a
+    // discovery-flow concern, and the operator wants visibility into
+    // the actually-cheapest option regardless of channel.
     //
-    // Vrbo IS surfaced now (operator explicitly opted back in) but stays
-    // OUT of the priced/cheapest pool — Vrbo's TOS has the same sublet
-    // restriction as Airbnb. It shows up under sources.vrbo for
-    // awareness / manual outreach. Booking.com stays — many Booking.com
-    // listings are commercial hotels that DO allow re-rental. PM stays
-    // — the whole point of PM is they accept commercial bookings.
-    const priced: Candidate[] = [...booking, ...pmAugmented]
+    // Vrbo stays OUT of the priced/cheapest pool — same TOS sublet
+    // restriction as Airbnb but no engine-level date verification, so
+    // surfacing it as "buy this" is a footgun. It still appears under
+    // sources.vrbo for awareness / direct-with-owner outreach.
+    // Booking.com — google_hotels engine results are date-specific.
+    // PM — verified via the Stagehand pre-verify pass below.
+    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
@@ -3680,23 +3689,16 @@ export async function registerRoutes(
     const cheapest = verifiedCheapest.length > 0
       ? verifiedCheapest.slice(0, 20)
       : unpricedFallback;
-    // Telemetry: what would the cheapest have been if we counted Airbnb?
-    // Useful to see how often Airbnb is undercutting the bookable channels.
-    const airbnbCheapest = airbnbWithMatches
-      .filter((c) => c.nightlyPrice > 0)
-      .sort((a, b) => a.nightlyPrice - b.nightlyPrice)
-      .slice(0, 1);
-
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
-      + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
+      + `airbnb=${airbnb.length}/${airbnbRawCount} `
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
-      + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
+      + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
     );
 
     return res.json({
@@ -3732,13 +3734,6 @@ export async function registerRoutes(
         searchLocation,
         vrboDestination,
         resortName,
-        // For-reference-only: what the cheapest Airbnb listing would have
-        // been if Airbnb were a bookable channel. Helps the operator see
-        // how much they're paying for the not-being-able-to-sublet
-        // restriction (e.g. "Airbnb $250/night vs PM $370/night").
-        airbnbCheapestTelemetry: airbnbCheapest[0]
-          ? { nightlyPrice: airbnbCheapest[0].nightlyPrice, totalPrice: airbnbCheapest[0].totalPrice, url: airbnbCheapest[0].url }
-          : null,
       },
       cheapest,
       totalPricedResults: priced.length,
