@@ -3187,22 +3187,23 @@ export async function registerRoutes(
     // double-render a domain that the PM Google search already found.
     const existingPmUrls = new Set(pm.map((c) => c.url));
     const photoMatchPmCandidates: Candidate[] = [];
-    let droppedNoResortMatch = 0;
     for (const anchor of topAirbnb) {
       const matches = photoMatchesByUrl.get(anchor.url) ?? [];
-      // Per-anchor cap. Lens returns up to 3 visual matches per photo
-      // (the lensMatches helper caps at 3). Operator opted for max
-      // candidate surface, so use all 3 — the resort filter below
-      // catches similar-looking-but-different properties anyway, so
-      // there's no real noise floor introduced by widening this.
-      const filteredMatches = matches.filter((m) => {
-        const haystack = `${m.url} ${m.title} ${m.domain}`;
-        if (!mentionsResort(haystack)) {
-          droppedNoResortMatch++;
-          return false;
-        }
-        return true;
-      }).slice(0, 3);
+      // No resort filter on photo-matches per operator direction
+      // ("max candidates over price accuracy"). The Airbnb engine
+      // already filtered the anchor by location bounds + resort name;
+      // if photos match between an at-the-resort Airbnb listing and
+      // a PM URL, it's the same physical unit at the same resort.
+      //
+      // Earlier passes had a `mentionsResort(url + title + domain)`
+      // filter requiring every resort token to appear. Lens results
+      // vary stochastically — a run where Lens happened to surface
+      // a row without the resort name in title/URL/domain dropped
+      // legitimate matches. Trusting the anchor's location proof
+      // restores the candidate volume the operator wants.
+      //
+      // Per-anchor cap of 3 — matches the Lens helper's internal cap.
+      const filteredMatches = matches.slice(0, 3);
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
