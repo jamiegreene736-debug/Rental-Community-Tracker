@@ -1423,6 +1423,13 @@ type LiveCandidate = {
   // resort for those exact dates) and the actual PM rate may differ.
   airbnbAnchorUrl?: string;
   airbnbAnchorPrice?: number;
+  // Server-side verification state (find-buy-in pre-verifies top-N
+  // priced PM candidates against actual PM page). The Cheapest panel
+  // is gated on this — operators should never see "buy this" for a
+  // unit that isn't confirmed bookable for the requested dates.
+  verified?: "yes" | "no" | "unclear" | "skipped";
+  verifiedNightlyPrice?: number | null;
+  verifiedReason?: string;
 };
 
 type FindBuyInResponse = {
@@ -1451,6 +1458,15 @@ type FindBuyInResponse = {
       airbnb?: { noResort: number; wrongBedrooms: number };
       vrbo?: { noResort: number; wrongBedrooms: number };
       booking?: { noResort: number; wrongBedrooms: number };
+      photoMatchBedroomMismatch?: number;
+      photoMatchLanding?: number;
+    };
+    verification?: {
+      attempted: number;
+      yes: number;
+      no: number;
+      unclear: number;
+      available: boolean;
     };
     searchLocation?: string;
     vrboDestination?: string;
@@ -1588,18 +1604,41 @@ function LiveSearchSection({
         </div>
       )}
 
-      {/* Cheapest callout */}
-      {cheapest.length > 0 && (
+      {/* Cheapest callout — gated server-side on verified=yes (real
+          availability + real per-night rate confirmed for these dates).
+          When the verify pass came back empty, show a clear "no
+          verified options" state rather than promoting un-verified
+          inherited-price rows. */}
+      {cheapest.length > 0 ? (
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">
-            <TrendingDown className="h-3.5 w-3.5 inline mr-1" />
+          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
+            <TrendingDown className="h-3.5 w-3.5" />
             Cheapest {cheapest.length} — buy these
+            {data?.debug?.verification?.attempted ? (
+              <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
+                · {data.debug.verification.yes} verified bookable for {checkInYmd} → {checkOutYmd}
+              </span>
+            ) : null}
           </p>
           <div className="space-y-2">
             {cheapest.map((c, i) => (
               <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight />
             ))}
           </div>
+        </div>
+      ) : (
+        <div className="border-2 border-dashed border-amber-400 rounded-lg p-3 bg-amber-50/50 dark:bg-amber-950/20">
+          <p className="text-xs font-semibold text-amber-700 mb-1 uppercase tracking-wide flex items-center gap-1.5">
+            <TrendingDown className="h-3.5 w-3.5" />
+            No verified bookable options
+          </p>
+          <p className="text-[11px] text-amber-700/90">
+            {data?.debug?.verification?.available === false
+              ? "Verification path is unavailable on this deploy (BROWSERBASE_API_KEY / ANTHROPIC_API_KEY not set). All scanned options are listed below — verify each manually before recording."
+              : data?.debug?.verification?.attempted
+                ? `Tried to verify ${data.debug.verification.attempted} top-priced candidates: ${data.debug.verification.yes} bookable, ${data.debug.verification.no} unavailable, ${data.debug.verification.unclear} unclear. Browse all scanned options below.`
+                : "No priced PM/Booking candidates surfaced for these dates and bedrooms. Browse all scanned options below or click 'Refresh'."}
+          </p>
         </div>
       )}
 
@@ -2160,6 +2199,19 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
         <div className="grow min-w-0">
           <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
             <Badge className={`text-[9px] ${sourceBadgeClass(c.source)}`}>{c.sourceLabel}</Badge>
+            {c.verified === "yes" ? (
+              <Badge className="text-[9px] bg-emerald-600 text-white" title={c.verifiedReason ?? undefined}>
+                ✓ Verified bookable
+              </Badge>
+            ) : c.verified === "no" ? (
+              <Badge className="text-[9px] bg-red-600 text-white" title={c.verifiedReason ?? undefined}>
+                ✗ Not bookable
+              </Badge>
+            ) : c.verified === "unclear" ? (
+              <Badge className="text-[9px] bg-amber-500 text-white" title={c.verifiedReason ?? undefined}>
+                ? Unclear — verify manually
+              </Badge>
+            ) : null}
             <p className="font-medium text-sm truncate">{c.title}</p>
           </div>
           {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}

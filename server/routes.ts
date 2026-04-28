@@ -2221,6 +2221,24 @@ export async function registerRoutes(
       // rate may vary slightly (Airbnb adds service fee, PMs don't).
       airbnbAnchorUrl?: string;
       airbnbAnchorPrice?: number;
+      // Verification state. The cheapest-N panel is GATED on
+      // verified === "yes" — operator should never see a "buy this"
+      // suggestion that hasn't been confirmed bookable for these
+      // exact dates with a real (not inherited / not "from $X") price.
+      //
+      //   "yes"     — bookable for the dates AND price is the page-quoted
+      //               rate (or, for booking.com engine results, the
+      //               google_hotels engine's date-specific rate).
+      //   "no"      — the page clearly says these dates aren't bookable.
+      //   "unclear" — we tried to verify but couldn't get a clear answer
+      //               (PM date picker stalled, login wall, etc).
+      //   "skipped" — wasn't in the top-N priced batch we verified;
+      //               operator can request per-row verify from the UI.
+      //   undefined — nothing has been attempted (pre-verify step
+      //               failed to run, e.g. Browserbase keys unset).
+      verified?: "yes" | "no" | "unclear" | "skipped";
+      verifiedNightlyPrice?: number | null;
+      verifiedReason?: string;
     };
 
     const asNum = (v: unknown): number => {
@@ -2261,10 +2279,18 @@ export async function registerRoutes(
       }
     };
 
-    // Secondary signal: does this PM URL look like a resort-landing page
-    // rather than a specific unit? Used for ranking, NOT for filtering —
-    // we still surface landing pages if that's all the PM offers, but
-    // unit-specific URLs bubble to the top.
+    // Detection: does this PM URL look like a resort-landing / category
+    // page rather than a specific unit? PMs commonly publish per-resort
+    // listing-grid pages whose URLs contain the resort slug ("/poipu-kai/",
+    // "/poipu-kai-collection/") — those pages display "Rates from $X" copy
+    // that the snippet parser was happily harvesting as if it were a real
+    // date-specific quote, ranking the category page as the cheapest hit.
+    //
+    // This used to be a "downrank only" signal; per the operator's verify-
+    // first directive it's now a HARD FILTER on PM candidates. A PM URL
+    // that looks like a landing page never carries a real per-night quote
+    // for a specific window, so it shouldn't be in the priced pool at all.
+    // We still surface PM URLs that look unit-specific.
     const isLandingUrl = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): boolean => {
       if (source !== "pm") return false;
       let u: URL;
@@ -2275,10 +2301,30 @@ export async function registerRoutes(
       const resortSlug = resortName
         ? resortName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
         : "";
+      // Exact resort-slug landings (e.g. "/poipu-kai", "/poipu-kai-resort").
       if (resortSlug && (last === resortSlug
                       || last === `${resortSlug}-resort`
                       || last.replace(/-resort$/, "") === resortSlug)) return true;
-      if (/^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|kauai|oahu|maui|hawaii)$/.test(last)) return true;
+      // Resort-slug + common category suffix (the Parrish "Poipu Kai
+      // Collection" case — `/poipu-kai-collection`, `/kauai-homes/poipu-kai/`,
+      // `/poipu-kai-vacation-rentals`, etc.).
+      if (resortSlug && new RegExp(`^${resortSlug}-(collection|properties|villas?|condos?|homes?|rentals?|vacation-rentals?)$`).test(last)) return true;
+      // Category / section pages anywhere in the path. If ANY segment
+      // looks like a generic category, the URL is a section page —
+      // unit-specific URLs typically have a unit identifier as the leaf.
+      const categoryRe = /^(resort|resorts|hotel|hotels|vacation-rentals?|rentals?|properties|listings|collection|collections|kauai-homes?|oahu-homes?|maui-homes?|big-island-homes?|kauai|oahu|maui|hawaii)$/;
+      if (categoryRe.test(last)) return true;
+      // The leaf has no unit identifier — pure word slug like "poipu-kai"
+      // with no digits, no letter codes, and a known-resort slug present
+      // earlier in the path. Unit pages near-universally carry SOME
+      // identifier (a number, a unit code, a property ID), so the absence
+      // of one in a known-resort path is a strong signal the URL is a
+      // section page. We require a known-resort token earlier in the path
+      // to avoid catching legitimate unit slugs like "tropical-haven".
+      if (resortSlug && segments.length >= 2 && segments.slice(0, -1).join("/").includes(resortSlug)) {
+        const hasUnitIdentifier = /\d|^unit-|^u-|^[a-z]\d|\bplus\b|\bvilla[\s-]?\d|condo[\s-]?\d/i.test(last);
+        if (!hasUnitIdentifier) return true;
+      }
       return false;
     };
 
@@ -2539,6 +2585,12 @@ export async function registerRoutes(
                   bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
                   image: Array.isArray(p?.images) ? (p.images[0]?.original_image ?? p.images[0]?.thumbnail ?? p.images[0]) : (p?.thumbnail ?? undefined),
                   snippet: String(p?.description ?? p?.type ?? "").slice(0, 160),
+                  // google_hotels was queried with check_in_date /
+                  // check_out_date, so the price IS the date-specific
+                  // quote — not a "from $X" marketing rate. Mark verified.
+                  verified: "yes",
+                  verifiedNightlyPrice: Math.round(nightly),
+                  verifiedReason: "google_hotels engine returned a date-specific rate for this property",
                 };
               })
               .filter((c: Candidate | null): c is Candidate => c !== null);
@@ -2936,25 +2988,33 @@ export async function registerRoutes(
                 hits.push(h);
               }
             }
-            // Extract nightly price from snippet — broadened from the
-            // original $X/night-only pattern to also catch "from $X",
-            // "starting at $X", "$X/wk" / "$X/week" (÷ 7 → nightly),
-            // "$X/month" / "$X/mo" (÷ 30 → nightly approximate).
-            // Returns 0 when no price found; the caller treats unpriced
-            // candidates as click-through-only (PR #148 fallback).
+            // Extract nightly price from snippet — but only REAL date-
+            // specific quotes. PMs commonly publish "Rates from $400/night"
+            // on category/landing pages; that's a marketing starting price,
+            // not a quote for the operator's check-in / check-out window.
+            // Treating it as a real rate ranks landing pages as #1 cheapest
+            // and surfaces them ahead of actually-bookable units. So when
+            // a "from" / "starting at" / "rates from" qualifier appears
+            // close to the price, return 0 (URL still surfaces in the
+            // unpriced section as click-through-only). Per-week / per-month
+            // are also dropped — the operator wants nightly we can stand
+            // behind, not arithmetic conversions of summary copy.
+            //
+            // The operator request was explicit: don't show prices that
+            // aren't real for the requested dates. Verification (Fix #4/#5)
+            // will further gate the cheapest panel; this just stops the
+            // upstream noise at the snippet-parse step.
+            const FROM_QUALIFIER = /(?:rates?\s+from|prices?\s+from|starting(?:\s+at)?|\bfrom\s+(?:as\s+low\s+as\s+|just\s+))/i;
             const extractPrice = (text: string): number => {
-              // Per-night first (most accurate).
+              // Per-night quote — but only when no "from"/"starting"
+              // qualifier appears within ~40 chars before the price.
               const perNight = text.match(/\$\s*([\d,]{3,5})\s*(?:\/|per|a\s+)?\s*(?:night|nt|nightly)/i);
-              if (perNight) return parseInt(perNight[1].replace(/,/g, ""), 10);
-              // From / starting at — usually a per-night quote.
-              const startingAt = text.match(/(?:from|starting(?:\s+at)?)\s+\$\s*([\d,]{3,5})(?!\s*(?:\/|per|a\s+)?\s*(?:week|wk|month|mo))/i);
-              if (startingAt) return parseInt(startingAt[1].replace(/,/g, ""), 10);
-              // Per-week — divide by 7 for nightly approximation.
-              const perWeek = text.match(/\$\s*([\d,]{4,6})\s*(?:\/|per|a\s+)?\s*(?:week|wk|weekly)/i);
-              if (perWeek) return Math.round(parseInt(perWeek[1].replace(/,/g, ""), 10) / 7);
-              // Per-month — divide by 30 (rough but useful).
-              const perMonth = text.match(/\$\s*([\d,]{4,6})\s*(?:\/|per|a\s+)?\s*(?:month|mo|monthly)/i);
-              if (perMonth) return Math.round(parseInt(perMonth[1].replace(/,/g, ""), 10) / 30);
+              if (perNight) {
+                const idx = perNight.index ?? 0;
+                const prefix = text.slice(Math.max(0, idx - 40), idx);
+                if (FROM_QUALIFIER.test(prefix)) return 0;
+                return parseInt(perNight[1].replace(/,/g, ""), 10);
+              }
               return 0;
             };
             const candidates: Candidate[] = hits
@@ -2964,9 +3024,11 @@ export async function registerRoutes(
                 // with the right bedroom count — same rules as the OTAs.
                 return mentionsResort(hay) && bedroomOk(hay);
               })
-              // Reject bare-homepage URLs — the whole point of the deep-dive
-              // is to land on a specific listing page.
-              .filter((h: any) => h?.link && isDetailUrl("pm", String(h.link)))
+              // Reject bare-homepage URLs AND resort-landing/category pages
+              // — the whole point of the deep-dive is to land on a specific
+              // unit page with a real per-night quote, not a "Rates from $X"
+              // catalogue page.
+              .filter((h: any) => h?.link && isDetailUrl("pm", String(h.link)) && !isLandingUrl("pm", String(h.link)))
               // Cap at 10 hits per PM domain (was 3). Whichever 3 units Google's
               // index ranked highest got into the candidate pool, regardless of
               // whether they were available for the requested dates — and on
@@ -3301,7 +3363,20 @@ export async function registerRoutes(
     const existingPmUrls = new Set(pm.map((c) => c.url));
     const photoMatchPmCandidates: Candidate[] = [];
     let photoMatchWrongResortDropped = 0;
+    let photoMatchBedroomMismatchDropped = 0;
+    let photoMatchLandingDropped = 0;
     for (const anchor of topAirbnb) {
+      // Bedroom guard — Lens visual similarity does NOT respect bedroom
+      // count. A 4BR penthouse anchor was producing 3BR-search rows
+      // (Steve Kuykendall, Jun 13-20 2026) at the anchor's $10,670
+      // price — operator saw an inflated "cheapest" entry that wasn't
+      // even available because the anchor was the wrong size. Require
+      // the anchor's bedroom count to match the requested count exactly
+      // before any of its photo matches can seed a candidate.
+      if (typeof anchor.bedrooms === "number" && anchor.bedrooms !== bedrooms) {
+        photoMatchBedroomMismatchDropped += (photoMatchesByUrl.get(anchor.url)?.length ?? 0);
+        continue;
+      }
       const matches = photoMatchesByUrl.get(anchor.url) ?? [];
       // No resort filter on photo-matches per operator direction
       // ("max candidates over price accuracy"). The Airbnb engine
@@ -3326,6 +3401,13 @@ export async function registerRoutes(
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
+        // Drop landing/category PM URLs at the photo-match step too —
+        // Lens hits on resort-collection pages are not a real per-unit
+        // confirmation, even when the visual match is high.
+        if (isLandingUrl("pm", m.url)) {
+          photoMatchLandingDropped++;
+          continue;
+        }
         // Soft resort-token filter (see `mentionsResortLoose` for the
         // why). Without this, Lens surfaces visually-similar interiors
         // at totally different resorts (Kona / Mauna Lani / Big Island
@@ -3461,28 +3543,143 @@ export async function registerRoutes(
     const priced: Candidate[] = [...booking, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
-    // If no priced PM/Booking candidate exists, fall back to the top
-    // unpriced PM URL so auto-fill still has SOMETHING to attach. PM
-    // sites often don't surface live prices in Google snippets — but
-    // the URL itself is what the operator needs to click through and
-    // negotiate. Buy-in record gets created with $0 cost; operator
-    // updates after talking to the PM. Better than a silent no-op
-    // that leaves the slot looking unfilled when there are real PM
-    // links available to click. pmAugmented prefers PM Google search
-    // hits before photo-match-derived URLs (insertion order), so the
-    // fallback picks a curated PM hit when one exists.
-    const unpricedFallback: Candidate[] = priced.length === 0
+
+    // ── Pre-verify top-N priced PM candidates ──────────────────────────────
+    //
+    // The Steve Kuykendall case (Jun 13-20 2026, 3BR Poipu Kai) surfaced
+    // a $10,670 sandydoor.com row marked "Same photos as Airbnb listing
+    // $10,670 (Luxury 4BR Penthouse)" — bedroom mismatch caught now by
+    // Fix #3, but the deeper problem is that PM photo-match candidates
+    // inherit the Airbnb anchor's price WITHOUT confirming the PM URL is
+    // actually bookable for those dates. The operator was about to record
+    // a buy-in for a unit that wasn't even available.
+    //
+    // Pre-verify a budget-capped slice of the cheapest PM candidates BEFORE
+    // returning, so the cheapest panel can be hard-gated on verified=yes.
+    // Booking.com candidates from the google_hotels engine are already
+    // verified upstream (date-specific rate query), so they skip this step.
+    //
+    // Wall budget: ~90s for top 6 PM URLs (Stagehand sequential ≈ 10s
+    // each + Vrbo parallel scraper ≈ 8s). Past the budget, remaining URLs
+    // are marked "skipped" and excluded from cheapest. The whole find-buy-
+    // in handler aims for ~3-5 min total; this is the last expensive step.
+    const PRE_VERIFY_TOP_N = 6;
+    const PRE_VERIFY_WALL_MS = 90_000;
+    const verifyBbApiKey = process.env.BROWSERBASE_API_KEY;
+    const verifyBbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    const verifyAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    let preVerifyAttempted = 0;
+    let preVerifyYes = 0;
+    let preVerifyNo = 0;
+    let preVerifyUnclear = 0;
+    if (verifyBbApiKey && verifyBbProjectId && verifyAnthropicKey) {
+      // Pick the top-N cheapest PM candidates that need verification —
+      // skip Booking (already verified) and skip rows past N.
+      const toVerify = priced
+        .filter((c) => c.source === "pm" && !c.verified)
+        .slice(0, PRE_VERIFY_TOP_N);
+      if (toVerify.length > 0) {
+        try {
+          const { verifyPmAvailabilityBatch } = await import("./verify-pm-availability");
+          const verifyResults = await withTimeout(
+            verifyPmAvailabilityBatch({
+              urls: toVerify.map((c) => c.url),
+              checkIn,
+              checkOut,
+              bbApiKey: verifyBbApiKey,
+              bbProjectId: verifyBbProjectId,
+              anthropicKey: verifyAnthropicKey,
+              maxUrls: PRE_VERIFY_TOP_N,
+            }),
+            PRE_VERIFY_WALL_MS,
+            {} as Record<string, never>,
+            "pre-verify",
+          );
+          preVerifyAttempted = toVerify.length;
+          for (const c of toVerify) {
+            const r = (verifyResults as Record<string, any>)[c.url];
+            if (!r) {
+              c.verified = "skipped";
+              continue;
+            }
+            c.verified = r.available;
+            c.verifiedReason = r.reason;
+            c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
+            // When the page quoted a real per-night rate, OVERRIDE the
+            // inherited Airbnb-anchor price with the page-quoted value.
+            // This is the whole point of the verify step — the cheapest
+            // panel should show what the PM actually charges, not what
+            // Airbnb's anchor charges.
+            if (r.available === "yes" && typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
+              c.nightlyPrice = Math.round(r.nightlyPriceUsd);
+              c.totalPrice = Math.round(r.nightlyPriceUsd * nights);
+              preVerifyYes++;
+            } else if (r.available === "yes") {
+              preVerifyYes++;
+            } else if (r.available === "no") {
+              preVerifyNo++;
+            } else {
+              preVerifyUnclear++;
+            }
+          }
+          // Mark anyone past the verify cap as skipped so the UI can
+          // distinguish "we tried and got unclear" from "we never tried."
+          for (const c of priced) {
+            if (c.source === "pm" && !c.verified) c.verified = "skipped";
+          }
+        } catch (e: any) {
+          console.error("[find-buy-in] pre-verify failed:", e?.message ?? e);
+          for (const c of priced) {
+            if (c.source === "pm" && !c.verified) c.verified = "skipped";
+          }
+        }
+      }
+    } else {
+      // Browserbase / Anthropic env unset — pre-verify is unavailable.
+      // Mark PM candidates as skipped so the UI can render "Verifying
+      // unavailable" rather than implying they ARE verified.
+      for (const c of priced) {
+        if (c.source === "pm" && !c.verified) c.verified = "skipped";
+      }
+    }
+
+    // Re-sort priced after verification — verified-yes candidates may
+    // have had their nightlyPrice updated to the real PM rate (which
+    // typically differs from the inherited Airbnb-anchor rate by the
+    // service-fee delta).
+    priced.sort((a, b) => a.nightlyPrice - b.nightlyPrice);
+
+    // ── Cheapest pool ──────────────────────────────────────────────────────
+    //
+    // Verified-only. The cheapest panel is the operator's "buy these"
+    // recommendation — it must reflect units we actually confirmed are
+    // bookable for these dates with the price the page is quoting,
+    // not inherited prices on un-verified PM URLs.
+    //
+    // - "yes"     → in. Real availability + real rate (PM page-quoted or
+    //               google_hotels engine date-specific).
+    // - "no"      → out. Confirmed unavailable.
+    // - "unclear" → out of CHEAPEST, but stays in `sources.pm` so the
+    //               operator can review. The Stagehand verify is best-
+    //               effort; "unclear" is honest about the remaining
+    //               uncertainty rather than promoting a bookable claim.
+    // - "skipped" → out of CHEAPEST. Past the verify-budget cap or
+    //               verification path unavailable.
+    // - undefined → out (defensive — should never happen in production).
+    const verifiedCheapest = priced.filter((c) => c.verified === "yes");
+    // If pre-verify produced ZERO yes results (e.g. peak season — every
+    // top-priced PM is genuinely booked), fall back to the unpriced PM
+    // URL list so the operator still has SOMETHING to click. Buy-in
+    // record gets created at $0; operator updates after calling the PM.
+    // Better than empty when the search did surface candidates.
+    const unpricedFallback: Candidate[] = verifiedCheapest.length === 0
       ? pmAugmented.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
       : [];
-    // Widened from 2 → 20 per operator direction: maximum candidate
-    // surface area for auto-fill. Multi-slot reservations (e.g. Amy's
-    // 2× 3BR) need distinct units per slot — with the prior cap of 2,
-    // slot 2 fell through to unpriced fallbacks once slot 1 took the
-    // cheapest. With 20 priced candidates available, slot 2 gets a
-    // priced pick from sitemap discovery (SP/PK/CB) or photo-match
-    // (Airbnb-anchored). Find-buy-in dialog also shows more priced
-    // options to the operator for manual selection.
-    const cheapest = priced.length > 0 ? priced.slice(0, 20) : unpricedFallback;
+    // Cap at 20 — multi-slot reservations need enough variety to fill
+    // distinct units per slot.
+    const cheapest = verifiedCheapest.length > 0
+      ? verifiedCheapest.slice(0, 20)
+      : unpricedFallback;
     // Telemetry: what would the cheapest have been if we counted Airbnb?
     // Useful to see how often Airbnb is undercutting the bookable channels.
     const airbnbCheapest = airbnbWithMatches
@@ -3497,9 +3694,9 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped}) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
-      + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
+      + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
 
     return res.json({
@@ -3518,7 +3715,20 @@ export async function registerRoutes(
       },
       debug: {
         rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
-        dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
+        dropped: {
+          airbnb: airbnbDropped,
+          vrbo: vrboDropped,
+          booking: bookingDropped,
+          photoMatchBedroomMismatch: photoMatchBedroomMismatchDropped,
+          photoMatchLanding: photoMatchLandingDropped,
+        },
+        verification: {
+          attempted: preVerifyAttempted,
+          yes: preVerifyYes,
+          no: preVerifyNo,
+          unclear: preVerifyUnclear,
+          available: !!(verifyBbApiKey && verifyBbProjectId && verifyAnthropicKey),
+        },
         searchLocation,
         vrboDestination,
         resortName,
