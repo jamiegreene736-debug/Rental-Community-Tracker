@@ -3903,6 +3903,26 @@ export async function registerRoutes(
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
   };
 
+  // Decomposed location info per `PROPERTY_UNIT_NEEDS` community key,
+  // used by `/api/property/:id/refresh-market-rates` to build the
+  // (name, city, state, streetAddress) tuple `fetchAmortizedNightlyByBR`
+  // expects. The `searchName` field is the name passed to the engine's
+  // token-match fallback when geocoding fails — it should be the
+  // operator-recognizable resort name, not the canonical complex name
+  // (so "Regency at Poipu Kai" beats the bare community key
+  // "Poipu Kai" for distinctness against "Poipu Kai Resort", "Poipu Kai
+  // Estates", etc.).
+  const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string }> = {
+    "Poipu Kai":         { searchName: "Regency at Poipu Kai",   city: "Koloa",      state: "Hawaii", streetAddress: "1701 Poipu Rd" },
+    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",      city: "Kekaha",     state: "Hawaii" },
+    "Keauhou":           { searchName: "Keauhou Estates",        city: "Kailua-Kona", state: "Hawaii" },
+    "Princeville":       { searchName: "Mauna Kai Princeville",  city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd" },
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",       city: "Kapaa",      state: "Hawaii", streetAddress: "4460 Nehe Rd" },
+    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",  state: "Hawaii" },
+    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",       city: "Koloa",      state: "Hawaii" },
+    "Pili Mai":          { searchName: "Pili Mai at Poipu",      city: "Koloa",      state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr" },
+  };
+
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
   // SearchAPI Airbnb supports sw_lat/sw_lng/ne_lat/ne_lng to geo-constrain results.
   // We also post-filter by GPS coordinates in the returned listings for extra precision.
@@ -11262,6 +11282,30 @@ export async function registerRoutes(
       estimatedHighRate,
     });
 
+    // Persist the per-bedroom medians into property_market_rates
+    // keyed by the draft's negative propertyId convention (`-draftId`)
+    // so the Pricing tab's effective-buy-in lookup finds them via the
+    // same code path as static properties. Best-effort — failures here
+    // don't poison the response.
+    try {
+      for (const [brStr, samples] of Object.entries(ratesByBR)) {
+        const bedrooms = parseInt(brStr, 10);
+        if (!Number.isFinite(bedrooms) || samples.length === 0) continue;
+        const sorted = [...samples].sort((a, b) => a - b);
+        await storage.upsertPropertyMarketRate({
+          propertyId: -id, // drafts use negative ids on the dashboard
+          bedrooms,
+          medianNightly: String(medianRate(samples)),
+          lowNightly: String(sorted[0]),
+          highNightly: String(sorted[sorted.length - 1]),
+          sampleCount: samples.length,
+          source: "airbnb",
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[refresh-pricing] market-rates upsert failed for draft ${id}: ${e?.message}`);
+    }
+
     res.json({
       ok: true,
       ratesByBR: Object.fromEntries(
@@ -11279,6 +11323,140 @@ export async function registerRoutes(
       firstListingSample,
       draft: updated,
     });
+  });
+
+  // POST /api/property/:id/refresh-market-rates
+  //
+  // Sister to /api/community/:id/refresh-pricing but for the static
+  // properties from `unit-builder-data.ts` (positive integer ids).
+  // Resolves the property's community + city/state from the
+  // server-side `PROPERTY_UNIT_NEEDS` / `COMMUNITY_SEARCH_LOCATIONS`
+  // maps below, runs the same Airbnb-engine 7-night-amortized lookup
+  // (`fetchAmortizedNightlyByBR`, AGENTS.md Load-Bearing #31), and
+  // upserts one `property_market_rates` row per bedroom count the
+  // property's units actually carry. The Pricing tab reads this
+  // table at render time as the cost basis for the per-channel floor
+  // formula `(buyIn × 1.20) ÷ (1 − channel_fee)` — falling back to the
+  // hand-curated `BUY_IN_RATES` table when no live row exists.
+  //
+  // Unlike the draft path this doesn't write `estimatedLowRate` /
+  // `estimatedHighRate` anywhere — static properties don't carry
+  // those columns, and the per-BR breakdown in `property_market_rates`
+  // is strictly more useful (a 2BR + 3BR combo property gets two
+  // medians instead of one aggregated low/high pair).
+  app.post("/api/property/:id/refresh-market-rates", async (req, res) => {
+    const propertyId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid id" });
+    if (!process.env.SEARCHAPI_API_KEY) {
+      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    }
+
+    // Negative ids belong to drafts — delegate to the existing draft
+    // refresh path so callers don't need to branch by id sign.
+    if (propertyId < 0) {
+      return res.redirect(307, `/api/community/${-propertyId}/refresh-pricing`);
+    }
+
+    const config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config) return res.status(404).json({ error: `Property ${propertyId} not in PROPERTY_UNIT_NEEDS` });
+
+    const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
+    if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
+
+    const { ratesByBR, drops } = await fetchAmortizedNightlyByBR(
+      loc.searchName,
+      loc.city,
+      loc.state,
+      loc.streetAddress,
+    );
+
+    // Upsert one row per unique bedroom count this property's units
+    // actually carry. Skipping bedroom counts not in the property's
+    // unit set keeps the table tight — a 2BR+2BR Caribe Cove property
+    // doesn't need a 4BR row even if the engine returned 4BR samples.
+    const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
+    const persisted: Array<{ bedrooms: number; median: number; samples: number }> = [];
+    for (const br of wantBedrooms) {
+      const samples = ratesByBR[br] ?? [];
+      if (samples.length === 0) {
+        persisted.push({ bedrooms: br, median: 0, samples: 0 });
+        continue;
+      }
+      const sorted = [...samples].sort((a, b) => a - b);
+      const median = medianRate(samples);
+      await storage.upsertPropertyMarketRate({
+        propertyId,
+        bedrooms: br,
+        medianNightly: String(median),
+        lowNightly: String(sorted[0]),
+        highNightly: String(sorted[sorted.length - 1]),
+        sampleCount: samples.length,
+        source: "airbnb",
+      });
+      persisted.push({ bedrooms: br, median, samples: samples.length });
+    }
+
+    console.log(`[refresh-market-rates] property ${propertyId} (${config.community}): ${persisted.map((p) => `${p.bedrooms}BR=$${p.median}/${p.samples}`).join(", ")}`);
+    res.json({ ok: true, propertyId, community: config.community, persisted, drops });
+  });
+
+  // POST /api/admin/refresh-all-market-rates
+  //
+  // One-shot: walks every active static property in
+  // `PROPERTY_UNIT_NEEDS` plus every saved community draft, calling
+  // the per-id refresh endpoints in series. Used for the initial
+  // backfill after this feature ships and as the work loop for the
+  // weekly cron in `availability-scheduler.ts`. Sequential (not
+  // parallel) because each call hits SearchAPI once per bedroom
+  // count — running 12 properties × ~3 BR variants in parallel would
+  // burst-limit the SearchAPI key. Total runtime: ~30s.
+  app.post("/api/admin/refresh-all-market-rates", async (_req, res) => {
+    if (!process.env.SEARCHAPI_API_KEY) {
+      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    }
+
+    const port = process.env.PORT || "5000";
+    const base = `http://127.0.0.1:${port}`;
+
+    const staticIds = Object.keys(PROPERTY_UNIT_NEEDS).map((s) => parseInt(s, 10)).sort((a, b) => a - b);
+    const drafts = await storage.getCommunityDrafts();
+    const draftIds = drafts.map((d) => d.id);
+
+    const results: Array<{ id: number; kind: "static" | "draft"; ok: boolean; error?: string }> = [];
+
+    for (const id of staticIds) {
+      try {
+        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates`, { method: "POST" });
+        const data = (await r.json().catch(() => ({}))) as any;
+        results.push({ id, kind: "static", ok: r.ok, error: r.ok ? undefined : data?.error });
+      } catch (e: any) {
+        results.push({ id, kind: "static", ok: false, error: e.message });
+      }
+    }
+    for (const id of draftIds) {
+      try {
+        const r = await fetch(`${base}/api/community/${id}/refresh-pricing`, { method: "POST" });
+        const data = (await r.json().catch(() => ({}))) as any;
+        results.push({ id, kind: "draft", ok: r.ok, error: r.ok ? undefined : data?.error });
+      } catch (e: any) {
+        results.push({ id, kind: "draft", ok: false, error: e.message });
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    console.log(`[refresh-all-market-rates] ${okCount}/${results.length} succeeded`);
+    res.json({ ok: true, total: results.length, succeeded: okCount, results });
+  });
+
+  // GET /api/property/market-rates
+  //
+  // Returns every row in `property_market_rates` so the Pricing tab
+  // can hydrate the (id, bedrooms) → median lookup once per session.
+  // Tiny response (~100 rows × 60 bytes) so the simpler "send it all"
+  // shape beats a per-property fetch for the dashboard's needs.
+  app.get("/api/property/market-rates", async (_req, res) => {
+    const rates = await storage.getAllPropertyMarketRates();
+    res.json(rates);
   });
 
   // POST /api/community/:id/persist-photos

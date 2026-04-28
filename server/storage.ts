@@ -18,7 +18,8 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -66,6 +67,10 @@ export interface IStorage {
   getCommunityDraft(id: number): Promise<CommunityDraft | undefined>;
   updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
   deleteCommunityDraft(id: number): Promise<boolean>;
+
+  upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate>;
+  getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]>;
+  getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
 
   getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
   upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
@@ -367,6 +372,37 @@ export class DatabaseStorage implements IStorage {
   async deleteCommunityDraft(id: number): Promise<boolean> {
     const result = await db.delete(communityDrafts).where(eq(communityDrafts.id, id)).returning();
     return result.length > 0;
+  }
+
+  // Per-property live market rates. One row per (propertyId, bedrooms)
+  // pair — `upsertPropertyMarketRate` deletes any existing row for that
+  // pair and re-inserts so callers don't need to track previous IDs.
+  // Read paths return `PropertyMarketRate[]` ordered by bedrooms ASC so
+  // a property with mixed-BR units gets a stable iteration order.
+  async upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate> {
+    await db
+      .delete(propertyMarketRates)
+      .where(and(
+        eq(propertyMarketRates.propertyId, input.propertyId),
+        eq(propertyMarketRates.bedrooms, input.bedrooms),
+      ));
+    const [row] = await db.insert(propertyMarketRates).values(input).returning();
+    return row;
+  }
+
+  async getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]> {
+    return db
+      .select()
+      .from(propertyMarketRates)
+      .where(eq(propertyMarketRates.propertyId, propertyId))
+      .orderBy(propertyMarketRates.bedrooms);
+  }
+
+  async getAllPropertyMarketRates(): Promise<PropertyMarketRate[]> {
+    return db
+      .select()
+      .from(propertyMarketRates)
+      .orderBy(propertyMarketRates.propertyId, propertyMarketRates.bedrooms);
   }
 
   async getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]> {

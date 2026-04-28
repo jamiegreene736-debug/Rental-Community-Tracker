@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useLocation } from "wouter";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
-import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey } from "@/data/pricing-data";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
@@ -1796,6 +1796,55 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const descriptions = effectivePropertyData?.descriptions;
   const pricing = propertyData?.pricing;
 
+  // Live per-property market-rate cache. Hydrated from
+  // GET /api/property/market-rates on mount and after a manual
+  // refresh (Refresh market rates button below). The version
+  // counter is the seasonalMonths useMemo's signal that the
+  // module-level live-buy-in cache changed and the per-channel
+  // floor formula should be recomputed against the new median.
+  const [marketRatesVersion, setMarketRatesVersion] = useState(0);
+  const [marketRatesRefreshing, setMarketRatesRefreshing] = useState(false);
+  const reloadMarketRates = useCallback(async () => {
+    try {
+      const r = await fetch("/api/property/market-rates");
+      if (!r.ok) return;
+      const rates = (await r.json()) as LivePropertyMarketRateInput[];
+      if (Array.isArray(rates)) {
+        setLivePropertyMarketRates(rates);
+        setMarketRatesVersion((v) => v + 1);
+      }
+    } catch (e: any) {
+      console.warn(`[GuestyListingBuilder] market-rates fetch failed: ${e?.message}`);
+    }
+  }, []);
+  useEffect(() => {
+    void reloadMarketRates();
+  }, [reloadMarketRates]);
+
+  const refreshThisPropertyMarketRates = useCallback(async () => {
+    if (!propertyId || marketRatesRefreshing) return;
+    setMarketRatesRefreshing(true);
+    try {
+      // Negative ids (drafts) and positive ids (static) both work —
+      // the static endpoint redirects negative ids to the draft path.
+      const path = propertyId < 0
+        ? `/api/community/${-propertyId}/refresh-pricing`
+        : `/api/property/${propertyId}/refresh-market-rates`;
+      const r = await fetch(path, { method: "POST" });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        toast({ title: "Refresh failed", description: data?.error || `HTTP ${r.status}`, variant: "destructive" });
+        return;
+      }
+      await reloadMarketRates();
+      toast({ title: "Market rates refreshed" });
+    } catch (e: any) {
+      toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
+    } finally {
+      setMarketRatesRefreshing(false);
+    }
+  }, [propertyId, marketRatesRefreshing, reloadMarketRates, toast]);
+
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
     if (!propertyId) return [];
@@ -1809,7 +1858,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       totalBuyIn: propPricing.units.reduce((s, u) => s + u.monthlyRates[i].buyInRate, 0),
       totalSell:  propPricing.units.reduce((s, u) => s + u.monthlyRates[i].sellRate, 0),
     }));
-  }, [propertyId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, marketRatesVersion]);
+
+  // Per-bedroom live-buy-in summary for the Pricing tab header. Pulls
+  // straight from the module-level cache so it reflects whatever
+  // setLivePropertyMarketRates wrote on the most recent reload.
+  const liveBuyInSummary = useMemo(() => {
+    if (!propertyId) return [];
+    const propPricing = getPropertyPricing(propertyId);
+    if (!propPricing) return [];
+    const seenBR = new Set<number>();
+    const bedrooms: number[] = [];
+    for (const u of propPricing.units) {
+      if (!seenBR.has(u.bedrooms)) { seenBR.add(u.bedrooms); bedrooms.push(u.bedrooms); }
+    }
+    bedrooms.sort((a, b) => a - b);
+    return bedrooms.map((br) => ({ bedrooms: br, live: getLiveBuyIn(propertyId, br) }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, marketRatesVersion]);
 
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
   // Fetches what Guesty is ACTUALLY charging per month so we can compare
@@ -3202,6 +3269,60 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 })()}
                               </div>
                             </div>
+                            {/* Live buy-in summary. One badge per bedroom-count
+                                showing the median nightly the SearchAPI
+                                Airbnb-engine 7-night-amortized lookup found
+                                (the cost basis the per-channel floor formula
+                                feeds on). "fallback" badges mean we haven't
+                                refreshed for that BR yet — the Pricing tab
+                                falls through to BUY_IN_RATES until the
+                                operator clicks Refresh. */}
+                            {liveBuyInSummary.length > 0 && (
+                              <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                                <span style={{ color: "#374151", fontWeight: 600 }}>Live buy-in (median):</span>
+                                {liveBuyInSummary.map(({ bedrooms, live }) => {
+                                  if (!live) {
+                                    return (
+                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh market rates' to fetch."
+                                        style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
+                                        {bedrooms}BR fallback
+                                      </span>
+                                    );
+                                  }
+                                  const ageDays = Math.max(0, Math.floor((Date.now() - new Date(live.refreshedAt).getTime()) / (24 * 60 * 60 * 1000)));
+                                  const stale = ageDays > 14;
+                                  const bg = stale ? "#fef3c7" : "#dbeafe";
+                                  const fg = stale ? "#92400e" : "#1e40af";
+                                  return (
+                                    <span key={bedrooms}
+                                      title={`${live.sampleCount} comparable listings · refreshed ${ageDays} day${ageDays === 1 ? "" : "s"} ago · source: ${live.source}`}
+                                      style={{ background: bg, color: fg, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
+                                      {bedrooms}BR ${Math.round(live.medianNightly).toLocaleString()}
+                                      <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 4 }}>· {ageDays}d</span>
+                                    </span>
+                                  );
+                                })}
+                                <button
+                                  type="button"
+                                  onClick={refreshThisPropertyMarketRates}
+                                  disabled={marketRatesRefreshing}
+                                  style={{
+                                    marginLeft: "auto",
+                                    fontSize: 11,
+                                    fontWeight: 500,
+                                    padding: "3px 10px",
+                                    borderRadius: 4,
+                                    border: "1px solid #d1d5db",
+                                    background: marketRatesRefreshing ? "#f3f4f6" : "#ffffff",
+                                    color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
+                                    cursor: marketRatesRefreshing ? "wait" : "pointer",
+                                  }}
+                                  title="Re-runs the SearchAPI Airbnb-engine lookup for this property and updates the per-bedroom median above. ~10s, one SearchAPI call per bedroom count."
+                                >
+                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
+                                </button>
+                              </div>
+                            )}
                             {marketComps && (
                               <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, lineHeight: 1.6 }}>
                                 <div>

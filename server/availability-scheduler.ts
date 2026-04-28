@@ -347,11 +347,57 @@ async function tick() {
   }
 }
 
+// Weekly market-rate refresh. Calls the in-process
+// /api/admin/refresh-all-market-rates endpoint, which walks every
+// active static property in PROPERTY_UNIT_NEEDS plus every saved
+// community draft and re-runs the SearchAPI Airbnb-engine 7-night-
+// amortized lookup. Result is one upserted row per (propertyId,
+// bedrooms) in `property_market_rates` — the cost-basis that the
+// Pricing tab feeds into the per-channel floor formula
+// `(buyIn × 1.20) ÷ (1 − channel_fee)`.
+//
+// Cadence: once per 7 days. SearchAPI bills per query and a
+// per-bedroom-count refresh on 12 properties is ~30 calls; weekly is
+// the right balance between freshness and cost. Operators who need a
+// faster refresh can hit `/api/property/:id/refresh-market-rates`
+// directly from the buy-in tracker page.
+const MARKET_RATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+let _lastMarketRateRefreshAt = 0;
+let _marketRateRefreshRunning = false;
+
+async function maybeRefreshMarketRates() {
+  if (_marketRateRefreshRunning) return;
+  if (!process.env.SEARCHAPI_API_KEY) return;
+  if (_lastMarketRateRefreshAt > 0 && Date.now() - _lastMarketRateRefreshAt < MARKET_RATE_INTERVAL_MS) return;
+  _marketRateRefreshRunning = true;
+  try {
+    const port = process.env.PORT || "5000";
+    const r = await fetch(`http://127.0.0.1:${port}/api/admin/refresh-all-market-rates`, { method: "POST" });
+    const data = (await r.json().catch(() => ({}))) as { ok?: boolean; succeeded?: number; total?: number };
+    if (data.ok) {
+      _lastMarketRateRefreshAt = Date.now();
+      console.log(`[availability-scheduler] market-rates refreshed ${data.succeeded}/${data.total}`);
+    } else {
+      console.warn(`[availability-scheduler] market-rates refresh returned !ok`);
+    }
+  } catch (e: any) {
+    console.error(`[availability-scheduler] market-rates refresh failed: ${e?.message ?? e}`);
+  } finally {
+    _marketRateRefreshRunning = false;
+  }
+}
+
 export function startAvailabilityScheduler() {
   // First tick after 2 minutes so server startup has time to settle.
   setTimeout(() => { tick().catch(() => {}); }, 2 * 60 * 1000);
   _timer = setInterval(() => { tick().catch(() => {}); }, TICK_MS);
-  console.log(`[availability-scheduler] started (tick every ${TICK_MS / 60000} min)`);
+  // Market-rates run on their own ~weekly cadence — checked every
+  // tick but no-ops until the 7-day interval has elapsed. First check
+  // is delayed 5 minutes so the initial availability tick finishes
+  // first (the two paths share the SearchAPI key).
+  setTimeout(() => { maybeRefreshMarketRates().catch(() => {}); }, 5 * 60 * 1000);
+  setInterval(() => { maybeRefreshMarketRates().catch(() => {}); }, TICK_MS);
+  console.log(`[availability-scheduler] started (tick every ${TICK_MS / 60000} min, market-rates every ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)} days)`);
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.
