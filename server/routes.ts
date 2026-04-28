@@ -18,6 +18,7 @@ import { searchVrboViaApifyWebScraper } from "./apify-vrbo-web-scraper";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
+import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { humanizeReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -2068,6 +2069,25 @@ export async function registerRoutes(
       res.send(text);
     } catch (e: any) {
       res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
+  });
+
+  // Recon helper: surface unique PM-ish domains from Google's first
+  // pages for a community. Operator review tool — no rate scraping.
+  // Useful when deciding which PMs to add scrapers for next.
+  // ?community=Pili Mai&location=Kauai
+  app.get("/api/admin/pm-discovery", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    const community = String(req.query.community || "").trim();
+    const location = (String(req.query.location || "").trim() || undefined) as string | undefined;
+    const pages = req.query.pages ? Math.max(1, Math.min(5, parseInt(String(req.query.pages), 10) || 2)) : 2;
+    if (!community) return res.status(400).json({ error: "community query param required" });
+    try {
+      const result = await discoverPmDomains({ community, location, apiKey, pages });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
     }
   });
 
