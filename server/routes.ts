@@ -10489,25 +10489,39 @@ export async function registerRoutes(
             for (const cfg of PLATFORM_CONFIGS) {
               const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
               if (signals[cfg.key]) continue;
-              // Find the first link that's an actual listing page on this platform.
-              const matchedLink = sourceLinks.find((l: string) => {
+              // Collect EVERY candidate URL on this platform (not just
+              // the first one). The previous `.find()` short-circuited
+              // after one URL — if that URL's listing page didn't
+              // surface our unit number with a marker, the entire
+              // photo's contribution to this platform was forfeited
+              // even though a later URL in the same Lens response
+              // would have verified cleanly. The scanner walks up to
+              // MAX_VERIFY_PER_HOST_PER_PHOTO (=3) candidates per
+              // (photo, host) and accepts the first verified hit; we
+              // match that here so a brand-new property's preflight
+              // gets the same detection rate the scanner gets on
+              // existing folders.
+              const candidates = sourceLinks.filter((l: string) => {
                 const ll = l.toLowerCase();
                 if (!ll.includes(domain)) return false;
                 return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
-              });
-              if (!matchedLink) continue;
-              // Cross-validate: confirm the matched page actually names
-              // our unit number. For shared-building addresses the same
-              // Lens result set can contain listings for many units —
-              // without this check, the first one "wins" even if it's
-              // the wrong unit (e.g. 3920 Wyllie Rd unit 2A returned
-              // for a unit 9 query). A Google site: scoped to the
-              // listing's path must surface an explicit unit marker.
-              const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
-              if (!verified) continue;
-              signals[cfg.key] = true;
-              matchedUrls[cfg.key] = matchedLink;
-              matchCount++;
+              }).slice(0, 3);
+              for (const matchedLink of candidates) {
+                // Cross-validate: confirm the matched page actually
+                // names our unit number. For shared-building addresses
+                // the same Lens result set can contain listings for
+                // many units — without this check, the first one
+                // "wins" even if it's the wrong unit (e.g. 3920 Wyllie
+                // Rd unit 2A returned for a unit 9 query). A Google
+                // site: scoped to the listing's path must surface an
+                // explicit unit marker.
+                const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
+                if (!verified) continue;
+                signals[cfg.key] = true;
+                matchedUrls[cfg.key] = matchedLink;
+                matchCount++;
+                break;
+              }
             }
           }
         } catch { /* best effort */ }
@@ -10544,6 +10558,78 @@ export async function registerRoutes(
       return { status: "not-listed", url: null, detection: "No signals found" };
     };
 
+    // ── Pre-load scanner data for any photoFolders we'll be checking. ──────────
+    // The hourly photo-listing-scanner (server/photo-listing-scanner.ts)
+    // already runs the same kind of reverse-image-search this preflight
+    // does, but with stronger verification (multi-token, multi-URL,
+    // authorized-URL suppression) and persists the result in
+    // photo_listing_checks. When the scanner has a fresh "found"
+    // verdict for a folder, that's a stronger signal than anything our
+    // live search can produce in a single request — so promote it
+    // unconditionally. This was the bug behind a Caribe Cove preflight
+    // saying "Not Found — Likely Safe to Use" for unit-621 / unit-423
+    // while the dashboard's photo-listing-alert banner showed both
+    // units flipped to "found" the day before.
+    const SCANNER_FRESHNESS_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const folderToScannerRow = new Map<string, any>();
+    const photoFolders = units.map(u => u.photoFolder).filter((f): f is string => !!f && f.trim() !== "");
+    if (photoFolders.length > 0) {
+      try {
+        const allScannerRows = await storage.getAllPhotoListingChecks();
+        const wanted = new Set(photoFolders);
+        for (const row of allScannerRows) {
+          if (wanted.has(row.photoFolder)) folderToScannerRow.set(row.photoFolder, row);
+        }
+      } catch (e: any) {
+        console.error(`[platform-check] scanner pre-load failed: ${e?.message}`);
+      }
+    }
+    const now = Date.now();
+    const isScannerFresh = (row: any | undefined): boolean =>
+      !!row && row.checkedAt && (now - new Date(row.checkedAt).getTime() < SCANNER_FRESHNESS_MS);
+
+    const firstScannerMatchUrl = (row: any, platform: "airbnb" | "vrbo" | "booking"): string | null => {
+      const json = platform === "airbnb"
+        ? row.airbnbMatches
+        : platform === "vrbo"
+          ? row.vrboMatches
+          : row.bookingMatches;
+      if (!json || typeof json !== "string") return null;
+      try {
+        const parsed = JSON.parse(json);
+        if (Array.isArray(parsed) && parsed[0]?.listingUrl) return String(parsed[0].listingUrl);
+      } catch { /* fall through */ }
+      return null;
+    };
+
+    // Promote a per-platform result with the scanner's verdict. "found"
+    // upgrades to photo-confirmed (or keeps existing "confirmed" but
+    // backfills the URL); "clean" / "unknown" leaves the result alone.
+    const applyScannerOverride = (
+      combined: CombinedResult,
+      row: any | undefined,
+      platform: "airbnb" | "vrbo" | "booking",
+    ): CombinedResult => {
+      if (!isScannerFresh(row)) return combined;
+      const status = platform === "airbnb"
+        ? row.airbnbStatus
+        : platform === "vrbo"
+          ? row.vrboStatus
+          : row.bookingStatus;
+      if (status !== "found") return combined;
+      const scannerUrl = firstScannerMatchUrl(row, platform);
+      if (combined.status === "confirmed") {
+        return { ...combined, url: combined.url ?? scannerUrl };
+      }
+      return {
+        status: "photo-confirmed",
+        url: scannerUrl ?? combined.url,
+        detection: combined.status === "unconfirmed" || combined.status === "photo-only"
+          ? "Text + scanner photo match"
+          : "Scanner photo match — Lens detected our photos on a third-party listing",
+      };
+    };
+
     // ── Process each unit: run text searches + photo search concurrently ───────
     const resultUnits = await Promise.all(
       units.map(async (unit) => {
@@ -10553,6 +10639,7 @@ export async function registerRoutes(
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchedUrls, matchCount, totalChecked } = photoResult;
+        const scannerRow = unit.photoFolder ? folderToScannerRow.get(unit.photoFolder) : undefined;
 
         // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
         const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
@@ -10566,9 +10653,9 @@ export async function registerRoutes(
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
-            vrbo:    combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
-            booking: combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked),
+            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked), scannerRow, "airbnb"),
+            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked), scannerRow, "vrbo"),
+            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked), scannerRow, "booking"),
           },
         };
       }),
