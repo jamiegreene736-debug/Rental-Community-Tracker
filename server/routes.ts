@@ -8,7 +8,7 @@ import fs from "fs";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
-import { verifyPmAvailability } from "./verify-pm-availability";
+import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
@@ -3658,6 +3658,44 @@ export async function registerRoutes(
     } catch (e: any) {
       console.error(`[verify-availability] error:`, e?.message ?? e);
       return res.status(500).json({ error: "verifier error", message: e?.message ?? String(e) });
+    }
+  });
+
+  // Batch verify — used by the find-buy-in dialog's auto-verify on load.
+  // ONE Stagehand session navigates through up to N urls sequentially,
+  // saving the per-URL session-creation cost (~$0.005 each). Cache hits
+  // are peeled off before the session opens, so a fully cached batch is
+  // free. Cap at 10 to bound cost (~$0.05 worst case).
+  app.post("/api/buy-in-candidates/verify-availability-batch", async (req: Request, res: Response) => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const bbApiKey = process.env.BROWSERBASE_API_KEY;
+    const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+    if (!bbApiKey) return res.status(500).json({ error: "BROWSERBASE_API_KEY not configured" });
+    if (!bbProjectId) return res.status(500).json({ error: "BROWSERBASE_PROJECT_ID not configured" });
+
+    const { urls, checkIn, checkOut } = (req.body ?? {}) as {
+      urls?: unknown; checkIn?: string; checkOut?: string;
+    };
+    if (!Array.isArray(urls) || urls.length === 0 || !urls.every((u) => typeof u === "string")) {
+      return res.status(400).json({ error: "urls (string[]) required" });
+    }
+    if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+    const validUrls = (urls as string[]).filter((u) => {
+      try { new URL(u); return true; } catch { return false; }
+    });
+    if (validUrls.length === 0) return res.status(400).json({ error: "no valid urls" });
+
+    try {
+      const results = await verifyPmAvailabilityBatch({
+        urls: validUrls, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId, maxUrls: 10,
+      });
+      return res.json({ results });
+    } catch (e: any) {
+      console.error(`[verify-availability-batch] error:`, e?.message ?? e);
+      return res.status(500).json({ error: "batch verifier error", message: e?.message ?? String(e) });
     }
   });
 
