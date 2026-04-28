@@ -1332,14 +1332,27 @@ function CandidateList({
                   {fmtMoney(c.costPerNight)}/night
                 </p>
               </div>
-              <Button
-                size="sm"
-                onClick={() => onAttach(c.buyIn.id)}
-                disabled={isPending}
-                data-testid={`button-attach-${c.buyIn.id}`}
-              >
-                <Link2 className="h-3.5 w-3.5 mr-1" /> Attach
-              </Button>
+              <div className="flex flex-col gap-1 shrink-0">
+                {c.buyIn.airbnbListingUrl && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => window.open(c.buyIn.airbnbListingUrl!, "_blank", "noopener,noreferrer")}
+                    data-testid={`button-open-${c.buyIn.id}`}
+                  >
+                    <ExternalLink className="h-3 w-3 mr-1" /> Open
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  onClick={() => onAttach(c.buyIn.id)}
+                  disabled={isPending}
+                  data-testid={`button-attach-${c.buyIn.id}`}
+                >
+                  <Link2 className="h-3.5 w-3.5 mr-1" /> Attach
+                </Button>
+              </div>
             </div>
           ))}
         </div>

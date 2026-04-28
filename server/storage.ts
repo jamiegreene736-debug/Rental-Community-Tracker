@@ -145,6 +145,16 @@ export class DatabaseStorage implements IStorage {
     //   2. Fully cover the booking window: buyIn.checkIn <= booking.checkIn AND buyIn.checkOut >= booking.checkOut
     //   3. Be status=active
     //   4. Not already be attached to any reservation
+    //   5. Have a non-zero costPaid. Auto-fill creates buy-in records
+    //      with costPaid=0 when it falls back to the unpriced-PM
+    //      fallback (no priced bookable inventory found). Detaching
+    //      unlinks the reservation but doesn't delete the record, so
+    //      these orphan $0 rows accumulate across auto-fill runs and
+    //      flood the picker. Filter them out — a $0 buy-in isn't a
+    //      useful candidate to attach (the operator still needs to
+    //      negotiate a price with the PM). Buy-ins with a real price
+    //      that happen to be 0 (comp stays etc.) can be entered via
+    //      the manual create flow at any cost > 0.
     const rows = await db
       .select()
       .from(buyIns)
@@ -156,6 +166,7 @@ export class DatabaseStorage implements IStorage {
           gte(buyIns.checkOut, params.checkOut),
           eq(buyIns.status, "active"),
           sql`${buyIns.guestyReservationId} IS NULL`,
+          sql`${buyIns.costPaid} > 0`,
         ),
       );
     return rows;
