@@ -619,6 +619,15 @@ export default function Bookings() {
           const tosSuffix = airbnbLastResort
             ? ` · ⚠️ Last-resort Airbnb pick — Airbnb TOS prohibits sublet. No PM/Booking/Vrbo candidate was available for these dates. Open Find buy-in on this slot for reverse-image PM matches you can book direct.`
             : "";
+          // PM URL discovered via reverse-image-match against an Airbnb
+          // listing — disclose the anchor + that the PM rate may differ
+          // slightly from the inherited Airbnb price. Both pieces are
+          // important: the anchor URL lets the operator click through
+          // to verify the photos match, and the disclaimer keeps them
+          // from over-relying on the inherited price.
+          const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
+            ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
+            : "";
           // When we attached the URL because of the peak-season fallback
           // (most/all candidates came back booked), record what was
           // checked so the operator can see what's listed elsewhere
@@ -643,7 +652,7 @@ export default function Bookings() {
               costPaid: finalCost.toFixed(2),
               airbnbConfirmation: null,
               airbnbListingUrl: pick.url,
-              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${tosSuffix}${attemptsNote}`,
+              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${tosSuffix}${anchorSuffix}${attemptsNote}`,
               status: "active",
             }).then((r) => r.json());
             if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -1356,10 +1365,17 @@ type LiveCandidate = {
   snippet?: string;
   // Reverse-image-search hits where the same photo appears on a non-OTA
   // site (typically a property-management company that has the same
-  // unit listed for direct booking). Only populated for the top 2
+  // unit listed for direct booking). Populated for the top N priced
   // Airbnb candidates server-side. Zero-length when no matches were
-  // found OR the candidate isn't one of the top 2.
+  // found OR the candidate isn't in the top-N pool.
   photoMatches?: Array<{ url: string; title: string; domain: string }>;
+  // For PM candidates surfaced via reverse-image match against an
+  // Airbnb listing: the anchor's URL + price. Auto-fill annotates the
+  // buy-in note with these so the operator knows the price is a proxy
+  // (Airbnb's, attached because Airbnb verifies availability at the
+  // resort for those exact dates) and the actual PM rate may differ.
+  airbnbAnchorUrl?: string;
+  airbnbAnchorPrice?: number;
 };
 
 type FindBuyInResponse = {
