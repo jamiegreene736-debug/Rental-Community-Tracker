@@ -479,22 +479,28 @@ export default function Bookings() {
           let verifiedPrice: number | null = null;
           let skippedReasons: string[] = [];
 
-          // Build the verified-yes set: start with trusted-by-source rows,
-          // then enrich with Haiku batch results for PM rows.
+          // Build verified-yes AND verified-no sets from the Haiku
+          // batch. Airbnb anchors are trusted-by-source (engine
+          // filters by availability for the requested dates).
+          // Everything else (PM + Vrbo + Booking) goes through the
+          // Haiku verifier — dropping Vrbo's trust-by-source closes
+          // the "Vrbo URL pre-filled dates but unit wasn't bookable"
+          // gap Jamie hit.
           const verifiedYesUrls = new Set<string>();
+          const verifiedNoUrls = new Set<string>();
           for (const c of pricedCandidates) {
-            if (c.source !== "pm") verifiedYesUrls.add(c.url);
+            if (c.source === "airbnb") verifiedYesUrls.add(c.url);
           }
-          const pmToVerify = pricedCandidates
-            .filter((c) => c.source === "pm")
-            .slice(0, 10)
+          const toVerify = pricedCandidates
+            .filter((c) => c.source !== "airbnb")
+            .slice(0, 15)
             .map((c) => c.url);
-          if (pmToVerify.length > 0) {
+          if (toVerify.length > 0) {
             try {
               const batchResp = await apiRequest(
                 "POST",
                 "/api/buy-in-candidates/verify-availability-batch",
-                { urls: pmToVerify, checkIn: ci, checkOut: co },
+                { urls: toVerify, checkIn: ci, checkOut: co },
               ).then((r) => r.json());
               const results = (batchResp?.results ?? {}) as Record<
                 string,
@@ -502,6 +508,7 @@ export default function Bookings() {
               >;
               for (const [url, result] of Object.entries(results)) {
                 if (result?.available === "yes") verifiedYesUrls.add(url);
+                else if (result?.available === "no") verifiedNoUrls.add(url);
               }
             } catch (e: any) {
               // Batch verifier failure is non-fatal — fall through to
@@ -518,13 +525,21 @@ export default function Bookings() {
             break;
           }
 
-          // Pass 2: if nothing came back verified-yes (peak season,
-          // batch errored, or all PM rows returned no/unclear), fall
-          // back to the older per-row SearchAPI pre-flight on the top
-          // 4 priced. This keeps the safety net intact — Haiku verify
-          // is opt-in tightening, not a hard gate.
+          // Pass 2: if Haiku found nothing verified-yes (peak season,
+          // batch errored, or everything came back unclear), fall back
+          // to the older SearchAPI pre-flight on the top 4 priced.
+          // CRITICAL: skip URLs that Haiku already flagged as
+          // verified-no — otherwise Pass 2 attaches a unit Haiku just
+          // told us is unavailable. SearchAPI returns "available: null"
+          // for most PM URLs (it can't decisively check them), so
+          // without this gate Pass 2 picks the cheapest unverified row
+          // even when Haiku said "no."
           if (!pick) {
             for (const c of pricedCandidates.slice(0, 4)) {
+              if (verifiedNoUrls.has(c.url)) {
+                skippedReasons.push(`${c.sourceLabel}: Haiku flagged unavailable`);
+                continue;
+              }
               const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
               const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
               if (v?.available === false) {
@@ -1710,32 +1725,34 @@ function ScannedOptionsTable({
   // Auto-verify on load.
   //
   // Cost-discipline rules:
-  //   - Trust-by-source: Airbnb / Vrbo / Booking rows are pre-marked
-  //     "yes" without spending a verifier call. Those sources came
-  //     from systems that already vouched for the priced inventory
-  //     (Airbnb engine results for these dates, Booking.com search
-  //     results for these dates, Vrbo search agent / Apify / etc.
-  //     that drove a real query for these dates).
-  //   - PM rows with a non-zero price are the actual gap (price is
-  //     anchored from Airbnb on photo-matches, or absent on PM Google
-  //     site:search results). Send the top 10 cheapest to the batch
-  //     verifier — that's ~$0.05 worst case.
-  //   - PM rows without a price are skipped (not in the cheapest pool;
-  //     operator can manually Verify any individual one).
+  //   - Trust-by-source: AIRBNB ONLY. Airbnb's engine filters by
+  //     availability for the requested dates so its results are
+  //     reliable. Vrbo and Booking, by contrast, return listings
+  //     that "match" the search but aren't always actually bookable
+  //     for the requested window (Jamie hit this: a Vrbo URL with
+  //     dates pre-filled landed on a "not available" page). So
+  //     Vrbo and Booking now go through the verifier.
+  //   - Verify queue: PM + Vrbo + Booking rows. Cap at 15 to bound
+  //     cost (~$0.075 worst case at $0.005/Haiku call + $0.005
+  //     session). Selection: top 10 cheapest priced, then top 5
+  //     unpriced Vrbo (Vrbo "manual quote" rows are exactly the
+  //     ones the operator will click on; verifying them tells us
+  //     whether the URL lands on an available unit before they do).
+  //   - Airbnb skipped from verify queue (trust-by-source).
   useEffect(() => {
     if (all.length === 0) return;
     if (autoVerifyState !== "idle") return;
     if (!checkIn || !checkOut) return;
 
-    // Trust-by-source pre-mark — synchronous, free.
+    // Trust-by-source pre-mark — Airbnb only. Synchronous, free.
     setVerifyByUrl((prev) => {
       const next = { ...prev };
       for (const c of all) {
         if (next[c.url]) continue; // don't clobber existing state
-        if (c.source !== "pm" && c.totalPrice > 0) {
+        if (c.source === "airbnb" && c.totalPrice > 0) {
           next[c.url] = {
             status: "yes",
-            reason: `Trusted by source (${c.sourceLabel}) — engine returned this row priced for these dates`,
+            reason: "Airbnb engine returned this listing priced for these dates",
             nightlyPriceUsd: c.nightlyPrice || null,
           };
         }
@@ -1743,23 +1760,32 @@ function ScannedOptionsTable({
       return next;
     });
 
-    // PM rows that need verifying — top 10 cheapest priced.
-    const pmToVerify = all
-      .filter((c) => c.source === "pm" && c.totalPrice > 0)
+    // Build verify queue.
+    const nonAirbnb = all.filter((c) => c.source !== "airbnb");
+    const pricedToVerify = nonAirbnb
+      .filter((c) => c.totalPrice > 0)
       .sort((a, b) => a.totalPrice - b.totalPrice)
       .slice(0, 10)
       .map((c) => c.url);
+    // Plus top 5 unpriced Vrbo — these are "manual quote" rows the
+    // operator clicks on directly. Knowing whether the URL lands on
+    // an available unit is exactly the gap Jamie hit.
+    const unpricedVrboToVerify = nonAirbnb
+      .filter((c) => c.source === "vrbo" && c.totalPrice === 0)
+      .slice(0, 5)
+      .map((c) => c.url);
+    const toVerify = Array.from(new Set([...pricedToVerify, ...unpricedVrboToVerify]));
 
-    if (pmToVerify.length === 0) {
+    if (toVerify.length === 0) {
       setAutoVerifyState("done");
       return;
     }
 
     setAutoVerifyState("running");
-    // Mark each PM row as loading so the UI shows progress immediately.
+    // Mark each row as loading so the UI shows progress immediately.
     setVerifyByUrl((prev) => {
       const next = { ...prev };
-      for (const url of pmToVerify) {
+      for (const url of toVerify) {
         if (!next[url]) next[url] = { status: "loading" };
       }
       return next;
@@ -1768,7 +1794,7 @@ function ScannedOptionsTable({
     (async () => {
       try {
         const r = await apiRequest("POST", "/api/buy-in-candidates/verify-availability-batch", {
-          urls: pmToVerify, checkIn, checkOut,
+          urls: toVerify, checkIn, checkOut,
         });
         const j = await r.json();
         const results = (j?.results ?? {}) as Record<string, { available: string; reason: string; nightlyPriceUsd: number | null }>;
@@ -1782,7 +1808,7 @@ function ScannedOptionsTable({
             };
           }
           // Any URL we asked for but didn't get a result → unclear (server skipped it).
-          for (const url of pmToVerify) {
+          for (const url of toVerify) {
             if (!results[url] && next[url]?.status === "loading") {
               next[url] = { status: "unclear", reason: "no result returned by batch verifier" };
             }
@@ -1793,7 +1819,7 @@ function ScannedOptionsTable({
         // On failure, mark loaders as error so the operator can retry one-off.
         setVerifyByUrl((prev) => {
           const next = { ...prev };
-          for (const url of pmToVerify) {
+          for (const url of toVerify) {
             if (next[url]?.status === "loading") {
               next[url] = { status: "error", reason: e?.message ?? "batch request failed" };
             }

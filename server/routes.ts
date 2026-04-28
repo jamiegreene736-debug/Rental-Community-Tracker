@@ -3690,7 +3690,7 @@ export async function registerRoutes(
 
     try {
       const results = await verifyPmAvailabilityBatch({
-        urls: validUrls, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId, maxUrls: 10,
+        urls: validUrls, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId, maxUrls: 15,
       });
       return res.json({ results });
     } catch (e: any) {
