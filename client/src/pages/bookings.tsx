@@ -1583,6 +1583,8 @@ function LiveSearchSection({
         booking={booking}
         pm={pm}
         autoPickUrl={cheapest[0]?.url}
+        checkIn={checkInYmd}
+        checkOut={checkOutYmd}
         onRecord={(c) => setRecordTarget(c)}
       />
 
@@ -1636,12 +1638,20 @@ function LiveSearchSection({
 type SortKey = "source" | "title" | "total" | "nightly";
 type SortDir = "asc" | "desc";
 
+type VerifyState = {
+  status: "idle" | "loading" | "yes" | "no" | "unclear" | "error";
+  reason?: string;
+  nightlyPriceUsd?: number | null;
+};
+
 function ScannedOptionsTable({
   airbnb,
   vrbo,
   booking,
   pm,
   autoPickUrl,
+  checkIn,
+  checkOut,
   onRecord,
 }: {
   airbnb: LiveCandidate[];
@@ -1649,10 +1659,36 @@ function ScannedOptionsTable({
   booking: LiveCandidate[];
   pm: LiveCandidate[];
   autoPickUrl: string | undefined;
+  checkIn: string;
+  checkOut: string;
   onRecord: (c: LiveCandidate) => void;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [verifyByUrl, setVerifyByUrl] = useState<Record<string, VerifyState>>({});
+
+  const verifyOne = async (url: string) => {
+    setVerifyByUrl((prev) => ({ ...prev, [url]: { status: "loading" } }));
+    try {
+      const r = await apiRequest("POST", "/api/buy-in-candidates/verify-availability", {
+        url, checkIn, checkOut,
+      });
+      const j = await r.json();
+      setVerifyByUrl((prev) => ({
+        ...prev,
+        [url]: {
+          status: j.available ?? "unclear",
+          reason: j.reason,
+          nightlyPriceUsd: j.nightlyPriceUsd ?? null,
+        },
+      }));
+    } catch (e: any) {
+      setVerifyByUrl((prev) => ({
+        ...prev,
+        [url]: { status: "error", reason: e?.message ?? "request failed" },
+      }));
+    }
+  };
 
   // Flatten all sources, dedupe by URL (some PM candidates also appear as
   // photo-matches under Airbnb rows; first writer wins so we keep the
@@ -1750,6 +1786,7 @@ function ScannedOptionsTable({
               /night <SortIcon col="nightly" />
             </TableHead>
             <TableHead className="w-32 text-[11px]">Anchor</TableHead>
+            <TableHead className="w-24 text-[11px]">Avail</TableHead>
             <TableHead className="w-28 text-right text-[11px]"></TableHead>
           </TableRow>
         </TableHeader>
@@ -1804,6 +1841,12 @@ function ScannedOptionsTable({
                     </a>
                   ) : null}
                 </TableCell>
+                <TableCell className="py-1.5">
+                  <VerifyCell
+                    state={verifyByUrl[c.url] ?? { status: "idle" }}
+                    onVerify={() => verifyOne(c.url)}
+                  />
+                </TableCell>
                 <TableCell className="py-1.5 text-right">
                   <div className="flex justify-end gap-1">
                     <Button
@@ -1829,6 +1872,73 @@ function ScannedOptionsTable({
         </TableBody>
       </Table>
     </div>
+  );
+}
+
+function VerifyCell({ state, onVerify }: { state: VerifyState; onVerify: () => void }) {
+  if (state.status === "idle") {
+    return (
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-6 px-1.5 text-[10px]"
+        onClick={onVerify}
+        title="Drives the listing page with Haiku to confirm availability for these dates (~$0.01)"
+      >
+        <CheckCircle2 className="h-2.5 w-2.5 mr-1" /> Verify
+      </Button>
+    );
+  }
+  if (state.status === "loading") {
+    return (
+      <span className="text-[10px] text-muted-foreground inline-flex items-center gap-1">
+        <RefreshCw className="h-2.5 w-2.5 animate-spin" /> Checking…
+      </span>
+    );
+  }
+  if (state.status === "yes") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] text-green-700 dark:text-green-400"
+        title={state.reason}
+      >
+        <CheckCircle2 className="h-3 w-3" />
+        {state.nightlyPriceUsd ? `Avail · ${fmtMoney(state.nightlyPriceUsd)}/n` : "Available"}
+      </span>
+    );
+  }
+  if (state.status === "no") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] text-red-700 dark:text-red-400"
+        title={state.reason}
+      >
+        <AlertCircle className="h-3 w-3" />
+        Not avail
+      </span>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <button
+        type="button"
+        className="text-[10px] text-muted-foreground italic underline"
+        title={state.reason}
+        onClick={onVerify}
+      >
+        retry
+      </button>
+    );
+  }
+  // unclear
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400"
+      title={state.reason}
+    >
+      <AlertCircle className="h-3 w-3" />
+      Unclear
+    </span>
   );
 }
 
