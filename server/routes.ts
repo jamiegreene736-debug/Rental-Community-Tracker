@@ -3193,7 +3193,7 @@ export async function registerRoutes(
             title: String(s?.title || s?.source || domain).slice(0, 80),
             domain,
           });
-          if (out.length >= 3) break;
+          if (out.length >= 6) break;
         }
         return out;
       } catch (e: any) {
@@ -3206,12 +3206,12 @@ export async function registerRoutes(
     // verified-available + priced inventory, Google Lens bridges to
     // the bookable PM URL for the same physical unit. Operator
     // explicitly opted for "maximum candidate surface area" over
-    // tighter cost control — cap at 15 covers essentially every
-    // Airbnb result for our resort searches (~10-12 priced typical;
-    // hard cap at 15 in case Airbnb opens up to a wider geo). Cost:
-    // ~$0.01/lens call × up to 15 = $0.15/cold-cache find-buy-in;
-    // cached 5min so re-runs free.
-    const TOP_AIRBNB_FOR_LENS = 15;
+    // tighter cost control — cap at 30 surfaces every priced Airbnb
+    // listing in a typical resort window (the engine itself rarely
+    // returns more), so we never miss an anchor that might have a
+    // bookable PM. Cost: ~$0.01/lens call × up to 30 = $0.30/cold-
+    // cache find-buy-in; cached 5min so re-runs free.
+    const TOP_AIRBNB_FOR_LENS = 30;
     const topAirbnb = airbnb
       .filter((c) => c.image && c.nightlyPrice > 0)
       .slice(0, TOP_AIRBNB_FOR_LENS);
@@ -3261,8 +3261,13 @@ export async function registerRoutes(
       // legitimate matches. Trusting the anchor's location proof
       // restores the candidate volume the operator wants.
       //
-      // Per-anchor cap of 3 — matches the Lens helper's internal cap.
-      const filteredMatches = matches.slice(0, 3);
+      // Per-anchor cap of 6 — matches the Lens helper's internal cap.
+      // Doubled from 3 to 6 (alongside TOP_AIRBNB_FOR_LENS 15→30) per
+      // operator direction "maximum candidate surface area." Lens
+      // ranks by visual similarity; matches 4-6 are still usually
+      // legit when the anchor's photos are unit-interior shots
+      // (vs. exterior/pool shared across the complex).
+      const filteredMatches = matches.slice(0, 6);
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
