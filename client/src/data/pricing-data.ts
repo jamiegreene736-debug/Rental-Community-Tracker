@@ -252,70 +252,14 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
-// ─────────────────────────────────────────────────────────────
-// LIVE BUY-IN OVERRIDES (per-property, per-bedroom)
-//
-// Module-scope cache populated from `GET /api/property/market-rates`
-// at app startup. Mirrors the row shape of the
-// `property_market_rates` table. The Builder's Pricing tab calls
-// `setLivePropertyMarketRates` once the fetch resolves; subsequent
-// `getPropertyPricing()` calls then use live medians as the cost
-// basis instead of the hand-curated `BUY_IN_RATES` table.
-//
-// Fallback chain (highest to lowest priority):
-//   1. live median for (propertyId, bedrooms)
-//   2. BUY_IN_RATES[community][${BR}BR]
-//   3. FALLBACK_RATE_PER_BEDROOM × bedrooms (the per-region default
-//      from AGENTS.md Load-Bearing #30)
-//
-// Negative `propertyId` keys are draft ids (the `-draftId`
-// convention used everywhere on the dashboard for drafts), so the
-// same lookup works uniformly for static + drafts.
-// ─────────────────────────────────────────────────────────────
-
-type LiveBuyInKey = string; // `${propertyId}::${bedrooms}`
-type LiveBuyInEntry = { medianNightly: number; sampleCount: number; refreshedAt: string; source: string };
-const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
-const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
-
-export type LivePropertyMarketRateInput = {
-  propertyId: number;
-  bedrooms: number;
-  medianNightly: number | string;
-  sampleCount: number;
-  refreshedAt: string;
-  source: string;
-};
-
-export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
-  _liveBuyIns.clear();
-  for (const r of rates) {
-    const median = typeof r.medianNightly === "number" ? r.medianNightly : parseFloat(r.medianNightly);
-    if (!Number.isFinite(median) || median <= 0) continue;
-    _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
-      medianNightly: median,
-      sampleCount: r.sampleCount,
-      refreshedAt: r.refreshedAt,
-      source: r.source,
-    });
-  }
-}
-
-export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEntry | null {
-  return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
-}
-
-function getBuyInRate(community: string, bedrooms: number, propertyId?: number): number {
-  if (propertyId != null) {
-    const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
-    if (live) return live.medianNightly;
-  }
-  const entry = BUY_IN_RATES[community];
-  const key = `${bedrooms}BR` as keyof CommunityRate;
-  const rate = entry?.[key];
-  if (typeof rate === "number") return rate;
-  return FALLBACK_RATE_PER_BEDROOM * bedrooms;
-}
+// Live-rate cache moved to `shared/pricing-rates.ts` so dashboard
+// (`home.tsx → computeBaseRate`) and Builder Pricing tab read from
+// the same Map. This file re-exports the public surface for code
+// that imports from `@/data/pricing-data` (the Builder, drafts).
+// New callers should import directly from `@shared/pricing-rates`.
+import { setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
+export { setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate };
+export type { LivePropertyMarketRateInput };
 
 function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
   const map = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;

@@ -27,7 +27,17 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Poipu Oceanfront":  { "2BR": 630, "3BR": 792, "4BR": 936,  region: "hawaii" },
   "Poipu Brenneckes":  { "2BR": 510, "3BR": 618, "4BR": 864,  region: "hawaii" },
   "Pili Mai":          { "2BR": 576, "3BR": 744, "4BR": 840,  region: "hawaii" },
-  "Kapaa Beachfront":  { "2BR": 588, "3BR": 840, "4BR": 1020, region: "hawaii" },
+  // 3BR re-set 2026-04-28 from $840 to $615 to match the live-data
+  // methodology operator chose to keep. The live Airbnb-engine
+  // backfill landed Kapaa Beachfront 2BR at $430/n=4 (vs the prior
+  // static $588 — 27% drop), but Kapaa proper has no 3BR condo comps
+  // in the operator's COMMUNITY_BOUNDS zone, so the per-property
+  // refresh persists no 3BR row and the Pricing tab falls through to
+  // this static value for unit A on prop 23. Extrapolation: $430 ×
+  // 1.43 (the prior static 3BR/2BR ratio for this community) = $615 —
+  // keeps prop 23's 3BR component consistent with the rest of the
+  // live-data table.
+  "Kapaa Beachfront":  { "2BR": 588, "3BR": 615, "4BR": 1020, region: "hawaii" },
   "Princeville":       { "2BR": 492, "3BR": 744, "4BR": 858,  region: "hawaii" },
   "Kekaha Beachfront": { "2BR": 540, "3BR": 810, "4BR": 1080, region: "hawaii" },
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
@@ -134,7 +144,65 @@ export function suggestPricingArea(
   return "";
 }
 
-export function getBuyInRate(community: string, bedrooms: number): number {
+// Live per-(propertyId, bedrooms) buy-in cache. Hydrated client-side
+// from `GET /api/property/market-rates` at app mount via
+// `setLivePropertyMarketRates`. Empty on the server (server reads
+// `property_market_rates` directly from the DB) — that's fine; this
+// file is shared but the cache only lives in process memory and the
+// only callers that need it run client-side.
+//
+// Lookup key: `${propertyId}::${bedrooms}`. Negative propertyIds are
+// drafts (the synthetic `-draftId` convention used everywhere on the
+// dashboard); positive ids are static properties from
+// `unit-builder-data.ts`. One cache covers both.
+type LiveBuyInKey = string;
+type LiveBuyInEntry = {
+  medianNightly: number;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
+const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
+
+export type LivePropertyMarketRateInput = {
+  propertyId: number;
+  bedrooms: number;
+  medianNightly: number | string;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+
+export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
+  _liveBuyIns.clear();
+  for (const r of rates) {
+    const median = typeof r.medianNightly === "number" ? r.medianNightly : parseFloat(r.medianNightly);
+    if (!Number.isFinite(median) || median <= 0) continue;
+    _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
+      medianNightly: median,
+      sampleCount: r.sampleCount,
+      refreshedAt: r.refreshedAt,
+      source: r.source,
+    });
+  }
+}
+
+export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEntry | null {
+  return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
+}
+
+// Fallback chain (highest → lowest priority):
+//   1. Live median for (propertyId, bedrooms) — when propertyId is
+//      supplied AND the cache has a row for that pair.
+//   2. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
+//   3. FALLBACK_RATE_PER_BEDROOM[region] × bedrooms — per-region
+//      default for areas not in the static table.
+export function getBuyInRate(community: string, bedrooms: number, propertyId?: number): number {
+  if (propertyId != null) {
+    const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
+    if (live) return live.medianNightly;
+  }
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];

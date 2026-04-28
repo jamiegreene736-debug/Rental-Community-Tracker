@@ -3979,12 +3979,33 @@ export async function registerRoutes(
     "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
     "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
     "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
-    // Kaha Lani Resort is in Wailua (zip 96746), not Lihue. Backfill
-    // probe on property 23 returned 18 listings, 17 dropped by
-    // outsideBbox at the prior 22.0079, -159.3471 — Nominatim's match
-    // for "Kaha Lani Resort, Nehe Road, Wailua" lands at 22.0358,
-    // -159.3369, ~3km north of where I had it.
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0358, lng: -159.3369 },
+    // Kaha Lani Resort sits in Wailua at 22.036, -159.337. PR #250
+    // moved the bbox there from Lihue, but the resulting 1.65km bbox
+    // returned 19 listings with NONE matching the 2BR/3BR units we
+    // need (Wailua/Lihue is dominated by 1BR studios + 4+BR estates).
+    // The operator's hand-curated `COMMUNITY_BOUNDS["Kapaa
+    // Beachfront"]` targets ~22.072, -159.320 (Kapaa proper) where
+    // condo comps like Lae Nani / Pono Kai live. Centering the bbox
+    // at the midpoint (22.050, -159.328) extends the 1.65km box from
+    // Kaha Lani's actual location north into Kapaa Beachfront proper,
+    // catching east-shore 2BR/3BR condos that price comparably to
+    // Kaha Lani's units. Same Kapaa Beachfront pricing tier the
+    // operator already uses for buy-in calculations, just with a
+    // richer sample set.
+    // PR #252's midpoint bbox (22.05, -159.328) returned 18/18
+    // outsideBbox — moving the bbox north of the engine's
+    // q="Kaha Lani Resort Wailua Hawaii" query area meant the engine
+    // kept surfacing Wailua-clustered listings the bbox then rejected.
+    // The engine's text query and the bbox need to align. Realign
+    // both to the operator's hand-curated COMMUNITY_BOUNDS["Kapaa
+    // Beachfront"] zone (center 22.072, -159.320 — Kapaa proper),
+    // which is also how the operator's BUY_IN_RATES["Kapaa
+    // Beachfront"] table is calibrated. The search now returns east-
+    // shore Kapaa condo comps (Lae Nani, Pono Kai, etc.) rather than
+    // Kaha Lani-specific listings — appropriate because the operator's
+    // entire pricing tier for this propertyId is keyed on the
+    // "Kapaa Beachfront" community label, not Kaha Lani specifically.
+    "Kapaa Beachfront":  { searchName: "Kapaa Beachfront",            city: "Kapaa",       state: "Hawaii",                                                lat: 22.0720, lng: -159.3200 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
@@ -8056,6 +8077,44 @@ export async function registerRoutes(
       return res.status(400).json({ error: "At least one of taxMapKey / tatLicense / getLicense required" });
     }
 
+    // Sync to the open API first via /api/builder/push-compliance.
+    // This writes the values to the listing's tags + top-level
+    // licenseNumber/taxId fields, which is what the readback in
+    // `getChannelStatus` (client/src/services/guestyService.ts) uses
+    // to detect compliance state. Without this step, the Playwright
+    // panel-fill below would update Guesty's admin UI but the
+    // listing's API payload would still report the stale values —
+    // leaving the operator stuck in a "Compliance on file but
+    // incomplete" loop where re-clicking this button does nothing
+    // detectable to the comparison logic. See the Kaha Lani case
+    // 2026-04-28 for the failure pattern.
+    //
+    // Best-effort — failures here log a warning but don't abort the
+    // Playwright path, since the Playwright-filled Guesty UI is the
+    // primary target VRBO actually reads from for license checks.
+    const port = process.env.PORT || "5000";
+    const apiSyncResult: { ok: boolean; reason?: string } = { ok: false };
+    if (!dryRun) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/builder/push-compliance`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId, taxMapKey, tatLicense, getLicense }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (r.ok) {
+          apiSyncResult.ok = true;
+        } else {
+          const errText = await r.text().catch(() => "");
+          apiSyncResult.reason = `push-compliance HTTP ${r.status}: ${errText.slice(0, 200)}`;
+          console.warn(`[submit-vrbo-compliance] api sync failed: ${apiSyncResult.reason}`);
+        }
+      } catch (e: any) {
+        apiSyncResult.reason = `push-compliance error: ${e?.message ?? e}`;
+        console.warn(`[submit-vrbo-compliance] api sync threw: ${apiSyncResult.reason}`);
+      }
+    }
+
     const { openGuestyAdminPage } = await import("./guesty-playwright");
     const targetUrl = `https://app.guesty.com/properties/${listingId}/owners-and-license`;
 
@@ -8320,6 +8379,7 @@ export async function registerRoutes(
         saveResult,
         saveFeedback,
         republishResult,
+        apiSync: apiSyncResult, // open-API push (tags + top-level licenseNumber/taxId)
         beforeShotUrl: beforeShot,
         afterEditShotUrl: afterEditShot,
         postFillShotUrl: postFillShot,
@@ -10688,25 +10748,39 @@ export async function registerRoutes(
             for (const cfg of PLATFORM_CONFIGS) {
               const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
               if (signals[cfg.key]) continue;
-              // Find the first link that's an actual listing page on this platform.
-              const matchedLink = sourceLinks.find((l: string) => {
+              // Collect EVERY candidate URL on this platform (not just
+              // the first one). The previous `.find()` short-circuited
+              // after one URL — if that URL's listing page didn't
+              // surface our unit number with a marker, the entire
+              // photo's contribution to this platform was forfeited
+              // even though a later URL in the same Lens response
+              // would have verified cleanly. The scanner walks up to
+              // MAX_VERIFY_PER_HOST_PER_PHOTO (=3) candidates per
+              // (photo, host) and accepts the first verified hit; we
+              // match that here so a brand-new property's preflight
+              // gets the same detection rate the scanner gets on
+              // existing folders.
+              const candidates = sourceLinks.filter((l: string) => {
                 const ll = l.toLowerCase();
                 if (!ll.includes(domain)) return false;
                 return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
-              });
-              if (!matchedLink) continue;
-              // Cross-validate: confirm the matched page actually names
-              // our unit number. For shared-building addresses the same
-              // Lens result set can contain listings for many units —
-              // without this check, the first one "wins" even if it's
-              // the wrong unit (e.g. 3920 Wyllie Rd unit 2A returned
-              // for a unit 9 query). A Google site: scoped to the
-              // listing's path must surface an explicit unit marker.
-              const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
-              if (!verified) continue;
-              signals[cfg.key] = true;
-              matchedUrls[cfg.key] = matchedLink;
-              matchCount++;
+              }).slice(0, 3);
+              for (const matchedLink of candidates) {
+                // Cross-validate: confirm the matched page actually
+                // names our unit number. For shared-building addresses
+                // the same Lens result set can contain listings for
+                // many units — without this check, the first one
+                // "wins" even if it's the wrong unit (e.g. 3920 Wyllie
+                // Rd unit 2A returned for a unit 9 query). A Google
+                // site: scoped to the listing's path must surface an
+                // explicit unit marker.
+                const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
+                if (!verified) continue;
+                signals[cfg.key] = true;
+                matchedUrls[cfg.key] = matchedLink;
+                matchCount++;
+                break;
+              }
             }
           }
         } catch { /* best effort */ }
@@ -10743,6 +10817,78 @@ export async function registerRoutes(
       return { status: "not-listed", url: null, detection: "No signals found" };
     };
 
+    // ── Pre-load scanner data for any photoFolders we'll be checking. ──────────
+    // The hourly photo-listing-scanner (server/photo-listing-scanner.ts)
+    // already runs the same kind of reverse-image-search this preflight
+    // does, but with stronger verification (multi-token, multi-URL,
+    // authorized-URL suppression) and persists the result in
+    // photo_listing_checks. When the scanner has a fresh "found"
+    // verdict for a folder, that's a stronger signal than anything our
+    // live search can produce in a single request — so promote it
+    // unconditionally. This was the bug behind a Caribe Cove preflight
+    // saying "Not Found — Likely Safe to Use" for unit-621 / unit-423
+    // while the dashboard's photo-listing-alert banner showed both
+    // units flipped to "found" the day before.
+    const SCANNER_FRESHNESS_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const folderToScannerRow = new Map<string, any>();
+    const photoFolders = units.map(u => u.photoFolder).filter((f): f is string => !!f && f.trim() !== "");
+    if (photoFolders.length > 0) {
+      try {
+        const allScannerRows = await storage.getAllPhotoListingChecks();
+        const wanted = new Set(photoFolders);
+        for (const row of allScannerRows) {
+          if (wanted.has(row.photoFolder)) folderToScannerRow.set(row.photoFolder, row);
+        }
+      } catch (e: any) {
+        console.error(`[platform-check] scanner pre-load failed: ${e?.message}`);
+      }
+    }
+    const now = Date.now();
+    const isScannerFresh = (row: any | undefined): boolean =>
+      !!row && row.checkedAt && (now - new Date(row.checkedAt).getTime() < SCANNER_FRESHNESS_MS);
+
+    const firstScannerMatchUrl = (row: any, platform: "airbnb" | "vrbo" | "booking"): string | null => {
+      const json = platform === "airbnb"
+        ? row.airbnbMatches
+        : platform === "vrbo"
+          ? row.vrboMatches
+          : row.bookingMatches;
+      if (!json || typeof json !== "string") return null;
+      try {
+        const parsed = JSON.parse(json);
+        if (Array.isArray(parsed) && parsed[0]?.listingUrl) return String(parsed[0].listingUrl);
+      } catch { /* fall through */ }
+      return null;
+    };
+
+    // Promote a per-platform result with the scanner's verdict. "found"
+    // upgrades to photo-confirmed (or keeps existing "confirmed" but
+    // backfills the URL); "clean" / "unknown" leaves the result alone.
+    const applyScannerOverride = (
+      combined: CombinedResult,
+      row: any | undefined,
+      platform: "airbnb" | "vrbo" | "booking",
+    ): CombinedResult => {
+      if (!isScannerFresh(row)) return combined;
+      const status = platform === "airbnb"
+        ? row.airbnbStatus
+        : platform === "vrbo"
+          ? row.vrboStatus
+          : row.bookingStatus;
+      if (status !== "found") return combined;
+      const scannerUrl = firstScannerMatchUrl(row, platform);
+      if (combined.status === "confirmed") {
+        return { ...combined, url: combined.url ?? scannerUrl };
+      }
+      return {
+        status: "photo-confirmed",
+        url: scannerUrl ?? combined.url,
+        detection: combined.status === "unconfirmed" || combined.status === "photo-only"
+          ? "Text + scanner photo match"
+          : "Scanner photo match — Lens detected our photos on a third-party listing",
+      };
+    };
+
     // ── Process each unit: run text searches + photo search concurrently ───────
     const resultUnits = await Promise.all(
       units.map(async (unit) => {
@@ -10752,6 +10898,7 @@ export async function registerRoutes(
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchedUrls, matchCount, totalChecked } = photoResult;
+        const scannerRow = unit.photoFolder ? folderToScannerRow.get(unit.photoFolder) : undefined;
 
         // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
         const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
@@ -10765,9 +10912,9 @@ export async function registerRoutes(
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked),
-            vrbo:    combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked),
-            booking: combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked),
+            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked), scannerRow, "airbnb"),
+            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked), scannerRow, "vrbo"),
+            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked), scannerRow, "booking"),
           },
         };
       }),
