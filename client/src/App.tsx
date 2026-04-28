@@ -1,6 +1,7 @@
+import { useEffect } from "react";
 import { Switch, Route } from "wouter";
 import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppHeader from "@/components/AppHeader";
@@ -17,6 +18,7 @@ import Builder from "@/pages/builder";
 import BuilderPreflight from "@/pages/builder-preflight";
 import Inbox from "@/pages/inbox";
 import Bookings from "@/pages/bookings";
+import { setLivePropertyMarketRates, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
 
 function Router() {
   return (
@@ -42,11 +44,30 @@ function Router() {
   );
 }
 
+// Hydrates the shared live-buy-in cache (`shared/pricing-rates.ts →
+// _liveBuyIns`) once per app load. Both the dashboard
+// (`home.tsx → computeBaseRate`) and the Builder Pricing tab read
+// from this cache via `getBuyInRate(community, bedrooms, propertyId)`,
+// so it has to land before either renders. Uses `useQuery` so the
+// request is deduped with `home.tsx`'s same-key subscription —
+// react-query's cache holds the response and any consumer using the
+// same key sees the data without a second network call.
+function MarketRatesHydrator() {
+  const { data } = useQuery<LivePropertyMarketRateInput[]>({
+    queryKey: ["/api/property/market-rates"],
+  });
+  useEffect(() => {
+    if (Array.isArray(data)) setLivePropertyMarketRates(data);
+  }, [data]);
+  return null;
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
+        <MarketRatesHydrator />
         <Router />
       </TooltipProvider>
     </QueryClientProvider>
