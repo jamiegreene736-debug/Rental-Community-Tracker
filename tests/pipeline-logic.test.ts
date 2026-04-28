@@ -505,6 +505,9 @@ function detectVrboLicense(listing: Record<string, unknown>): VrboLicense {
   const fromTagsGet = tagValue("GET:");
   const fromTagsTmk = tagValue("TMK:");
 
+  const fromTopLevelTat = typeof listing.licenseNumber === "string" && (listing.licenseNumber as string).trim() ? (listing.licenseNumber as string).trim() : null;
+  const fromTopLevelGet = typeof listing.taxId === "string" && (listing.taxId as string).trim() ? (listing.taxId as string).trim() : null;
+
   const bookingInteg = integrations.find((i) => i.platform === "bookingCom" || i.platform === "bookingCom2");
   const bookingLicenseInfo = ((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined;
   const contentData = bookingLicenseInfo?.contentData as Array<{ name?: string; value?: string }> | undefined;
@@ -518,8 +521,8 @@ function detectVrboLicense(listing: Record<string, unknown>): VrboLicense {
 
   const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
 
-  const licenseNumber = fromTagsTat || fromBookingTat || homeaway.licenseNumber || null;
-  const taxId         = fromTagsGet || homeaway.taxId || null;
+  const licenseNumber = fromTagsTat || fromTopLevelTat || fromBookingTat || homeaway.licenseNumber || null;
+  const taxId         = fromTagsGet || fromTopLevelGet || homeaway.taxId || null;
   const parcelNumber  = fromTagsTmk || fromBookingTmk || homeaway.parcelNumber || null;
   if (!licenseNumber && !taxId && !parcelNumber) return null;
   return { licenseNumber, taxId, parcelNumber };
@@ -635,6 +638,53 @@ console.log("\nVRBO compliance detection suite");
   });
   assert.equal(detected?.licenseNumber, "TAGS-WINS", "tags should win priority");
   console.log("  ✓ tags take priority over bookingCom contentData");
+}
+
+// Case 7: top-level licenseNumber/taxId path (Kaha Lani 2026-04-28
+// case). The operator filled the "Vrbo license requirements" panel
+// in Guesty admin which writes to the listing's TOP-LEVEL
+// licenseNumber + taxId, but no GET tag was written. Without the
+// top-level path, taxId comes back null and the UI shows
+// "Compliance on file but incomplete" even though Guesty has GET.
+{
+  const detected = detectVrboLicense({
+    tags: [],
+    licenseNumber: "TA-024-630-2345-01",
+    taxId: "GE-024-630-2345-01",
+    integrations: [
+      {
+        platform: "bookingCom",
+        bookingCom: {
+          license: {
+            information: {
+              variantId: 6,
+              contentData: [
+                { name: "number", value: "TA-024-630-2345-01" },
+                { name: "tmk_number", value: "430150130001" },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(detected?.licenseNumber, "TA-024-630-2345-01", "TAT from top-level (or bookingCom)");
+  assert.equal(detected?.taxId, "GE-024-630-2345-01", "GET from top-level taxId");
+  assert.equal(detected?.parcelNumber, "430150130001", "TMK from bookingCom");
+  console.log("  ✓ Top-level licenseNumber/taxId surfaces GET when not in tags");
+}
+
+// Case 8: top-level + tags both present — tags still win.
+{
+  const detected = detectVrboLicense({
+    tags: ["TAT:TAGS-WIN", "GET:GET-TAGS-WIN"],
+    licenseNumber: "TOP-LEVEL-LOSES",
+    taxId: "GET-TOP-LOSES",
+    integrations: [],
+  });
+  assert.equal(detected?.licenseNumber, "TAGS-WIN", "tags TAT wins over top-level");
+  assert.equal(detected?.taxId, "GET-TAGS-WIN", "tags GET wins over top-level");
+  console.log("  ✓ Tags still win priority when top-level fields also exist");
 }
 
 console.log("\nall suites passed ✅");
