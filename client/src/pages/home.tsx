@@ -290,9 +290,9 @@ type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "hi
 function computeBaseRate(property: Property): number {
   const brs = property.multiUnit ? extractBRList(property.unitDetails) : [];
   if (brs.length >= 2 && brs.reduce((s, n) => s + n, 0) === property.bedrooms) {
-    return brs.reduce((sum, br) => sum + getBuyInRate(property.pricingArea, br), 0);
+    return brs.reduce((sum, br) => sum + getBuyInRate(property.pricingArea, br, property.id), 0);
   }
-  return getBuyInRate(property.pricingArea, property.bedrooms);
+  return getBuyInRate(property.pricingArea, property.bedrooms, property.id);
 }
 type SortDir = "asc" | "desc";
 
@@ -401,13 +401,22 @@ export default function Home() {
     return map;
   }, []);
 
+  // Subscribe to the live-buy-in feed so `baseRates` recomputes
+  // after `App.tsx`'s MarketRatesHydrator populates the shared cache
+  // in `@shared/pricing-rates`. Without this dep, the dashboard would
+  // render once on mount with the static `BUY_IN_RATES` fallback and
+  // never update — same fetch, deduped by react-query key.
+  const { data: marketRatesData } = useQuery<unknown[]>({
+    queryKey: ["/api/property/market-rates"],
+  });
   const baseRates = useMemo(() => {
     const map = new Map<number, number>();
     for (const p of allProperties) {
       map.set(p.id, computeBaseRate(p));
     }
     return map;
-  }, [allProperties]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allProperties, marketRatesData]);
 
   const communities = useMemo(() => {
     const set = new Set(allProperties.map((p) => p.community));

@@ -144,7 +144,65 @@ export function suggestPricingArea(
   return "";
 }
 
-export function getBuyInRate(community: string, bedrooms: number): number {
+// Live per-(propertyId, bedrooms) buy-in cache. Hydrated client-side
+// from `GET /api/property/market-rates` at app mount via
+// `setLivePropertyMarketRates`. Empty on the server (server reads
+// `property_market_rates` directly from the DB) — that's fine; this
+// file is shared but the cache only lives in process memory and the
+// only callers that need it run client-side.
+//
+// Lookup key: `${propertyId}::${bedrooms}`. Negative propertyIds are
+// drafts (the synthetic `-draftId` convention used everywhere on the
+// dashboard); positive ids are static properties from
+// `unit-builder-data.ts`. One cache covers both.
+type LiveBuyInKey = string;
+type LiveBuyInEntry = {
+  medianNightly: number;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
+const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
+
+export type LivePropertyMarketRateInput = {
+  propertyId: number;
+  bedrooms: number;
+  medianNightly: number | string;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+
+export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
+  _liveBuyIns.clear();
+  for (const r of rates) {
+    const median = typeof r.medianNightly === "number" ? r.medianNightly : parseFloat(r.medianNightly);
+    if (!Number.isFinite(median) || median <= 0) continue;
+    _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
+      medianNightly: median,
+      sampleCount: r.sampleCount,
+      refreshedAt: r.refreshedAt,
+      source: r.source,
+    });
+  }
+}
+
+export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEntry | null {
+  return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
+}
+
+// Fallback chain (highest → lowest priority):
+//   1. Live median for (propertyId, bedrooms) — when propertyId is
+//      supplied AND the cache has a row for that pair.
+//   2. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
+//   3. FALLBACK_RATE_PER_BEDROOM[region] × bedrooms — per-region
+//      default for areas not in the static table.
+export function getBuyInRate(community: string, bedrooms: number, propertyId?: number): number {
+  if (propertyId != null) {
+    const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
+    if (live) return live.medianNightly;
+  }
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
