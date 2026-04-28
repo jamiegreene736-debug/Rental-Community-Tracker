@@ -3912,15 +3912,33 @@ export async function registerRoutes(
   // (so "Regency at Poipu Kai" beats the bare community key
   // "Poipu Kai" for distinctness against "Poipu Kai Resort", "Poipu Kai
   // Estates", etc.).
+  // Street addresses below match `client/src/data/unit-builder-data.ts`'s
+  // `address:` fields (the operator-validated addresses for each
+  // complex). The 2026-04-28 backfill returned 0 samples for Poipu Kai
+  // (1, 4, 8, 9, 18, 27, 34), Kapaa Beachfront (23), Kekaha Beachfront
+  // (10), Keauhou (14), Poipu Oceanfront (24), and Poipu Brenneckes
+  // (28, 31). Diagnoses were:
+  //   - Poipu Kai street number was wrong (1701, actual 1831). Geocoder
+  //     resolved to a Poipu Rd intersection ~600m off the resort —
+  //     outside BBOX_HALF_DEG=0.015° (~1.65km).
+  //   - Kapaa Beachfront's city was wrong: Kaha Lani Resort sits in
+  //     Lihue (per the operator's address record), not Kapaa.
+  //   - Kekaha / Keauhou / Poipu Oceanfront / Poipu Brenneckes all had
+  //     no `streetAddress` set, so `fetchAmortizedNightlyByBR` skipped
+  //     the geocoded path and fell to the strict name-token match —
+  //     which Airbnb listings rarely satisfy (the resort name often
+  //     isn't in the listing title or description).
+  // Adding accurate addresses + correct cities makes the bbox path
+  // succeed for all 11 active static properties.
   const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string }> = {
-    "Poipu Kai":         { searchName: "Regency at Poipu Kai",   city: "Koloa",      state: "Hawaii", streetAddress: "1701 Poipu Rd" },
-    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",      city: "Kekaha",     state: "Hawaii" },
-    "Keauhou":           { searchName: "Keauhou Estates",        city: "Kailua-Kona", state: "Hawaii" },
-    "Princeville":       { searchName: "Mauna Kai Princeville",  city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd" },
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",       city: "Kapaa",      state: "Hawaii", streetAddress: "4460 Nehe Rd" },
-    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",  state: "Hawaii" },
-    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",       city: "Koloa",      state: "Hawaii" },
-    "Pili Mai":          { searchName: "Pili Mai at Poipu",      city: "Koloa",      state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr" },
+    "Poipu Kai":         { searchName: "Regency at Poipu Kai",        city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd" },
+    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd" },
+    "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr" },
+    "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd" },
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Lihue",       state: "Hawaii", streetAddress: "4460 Nehe Rd" },
+    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd" },
+    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd" },
+    "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr" },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
