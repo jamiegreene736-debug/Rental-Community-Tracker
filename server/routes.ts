@@ -11851,63 +11851,59 @@ export async function registerRoutes(
     // formal block embedded in space). Keep summary/space free of
     // disclaimer language; the auto-prepend handles it.
 
-    // STR permit format suggestion based on city / state. Each
-    // Hawaii county has its own license naming convention; we drop a
-    // template the operator can fill in once they have the real
-    // permit. Falls back to a generic placeholder for non-HI markets.
+    // STR permit pre-fill for the wizard's Step 5 input. Each
+    // Hawaii / Florida county has its own license naming convention;
+    // we pre-fill with a fully-formed sample value matching the format
+    // real properties in `unit-builder-data.ts` use (e.g. "TVR-2022-048",
+    // "LBTR-548291"), so the operator sees what the value should look
+    // like and overwrites with their actual permit. The concrete digits
+    // are filler; nothing identifies a real property or owner. Keep
+    // these values aligned with `client/src/data/adapt-draft.ts`'s
+    // sample tables so a wizard pre-fill matches what the builder card
+    // shows for the same draft.
     const strPermitSample = (() => {
       const c = (city || "").toLowerCase();
       const s = (state || "").toLowerCase();
       if (s.includes("hawaii") || s === "hi") {
-        // Maui County (Maui island)
         if (/(kihei|wailea|lahaina|kaanapali|kapalua|hana|paia|kahului|wailuku|makawao)/i.test(c)) {
-          return "STRH-XXXXXXXX (sample — replace with real Maui County permit)";
+          return "STRH-99999999"; // Maui County
         }
-        // Hawaii County (Big Island)
         if (/(kona|kailua-kona|hilo|waimea|kohala|keauhou|waikoloa|volcano)/i.test(c)) {
-          return "STVR-YYYY-XXXXXX (sample — replace with real Hawaii County permit)";
+          return "STVR-2024-009999"; // Hawaii County (Big Island)
         }
-        // Honolulu County (Oahu)
         if (/(honolulu|waikiki|kailua|haleiwa|aiea|pearl|ko olina|koolina|kaneohe|laie)/i.test(c)) {
-          return "NUC-XX-XXX-XXXX (sample — replace with real Honolulu permit)";
+          return "NUC-24-999-9999"; // Honolulu County (Oahu)
         }
-        // Kauai County — VDA zones (Poipu / Princeville) use TVR;
-        // non-VDA / residential zones (Kekaha, Kapaa) use TVNC.
         if (/(poipu|princeville|koloa|kalaheo)/i.test(c)) {
-          return "TVR-YYYY-XX (sample — replace with real Kauai VDA permit)";
+          return "TVR-2024-099"; // Kauai VDA
         }
         if (/(kapaa|kekaha|lihue|wailua|hanalei|anini)/i.test(c)) {
-          return "TVNC-XXXX (sample — replace with real Kauai TVNC permit)";
+          return "TVNC-0999"; // Kauai non-VDA
         }
-        return "TVR-YYYY-XX or TVNC-XXXX (sample — confirm permit type with the right HI county)";
+        return "TVR-2024-099";
       }
       if (s.includes("florida") || s === "fl") {
-        // Osceola County (Kissimmee, Davenport, Celebration, Poinciana,
-        // ChampionsGate, Reunion). Davenport sits across the
-        // Polk/Osceola line — most resort communities bill from
-        // Osceola addresses, so it's grouped here.
+        // Davenport sits across the Polk/Osceola line — most resort
+        // communities (ChampionsGate, Reunion) bill from Osceola
+        // addresses, so it's grouped with Osceola here.
         if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud|championsgate|reunion)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Osceola County Local Business Tax Receipt for short-term rental)";
+          return "LBTR-548291"; // Osceola County
         }
-        // Orange County (Orlando, Windermere, Lake Buena Vista, Dr Phillips)
         if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka|winter\s+garden|dr\.?\s*phillips)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Orange County Local Business Tax Receipt for short-term rental)";
+          return "LBTR-739104"; // Orange County
         }
-        // Polk County (Haines City, Lakeland, Winter Haven, Bartow)
         if (/(haines\s*city|lakeland|winter\s+haven|auburndale|bartow|lake\s+wales)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Polk County Local Business Tax Receipt for short-term rental)";
+          return "LBTR-462051"; // Polk County
         }
-        // Lake County (Clermont, Mount Dora)
         if (/(clermont|groveland|minneola|mascotte|mount\s+dora|tavares|leesburg)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Lake County Local Business Tax Receipt for short-term rental)";
+          return "LBTR-318472"; // Lake County
         }
-        // Brevard County (Space Coast)
         if (/(melbourne|cocoa|titusville|palm\s+bay|merritt\s+island|cape\s+canaveral|viera|rockledge)/i.test(c)) {
-          return "LBTR-XXXXXX (sample — Brevard County Local Business Tax Receipt for short-term rental)";
+          return "LBTR-294817"; // Brevard County
         }
-        return "LBTR-XXXXXX (sample — confirm permit type with the right FL county tax collector)";
+        return "LBTR-999999";
       }
-      return "STR-XXXX (sample — replace with the actual short-term rental permit number for this county)";
+      return "STR-099-99";
     })();
 
     if (!anthropicKey) {

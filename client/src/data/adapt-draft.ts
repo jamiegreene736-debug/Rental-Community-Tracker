@@ -63,20 +63,37 @@ function hawaiiCountyFromCity(city: string): "kauai-vda" | "kauai-non-vda" | "bi
   return "unknown";
 }
 
+// Fully-formed sample values that match the format real properties in
+// `unit-builder-data.ts` use (e.g. "TVR-2022-048", "GE-023-450-1234-01",
+// "420150080001"). The operator replaces these with the unit's actual
+// numbers before pushing to Guesty — the goal here is to show what the
+// expected shape is, not provide live license data. Format only:
+// every concrete digit string below is filler; nothing identifies a
+// real property or owner.
 function strPermitSampleHawaii(city: string): string {
   switch (hawaiiCountyFromCity(city)) {
+    case "kauai-vda":     return "TVR-2024-099";
+    case "kauai-non-vda": return "TVNC-0999";
+    case "big-island":    return "STVR-2024-009999";
+    case "maui":          return "STRH-99999999";
+    case "oahu":          return "NUC-24-999-9999";
+    default:              return "TVR-2024-099";
+  }
+}
+
+// Hawaii TMK serials are 12 digits (county-district-section-plat-parcel-cpr).
+// Keep filler digits in the per-county block of the actual TMK ranges —
+// 4xxx for Kauai, 3xxx for Big Island, 4xxx for Maui (different prefix
+// inside the range), 1xxx for Oahu — so the operator immediately sees
+// which county slot they're filling.
+function tmkSampleHawaii(city: string): string {
+  switch (hawaiiCountyFromCity(city)) {
     case "kauai-vda":
-      return "TVR-2024-XX (sample — Kauai VDA-zone Transient Vacation Rental permit)";
-    case "kauai-non-vda":
-      return "TVNC-XXXX (sample — Kauai non-VDA Transient Vacation Non-Conforming permit)";
-    case "big-island":
-      return "STVR-2024-XXXXXX (sample — Hawaii County Short-Term Vacation Rental permit)";
-    case "maui":
-      return "STRH-XXXXXXXX (sample — Maui County Short-Term Rental Home permit)";
-    case "oahu":
-      return "NUC-XX-XXX-XXXX (sample — Honolulu Non-Conforming Use Certificate)";
-    default:
-      return "(verify county-specific STR permit format)";
+    case "kauai-non-vda": return "420150080099";
+    case "big-island":    return "370110060099";
+    case "maui":          return "230080020099";
+    case "oahu":          return "190070030099";
+    default:              return "420150080099";
   }
 }
 
@@ -100,15 +117,59 @@ function floridaCountyFromCity(city: string): "osceola" | "orange" | "polk" | "l
   return "unknown";
 }
 
-type FloridaCountyLabel = { label: string; salesTaxCountyCode: string };
-function floridaCountyLabel(c: ReturnType<typeof floridaCountyFromCity>): FloridaCountyLabel {
+// Per-county Florida sample sets. The four FL fields are:
+//   - DBPR Vacation Rental License (DWE for dwellings, DWE/COND for
+//     condo-class units; 7-digit certificate)
+//   - DOR Sales & Use Tax Certificate (XX-XXXXXXXXXX-X; the leading
+//     two digits encode the county the business registered in)
+//   - Tourist Development Tax account (issued per-county by the local
+//     Tax Collector; numeric 7-digit account)
+//   - Local Business Tax Receipt (LBTR, issued by the same Tax
+//     Collector for STR-class businesses)
+//
+// Concrete digits are filler chosen to match each county's leading
+// sales-tax code, so the operator can see at a glance which county
+// slot they're in. Operators replace with their actual numbers
+// before pushing compliance to Guesty.
+type FloridaSamples = { taxMapKey: string; getLicense: string; tatLicense: string; strPermit: string };
+function floridaSamples(c: ReturnType<typeof floridaCountyFromCity>): FloridaSamples {
   switch (c) {
-    case "osceola": return { label: "Osceola County",  salesTaxCountyCode: "49" };
-    case "orange":  return { label: "Orange County",   salesTaxCountyCode: "48" };
-    case "polk":    return { label: "Polk County",     salesTaxCountyCode: "53" };
-    case "lake":    return { label: "Lake County",     salesTaxCountyCode: "35" };
-    case "brevard": return { label: "Brevard County",  salesTaxCountyCode: "05" };
-    default:        return { label: "FL county",       salesTaxCountyCode: "XX" };
+    case "osceola": return {
+      taxMapKey:  "DWE/COND-7053894",
+      getLicense: "49-8013575941-1",
+      tatLicense: "Osceola County TDT Acct # 4502187",
+      strPermit:  "LBTR-548291",
+    };
+    case "orange": return {
+      taxMapKey:  "DWE/COND-6841273",
+      getLicense: "48-8014729384-2",
+      tatLicense: "Orange County TDT Acct # 7218394",
+      strPermit:  "LBTR-739104",
+    };
+    case "polk": return {
+      taxMapKey:  "DWE/COND-5928374",
+      getLicense: "53-8024918273-3",
+      tatLicense: "Polk County TDT Acct # 3612847",
+      strPermit:  "LBTR-462051",
+    };
+    case "lake": return {
+      taxMapKey:  "DWE/COND-4827193",
+      getLicense: "35-8035102847-4",
+      tatLicense: "Lake County TDT Acct # 2841093",
+      strPermit:  "LBTR-318472",
+    };
+    case "brevard": return {
+      taxMapKey:  "DWE/COND-3719284",
+      getLicense: "05-8046283715-5",
+      tatLicense: "Brevard County TDT Acct # 1928374",
+      strPermit:  "LBTR-294817",
+    };
+    default: return {
+      taxMapKey:  "DWE/COND-9999999",
+      getLicense: "99-9999999999-9",
+      tatLicense: "FL County TDT Acct # 9999999",
+      strPermit:  "LBTR-999999",
+    };
   }
 }
 
@@ -116,21 +177,14 @@ function sampleLicensesForLocation(city: string, state: string): LicenseSamples 
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
     return {
-      taxMapKey: "XX-X-X-XXX-XXX-XXXX (sample — replace with 12-digit TMK: county-district-section-parcel)",
-      getLicense: "GE-XXX-XXX-XXXX-XX (sample — replace with GE Tax license)",
-      tatLicense: "TA-XXX-XXX-XXXX-XX (sample — replace with TAT Tax license)",
-      strPermit: strPermitSampleHawaii(city),
+      taxMapKey:  tmkSampleHawaii(city),
+      getLicense: "GE-099-999-9999-99",
+      tatLicense: "TA-099-999-9999-99",
+      strPermit:  strPermitSampleHawaii(city),
     };
   }
   if (s === "florida" || s === "fl") {
-    const fc = floridaCountyFromCity(city);
-    const { label, salesTaxCountyCode } = floridaCountyLabel(fc);
-    return {
-      taxMapKey: "DWE/COND-XXXXXXX (sample — Florida DBPR Vacation Rental Dwelling/Condo License, 7-digit cert)",
-      getLicense: `${salesTaxCountyCode}-XXXXXXXXXX-X (sample — Florida DOR Sales & Use Tax Certificate; ${salesTaxCountyCode === "XX" ? "first two digits = your county code" : `${salesTaxCountyCode} = ${label} code`})`,
-      tatLicense: `${label} TDT Acct # XXXXXXX (sample — ${label} Tourist Development Tax registration${fc === "osceola" ? ", 6% local lodging tax" : ""})`,
-      strPermit: `LBTR-XXXXXX (sample — ${label} Local Business Tax Receipt for short-term rental)`,
-    };
+    return floridaSamples(floridaCountyFromCity(city));
   }
   return {
     taxMapKey: "(no parcel/license id required for this state — verify with local jurisdiction)",
@@ -140,19 +194,24 @@ function sampleLicensesForLocation(city: string, state: string): LicenseSamples 
   };
 }
 
-// True when the saved value looks like a sample placeholder we generated
-// (contains "sample —" / "sample -", or is purely the verify-with-
-// jurisdiction fallback). When the operator typed a real permit, the
-// string won't contain those markers, and we keep their value verbatim.
+// True when the saved value looks like an older XXXX-style placeholder
+// or a "(sample — …)" / "(verify …)" annotated string from a previous
+// revision of this file. Real license numbers don't contain runs of
+// X's or those parenthetical hints, so this is a safe heuristic to
+// distinguish stale samples from operator-typed values.
 //
-// Drafts created before location detection landed (or before the
-// current Florida county-aware samples) saved the older generic
-// fallback as `draft.strPermit`. Treating those as "no real value"
-// lets the freshly adapted draft display the new, location-specific
-// sample without the operator having to clear the field by hand.
+// Drafts saved before the fully-formed sample values landed have the
+// older annotated placeholder stored as `draft.strPermit` (Caribe Cove
+// in particular carries the pre-FL-detection generic fallback). Treating
+// those as "no real value" lets the freshly adapted draft display the
+// new, fully-formed county-specific sample without the operator having
+// to clear the field by hand.
 function looksLikeSamplePlaceholder(value: string): boolean {
   const v = value.toLowerCase();
-  return v.includes("sample —") || v.includes("sample -") || v.includes("(verify ") || v.includes("verify with local");
+  if (v.includes("sample —") || v.includes("sample -")) return true;
+  if (v.includes("(verify ") || v.includes("verify with local")) return true;
+  if (/x{3,}/i.test(value)) return true; // "STR-XXXX", "DWE/COND-XXXXXXX", etc.
+  return false;
 }
 
 export function adaptDraftToPropertyUnitBuilder(
