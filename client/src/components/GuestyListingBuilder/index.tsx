@@ -2623,7 +2623,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "done" }));
                           refreshChannelStatus?.();
                         } catch (e: any) {
-                          toast({ title: "VRBO compliance failed", description: e.message, variant: "destructive" });
+                          // Surface the failure for long enough that the
+                          // operator actually catches it — Playwright runs
+                          // for 10-30s, so the default 3-5s toast often
+                          // disappears between when they click and when
+                          // they look back at the page. If the error looks
+                          // like a Guesty login failure (stale cookies →
+                          // Google SSO challenge, the most common failure
+                          // mode per AGENTS.md #28), append a remediation
+                          // hint instead of just the raw stack message.
+                          const msg: string = e?.message ?? String(e);
+                          const looksLikeLoginFailure = /google|cookie|password field|verify it's you|captcha|okta|session/i.test(msg);
+                          const description = looksLikeLoginFailure
+                            ? `${msg}\n\nFix: refresh GUESTY_SESSION_COOKIES + GUESTY_OKTA_TOKEN_STORAGE on Railway from a freshly-logged-in browser (Cookie-Editor extension on app.guesty.com).`
+                            : msg;
+                          toast({ title: "VRBO compliance failed", description, variant: "destructive", duration: 30000 });
                           setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "idle" }));
                         }
                       };
