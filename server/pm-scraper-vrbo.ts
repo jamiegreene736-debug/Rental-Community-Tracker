@@ -170,41 +170,22 @@ export async function scrapeVrboRate(opts: {
       await page.waitForTimeout(500);
     }
 
-    // Quote-query trigger (per Grok review): on a Vrbo property page
-    // with arrival/departure in the URL, the booking widget's "Reserve"
-    // button fires `PropertyQuoteQuery` (or its current rev's
-    // equivalent), which returns the all-in trip total — base +
-    // cleaning + service + taxes. We don't see this op fire on plain
-    // page load with our capture, so simulate the click ourselves.
+    // NOTE: PR #218 attempted to click the booking widget's "Reserve"
+    // button to trigger PropertyQuoteQuery (per Grok review). That
+    // click navigated Vrbo to a separate booking-flow page and broke
+    // the rest of the scrape — verify-pm-listing started returning
+    // ok=false with an empty agentTrace. Reverted here. The JSON
+    // scan improvements from PR #218 (quote-shape patterns + sort
+    // quote/trip ops to the front of the body walk) are kept since
+    // they're zero-risk; only the click was harmful.
     //
-    // Tries several common Vrbo CTA selectors. If none match, we
-    // continue with whatever ops fired naturally — the all-in
-    // extraction tier scans the full body collection regardless.
-    try {
-      const ctaSelectors = [
-        'button[data-testid="check-availability"]',
-        'button[data-testid="reserve-button"]',
-        'button[data-stid="submit-booking-step1"]',
-        'button:has-text("Reserve")',
-        'button:has-text("Check Availability")',
-        'button:has-text("Book now")',
-        'a[data-testid="reserve"]',
-      ];
-      for (const sel of ctaSelectors) {
-        const button = page.locator(sel).first();
-        const count = await button.count().catch(() => 0);
-        if (count > 0) {
-          const visible = await button.isVisible().catch(() => false);
-          if (visible) {
-            await button.click({ timeout: 5000 }).catch(() => {});
-            console.log(`[vrbo-scraper] clicked widget CTA: ${sel}`);
-            break;
-          }
-        }
-      }
-      // Give the quote query up to 8s to fire after the click.
-      await page.waitForTimeout(8000);
-    } catch { /* CTA click is best-effort */ }
+    // If we want to revisit triggering the quote query, the next move
+    // would be to either (a) catch and stop the post-click navigation
+    // before it commits, or (b) issue the GraphQL request directly
+    // ourselves with the property id + dates rather than driving the
+    // widget. Both are non-trivial and not justified by the marginal
+    // value of all-in vs base-rate when auto-fill skips Vrbo URLs
+    // anyway due to TOS.
 
     if (!calendarBody) {
       const finalUrl = page.url();
