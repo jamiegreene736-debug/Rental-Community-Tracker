@@ -103,22 +103,26 @@ async function run() {
     // ── Step 3: wait for reservations list ────────────────────────────
     console.log("→ Step 3: waiting for reservation list");
     await page.waitForSelector(`text=Reservations`, { timeout: 15_000 });
-    // Each reservation row is keyed by its testid; wait for at least one to render.
-    await page
-      .waitForFunction(() => document.querySelectorAll('[data-testid^="slot-"]').length === 0, {
-        timeout: 1_000,
-      })
-      .catch(() => {});
+    // Wait for the reservations API to return + render guest rows. The
+    // listing endpoint fetches from Guesty via proxy and can take a few
+    // seconds on cold start. Wait up to 30s for the target guest's
+    // name to appear.
+    const guestRow = page.locator(`text="${TARGET_GUEST}"`).first();
+    let guestRowVisible = false;
+    try {
+      await guestRow.waitFor({ state: "visible", timeout: 30_000 });
+      guestRowVisible = true;
+    } catch {
+      guestRowVisible = false;
+    }
     await shot(page, "03-reservations-list");
 
-    const guestRow = page.locator(`text="${TARGET_GUEST}"`).first();
-    const guestRowVisible = await guestRow.isVisible().catch(() => false);
     record(
       "Target reservation visible",
       guestRowVisible,
       guestRowVisible
         ? `${TARGET_GUEST} row found`
-        : `${TARGET_GUEST} not found — wrong property selected?`,
+        : `${TARGET_GUEST} not found within 30s — wrong property selected?`,
     );
     if (!guestRowVisible) throw new Error("target reservation missing — abort");
 
