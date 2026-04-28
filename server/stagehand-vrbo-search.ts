@@ -222,8 +222,6 @@ export async function searchVrboViaStagehandWithDebug(opts: {
     });
 
     const wallRemaining = Math.max(15_000, TOTAL_WALL_BUDGET_MS - (Date.now() - startedAt));
-    const abort = new AbortController();
-    const timeoutHandle = setTimeout(() => abort.abort(), wallRemaining);
 
     const goal = [
       `Search vrbo.com for vacation rentals in ${destination}.`,
@@ -231,15 +229,29 @@ export async function searchVrboViaStagehandWithDebug(opts: {
       `Stop once the search results page is loaded and property cards are visible.`,
     ].join(" ");
 
-    let result;
+    // Stagehand 3.x marks `signal: AbortSignal` on agent.execute() as an
+    // experimental flag and rejects it unless the constructor opts into
+    // experimental + disableAPI. Drop the signal and enforce the wall
+    // budget via Promise.race instead — same effect at the find-buy-in
+    // level (the rejected timeout propagates to the existing catch),
+    // and the Stagehand session is still cleaned up by the outer finally
+    // that calls stagehand.close().
+    let result: Awaited<ReturnType<ReturnType<typeof stagehand.agent>["execute"]>>;
     try {
-      result = await agent.execute({
-        instruction: goal,
-        maxSteps: 18,
-        signal: abort.signal,
-      });
-    } finally {
-      clearTimeout(timeoutHandle);
+      result = await Promise.race([
+        agent.execute({ instruction: goal, maxSteps: 18 }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`stagehand-vrbo wall budget exceeded (${wallRemaining}ms)`)), wallRemaining),
+        ),
+      ]);
+    } catch (e: any) {
+      // Promote the timeout / agent error into the diagnostics path
+      // rather than crashing the whole find-buy-in.
+      debug.errorMessage = e?.message ?? String(e);
+      console.error(`[vrbo-stagehand] agent.execute failed:`, debug.errorMessage);
+      // Continue to the extraction step anyway — even a partial run
+      // sometimes leaves the page on a usable state.
+      result = { success: false, completed: false, message: debug.errorMessage, actions: [] } as any;
     }
 
     debug.agentSuccess = !!result.success;

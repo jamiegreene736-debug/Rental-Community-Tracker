@@ -137,20 +137,23 @@ export async function findPmsViaStagehand(opts: {
     });
 
     const wallRemaining = Math.max(15_000, TOTAL_WALL_BUDGET_MS - (Date.now() - startedAt));
-    const abort = new AbortController();
-    const timeoutHandle = setTimeout(() => abort.abort(), wallRemaining);
 
+    // Stagehand 3.x rejects the `signal` arg on agent.execute(); enforce
+    // the wall budget via Promise.race instead. See the equivalent
+    // comment in server/stagehand-vrbo-search.ts.
     try {
-      const result = await agent.execute({
-        instruction: "Dismiss any consent or sign-in overlay, then scroll once to reveal more organic results. Stop on the SERP.",
-        maxSteps: 6,
-        signal: abort.signal,
-      });
+      const result = await Promise.race([
+        agent.execute({
+          instruction: "Dismiss any consent or sign-in overlay, then scroll once to reveal more organic results. Stop on the SERP.",
+          maxSteps: 6,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`stagehand-pm-finder wall budget exceeded (${wallRemaining}ms)`)), wallRemaining),
+        ),
+      ]);
       console.log(`[pm-finder] agent done success=${result.success} actions=${result.actions.length}`);
     } catch (e: any) {
       console.warn(`[pm-finder] agent failed (continuing to extract):`, e?.message ?? e);
-    } finally {
-      clearTimeout(timeoutHandle);
     }
 
     await page.waitForTimeout(1000);
