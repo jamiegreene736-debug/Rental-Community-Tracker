@@ -2184,9 +2184,18 @@ export async function registerRoutes(
       // to surface "this exact unit also listed at <PM company>" links
       // — the operator can't sublet from Airbnb directly, but the same
       // unit on a property-management company's own site is bookable
-      // for commercial use. Only populated for the top 2 Airbnb
-      // candidates (cost-controlled — Google Lens calls aren't free).
+      // for commercial use. Populated for the top N priced Airbnb
+      // candidates (cap configurable via TOP_AIRBNB_FOR_LENS).
       photoMatches?: Array<{ url: string; title: string; domain: string }>;
+      // For PM candidates discovered via reverse-image match against
+      // an Airbnb listing: track the anchor for traceability + price
+      // attribution. The PM URL inherits the Airbnb anchor's price
+      // because (a) Airbnb says it's available for these dates and
+      // (b) the same physical unit on the PM site typically prices
+      // similarly. The buy-in note carries a disclosure that the PM
+      // rate may vary slightly (Airbnb adds service fee, PMs don't).
+      airbnbAnchorUrl?: string;
+      airbnbAnchorPrice?: number;
     };
 
     const asNum = (v: unknown): number => {
@@ -3111,7 +3120,16 @@ export async function registerRoutes(
         return [];
       }
     }
-    const topAirbnb = airbnb.filter((c) => c.image && c.nightlyPrice > 0).slice(0, 2);
+    // Widen the Airbnb→Lens cap. The Airbnb-anchored PM match is the
+    // CANONICAL priced path (per operator direction): Airbnb gives us
+    // verified-available + priced inventory, Google Lens bridges to
+    // the bookable PM URL for the same physical unit. Cap at 8 covers
+    // typical Airbnb result sets without unbounded SearchAPI cost
+    // (~$0.01/lens call → $0.08/cold-cache find-buy-in; cached 5min).
+    const TOP_AIRBNB_FOR_LENS = 8;
+    const topAirbnb = airbnb
+      .filter((c) => c.image && c.nightlyPrice > 0)
+      .slice(0, TOP_AIRBNB_FOR_LENS);
     const photoMatchesByUrl = new Map<string, Array<{ url: string; title: string; domain: string }>>();
     if (topAirbnb.length > 0) {
       const lensResults = await Promise.all(topAirbnb.map((c) => lensMatches(c.image!)));
@@ -3122,19 +3140,43 @@ export async function registerRoutes(
       photoMatches: photoMatchesByUrl.get(c.url) ?? [],
     }));
 
-    // Promote photo-match URLs into the PM source. The reverse-image
-    // matches collected above ARE PM company unit pages (PMs reuse
-    // Airbnb-listed photos verbatim) — they're more actionable than
-    // the generic PM Google search results because they point at the
-    // SAME unit, not just "PM companies that handle this resort." Tag
-    // them with source="pm" so they flow through the same UI section
-    // and into auto-fill's bookable pool. Dedupe against the existing
-    // pm[] array by URL so we don't double-render a domain that the
-    // PM Google search already found.
+    // Promote photo-match URLs into the PM source as PRICED candidates.
+    //
+    // Each match becomes a bookable PM Candidate that inherits its
+    // Airbnb anchor's price + bedrooms + image. Reasoning:
+    //   - Photos match → it's the same physical unit
+    //   - Airbnb shows the unit as available + priced for these dates
+    //   - PM URL is bookable (no Airbnb TOS sublet issue)
+    //   - PM rate ≈ Airbnb rate (typically slightly less; PMs don't
+    //     add Airbnb's service fee). We surface the Airbnb price as
+    //     the proxy and the buy-in note discloses that PM may differ.
+    //
+    // Two filters keep noise out:
+    //   a. mentionsResort(url + title) — drops matches at neighboring
+    //      complexes that just happen to look similar in photos.
+    //   b. Top 2 matches per anchor — Google Lens ranks by visual
+    //      similarity; deeper matches are usually wrong-unit.
+    //
+    // Dedupe against the existing pm[] array by URL so we don't
+    // double-render a domain that the PM Google search already found.
     const existingPmUrls = new Set(pm.map((c) => c.url));
     const photoMatchPmCandidates: Candidate[] = [];
-    for (const matches of photoMatchesByUrl.values()) {
-      for (const m of matches) {
+    let droppedNoResortMatch = 0;
+    for (const anchor of topAirbnb) {
+      const matches = photoMatchesByUrl.get(anchor.url) ?? [];
+      // Per-anchor cap. Top match is the highest-confidence visual hit;
+      // expanding beyond 2 starts pulling in similar-looking-but-different
+      // properties.
+      const filteredMatches = matches.filter((m) => {
+        const haystack = `${m.url} ${m.title} ${m.domain}`;
+        if (!mentionsResort(haystack)) {
+          droppedNoResortMatch++;
+          return false;
+        }
+        return true;
+      }).slice(0, 2);
+
+      for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
         existingPmUrls.add(m.url);
         photoMatchPmCandidates.push({
@@ -3142,14 +3184,16 @@ export async function registerRoutes(
           sourceLabel: m.domain,
           title: m.title || `Match on ${m.domain}`,
           url: m.url,
-          // Photo-match URLs come without prices (Google Lens response
-          // doesn't include rates). They're click-through-only — the
-          // operator opens the link and gets the price from the PM's
-          // own booking page. Auto-fill's unpriced-PM fallback will
-          // pick from these too.
-          nightlyPrice: 0,
-          totalPrice: 0,
-          snippet: `Same photo as Airbnb listing — direct booking page on ${m.domain}`,
+          // Inherit price from the Airbnb anchor. This is what makes
+          // the Airbnb-anchored path a PRIMARY priced channel rather
+          // than an unpriced fallback.
+          nightlyPrice: anchor.nightlyPrice,
+          totalPrice: anchor.totalPrice,
+          bedrooms: anchor.bedrooms,
+          image: anchor.image,
+          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}) — same unit, bookable on PM site. PM rate may differ slightly (Airbnb adds service fee).`,
+          airbnbAnchorUrl: anchor.url,
+          airbnbAnchorPrice: anchor.totalPrice,
         });
       }
     }
