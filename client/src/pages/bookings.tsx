@@ -14,12 +14,16 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Table, TableHeader, TableBody, TableHead, TableRow, TableCell,
+} from "@/components/ui/table";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
+  ArrowUpDown, ArrowUp, ArrowDown, Star,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -1556,6 +1560,19 @@ function LiveSearchSection({
         </div>
       )}
 
+      {/* Sortable table of every scanned option across all sources. Auto-fill
+          picks `cheapest[0]` (the highlighted ⭐ row) — this table is the
+          audit trail so the operator can see what else was scanned and
+          override with one click. */}
+      <ScannedOptionsTable
+        airbnb={airbnb}
+        vrbo={vrbo}
+        booking={booking}
+        pm={pm}
+        autoPickUrl={cheapest[0]?.url}
+        onRecord={(c) => setRecordTarget(c)}
+      />
+
       {/* By-source sections.
           Airbnb + Vrbo are AWARENESS-ONLY — both have TOS bars on
           guest-side subletting, so neither feeds the cheapest pool nor
@@ -1599,6 +1616,205 @@ function LiveSearchSection({
           onClose={() => setRecordTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+type SortKey = "source" | "title" | "total" | "nightly";
+type SortDir = "asc" | "desc";
+
+function ScannedOptionsTable({
+  airbnb,
+  vrbo,
+  booking,
+  pm,
+  autoPickUrl,
+  onRecord,
+}: {
+  airbnb: LiveCandidate[];
+  vrbo: LiveCandidate[];
+  booking: LiveCandidate[];
+  pm: LiveCandidate[];
+  autoPickUrl: string | undefined;
+  onRecord: (c: LiveCandidate) => void;
+}) {
+  const [sortKey, setSortKey] = useState<SortKey>("total");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Flatten all sources, dedupe by URL (some PM candidates also appear as
+  // photo-matches under Airbnb rows; first writer wins so we keep the
+  // top-level entry with its original source label).
+  const all = useMemo(() => {
+    const seen = new Set<string>();
+    const out: LiveCandidate[] = [];
+    for (const c of [...airbnb, ...vrbo, ...booking, ...pm]) {
+      if (!c.url || seen.has(c.url)) continue;
+      seen.add(c.url);
+      out.push(c);
+    }
+    return out;
+  }, [airbnb, vrbo, booking, pm]);
+
+  const sorted = useMemo(() => {
+    const arr = [...all];
+    const dir = sortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      // Un-priced rows always sink to the bottom regardless of direction —
+      // they're the least actionable rows.
+      if (sortKey === "total" || sortKey === "nightly") {
+        const av = sortKey === "total" ? a.totalPrice : a.nightlyPrice;
+        const bv = sortKey === "total" ? b.totalPrice : b.nightlyPrice;
+        const aPriced = av > 0;
+        const bPriced = bv > 0;
+        if (aPriced && !bPriced) return -1;
+        if (!aPriced && bPriced) return 1;
+        if (!aPriced && !bPriced) return 0;
+        return (av - bv) * dir;
+      }
+      if (sortKey === "source") return a.source.localeCompare(b.source) * dir;
+      return a.title.localeCompare(b.title) * dir;
+    });
+    return arr;
+  }, [all, sortKey, sortDir]);
+
+  if (all.length === 0) return null;
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir(key === "total" || key === "nightly" ? "asc" : "asc");
+    }
+  };
+
+  const SortIcon = ({ col }: { col: SortKey }) => {
+    if (sortKey !== col) return <ArrowUpDown className="h-3 w-3 inline opacity-40" />;
+    return sortDir === "asc"
+      ? <ArrowUp className="h-3 w-3 inline" />
+      : <ArrowDown className="h-3 w-3 inline" />;
+  };
+
+  const pricedCount = all.filter((c) => c.totalPrice > 0).length;
+
+  return (
+    <div className="border rounded-lg overflow-hidden">
+      <div className="px-3 py-2 bg-muted/40 border-b flex items-center justify-between flex-wrap gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          All scanned options ({all.length} total · {pricedCount} priced)
+        </p>
+        <p className="text-[11px] text-muted-foreground">
+          <Star className="h-3 w-3 inline fill-amber-400 text-amber-500 mr-0.5" />
+          = auto-pick · click any column to sort
+        </p>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8"></TableHead>
+            <TableHead
+              className="cursor-pointer select-none w-24 text-[11px]"
+              onClick={() => toggleSort("source")}
+            >
+              Source <SortIcon col="source" />
+            </TableHead>
+            <TableHead
+              className="cursor-pointer select-none text-[11px]"
+              onClick={() => toggleSort("title")}
+            >
+              Listing <SortIcon col="title" />
+            </TableHead>
+            <TableHead
+              className="cursor-pointer select-none w-24 text-right text-[11px]"
+              onClick={() => toggleSort("total")}
+            >
+              Total <SortIcon col="total" />
+            </TableHead>
+            <TableHead
+              className="cursor-pointer select-none w-20 text-right text-[11px]"
+              onClick={() => toggleSort("nightly")}
+            >
+              /night <SortIcon col="nightly" />
+            </TableHead>
+            <TableHead className="w-32 text-[11px]">Anchor</TableHead>
+            <TableHead className="w-28 text-right text-[11px]"></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sorted.map((c) => {
+            const isAutoPick = !!autoPickUrl && c.url === autoPickUrl;
+            return (
+              <TableRow
+                key={c.url}
+                className={isAutoPick ? "bg-amber-50/60 dark:bg-amber-950/20" : ""}
+              >
+                <TableCell className="py-1.5">
+                  {isAutoPick && (
+                    <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-500" />
+                  )}
+                </TableCell>
+                <TableCell className="py-1.5">
+                  <Badge className={`text-[9px] ${sourceBadgeClass(c.source)}`}>
+                    {c.sourceLabel}
+                  </Badge>
+                </TableCell>
+                <TableCell className="py-1.5 max-w-0">
+                  <p className="text-xs font-medium truncate">{c.title}</p>
+                  {c.bedrooms ? (
+                    <p className="text-[10px] text-muted-foreground">{c.bedrooms}BR</p>
+                  ) : null}
+                </TableCell>
+                <TableCell className="py-1.5 text-right">
+                  {c.totalPrice > 0 ? (
+                    <span className="text-xs font-semibold">{fmtMoney(c.totalPrice)}</span>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground italic">—</span>
+                  )}
+                </TableCell>
+                <TableCell className="py-1.5 text-right">
+                  {c.nightlyPrice > 0 ? (
+                    <span className="text-[11px] text-muted-foreground">{fmtMoney(c.nightlyPrice)}</span>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground italic">—</span>
+                  )}
+                </TableCell>
+                <TableCell className="py-1.5">
+                  {c.airbnbAnchorUrl ? (
+                    <a
+                      href={c.airbnbAnchorUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                    >
+                      <Camera className="h-2.5 w-2.5" />
+                      Airbnb {c.airbnbAnchorPrice ? fmtMoney(c.airbnbAnchorPrice) : ""}
+                    </a>
+                  ) : null}
+                </TableCell>
+                <TableCell className="py-1.5 text-right">
+                  <div className="flex justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-1.5 text-[10px]"
+                      onClick={() => window.open(c.url, "_blank", "noopener,noreferrer")}
+                    >
+                      <ExternalLink className="h-2.5 w-2.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      onClick={() => onRecord(c)}
+                    >
+                      <ShoppingCart className="h-2.5 w-2.5" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
     </div>
   );
 }
