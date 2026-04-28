@@ -682,6 +682,15 @@ export default function AddCommunity() {
           });
         }
       }
+      // Auto-fetch resort/community-level photos for the Photos tab.
+      // Best-effort, fire-and-forget — ~5 SearchAPI calls + 6 image
+      // downloads + Claude-vision labels run server-side. The endpoint
+      // returns 200 even on partial failure (logs a `reason`), so a
+      // search miss never blocks the save flow.
+      if (draftId) {
+        apiRequest("POST", `/api/community/${draftId}/persist-community-photos`, {})
+          .catch((e: any) => console.warn(`[add-community] community-photos persist failed: ${e?.message}`));
+      }
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
       toast({ title: "Community saved to dashboard!" });
       navigate("/");

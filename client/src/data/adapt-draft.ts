@@ -260,8 +260,19 @@ export function adaptDraftToPropertyUnitBuilder(
       : licenseSamples.strPermit,
     hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
                  (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,
+    // Community photos for promoted drafts live at a deterministic
+    // folder name `community-draft-<draftId>`. The wizard's save flow
+    // best-effort fetches and writes 6 community-level photos there
+    // via /api/community/:id/persist-community-photos. The builder's
+    // photos tab reads files from disk via builder.tsx →
+    // /api/photos/community/<folder>, so leaving `communityPhotos`
+    // empty is fine — folderFiles takes precedence over the static
+    // array in the rendering code (builder.tsx line ~201). Positions
+    // default to "beginning", which collapses every community photo
+    // into the opener block before unit A — a sensible default for
+    // drafts that don't have hand-curated position metadata.
     communityPhotos: [],
-    communityPhotoFolder: blank,
+    communityPhotoFolder: `community-draft-${draft.id}`,
     units: [
       {
         id: `draft${draft.id}-unit-a`,
@@ -323,7 +334,8 @@ export async function loadDraftFullDataByNegativeId(
   const drafts = (await r.json()) as CommunityDraft[];
   const match = drafts.find((d) => d.id === draftId);
   if (!match) return null;
-  const folders = [match.unit1PhotoFolder, match.unit2PhotoFolder]
+  const communityFolder = `community-draft-${draftId}`;
+  const folders = [match.unit1PhotoFolder, match.unit2PhotoFolder, communityFolder]
     .filter((f): f is string => !!f);
   const filesByFolder: Record<string, string[]> = {};
   await Promise.all(
@@ -337,6 +349,17 @@ export async function loadDraftFullDataByNegativeId(
       }
     }),
   );
+
+  // Backfill: drafts saved before community-photos auto-fetch landed
+  // (e.g. Caribe Cove) have an empty `community-draft-<id>` folder.
+  // Fire-and-forget the persist endpoint so the next builder load
+  // shows them. The endpoint is idempotent — it clears + re-saves the
+  // folder each time, so re-running on a populated folder is safe but
+  // wasteful, hence the empty-folder gate.
+  if ((filesByFolder[communityFolder] ?? []).length === 0) {
+    void apiRequest("POST", `/api/community/${draftId}/persist-community-photos`, {})
+      .catch((e: any) => console.warn(`[adapt-draft] community-photos backfill failed for draft ${draftId}: ${e?.message}`));
+  }
   const property = adaptDraftToPropertyUnitBuilder(match, filesByFolder);
   const pricing = buildDraftPropertyPricing(match, propertyId);
   const bedding = buildDraftBeddingConfig(match, propertyId);
