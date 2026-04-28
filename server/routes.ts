@@ -14,6 +14,7 @@ import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
 import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
 import { searchVrboViaTrivago } from "./trivago-vrbo-search";
+import { searchVrboViaApifyWebScraper } from "./apify-vrbo-web-scraper";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
@@ -2541,13 +2542,14 @@ export async function registerRoutes(
     let vrboSbCount = 0;
     let vrboOsCount = 0;
     let vrboTvCount = 0;
+    let vrboAwsCount = 0; // apify web-scraper
     let vrboGoogleCount = 0;
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const bbApiKey = process.env.BROWSERBASE_API_KEY;
       const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
       const targetDestination = resortName ?? community;
 
-      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, googleResults] = await Promise.all([
+      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, googleResults] = await Promise.all([
         // Path 1 — Apify (paid actor; priced when regionId resolves)
         searchVrboViaApify({
           resortName: resortName ?? community,
@@ -2613,7 +2615,23 @@ export async function registerRoutes(
           console.error("[find-buy-in] vrbo (trivago) error:", e?.message ?? e);
           return [] as Awaited<ReturnType<typeof searchVrboViaTrivago>>;
         }),
-        // Path 6 — Google site:search (free; unpriced URLs, fallback)
+        // Path 6 — Apify generic `web-scraper` actor with custom JS
+        // page function (Grok rec #2). Different from path 1's
+        // Vrbo-specific actor — this one drives a residential-proxy
+        // headless browser through Vrbo's hydrated search page and
+        // reads property cards from the rendered DOM. Costs more per
+        // call (~$0.05) but is robust to Vrbo's frontend rev churn.
+        searchVrboViaApifyWebScraper({
+          resortName: resortName ?? community,
+          destination: targetDestination,
+          bedrooms,
+          checkIn,
+          checkOut,
+        }).catch((e: any) => {
+          console.error("[find-buy-in] vrbo (apify-web-scraper) error:", e?.message ?? e);
+          return [] as Awaited<ReturnType<typeof searchVrboViaApifyWebScraper>>;
+        }),
+        // Path 7 — Google site:search (free; unpriced URLs, fallback)
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
@@ -2625,9 +2643,10 @@ export async function registerRoutes(
       vrboSbCount = scrapingbeeResults.length;
       vrboOsCount = outscraperResults.length;
       vrboTvCount = trivagoResults.length;
+      vrboAwsCount = apifyWebResults.length;
       vrboGoogleCount = googleResults.candidates.length;
       vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + googleResults.raw;
+      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + googleResults.raw;
 
       const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
         source: "vrbo" as const,
@@ -2684,6 +2703,17 @@ export async function registerRoutes(
         image: c.image,
         snippet: c.snippet,
       }));
+      const awsCandidates: Candidate[] = apifyWebResults.map((c): Candidate => ({
+        source: "vrbo" as const,
+        sourceLabel: "Vrbo",
+        title: c.title,
+        url: withStayDates("vrbo", c.url),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        bedrooms: c.bedrooms,
+        image: c.image,
+        snippet: c.snippet,
+      }));
 
       // Dedupe by Vrbo listing id across all SIX paths. Priority order:
       // Trivago (priced via meta-search; weaker anti-bot than Vrbo direct) →
@@ -2704,8 +2734,11 @@ export async function registerRoutes(
       };
       // Trivago first — meta-search has weaker anti-bot than Vrbo
       // direct, and the all-in is computed by Trivago. Most likely
-      // path to actually return priced data.
+      // path to actually return priced data. Apify web-scraper
+      // (residential proxy + custom JS) ranks just below since it's
+      // robust to Vrbo's DOM rev churn.
       for (const c of tvCandidates) pushIfNew(c);
+      for (const c of awsCandidates) pushIfNew(c);
       for (const c of osCandidates) pushIfNew(c);
       for (const c of apifyCandidates) pushIfNew(c);
       for (const c of bbCandidates) pushIfNew(c);
@@ -3149,7 +3182,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (tv=${vrboTvCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
+      + `vrbo=${vrbo.length} (tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
