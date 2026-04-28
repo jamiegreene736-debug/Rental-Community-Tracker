@@ -39,6 +39,24 @@ export type StagehandVrboCandidate = {
   snippet: string;
 };
 
+export type StagehandVrboDebug = {
+  destination: string;
+  checkIn: string;
+  checkOut: string;
+  agentSuccess: boolean;
+  agentCompleted: boolean;
+  agentMessage: string;
+  agentActions: Array<{ tool?: string; arg?: string; status?: string }>;
+  finalUrl: string;
+  rawExtractedCount: number;
+  rawExtractedProperties: Array<{ title?: string; url?: string; totalPrice?: number | null; nightlyPrice?: number | null; bedrooms?: number | null }>;
+  acceptedCount: number;
+  rejectedReasons: Record<string, number>;
+  screenshotBase64: string | null;
+  ms: number;
+  errorMessage: string | null;
+};
+
 type CacheEntry = { value: StagehandVrboCandidate[]; expiresAt: number };
 const searchCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -78,13 +96,52 @@ export async function searchVrboViaStagehand(opts: {
   bbProjectId: string;
   anthropicKey: string;
 }): Promise<StagehandVrboCandidate[]> {
-  const { destination, bedrooms, checkIn, checkOut, bbApiKey, bbProjectId, anthropicKey } = opts;
+  const out = await searchVrboViaStagehandWithDebug(opts);
+  return out.candidates;
+}
+
+export async function searchVrboViaStagehandWithDebug(opts: {
+  resortName: string | null;
+  destination: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  bbApiKey: string;
+  bbProjectId: string;
+  anthropicKey: string;
+  // When true, skip the in-process cache so a forced re-run dumps fresh
+  // diagnostics. find-buy-in's normal call leaves this false so repeat
+  // hits within 5 min are free.
+  bypassCache?: boolean;
+}): Promise<{ candidates: StagehandVrboCandidate[]; debug: StagehandVrboDebug }> {
+  const { destination, bedrooms, checkIn, checkOut, bbApiKey, bbProjectId, anthropicKey, bypassCache } = opts;
 
   const cacheKey = `${destination}|${bedrooms}|${checkIn}|${checkOut}`;
-  const cached = searchCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    console.log(`[vrbo-stagehand] cache hit for ${cacheKey}`);
-    return cached.value;
+  if (!bypassCache) {
+    const cached = searchCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      console.log(`[vrbo-stagehand] cache hit for ${cacheKey}`);
+      return {
+        candidates: cached.value,
+        debug: {
+          destination,
+          checkIn,
+          checkOut,
+          agentSuccess: true,
+          agentCompleted: true,
+          agentMessage: "(cache hit)",
+          agentActions: [],
+          finalUrl: "(cache hit — no live page)",
+          rawExtractedCount: cached.value.length,
+          rawExtractedProperties: [],
+          acceptedCount: cached.value.length,
+          rejectedReasons: {},
+          screenshotBase64: null,
+          ms: 0,
+          errorMessage: null,
+        },
+      };
+    }
   }
 
   const stagehand = new Stagehand({
@@ -105,6 +162,26 @@ export async function searchVrboViaStagehand(opts: {
 
   let candidates: StagehandVrboCandidate[] = [];
   const startedAt = Date.now();
+  const debug: StagehandVrboDebug = {
+    destination,
+    checkIn,
+    checkOut,
+    agentSuccess: false,
+    agentCompleted: false,
+    agentMessage: "",
+    agentActions: [],
+    finalUrl: "",
+    rawExtractedCount: 0,
+    rawExtractedProperties: [],
+    acceptedCount: 0,
+    rejectedReasons: {},
+    screenshotBase64: null,
+    ms: 0,
+    errorMessage: null,
+  };
+  const reject = (reason: string) => {
+    debug.rejectedReasons[reason] = (debug.rejectedReasons[reason] ?? 0) + 1;
+  };
 
   try {
     await stagehand.init();
@@ -156,8 +233,19 @@ export async function searchVrboViaStagehand(opts: {
       clearTimeout(timeoutHandle);
     }
 
+    debug.agentSuccess = !!result.success;
+    debug.agentCompleted = !!result.completed;
+    debug.agentMessage = String(result.message ?? "");
+    debug.agentActions = (result.actions ?? []).slice(0, 30).map((a: any) => ({
+      tool: a?.action ?? a?.type ?? a?.tool ?? "?",
+      arg: typeof a?.arguments === "string"
+        ? a.arguments.slice(0, 120)
+        : JSON.stringify(a?.arguments ?? a?.args ?? a?.value ?? "").slice(0, 120),
+      status: a?.status ?? a?.outcome ?? undefined,
+    }));
+
     console.log(
-      `[vrbo-stagehand] agent done success=${result.success} completed=${result.completed} actions=${result.actions.length}`,
+      `[vrbo-stagehand] agent done success=${result.success} completed=${result.completed} actions=${result.actions.length} message="${String(result.message ?? "").slice(0, 200)}"`,
     );
 
     if (!result.success || !result.completed) {
@@ -166,25 +254,43 @@ export async function searchVrboViaStagehand(opts: {
 
     // Give Vrbo's results a beat to settle before extracting.
     await page.waitForTimeout(2_000);
+    debug.finalUrl = page.url();
+
+    // Capture a screenshot at the point we'd run extraction so we can
+    // see what Stagehand was actually looking at — search results page,
+    // unresolved autocomplete state, anti-bot wall, etc.
+    try {
+      const buf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
+      debug.screenshotBase64 = buf.toString("base64");
+    } catch (e: any) {
+      console.warn(`[vrbo-stagehand] screenshot capture failed:`, e?.message ?? e);
+    }
 
     const extracted = await stagehand.extract(
       "Extract every visible vacation rental property card on this page. For each, get the listing title, the absolute URL of the property detail page, the all-in trip total in USD if shown (numeric — strip $ and commas), the nightly rate in USD if shown, the number of bedrooms if shown, and the hero image URL if visible. Skip ads and 'similar' rows.",
       PropertyCardSchema,
     );
 
-    candidates = (extracted?.properties ?? [])
+    const rawProps = extracted?.properties ?? [];
+    debug.rawExtractedCount = rawProps.length;
+    debug.rawExtractedProperties = rawProps.slice(0, 12).map((p) => ({
+      title: p.title,
+      url: p.url,
+      totalPrice: p.totalPrice,
+      nightlyPrice: p.nightlyPrice,
+      bedrooms: p.bedrooms,
+    }));
+
+    candidates = rawProps
       .map((p): StagehandVrboCandidate | null => {
         const url = (p.url || "").trim();
-        if (!url) return null;
-        // Reject anything that isn't a Vrbo property detail page.
-        if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url)) return null;
+        if (!url) { reject("empty url"); return null; }
+        if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url)) { reject("non-vrbo url"); return null; }
         const title = (p.title || "").trim();
-        if (!title) return null;
+        if (!title) { reject("empty title"); return null; }
         const totalPrice = typeof p.totalPrice === "number" && p.totalPrice > 0 ? Math.round(p.totalPrice) : 0;
         const nightlyPrice = typeof p.nightlyPrice === "number" && p.nightlyPrice > 0 ? Math.round(p.nightlyPrice) : 0;
-        // At least one of total or nightly must be present — unpriced
-        // cards are useless for the cheapest pool.
-        if (totalPrice <= 0 && nightlyPrice <= 0) return null;
+        if (totalPrice <= 0 && nightlyPrice <= 0) { reject("no priced fields"); return null; }
         return {
           url,
           title,
@@ -197,9 +303,14 @@ export async function searchVrboViaStagehand(opts: {
       })
       .filter((c): c is StagehandVrboCandidate => c !== null);
 
-    console.log(`[vrbo-stagehand] extracted ${candidates.length} priced cards from results page`);
+    debug.acceptedCount = candidates.length;
+
+    console.log(
+      `[vrbo-stagehand] finalUrl=${debug.finalUrl} extracted=${debug.rawExtractedCount} accepted=${candidates.length} rejected=${JSON.stringify(debug.rejectedReasons)}`,
+    );
   } catch (e: any) {
-    console.error(`[vrbo-stagehand] error:`, e?.message ?? e);
+    debug.errorMessage = e?.message ?? String(e);
+    console.error(`[vrbo-stagehand] error:`, debug.errorMessage);
     candidates = [];
   } finally {
     try {
@@ -209,6 +320,9 @@ export async function searchVrboViaStagehand(opts: {
     }
   }
 
-  searchCache.set(cacheKey, { value: candidates, expiresAt: Date.now() + CACHE_TTL_MS });
-  return candidates;
+  debug.ms = Date.now() - startedAt;
+  if (!bypassCache) {
+    searchCache.set(cacheKey, { value: candidates, expiresAt: Date.now() + CACHE_TTL_MS });
+  }
+  return { candidates, debug };
 }
