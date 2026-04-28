@@ -449,17 +449,24 @@ export default function Bookings() {
         const slotResult = await (async () => {
           const data = await getFindBuyInForBedrooms(slot.bedrooms);
 
-          // Walk cheapest-first and run an availability pre-flight on each
-          // Airbnb pick. Non-Airbnb sources aren't verifiable via SearchAPI
-          // so they're treated as "unknown" (we don't block). We take the
-          // first candidate that's verified-available or unknown. This
-          // catches races where the listing got booked between initial
-          // search and the attach click.
-          // The server's `cheapest` is either up to 2 priced candidates OR
-          // the single-entry unpriced PM fallback (PR #148) when nothing
-          // priced exists. Split them so the verification loop only runs
-          // on priced ones, and we still attach the unpriced PM URL when
-          // the fallback fires (operator edits cost after booking).
+          // Pre-flight: walk cheapest-first and verify availability before
+          // picking. Two-tier verification, mirroring the dialog UI's
+          // ScannedOptionsTable auto-verify (PR #237):
+          //
+          //   1. Trust-by-source. Airbnb / Vrbo / Booking rows came from
+          //      engines that already vouched for priced inventory for
+          //      the requested dates. Treated as verified-yes for free.
+          //
+          //   2. PM rows are the gap (photo-matched price is anchored
+          //      from Airbnb; PM-side availability is not). Run the
+          //      Haiku batch verifier on the top 10 cheapest priced PM
+          //      candidates — same endpoint the dialog uses, same 5-min
+          //      cache. ~$0.05 worst case per slot; cache hits free.
+          //
+          //   3. Walk pricedCandidates cheapest-first, pick the first
+          //      verified-yes URL. This is what makes auto-fill stop
+          //      attaching units that the dialog's verifier already
+          //      flagged as unavailable.
           //
           // `pickedUrls` carries URLs already attached to earlier slots
           // in this same auto-fill run; filter them out so each slot
@@ -472,18 +479,64 @@ export default function Bookings() {
           let verifiedPrice: number | null = null;
           let skippedReasons: string[] = [];
 
-          for (const c of pricedCandidates.slice(0, 4)) {
-            const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
-            const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
-            if (v?.available === false) {
-              skippedReasons.push(`${c.sourceLabel}: ${v.reason ?? "unavailable"}`);
-              continue;
+          // Build the verified-yes set: start with trusted-by-source rows,
+          // then enrich with Haiku batch results for PM rows.
+          const verifiedYesUrls = new Set<string>();
+          for (const c of pricedCandidates) {
+            if (c.source !== "pm") verifiedYesUrls.add(c.url);
+          }
+          const pmToVerify = pricedCandidates
+            .filter((c) => c.source === "pm")
+            .slice(0, 10)
+            .map((c) => c.url);
+          if (pmToVerify.length > 0) {
+            try {
+              const batchResp = await apiRequest(
+                "POST",
+                "/api/buy-in-candidates/verify-availability-batch",
+                { urls: pmToVerify, checkIn: ci, checkOut: co },
+              ).then((r) => r.json());
+              const results = (batchResp?.results ?? {}) as Record<
+                string,
+                { available?: string; nightlyPriceUsd?: number | null; reason?: string }
+              >;
+              for (const [url, result] of Object.entries(results)) {
+                if (result?.available === "yes") verifiedYesUrls.add(url);
+              }
+            } catch (e: any) {
+              // Batch verifier failure is non-fatal — fall through to
+              // the per-row pre-flight loop below, which uses the
+              // older verify-listing endpoint as a backstop.
+              skippedReasons.push(`batch-verify-error: ${e?.message ?? "unknown"}`);
             }
+          }
+
+          // Pass 1: pick cheapest verified-yes priced candidate.
+          for (const c of pricedCandidates) {
+            if (!verifiedYesUrls.has(c.url)) continue;
             pick = c;
-            if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
-              verifiedPrice = v.currentTotalPrice;
-            }
             break;
+          }
+
+          // Pass 2: if nothing came back verified-yes (peak season,
+          // batch errored, or all PM rows returned no/unclear), fall
+          // back to the older per-row SearchAPI pre-flight on the top
+          // 4 priced. This keeps the safety net intact — Haiku verify
+          // is opt-in tightening, not a hard gate.
+          if (!pick) {
+            for (const c of pricedCandidates.slice(0, 4)) {
+              const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
+              const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
+              if (v?.available === false) {
+                skippedReasons.push(`${c.sourceLabel}: ${v.reason ?? "unavailable"}`);
+                continue;
+              }
+              pick = c;
+              if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
+                verifiedPrice = v.currentTotalPrice;
+              }
+              break;
+            }
           }
 
           // No priced candidate worked → walk multiple unpriced PM URLs
@@ -1788,6 +1841,20 @@ function ScannedOptionsTable({
     });
   }, [sorted, verifiedOnly, verifyByUrl]);
 
+  // Live "auto-pick" highlight — star the cheapest verified-yes priced
+  // row. Falls back to the server's `cheapest[0]` (passed in via
+  // autoPickUrl) until at least one row has verified, so the star is
+  // always somewhere reasonable. After auto-verify settles, this lines
+  // up with what auto-fill cheapest will actually attach (PR #243's
+  // verified-pick logic in autoFillMutation).
+  const livePickUrl = useMemo(() => {
+    const verifiedPriced = sorted
+      .filter((c) => c.totalPrice > 0 && verifyByUrl[c.url]?.status === "yes")
+      .sort((a, b) => a.totalPrice - b.totalPrice);
+    if (verifiedPriced.length > 0) return verifiedPriced[0].url;
+    return autoPickUrl;
+  }, [sorted, verifyByUrl, autoPickUrl]);
+
   if (all.length === 0) return null;
 
   const toggleSort = (key: SortKey) => {
@@ -1890,7 +1957,7 @@ function ScannedOptionsTable({
             </TableRow>
           )}
           {visible.map((c) => {
-            const isAutoPick = !!autoPickUrl && c.url === autoPickUrl;
+            const isAutoPick = !!livePickUrl && c.url === livePickUrl;
             return (
               <TableRow
                 key={c.url}
