@@ -7029,6 +7029,194 @@ export async function registerRoutes(
   });
 
   // ============================================================
+  // Guesty session-cache admin endpoints
+  //
+  // The three endpoints below let the operator manage the cookie/Okta-
+  // token cache that the Playwright stack reads in preference to the
+  // GUESTY_SESSION_COOKIES / GUESTY_OKTA_TOKEN_STORAGE env vars. The
+  // cache lives in a JSON file on the Railway volume, so updates take
+  // effect on the very next request — no redeploy.
+  //
+  // The Browserbase persistent-context refresh path
+  // (`refreshGuestySessionViaBrowserbase`) writes to the same cache
+  // automatically when steady-state cookies expire — these endpoints
+  // are for the one-time bootstrap and the manual fallback.
+  //
+  // Auth: when ADMIN_SECRET env var is set, require X-Admin-Secret
+  // header match. When unset, allow (matching the existing
+  // /api/admin/guesty-token/set posture). Operators who care about the
+  // sensitivity of session cookies should set ADMIN_SECRET.
+  // ============================================================
+  function checkAdminSecret(req: Request, res: Response): boolean {
+    const expected = process.env.ADMIN_SECRET;
+    if (!expected) return true;
+    const provided = req.headers["x-admin-secret"];
+    if (provided !== expected) {
+      res.status(401).json({
+        error:
+          "ADMIN_SECRET is set but the X-Admin-Secret header didn't match. Pass it via curl -H 'X-Admin-Secret: <value>' or remove ADMIN_SECRET from Railway to disable the gate.",
+      });
+      return false;
+    }
+    return true;
+  }
+
+  // GET /api/admin/guesty/session-status
+  //
+  // Returns booleans + metadata about the cached session state. Never
+  // returns the cookie/token values themselves — safe to call without
+  // an admin secret. Useful from the operator's browser DevTools to
+  // verify a paste/bootstrap landed.
+  app.get("/api/admin/guesty/session-status", async (_req, res) => {
+    try {
+      const { getSessionStatus } = await import("./guesty-session-cache");
+      const status = getSessionStatus();
+      const adminSecretEnforced = !!process.env.ADMIN_SECRET;
+      const browserbaseEnvReady =
+        !!process.env.BROWSERBASE_API_KEY && !!process.env.BROWSERBASE_PROJECT_ID;
+      return res.json({ ...status, browserbaseEnvReady, adminSecretEnforced });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // POST /api/admin/guesty/save-session
+  //
+  // Operator paste path. Accepts cookies + okta-token-storage and writes
+  // them to the cache. This is the fast unblock when (a) cookies have
+  // gone stale and (b) Browserbase context isn't bootstrapped yet.
+  //
+  // Body:
+  //   {
+  //     "cookies": [...]            // Cookie-Editor export JSON array
+  //     "oktaTokenStorage": "..."   // raw localStorage value
+  //   }
+  app.post("/api/admin/guesty/save-session", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as {
+      cookies?: unknown;
+      oktaTokenStorage?: unknown;
+    };
+    if (!Array.isArray(body.cookies) || body.cookies.length === 0) {
+      return res.status(400).json({
+        error:
+          "cookies (non-empty array, Cookie-Editor JSON shape) required. Use the Cookie-Editor extension on app.guesty.com → Export → JSON.",
+      });
+    }
+    if (typeof body.oktaTokenStorage !== "string" || body.oktaTokenStorage.length < 10) {
+      return res.status(400).json({
+        error:
+          "oktaTokenStorage (string) required. Open DevTools on app.guesty.com → Application → Local Storage → copy the okta-token-storage value.",
+      });
+    }
+    try {
+      const { setCachedSession, getSessionStatus } = await import(
+        "./guesty-session-cache"
+      );
+      setCachedSession(
+        {
+          cookies: body.cookies as any[],
+          oktaTokenStorage: body.oktaTokenStorage,
+        },
+        "manual-paste",
+      );
+      return res.json({ ok: true, ...getSessionStatus() });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  // POST /api/admin/guesty/bootstrap-browserbase-context
+  //
+  // ONE-TIME setup: creates a Browserbase persistent context, seeds it
+  // with the operator's freshly-exported cookies + okta-token-storage,
+  // verifies the session by navigating to app.guesty.com, and saves the
+  // context_id to the session cache. From this point on, the auto-
+  // refresh path inside openGuestyAdminPage will use this context to
+  // refresh cookies without operator involvement.
+  //
+  // Body: same shape as save-session.
+  // Env:  BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID required.
+  app.post(
+    "/api/admin/guesty/bootstrap-browserbase-context",
+    async (req, res) => {
+      if (!checkAdminSecret(req, res)) return;
+      const body = (req.body ?? {}) as {
+        cookies?: unknown;
+        oktaTokenStorage?: unknown;
+      };
+      if (!Array.isArray(body.cookies) || body.cookies.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "cookies (non-empty array) required" });
+      }
+      if (
+        typeof body.oktaTokenStorage !== "string" ||
+        body.oktaTokenStorage.length < 10
+      ) {
+        return res
+          .status(400)
+          .json({ error: "oktaTokenStorage (string) required" });
+      }
+      try {
+        const { bootstrapBrowserbaseContext } = await import(
+          "./guesty-browserbase-login"
+        );
+        const result = await bootstrapBrowserbaseContext({
+          cookies: body.cookies as any[],
+          oktaTokenStorage: body.oktaTokenStorage,
+        });
+        if (!result.ok) {
+          return res
+            .status(500)
+            .json({ ok: false, error: result.error, trace: result.trace });
+        }
+        return res.json({
+          ok: true,
+          contextId: result.contextId,
+          cookieCount: result.cookieCount,
+          oktaTokenSet: result.oktaTokenSet,
+          finalUrl: result.finalUrl,
+          durationMs: result.durationMs,
+        });
+      } catch (e: any) {
+        return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+      }
+    },
+  );
+
+  // POST /api/admin/guesty/refresh-session
+  //
+  // Manually triggers the Browserbase auto-refresh path. Useful for
+  // (a) verifying the bootstrap worked end-to-end before relying on it
+  // implicitly during a real push, and (b) preemptively rotating cookies
+  // when the operator suspects they're about to expire.
+  app.post("/api/admin/guesty/refresh-session", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    try {
+      const { refreshGuestySessionViaBrowserbase } = await import(
+        "./guesty-browserbase-login"
+      );
+      const result = await refreshGuestySessionViaBrowserbase();
+      if (!result.ok) {
+        return res
+          .status(500)
+          .json({ ok: false, error: result.error, trace: result.trace });
+      }
+      return res.json({
+        ok: true,
+        cookieCount: result.cookieCount,
+        oktaTokenSet: result.oktaTokenSet,
+        finalUrl: result.finalUrl,
+        contextId: result.contextId,
+        durationMs: result.durationMs,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  // ============================================================
   // POST /api/admin/guesty/inspect-vrbo-compliance
   //
   // Loads Guesty's Owner & license page for a listing

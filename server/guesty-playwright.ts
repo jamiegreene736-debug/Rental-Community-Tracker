@@ -35,6 +35,10 @@ import path from "path";
 import fs from "fs";
 import type { BrowserContext, Page } from "playwright";
 import { chromium as vanillaChromium } from "playwright";
+import {
+  resolveGuestyCookieJson,
+  resolveOktaTokenStorage,
+} from "./guesty-session-cache";
 
 export type Trace = Array<{ step: string; detail?: string }>;
 export type SaveShot = (page: Page, tag: string) => Promise<string | null>;
@@ -71,9 +75,13 @@ type PWCookie = {
  * clear error before bothering to launch a browser.
  */
 export function parseGuestyCookies(): PWCookie[] {
-  const cookieJson = process.env.GUESTY_SESSION_COOKIES;
+  // Cache wins over env var. The cache is the path the auto-refresh +
+  // operator-paste endpoints write to, so it's always at least as fresh
+  // as the env var. Env var stays as the cold-start fallback for fresh
+  // deploys before the cache file has been populated.
+  const cookieJson = resolveGuestyCookieJson();
   if (!cookieJson) {
-    throw new Error("GUESTY_SESSION_COOKIES not set");
+    throw new Error("GUESTY_SESSION_COOKIES not set (and no cached session — bootstrap via /api/admin/guesty/bootstrap-browserbase-context or paste cookies via /api/admin/guesty/save-session)");
   }
   const raw = JSON.parse(cookieJson) as RawCookie[];
   const sameSiteMap: Record<string, "Strict" | "Lax" | "None"> = {
@@ -301,7 +309,8 @@ export async function restoreOktaStorage(
       });
     }
   }
-  const oktaRaw = process.env.GUESTY_OKTA_TOKEN_STORAGE;
+  // Cache wins over env var (same reasoning as parseGuestyCookies).
+  const oktaRaw = resolveOktaTokenStorage();
   if (oktaRaw) toInjectLocal["okta-token-storage"] = oktaRaw;
 
   const toInjectSession: Record<string, string> = {};
@@ -1138,6 +1147,83 @@ export async function openGuestyAdminPage(
       timeout: 35000,
     });
     await page.waitForTimeout(opts.hydrationMs ?? 5000);
+
+    // Self-healing path: when Guesty bounces to /auth/login AND a
+    // Browserbase persistent context is bootstrapped, refresh cookies via
+    // Browserbase BEFORE falling through to the legacy native/SSO login
+    // (which fails reliably from Railway's datacenter IP — see AGENTS.md
+    // #28 + the new #32). Browserbase's residential IP + persistent
+    // device-trust cookie is the only path that actually completes
+    // Google's SSO without operator intervention.
+    if (await isOnGuestyLoginPage(page)) {
+      const { resolveBrowserbaseContextId } = await import(
+        "./guesty-session-cache"
+      );
+      const haveContext =
+        !!resolveBrowserbaseContextId() &&
+        !!process.env.BROWSERBASE_API_KEY &&
+        !!process.env.BROWSERBASE_PROJECT_ID;
+      if (haveContext) {
+        trace.push({
+          step: "auto-refresh-via-browserbase-starting",
+          detail: "stored cookies stale — refreshing via persistent context",
+        });
+        try {
+          const { refreshGuestySessionViaBrowserbase } = await import(
+            "./guesty-browserbase-login"
+          );
+          const refresh = await refreshGuestySessionViaBrowserbase();
+          if (refresh.ok) {
+            trace.push({
+              step: "auto-refresh-via-browserbase-succeeded",
+              detail: `cookies=${refresh.cookieCount} okta=${refresh.oktaTokenSet} ms=${refresh.durationMs}`,
+            });
+            // Re-seed the in-flight context with the freshly-extracted
+            // cookies + Okta token, then reload. The cache write inside
+            // the refresh helper means future cold starts also skip the
+            // refresh step.
+            const freshCookies = parseGuestyCookies();
+            await ctx.addCookies(freshCookies);
+            const freshOkta = resolveOktaTokenStorage();
+            if (freshOkta) {
+              await page
+                .evaluate((tok: string) => {
+                  try {
+                    window.localStorage.setItem("okta-token-storage", tok);
+                  } catch {
+                    /* origin storage blocked */
+                  }
+                }, freshOkta)
+                .catch(() => {});
+            }
+            await page.goto(targetUrl, {
+              waitUntil: "domcontentloaded",
+              timeout: 35000,
+            });
+            await page.waitForTimeout(opts.hydrationMs ?? 5000);
+          } else {
+            // Falling through to the legacy path is the right call here
+            // — the operator may have valid GUESTY_EMAIL/PASSWORD and
+            // we shouldn't fail the whole request just because
+            // Browserbase happens to be down.
+            trace.push({
+              step: "auto-refresh-via-browserbase-failed",
+              detail: refresh.error.slice(0, 200),
+            });
+          }
+        } catch (err: any) {
+          trace.push({
+            step: "auto-refresh-via-browserbase-threw",
+            detail: err?.message ?? String(err),
+          });
+        }
+      } else {
+        trace.push({
+          step: "auto-refresh-skipped",
+          detail: "no Browserbase context bootstrapped (or BB env vars missing) — using legacy login",
+        });
+      }
+    }
 
     const loginResult = await loginToGuestyIfNeeded(
       page,

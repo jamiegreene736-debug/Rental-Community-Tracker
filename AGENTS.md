@@ -243,20 +243,28 @@ established it so you can read the rationale in the commit message.
 
 ### Browser automation against Guesty admin
 
-25. **Vanilla rebrowser-playwright + the Dockerfile's Chromium — never
-    Browserbase — for app.guesty.com automation.** Browserbase is in
-    the dependency tree (`@browserbasehq/sdk`) because Vrbo's PUBLIC
-    site CAPTCHAs anonymous traffic, and `pm-scraper-vrbo.ts` uses
-    Browserbase + residential proxy to get past it. Guesty's
-    AUTHENTICATED admin UI for paying customers does not have that
-    problem — vanilla Playwright with the local
-    `/usr/bin/chromium` (already in the Dockerfile) and
-    rebrowser-playwright's CDP-leak patch handles Okta's bot
-    detection. This saves the ~$0.10/click Browserbase session cost
-    and the API-key footprint. If you find yourself reaching for
-    Browserbase for a Guesty automation, first check whether the
-    existing `openGuestyAdminPage` helper in
-    `server/guesty-playwright.ts` works — it almost certainly does.
+25. **Vanilla rebrowser-playwright for STEADY-STATE Guesty admin
+    automation; Browserbase persistent context ONLY for cookie
+    refresh.** *(Original rule was "never Browserbase for Guesty admin"
+    — narrowed when the SSO-from-Railway failure mode finally surfaced,
+    see Load-Bearing #32 + the Decision Log.)* For any operation where
+    the Playwright session has valid stored cookies, vanilla
+    rebrowser-playwright + the Dockerfile's `/usr/bin/chromium` is the
+    right tool. rebrowser's CDP-leak patch handles Okta's bot detection
+    cheaply (~$0/call), and Guesty's authenticated admin UI for paying
+    customers doesn't gate on residential-IP fingerprints. The
+    `openGuestyAdminPage` helper in `server/guesty-playwright.ts` is
+    the canonical entry point and should keep being used for inspect /
+    publish / submit endpoints.
+
+    Browserbase is in the dependency tree for two purposes: (a) Vrbo's
+    PUBLIC site (`pm-scraper-vrbo.ts` — anti-bot CAPTCHA on anonymous
+    traffic), and (b) the cookie-refresh path
+    (`guesty-browserbase-login.ts`) — see #32. Don't reach for
+    Browserbase for a NEW Guesty admin automation; the steady-state
+    path already works. Browserbase only earns its keep when the
+    failure mode is "Google's challenge wall vs. Railway's datacenter
+    IP" — a narrow scope.
 
 26. **Guesty admin endpoints are synchronous, not queued.** The
     pattern (`/api/admin/guesty/inspect-vrbo-compliance`,
@@ -336,6 +344,72 @@ established it so you can read the rationale in the commit message.
     common failure mode — the one that fires every single first
     login from Railway — and turns a daily intervention into a
     monthly one.
+
+32. **Cookie refresh is self-healing via a Browserbase persistent
+    context — operator no longer pastes cookies after every expiry.**
+    Sister to #28: the documented answer used to be "operator refreshes
+    `GUESTY_SESSION_COOKIES` + `GUESTY_OKTA_TOKEN_STORAGE` on Railway
+    when Google's SSO challenge wall blocks the relogin from Railway's
+    datacenter IP." That's ~5 min of toil every 1-2 weeks. The new path
+    uses Browserbase's persistent-context feature (`bb.contexts.create`
+    + `browserSettings.context.{id, persist: true}` per session) which
+    does two things vanilla Playwright can't: (a) sessions land on a
+    residential IP, and (b) the context persists Google's device-trust
+    cookie across runs, so Google sees the same "browser" that
+    successfully logged in before and waves the SSO through silently.
+
+    Architecture in three pieces:
+    - **`server/guesty-session-cache.ts`** — file-on-volume cache at
+      `process.cwd()/.guesty_session_cache.json` (same volume pattern
+      as `guesty-token.ts`). Holds `cookies`, `oktaTokenStorage`, and
+      `browserbaseContextId`. Read priority is memory → file → env var
+      so manual env-var deploys still work and writes (cache-only,
+      never the env var) take effect without redeploy.
+    - **`server/guesty-browserbase-login.ts`** — two functions:
+      `bootstrapBrowserbaseContext()` for one-time setup (operator
+      paste → create BB context → seed cookies → verify → save
+      context_id), and `refreshGuestySessionViaBrowserbase()` for the
+      auto path (connect to existing context → navigate → drive SSO if
+      needed → harvest fresh cookies + Okta token → write to cache).
+    - **`openGuestyAdminPage` self-healing branch** — when the page
+      bounces to `/auth/login` AND a Browserbase context is
+      bootstrapped, calls the refresh helper FIRST, re-seeds the
+      in-flight Playwright context with the freshly-extracted cookies,
+      reloads, and continues. Falls through to the legacy
+      native/SSO login from #28 if Browserbase is unset or refresh
+      errors — so cold deploys without Browserbase still work.
+
+    Operator workflow:
+    - **Day 0 (one-time):** export Cookie-Editor JSON from
+      app.guesty.com + copy `okta-token-storage` from DevTools, POST
+      both to `/api/admin/guesty/bootstrap-browserbase-context`. Saves
+      the context_id to the cache.
+    - **Steady state:** push compliance / publish channel / etc. just
+      works. When cookies expire, the auto-refresh fires inside the
+      same request and the operator never sees it.
+    - **Manual override:** `/api/admin/guesty/save-session` accepts a
+      cookie+token paste straight into the cache (skipping
+      Browserbase). Used when Browserbase isn't bootstrapped yet, or
+      when the operator wants to hand-pick cookies for a specific
+      account. `/api/admin/guesty/refresh-session` triggers the
+      Browserbase path on demand for verification.
+    - **Re-bootstrap (rare — months):** when Google's device-trust
+      cookie eventually rotates inside the persistent context, the
+      auto-refresh fails on the SSO step and surfaces a clear error.
+      Operator re-runs the bootstrap with fresh browser cookies; new
+      context, new device-trust cookie, back to silent steady state.
+
+    Cost: ~$0.20 per Browserbase session × ~30-50 refreshes/year ≈
+    $6-10/year. Cheaper than the operator's time. Don't widen this to
+    cover EVERY Guesty admin call — the cheap rebrowser-playwright
+    path is what handles the 99% steady-state case (#25). Browserbase
+    is for the cookie-refresh path only.
+
+    **Optional auth gate:** the three admin endpoints honor
+    `ADMIN_SECRET` env var when set (require `X-Admin-Secret` header
+    match). When unset, they're open like the rest of `/api/admin/*` —
+    matching the existing operator-only-deploy posture. If the deploy
+    becomes multi-tenant, set `ADMIN_SECRET`.
 
 ### Compliance & channel sync
 
