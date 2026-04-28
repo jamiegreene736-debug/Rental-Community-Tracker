@@ -3128,8 +3128,37 @@ export async function registerRoutes(
     const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
 
+    // Per-source wall-budget. Without this, a single hanging source
+    // (Stagehand Vrbo agent stuck on a CAPTCHA, an Apify actor that
+    // doesn't return, etc.) blocks the entire find-buy-in until
+    // Railway's edge timeout fires (5 min) and returns a 502 to the
+    // client. Wrapping each source in a Promise.race + fallback means
+    // the slowest source caps at its own timeout and we send back
+    // whatever the fast sources produced.
+    //
+    // Worst-case combined: vrbo 120s (dominates the parallel block)
+    // + photo-match phase 5s + PM finder 60s = ~185s total handler
+    // time — comfortably under Railway's 5-min timeout.
+    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
+      return Promise.race([
+        p,
+        new Promise<T>((resolve) =>
+          setTimeout(() => {
+            console.warn(`[find-buy-in] ${label} timed out after ${ms}ms — using fallback`);
+            resolve(fallback);
+          }, ms),
+        ),
+      ]);
+    };
     const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered] = await Promise.all([
-      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise, cbDiscoveryPromise, pikoDiscoveryPromise,
+      withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
+      withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
+      withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
+      withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
+      withTimeout(spDiscoveryPromise, 30_000, [] as Candidate[], "sp-sitemap"),
+      withTimeout(pkDiscoveryPromise, 30_000, [] as Candidate[], "pk-sitemap"),
+      withTimeout(cbDiscoveryPromise, 30_000, [] as Candidate[], "cb-sitemap"),
+      withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -3236,7 +3265,13 @@ export async function registerRoutes(
       .slice(0, TOP_AIRBNB_FOR_LENS);
     const photoMatchesByUrl = new Map<string, Array<{ url: string; title: string; domain: string }>>();
     if (topAirbnb.length > 0) {
-      const lensResults = await Promise.all(topAirbnb.map((c) => lensMatches(c.image!)));
+      // Each Lens call wrapped in a 8s per-call timeout so a single
+      // hung SearchAPI request doesn't block the whole batch.
+      const lensResults = await Promise.all(
+        topAirbnb.map((c) =>
+          withTimeout(lensMatches(c.image!), 8_000, [] as Array<{ url: string; title: string; domain: string }>, `lens-${c.url.slice(0, 60)}`),
+        ),
+      );
       topAirbnb.forEach((c, i) => photoMatchesByUrl.set(c.url, lensResults[i]));
     }
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => ({
@@ -3363,16 +3398,25 @@ export async function registerRoutes(
         `[find-buy-in] pm-finder firing: priced bookable=${pricedBookableSoFar} < ${PM_FINDER_THRESHOLD}`,
       );
       try {
-        const finderResults = await findPmsViaStagehand({
-          resortName,
-          destination: resortName ?? community,
-          bedrooms,
-          checkIn,
-          checkOut,
-          bbApiKey: finderBbApiKey,
-          bbProjectId: finderBbProjectId,
-          anthropicKey: finderAnthropicKey,
-        });
+        // 90s wall budget — internal Stagehand session has its own
+        // 120s budget but we cap tighter here so a stuck PM-finder
+        // can't push the whole find-buy-in over Railway's 5-min edge
+        // timeout.
+        const finderResults = await withTimeout(
+          findPmsViaStagehand({
+            resortName,
+            destination: resortName ?? community,
+            bedrooms,
+            checkIn,
+            checkOut,
+            bbApiKey: finderBbApiKey,
+            bbProjectId: finderBbProjectId,
+            anthropicKey: finderAnthropicKey,
+          }),
+          90_000,
+          [] as Awaited<ReturnType<typeof findPmsViaStagehand>>,
+          "pm-finder",
+        );
         const existingPmUrls = new Set<string>([
           ...pm.map((c) => c.url),
           ...photoMatchPmCandidates.map((c) => c.url),
