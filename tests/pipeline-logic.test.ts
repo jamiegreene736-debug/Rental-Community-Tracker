@@ -687,4 +687,76 @@ console.log("\nVRBO compliance detection suite");
   console.log("  ✓ Tags still win priority when top-level fields also exist");
 }
 
+// ---------- Guesty session cache layered read ----------
+// Locks in the priority order the cache layer uses for the cookie /
+// Okta-token resolvers. Pure logic — no Browserbase, no Playwright.
+// Covers the case that broke us: env vars set + cache populated → cache
+// must win (otherwise the auto-refresh path can't take effect without a
+// redeploy).
+
+console.log("\nGuesty session cache priority suite");
+
+{
+  // We re-implement the resolver shape inline so this test doesn't
+  // need to mock fs. Mirrors the priority logic in
+  // server/guesty-session-cache.ts (readMemory → readFile → env).
+  type CookieRecord = { name: string; value: string; domain: string };
+  type Cached = { cookies: CookieRecord[]; oktaTokenStorage: string | null };
+  let memCache: Cached | null = null;
+  let fileCache: Cached | null = null;
+  let envCookies: string | null = null;
+  let envOkta: string | null = null;
+
+  const resolveCookies = (): string | null => {
+    if (memCache && memCache.cookies.length > 0) return JSON.stringify(memCache.cookies);
+    if (fileCache && fileCache.cookies.length > 0) return JSON.stringify(fileCache.cookies);
+    return envCookies;
+  };
+  const resolveOkta = (): string | null => {
+    if (memCache?.oktaTokenStorage) return memCache.oktaTokenStorage;
+    if (fileCache?.oktaTokenStorage) return fileCache.oktaTokenStorage;
+    return envOkta;
+  };
+
+  // Case 1: only env vars → env wins.
+  envCookies = JSON.stringify([{ name: "env", value: "v", domain: ".guesty.com" }]);
+  envOkta = "env-okta";
+  assert.equal(JSON.parse(resolveCookies()!)[0].name, "env", "env-only cookies win when nothing else is set");
+  assert.equal(resolveOkta(), "env-okta");
+  console.log("  ✓ env-only path");
+
+  // Case 2: file cache populated → file wins over env.
+  fileCache = {
+    cookies: [{ name: "file", value: "v", domain: ".guesty.com" }],
+    oktaTokenStorage: "file-okta",
+  };
+  assert.equal(JSON.parse(resolveCookies()!)[0].name, "file", "file cache should beat env var");
+  assert.equal(resolveOkta(), "file-okta");
+  console.log("  ✓ file beats env");
+
+  // Case 3: memory populated → memory wins over file + env (the
+  // self-healing refresh path's hot signal).
+  memCache = {
+    cookies: [{ name: "mem", value: "v", domain: ".guesty.com" }],
+    oktaTokenStorage: "mem-okta",
+  };
+  assert.equal(JSON.parse(resolveCookies()!)[0].name, "mem", "memory cache should beat file + env");
+  assert.equal(resolveOkta(), "mem-okta");
+  console.log("  ✓ memory beats file + env");
+
+  // Case 4: empty cookies array on the cache should NOT shadow env. A
+  // partially-populated cache (e.g. okta-token-storage saved but
+  // cookies cleared) shouldn't leave us cookieless — fall through.
+  memCache = { cookies: [], oktaTokenStorage: "mem-okta-only" };
+  fileCache = null;
+  envCookies = JSON.stringify([{ name: "env-fallback", value: "v", domain: ".guesty.com" }]);
+  assert.equal(
+    JSON.parse(resolveCookies()!)[0].name,
+    "env-fallback",
+    "empty cookies array in cache should fall through to env",
+  );
+  assert.equal(resolveOkta(), "mem-okta-only", "okta token still served from cache when only it is populated");
+  console.log("  ✓ empty cookies array in cache falls through to env");
+}
+
 console.log("\nall suites passed ✅");
