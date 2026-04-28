@@ -252,7 +252,64 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
-function getBuyInRate(community: string, bedrooms: number): number {
+// ─────────────────────────────────────────────────────────────
+// LIVE BUY-IN OVERRIDES (per-property, per-bedroom)
+//
+// Module-scope cache populated from `GET /api/property/market-rates`
+// at app startup. Mirrors the row shape of the
+// `property_market_rates` table. The Builder's Pricing tab calls
+// `setLivePropertyMarketRates` once the fetch resolves; subsequent
+// `getPropertyPricing()` calls then use live medians as the cost
+// basis instead of the hand-curated `BUY_IN_RATES` table.
+//
+// Fallback chain (highest to lowest priority):
+//   1. live median for (propertyId, bedrooms)
+//   2. BUY_IN_RATES[community][${BR}BR]
+//   3. FALLBACK_RATE_PER_BEDROOM × bedrooms (the per-region default
+//      from AGENTS.md Load-Bearing #30)
+//
+// Negative `propertyId` keys are draft ids (the `-draftId`
+// convention used everywhere on the dashboard for drafts), so the
+// same lookup works uniformly for static + drafts.
+// ─────────────────────────────────────────────────────────────
+
+type LiveBuyInKey = string; // `${propertyId}::${bedrooms}`
+type LiveBuyInEntry = { medianNightly: number; sampleCount: number; refreshedAt: string; source: string };
+const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
+const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
+
+export type LivePropertyMarketRateInput = {
+  propertyId: number;
+  bedrooms: number;
+  medianNightly: number | string;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+
+export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
+  _liveBuyIns.clear();
+  for (const r of rates) {
+    const median = typeof r.medianNightly === "number" ? r.medianNightly : parseFloat(r.medianNightly);
+    if (!Number.isFinite(median) || median <= 0) continue;
+    _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
+      medianNightly: median,
+      sampleCount: r.sampleCount,
+      refreshedAt: r.refreshedAt,
+      source: r.source,
+    });
+  }
+}
+
+export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEntry | null {
+  return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
+}
+
+function getBuyInRate(community: string, bedrooms: number, propertyId?: number): number {
+  if (propertyId != null) {
+    const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
+    if (live) return live.medianNightly;
+  }
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
@@ -366,7 +423,7 @@ export function getSeasonalRateReference(
     const multiplier = SEASON_MULTIPLIERS[region][season];
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const base = getBuyInRate(config.community, unit.bedrooms);
+      const base = getBuyInRate(config.community, unit.bedrooms, propertyId);
       nightlyBuyIn += Math.round(base * multiplier);
     }
     const nightlySell = Math.round(nightlyBuyIn * MARKUP);
@@ -436,7 +493,7 @@ export function getPropertyPricing(propertyId: number): PropertyPricing | null {
   if (!config) return null;
 
   const units: UnitPricing[] = config.units.map((unit) => {
-    const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
+    const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
     const baseSellRate = Math.round(baseBuyIn * MARKUP);
     const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
     return { unitId: unit.unitId, unitLabel: unit.unitLabel, bedrooms: unit.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates };
@@ -484,7 +541,7 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
   for (const [id, config] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
     const propertyId = parseInt(id, 10);
     for (const unitCfg of config.units) {
-      const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms);
+      const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms, propertyId);
       const baseSellRate = Math.round(baseBuyIn * MARKUP);
       const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
       results.push({
@@ -519,7 +576,7 @@ export function calculateStaySellRate(
 
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
+      const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
       nightlyBuyIn += Math.round(baseBuyIn * multiplier);
     }
     const nightlySellRate = Math.round(nightlyBuyIn * MARKUP);

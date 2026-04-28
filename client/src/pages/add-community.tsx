@@ -691,6 +691,17 @@ export default function AddCommunity() {
         apiRequest("POST", `/api/community/${draftId}/persist-community-photos`, {})
           .catch((e: any) => console.warn(`[add-community] community-photos persist failed: ${e?.message}`));
       }
+      // Auto-fetch per-bedroom live market rates for the Pricing tab.
+      // Best-effort, fire-and-forget — runs the SearchAPI Airbnb-
+      // engine 7-night-amortized lookup and persists per-BR medians
+      // to `property_market_rates` (keyed by `-draftId`). The Pricing
+      // tab's effective-buy-in lookup picks them up on the next
+      // builder load, so the per-channel floor formula uses live
+      // medians instead of just the static BUY_IN_RATES table.
+      if (draftId) {
+        apiRequest("POST", `/api/community/${draftId}/refresh-pricing`, {})
+          .catch((e: any) => console.warn(`[add-community] refresh-pricing failed: ${e?.message}`));
+      }
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
       toast({ title: "Community saved to dashboard!" });
       navigate("/");

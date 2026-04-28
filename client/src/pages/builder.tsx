@@ -71,7 +71,12 @@ export default function Builder() {
   // PROPERTY_UNIT_CONFIGS-based generator. For promoted drafts, the
   // 24-month schedule is generated from the draft's pricingArea (or
   // estimatedLowRate fallback) so the Pricing tab renders something
-  // editable instead of being blank.
+  // editable instead of being blank. The Pricing tab inside
+  // GuestyListingBuilder additionally hydrates a per-(property,
+  // bedrooms) live-buy-in cache and re-derives the seasonal rates
+  // from it — so the value here is the day-zero render, and live
+  // medians take over once the fetch lands. See `marketRatesVersion`
+  // inside the component.
   const pricing = staticProperty
     ? getPropertyPricing(propertyId)
     : draftPricing;
