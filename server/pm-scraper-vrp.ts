@@ -355,4 +355,8 @@ export const VRP_SITES = {
     label: "CB Island Vacations",
     baseUrl: "https://www.cbislandvacations.com",
   },
+  pikoProperties: {
+    label: "Piko Properties",
+    baseUrl: "https://pikoproperties.com",
+  },
 } as const satisfies Record<string, VrpSiteConfig>;

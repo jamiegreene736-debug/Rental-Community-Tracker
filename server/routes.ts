@@ -2000,6 +2000,9 @@ export async function registerRoutes(
     cbCalls: 0,
     cbHits: 0,
     cbUnitsTotal: 0,
+    pikoCalls: 0,
+    pikoHits: 0,
+    pikoUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -2016,10 +2019,12 @@ export async function registerRoutes(
       spHitRate: rate(pmDiscoveryStats.spHits, pmDiscoveryStats.spCalls),
       pkHitRate: rate(pmDiscoveryStats.pkHits, pmDiscoveryStats.pkCalls),
       cbHitRate: rate(pmDiscoveryStats.cbHits, pmDiscoveryStats.cbCalls),
+      pikoHitRate: rate(pmDiscoveryStats.pikoHits, pmDiscoveryStats.pikoCalls),
       googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
       spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
       pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
       cbAvgUnits: avg(pmDiscoveryStats.cbUnitsTotal, pmDiscoveryStats.cbCalls),
+      pikoAvgUnits: avg(pmDiscoveryStats.pikoUnitsTotal, pmDiscoveryStats.pikoCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
   });
@@ -3019,11 +3024,14 @@ export async function registerRoutes(
     // Florida search.
     const isHawaii = /hawaii|kauai|maui|oahu|honolulu|big\s*island|hawai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai|wailea|kaanapali|kihei|lahaina|kaneohe/i.test(community);
 
-    const vrpDiscoveryPromise = (siteKey: keyof typeof VRP_SITES, statsKey: "pkCalls" | "cbCalls"): Promise<Candidate[]> => {
+    const vrpDiscoveryPromise = (
+      siteKey: keyof typeof VRP_SITES,
+      statsKey: "pkCalls" | "cbCalls" | "pikoCalls",
+    ): Promise<Candidate[]> => {
       if (!isHawaii) return Promise.resolve([]);
       const site = VRP_SITES[siteKey];
-      const hitsKey = statsKey.replace("Calls", "Hits") as "pkHits" | "cbHits";
-      const totalKey = statsKey.replace("Calls", "UnitsTotal") as "pkUnitsTotal" | "cbUnitsTotal";
+      const hitsKey = statsKey.replace("Calls", "Hits") as "pkHits" | "cbHits" | "pikoHits";
+      const totalKey = statsKey.replace("Calls", "UnitsTotal") as "pkUnitsTotal" | "cbUnitsTotal" | "pikoUnitsTotal";
       return (async () => {
         pmDiscoveryStats[statsKey]++;
         try {
@@ -3054,9 +3062,10 @@ export async function registerRoutes(
     };
     const pkDiscoveryPromise = vrpDiscoveryPromise("parrishKauai", "pkCalls");
     const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
+    const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
 
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered] = await Promise.all([
-      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise, cbDiscoveryPromise,
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered] = await Promise.all([
+      airbnbPromise, bookingPromise, vrboPromise, pmPromise, spDiscoveryPromise, pkDiscoveryPromise, cbDiscoveryPromise, pikoDiscoveryPromise,
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -3065,11 +3074,13 @@ export async function registerRoutes(
       ...spDiscovered.map((c) => c.url),
       ...pkDiscovered.map((c) => c.url),
       ...cbDiscovered.map((c) => c.url),
+      ...pikoDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
       ...spDiscovered,
       ...pkDiscovered,
       ...cbDiscovered,
+      ...pikoDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
