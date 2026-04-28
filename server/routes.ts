@@ -3096,18 +3096,32 @@ export async function registerRoutes(
     // Filter list mirrors the major OTAs we already track + a handful of
     // meta-search aggregators (kayak, trivago, hotels.com) that don't add
     // a useful new booking surface for the operator.
-    // Airbnb localized variants (airbnb.co.in, airbnb.co.uk, airbnb.fr, …)
-    // were leaking through. The base hostname pattern with explicit `.com$`
-    // missed them, so a Lens hit on a localized Airbnb URL was being
-    // treated as a "PM match" with the same TOS sublet issue we wanted
-    // to avoid.
+    // Three categories of domains we drop from photo-match results,
+    // since none are bookable vacation-rental PM sites:
     //
-    // to-hawaii.com is a Hawaii vacation-rental aggregator/directory —
-    // it surfaces inventory but isn't itself a bookable PM. Same for
-    // a couple of similar aggregator domains. Filtering these keeps
-    // the photo-match pool to ACTUAL property-management company
-    // websites the operator can book direct on.
-    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com)$/i;
+    //   1. OTAs proper — Airbnb (incl. localized TLDs), Vrbo, Booking,
+    //      etc. Same TOS sublet issue we built this pipeline to avoid.
+    //
+    //   2. Travel meta-search / aggregators — Trivago, Kayak,
+    //      Priceline, plus Hawaii-specific directories like
+    //      to-hawaii.com. Useful for awareness but not directly
+    //      bookable as a PM URL.
+    //
+    //   3. Real-estate-for-sale + long-term-residential sites —
+    //      realtor.com, zillow.com, redfin.com, coldwellbanker.com,
+    //      hawaiilife.com (Hawaii MLS), pscondos.com (Palm Springs
+    //      sales), hotpads.com (long-term residential rentals).
+    //      Lens picks these up when the interior styling matches a
+    //      vacation rental, but they're NOT bookable for short-term
+    //      vacation use.
+    //
+    // After PR #227 dropped the resort-tokens filter on photo-matches,
+    // these three categories started leaking through and creating
+    // candidates like "$19,472 - 181 Chase Dr, Bourg, LA 70343" — a
+    // Louisiana house for sale, not a Hawaii vacation rental. This
+    // filter cleans them up at the lens-helper layer so they never
+    // reach the candidate pool.
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
       try {
         const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
