@@ -279,6 +279,64 @@ function channelBadge(raw: string) {
   return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-400 text-white">{src}</span>;
 }
 
+// ─── Outbound message templates ────────────────────────────────────────────────
+// Guest-facing messages sent from the inbox are signed by the operator's
+// brand. Sender + brand live in one place so future templates pick up the
+// same identity. Property nicknames, totals, etc. are still merged from
+// Guesty data per-message.
+const OUTBOUND_SENDER_NAME = "John Carpenter";
+const OUTBOUND_BRAND_NAME = "VacationRentalExpertz";
+
+const formatMoney = (n: number): string =>
+  `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const formatLongDate = (isoYmd: string): string => {
+  // `new Date("2026-04-28")` parses as UTC midnight, which renders as
+  // April 27 in negative timezone offsets. Build the date in local time
+  // so the receipt's "today" matches the operator's wall clock.
+  const [y, m, d] = isoYmd.split("-").map(Number);
+  if (!y || !m || !d) return isoYmd;
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: "long", day: "numeric", year: "numeric",
+  });
+};
+
+// Renders a payment-receipt body. `paidAfterPayment` is the total the
+// guest has paid AFTER today's payment was applied — Guesty's
+// `money.totalPaid` typically reflects this once the charge posts, but
+// the dialog lets the operator override either field.
+function buildReceiptBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  paymentAmount: number;
+  paymentDateIso: string;
+  bookingTotal: number;
+  paidAfterPayment: number;
+}): string {
+  const balance = Math.max(0, args.bookingTotal - args.paidAfterPayment);
+  const stayLabel = args.propertyName ? ` for your stay at ${args.propertyName}` : "";
+  const checkInLine = args.checkInIso
+    ? ` (check-in ${formatLongDate(args.checkInIso.slice(0, 10))})`
+    : "";
+
+  return [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `This is ${OUTBOUND_SENDER_NAME} with ${OUTBOUND_BRAND_NAME} confirming we just processed a payment of ${formatMoney(args.paymentAmount)} on ${formatLongDate(args.paymentDateIso)} on the card we have on file${stayLabel}${checkInLine}.`,
+    ``,
+    `Booking total:     ${formatMoney(args.bookingTotal)}`,
+    `Paid to date:      ${formatMoney(args.paidAfterPayment)}`,
+    `Remaining balance: ${formatMoney(balance)}`,
+    ``,
+    `If you have any questions about this charge or your reservation, just reply to this message — happy to help.`,
+    ``,
+    `Thanks,`,
+    `${OUTBOUND_SENDER_NAME}`,
+    `${OUTBOUND_BRAND_NAME}`,
+  ].join("\n");
+}
+
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
 // Guesty's Open API wraps list responses inconsistently depending on endpoint:
 //   bare:      [...]
@@ -604,6 +662,24 @@ export default function InboxPage() {
   }>({ open: false, reservationId: null, currentTotal: 0 });
   const [specialOfferPrice, setSpecialOfferPrice] = useState<string>("");
   const [specialOfferMessage, setSpecialOfferMessage] = useState<string>("");
+  // Receipt template state. Pre-populated from Guesty's money fields
+  // when the dialog opens; every value is editable so the operator can
+  // correct stale Guesty data on the spot. The body regenerates from
+  // these inputs until the operator types into the textarea — at that
+  // point we stop overwriting their edits (`receiptBodyTouched`).
+  const [receiptDialog, setReceiptDialog] = useState<{
+    open: boolean;
+    reservationId: string | null;
+    propertyName: string;
+    guestFirstName: string;
+    checkInIso?: string;
+  }>({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
+  const [receiptPaymentAmount, setReceiptPaymentAmount] = useState<string>("");
+  const [receiptPaymentDate, setReceiptPaymentDate] = useState<string>("");
+  const [receiptTotalPrice, setReceiptTotalPrice] = useState<string>("");
+  const [receiptTotalPaid, setReceiptTotalPaid] = useState<string>("");
+  const [receiptBody, setReceiptBody] = useState<string>("");
+  const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
 
   // ── Conversations ──
@@ -752,6 +828,83 @@ export default function InboxPage() {
       toast({ title: "Message sent!" });
     },
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
+  });
+
+  // Regenerate the receipt body whenever any input changes — but only
+  // until the operator edits the textarea directly (then `receiptBodyTouched`
+  // pins their version).
+  useEffect(() => {
+    if (!receiptDialog.open) return;
+    if (receiptBodyTouched) return;
+    if (!receiptPaymentDate) return;
+    const body = buildReceiptBody({
+      guestFirstName: receiptDialog.guestFirstName,
+      propertyName: receiptDialog.propertyName,
+      checkInIso: receiptDialog.checkInIso,
+      paymentAmount: parseFloat(receiptPaymentAmount) || 0,
+      paymentDateIso: receiptPaymentDate,
+      bookingTotal: parseFloat(receiptTotalPrice) || 0,
+      paidAfterPayment: parseFloat(receiptTotalPaid) || 0,
+    });
+    setReceiptBody(body);
+  }, [
+    receiptDialog.open,
+    receiptDialog.guestFirstName,
+    receiptDialog.propertyName,
+    receiptDialog.checkInIso,
+    receiptPaymentAmount,
+    receiptPaymentDate,
+    receiptTotalPrice,
+    receiptTotalPaid,
+    receiptBodyTouched,
+  ]);
+
+  const resetReceiptState = () => {
+    setReceiptDialog({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
+    setReceiptPaymentAmount("");
+    setReceiptPaymentDate("");
+    setReceiptTotalPrice("");
+    setReceiptTotalPaid("");
+    setReceiptBody("");
+    setReceiptBodyTouched(false);
+  };
+
+  // Send the receipt body through the same Guesty proxy + module
+  // whitelist `sendMessage` uses. Guesty's /send-message validator
+  // rejects extra module keys (`templateValues`, `externalId`, …) with
+  // a 400, so the same allow-list applies.
+  const sendReceipt = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv) throw new Error("No conversation selected");
+      if (!receiptBody.trim()) throw new Error("Receipt body is empty");
+      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
+      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+      const mod: GuestyModule = {};
+      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
+      for (const k of allowedKeys) {
+        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
+      }
+      if (!mod.type) mod.type = "email";
+
+      const r = await apiRequest(
+        "POST",
+        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
+        { body: receiptBody, module: mod },
+      );
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      resetReceiptState();
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Receipt sent" });
+    },
+    onError: (e: any) => toast({ title: "Failed to send receipt", description: e.message, variant: "destructive" }),
   });
 
   const generateDraft = async () => {
@@ -1785,6 +1938,50 @@ export default function InboxPage() {
                         </div>
                       )}
 
+                      {/* Templates — manual on-demand outbound message
+                          templates. Currently one entry (payment receipt);
+                          designed to grow as more templates land. Hidden
+                          for inquiries because there's no booking to
+                          receipt against. */}
+                      {(phase === "booked" || phase === "request") && res?._id && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                            Templates
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 px-2.5 text-[11px] w-full justify-start"
+                            onClick={() => {
+                              const totalPriceFromMoney =
+                                asNum(m.totalPrice) || guestGross || 0;
+                              const totalPaidFromMoney = asNum(m.totalPaid);
+                              const propertyName = listing.title ?? listing.nickname ?? "";
+                              const fullName = guest.fullName ?? selectedConv.displayGuestName ?? "";
+                              const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
+                              const today = new Date();
+                              const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+                              setReceiptDialog({
+                                open: true,
+                                reservationId: res._id,
+                                propertyName,
+                                guestFirstName: firstName,
+                                checkInIso: res?.checkIn,
+                              });
+                              setReceiptTotalPrice(totalPriceFromMoney > 0 ? totalPriceFromMoney.toFixed(2) : "");
+                              setReceiptTotalPaid(totalPaidFromMoney > 0 ? totalPaidFromMoney.toFixed(2) : "");
+                              setReceiptPaymentAmount("");
+                              setReceiptPaymentDate(todayIso);
+                              setReceiptBody("");
+                              setReceiptBodyTouched(false);
+                            }}
+                            data-testid="button-send-receipt"
+                          >
+                            <DollarSign className="h-3 w-3 mr-1.5" /> Send payment receipt
+                          </Button>
+                        </div>
+                      )}
+
                       {/* Confirmation code + Guesty deep link */}
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Confirmation</div>
@@ -2314,6 +2511,150 @@ export default function InboxPage() {
               ) : (
                 <>
                   <Send className="h-3 w-3 mr-1" /> Send Special Offer
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Payment-receipt dialog. Pre-populated from Guesty's reservation
+          money fields — booking total + paid-to-date — and asks the
+          operator for the amount/date of the payment they just took.
+          The body live-renders in the textarea until the operator types
+          into it (then their edits stick). Sends through the same Guesty
+          /communication/conversations/:id/send-message proxy as the
+          inline reply composer. */}
+      <Dialog
+        open={receiptDialog.open}
+        onOpenChange={(open) => {
+          if (!open) resetReceiptState();
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              Send payment receipt
+              {receiptDialog.guestFirstName ? ` to ${receiptDialog.guestFirstName}` : ""}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="receipt-payment-amount">Payment amount (USD)</Label>
+                <Input
+                  id="receipt-payment-amount"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={receiptPaymentAmount}
+                  onChange={(e) => setReceiptPaymentAmount(e.target.value)}
+                  placeholder="200.00"
+                  data-testid="input-receipt-payment-amount"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  The charge you just ran on the guest's card.
+                </p>
+              </div>
+              <div>
+                <Label htmlFor="receipt-payment-date">Payment date</Label>
+                <Input
+                  id="receipt-payment-date"
+                  type="date"
+                  value={receiptPaymentDate}
+                  onChange={(e) => setReceiptPaymentDate(e.target.value)}
+                  data-testid="input-receipt-payment-date"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Defaults to today.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="receipt-total-price">Booking total (USD)</Label>
+                <Input
+                  id="receipt-total-price"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={receiptTotalPrice}
+                  onChange={(e) => setReceiptTotalPrice(e.target.value)}
+                  placeholder="1500.00"
+                  data-testid="input-receipt-total-price"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Pre-filled from Guesty.
+                </p>
+              </div>
+              <div>
+                <Label htmlFor="receipt-total-paid">Paid to date (USD)</Label>
+                <Input
+                  id="receipt-total-paid"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={receiptTotalPaid}
+                  onChange={(e) => setReceiptTotalPaid(e.target.value)}
+                  placeholder="900.00"
+                  data-testid="input-receipt-total-paid"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Total paid <em>after</em> this payment was applied. Pre-filled from Guesty — adjust if Guesty hasn't caught up yet.
+                </p>
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="receipt-body">Message preview</Label>
+              <Textarea
+                id="receipt-body"
+                value={receiptBody}
+                onChange={(e) => {
+                  setReceiptBody(e.target.value);
+                  setReceiptBodyTouched(true);
+                }}
+                rows={14}
+                className="font-mono text-xs"
+                data-testid="textarea-receipt-body"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {receiptBodyTouched
+                  ? "You've edited the message — it won't auto-update from the fields above anymore."
+                  : "The message regenerates as you change the fields above. Edit the textarea to override."}
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={resetReceiptState}
+              data-testid="button-receipt-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const amt = parseFloat(receiptPaymentAmount);
+                if (!Number.isFinite(amt) || amt <= 0) {
+                  toast({ title: "Enter a payment amount greater than 0", variant: "destructive" });
+                  return;
+                }
+                if (!receiptBody.trim()) {
+                  toast({ title: "Receipt message is empty", variant: "destructive" });
+                  return;
+                }
+                sendReceipt.mutate();
+              }}
+              disabled={sendReceipt.isPending || !receiptPaymentAmount || !receiptBody.trim()}
+              data-testid="button-receipt-send"
+            >
+              {sendReceipt.isPending ? (
+                <>
+                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Sending…
+                </>
+              ) : (
+                <>
+                  <Send className="h-3 w-3 mr-1" /> Send receipt
                 </>
               )}
             </Button>
