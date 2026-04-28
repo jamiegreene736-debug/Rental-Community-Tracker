@@ -56,6 +56,72 @@ const ResultSchema = z.object({
 const cache = new Map<string, { value: VerifyAvailabilityResult; expiresAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+function newStagehand(opts: { bbApiKey: string; bbProjectId: string; anthropicKey: string }) {
+  return new Stagehand({
+    env: "BROWSERBASE",
+    apiKey: opts.bbApiKey,
+    projectId: opts.bbProjectId,
+    browserbaseSessionCreateParams: {
+      projectId: opts.bbProjectId,
+      proxies: true,
+      browserSettings: { viewport: { width: 1280, height: 800 } },
+    },
+    model: { provider: "anthropic", modelName: VERIFIER_MODEL, apiKey: opts.anthropicKey },
+    verbose: 1,
+  });
+}
+
+// Per-URL verify against an already-initialized Stagehand. Used by both
+// the single-URL path (opens its own session) and the batch path (one
+// session, many sequential navigates — saves the per-URL session cost).
+async function verifyOneAgainst(
+  stagehand: Stagehand,
+  url: string,
+  checkIn: string,
+  checkOut: string,
+): Promise<VerifyAvailabilityResult> {
+  const startedAt = Date.now();
+  try {
+    const page = stagehand.context.pages()[0];
+    await page.goto(url, { timeoutMs: NAV_TIMEOUT_MS, waitUntil: "domcontentloaded" });
+    // PM sites are JS-heavy; give the date-pre-fill / availability
+    // calendar a chance to settle before extracting.
+    await page.waitForTimeout(SETTLE_DELAY_MS);
+
+    const extracted = await stagehand.extract(
+      `You are checking a property-management vacation-rental page. The user wants to know whether THIS specific unit can be booked for check-in ${checkIn} and check-out ${checkOut}. Examine the page and report:
+- available: yes (price is quoted + a working Book/Reserve button + no unavailable banner) / no (page clearly says these dates are unavailable, booked, or violate min-stay) / unclear (homepage, search results page, didn't load, dates not pre-filled).
+- nightlyPriceUsd: the per-night USD rate if visible for these dates, else null.
+- reason: one short sentence grounded in what's on the page.`,
+      ResultSchema,
+    );
+
+    const result: VerifyAvailabilityResult = {
+      available: extracted?.available ?? "unclear",
+      nightlyPriceUsd:
+        typeof extracted?.nightlyPriceUsd === "number" && extracted.nightlyPriceUsd > 0
+          ? Math.round(extracted.nightlyPriceUsd)
+          : null,
+      reason: extracted?.reason ?? "extract returned empty",
+      finalUrl: page.url(),
+      ms: Date.now() - startedAt,
+    };
+    console.log(
+      `[verify-availability] ${url} → available=${result.available} price=${result.nightlyPriceUsd} (${result.ms}ms)`,
+    );
+    return result;
+  } catch (e: any) {
+    console.error(`[verify-availability] error for ${url}:`, e?.message ?? e);
+    return {
+      available: "unclear",
+      nightlyPriceUsd: null,
+      reason: `verifier error: ${e?.message ?? "unknown"}`,
+      finalUrl: url,
+      ms: Date.now() - startedAt,
+    };
+  }
+}
+
 export async function verifyPmAvailability(opts: {
   url: string;
   checkIn: string;
@@ -64,7 +130,7 @@ export async function verifyPmAvailability(opts: {
   bbProjectId: string;
   anthropicKey: string;
 }): Promise<VerifyAvailabilityResult> {
-  const { url, checkIn, checkOut, bbApiKey, bbProjectId, anthropicKey } = opts;
+  const { url, checkIn, checkOut } = opts;
 
   const cacheKey = `${url}|${checkIn}|${checkOut}`;
   const cached = cache.get(cacheKey);
@@ -73,71 +139,11 @@ export async function verifyPmAvailability(opts: {
     return cached.value;
   }
 
-  const startedAt = Date.now();
-  const stagehand = new Stagehand({
-    env: "BROWSERBASE",
-    apiKey: bbApiKey,
-    projectId: bbProjectId,
-    browserbaseSessionCreateParams: {
-      projectId: bbProjectId,
-      proxies: true,
-      browserSettings: { viewport: { width: 1280, height: 800 } },
-    },
-    model: { provider: "anthropic", modelName: VERIFIER_MODEL, apiKey: anthropicKey },
-    verbose: 1,
-  });
-
+  const stagehand = newStagehand(opts);
   let result: VerifyAvailabilityResult;
-
   try {
     await stagehand.init();
-    const page = stagehand.context.pages()[0];
-
-    const abort = new AbortController();
-    const timeoutHandle = setTimeout(
-      () => abort.abort(),
-      Math.max(15_000, TOTAL_WALL_BUDGET_MS - (Date.now() - startedAt)),
-    );
-
-    try {
-      await page.goto(url, { timeoutMs: NAV_TIMEOUT_MS, waitUntil: "domcontentloaded" });
-      // PM sites are JS-heavy; give the date-pre-fill / availability
-      // calendar a chance to settle before extracting.
-      await page.waitForTimeout(SETTLE_DELAY_MS);
-
-      const extracted = await stagehand.extract(
-        `You are checking a property-management vacation-rental page. The user wants to know whether THIS specific unit can be booked for check-in ${checkIn} and check-out ${checkOut}. Examine the page and report:
-- available: yes (price is quoted + a working Book/Reserve button + no unavailable banner) / no (page clearly says these dates are unavailable, booked, or violate min-stay) / unclear (homepage, search results page, didn't load, dates not pre-filled).
-- nightlyPriceUsd: the per-night USD rate if visible for these dates, else null.
-- reason: one short sentence grounded in what's on the page.`,
-        ResultSchema,
-      );
-
-      result = {
-        available: extracted?.available ?? "unclear",
-        nightlyPriceUsd:
-          typeof extracted?.nightlyPriceUsd === "number" && extracted.nightlyPriceUsd > 0
-            ? Math.round(extracted.nightlyPriceUsd)
-            : null,
-        reason: extracted?.reason ?? "extract returned empty",
-        finalUrl: page.url(),
-        ms: Date.now() - startedAt,
-      };
-      console.log(
-        `[verify-availability] ${url} → available=${result.available} price=${result.nightlyPriceUsd} (${result.ms}ms)`,
-      );
-    } finally {
-      clearTimeout(timeoutHandle);
-    }
-  } catch (e: any) {
-    console.error(`[verify-availability] error for ${url}:`, e?.message ?? e);
-    result = {
-      available: "unclear",
-      nightlyPriceUsd: null,
-      reason: `verifier error: ${e?.message ?? "unknown"}`,
-      finalUrl: url,
-      ms: Date.now() - startedAt,
-    };
+    result = await verifyOneAgainst(stagehand, url, checkIn, checkOut);
   } finally {
     try {
       await stagehand.close();
@@ -148,4 +154,76 @@ export async function verifyPmAvailability(opts: {
 
   cache.set(cacheKey, { value: result, expiresAt: Date.now() + CACHE_TTL_MS });
   return result;
+}
+
+export async function verifyPmAvailabilityBatch(opts: {
+  urls: string[];
+  checkIn: string;
+  checkOut: string;
+  bbApiKey: string;
+  bbProjectId: string;
+  anthropicKey: string;
+  maxUrls?: number;
+}): Promise<Record<string, VerifyAvailabilityResult>> {
+  const { urls, checkIn, checkOut, maxUrls = 10 } = opts;
+  const out: Record<string, VerifyAvailabilityResult> = {};
+
+  // Cache hits never spend a session — peel them off first so a fully
+  // cached batch is free.
+  const toFetch: string[] = [];
+  for (const url of urls.slice(0, maxUrls)) {
+    const cacheKey = `${url}|${checkIn}|${checkOut}`;
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      out[url] = cached.value;
+    } else {
+      toFetch.push(url);
+    }
+  }
+
+  if (toFetch.length === 0) {
+    console.log(`[verify-availability] batch fully cached (${urls.length} urls)`);
+    return out;
+  }
+
+  console.log(
+    `[verify-availability] batch: ${urls.length} requested, ${urls.length - toFetch.length} cached, ${toFetch.length} to fetch (single session)`,
+  );
+
+  const stagehand = newStagehand(opts);
+  const batchStartedAt = Date.now();
+  try {
+    await stagehand.init();
+    for (const url of toFetch) {
+      // Hard wall budget across the whole batch — if we're past it,
+      // mark remaining URLs as unclear/timeout rather than hanging.
+      if (Date.now() - batchStartedAt > TOTAL_WALL_BUDGET_MS * Math.min(toFetch.length, 6)) {
+        console.warn(`[verify-availability] batch wall budget exceeded; remaining urls return unclear`);
+        for (const remaining of toFetch.slice(toFetch.indexOf(url))) {
+          out[remaining] = {
+            available: "unclear",
+            nightlyPriceUsd: null,
+            reason: "batch wall budget exceeded before this URL was checked",
+            finalUrl: remaining,
+            ms: 0,
+          };
+        }
+        break;
+      }
+      const result = await verifyOneAgainst(stagehand, url, checkIn, checkOut);
+      out[url] = result;
+      cache.set(`${url}|${checkIn}|${checkOut}`, {
+        value: result,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
+    }
+  } finally {
+    try {
+      await stagehand.close();
+    } catch (e: any) {
+      console.warn(`[verify-availability] batch close failed:`, e?.message ?? e);
+    }
+  }
+
+  return out;
 }

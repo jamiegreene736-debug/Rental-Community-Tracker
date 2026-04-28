@@ -1666,6 +1666,8 @@ function ScannedOptionsTable({
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [verifyByUrl, setVerifyByUrl] = useState<Record<string, VerifyState>>({});
+  const [verifiedOnly, setVerifiedOnly] = useState<boolean>(true);
+  const [autoVerifyState, setAutoVerifyState] = useState<"idle" | "running" | "done">("idle");
 
   const verifyOne = async (url: string) => {
     setVerifyByUrl((prev) => ({ ...prev, [url]: { status: "loading" } }));
@@ -1704,6 +1706,105 @@ function ScannedOptionsTable({
     return out;
   }, [airbnb, vrbo, booking, pm]);
 
+  // Auto-verify on load.
+  //
+  // Cost-discipline rules:
+  //   - Trust-by-source: Airbnb / Vrbo / Booking rows are pre-marked
+  //     "yes" without spending a verifier call. Those sources came
+  //     from systems that already vouched for the priced inventory
+  //     (Airbnb engine results for these dates, Booking.com search
+  //     results for these dates, Vrbo search agent / Apify / etc.
+  //     that drove a real query for these dates).
+  //   - PM rows with a non-zero price are the actual gap (price is
+  //     anchored from Airbnb on photo-matches, or absent on PM Google
+  //     site:search results). Send the top 10 cheapest to the batch
+  //     verifier — that's ~$0.05 worst case.
+  //   - PM rows without a price are skipped (not in the cheapest pool;
+  //     operator can manually Verify any individual one).
+  useEffect(() => {
+    if (all.length === 0) return;
+    if (autoVerifyState !== "idle") return;
+    if (!checkIn || !checkOut) return;
+
+    // Trust-by-source pre-mark — synchronous, free.
+    setVerifyByUrl((prev) => {
+      const next = { ...prev };
+      for (const c of all) {
+        if (next[c.url]) continue; // don't clobber existing state
+        if (c.source !== "pm" && c.totalPrice > 0) {
+          next[c.url] = {
+            status: "yes",
+            reason: `Trusted by source (${c.sourceLabel}) — engine returned this row priced for these dates`,
+            nightlyPriceUsd: c.nightlyPrice || null,
+          };
+        }
+      }
+      return next;
+    });
+
+    // PM rows that need verifying — top 10 cheapest priced.
+    const pmToVerify = all
+      .filter((c) => c.source === "pm" && c.totalPrice > 0)
+      .sort((a, b) => a.totalPrice - b.totalPrice)
+      .slice(0, 10)
+      .map((c) => c.url);
+
+    if (pmToVerify.length === 0) {
+      setAutoVerifyState("done");
+      return;
+    }
+
+    setAutoVerifyState("running");
+    // Mark each PM row as loading so the UI shows progress immediately.
+    setVerifyByUrl((prev) => {
+      const next = { ...prev };
+      for (const url of pmToVerify) {
+        if (!next[url]) next[url] = { status: "loading" };
+      }
+      return next;
+    });
+
+    (async () => {
+      try {
+        const r = await apiRequest("POST", "/api/buy-in-candidates/verify-availability-batch", {
+          urls: pmToVerify, checkIn, checkOut,
+        });
+        const j = await r.json();
+        const results = (j?.results ?? {}) as Record<string, { available: string; reason: string; nightlyPriceUsd: number | null }>;
+        setVerifyByUrl((prev) => {
+          const next = { ...prev };
+          for (const [url, result] of Object.entries(results)) {
+            next[url] = {
+              status: (result.available as VerifyState["status"]) ?? "unclear",
+              reason: result.reason,
+              nightlyPriceUsd: result.nightlyPriceUsd ?? null,
+            };
+          }
+          // Any URL we asked for but didn't get a result → unclear (server skipped it).
+          for (const url of pmToVerify) {
+            if (!results[url] && next[url]?.status === "loading") {
+              next[url] = { status: "unclear", reason: "no result returned by batch verifier" };
+            }
+          }
+          return next;
+        });
+      } catch (e: any) {
+        // On failure, mark loaders as error so the operator can retry one-off.
+        setVerifyByUrl((prev) => {
+          const next = { ...prev };
+          for (const url of pmToVerify) {
+            if (next[url]?.status === "loading") {
+              next[url] = { status: "error", reason: e?.message ?? "batch request failed" };
+            }
+          }
+          return next;
+        });
+      } finally {
+        setAutoVerifyState("done");
+      }
+    })();
+  }, [all, autoVerifyState, checkIn, checkOut]);
+
   const sorted = useMemo(() => {
     const arr = [...all];
     const dir = sortDir === "asc" ? 1 : -1;
@@ -1726,6 +1827,19 @@ function ScannedOptionsTable({
     return arr;
   }, [all, sortKey, sortDir]);
 
+  // Apply the verified-only filter. Keep rows whose verify status is
+  // "yes" or "loading" (still being checked). Hide "no" / "unclear" /
+  // "error" / "idle" — these are either confirmed-not-bookable or
+  // never got verified, both unsafe to record.
+  const visible = useMemo(() => {
+    if (!verifiedOnly) return sorted;
+    return sorted.filter((c) => {
+      const v = verifyByUrl[c.url];
+      if (!v) return false;
+      return v.status === "yes" || v.status === "loading";
+    });
+  }, [sorted, verifiedOnly, verifyByUrl]);
+
   if (all.length === 0) return null;
 
   const toggleSort = (key: SortKey) => {
@@ -1745,17 +1859,44 @@ function ScannedOptionsTable({
   };
 
   const pricedCount = all.filter((c) => c.totalPrice > 0).length;
+  const verifiedYesCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "yes").length;
+  const verifyingCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "loading").length;
+  const hiddenCount = sorted.length - visible.length;
 
   return (
     <div className="border rounded-lg overflow-hidden">
       <div className="px-3 py-2 bg-muted/40 border-b flex items-center justify-between flex-wrap gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          All scanned options ({all.length} total · {pricedCount} priced)
-        </p>
-        <p className="text-[11px] text-muted-foreground">
-          <Star className="h-3 w-3 inline fill-amber-400 text-amber-500 mr-0.5" />
-          = auto-pick · click any column to sort
-        </p>
+        <div className="flex flex-col gap-0.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            All scanned options ({all.length} total · {pricedCount} priced · {verifiedYesCount} verified)
+          </p>
+          {autoVerifyState === "running" && verifyingCount > 0 && (
+            <p className="text-[11px] text-muted-foreground inline-flex items-center gap-1">
+              <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+              Auto-verifying {verifyingCount} PM listing{verifyingCount === 1 ? "" : "s"} (Haiku, ~\$0.005 each)…
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="text-[11px] text-muted-foreground inline-flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-3 w-3"
+              checked={verifiedOnly}
+              onChange={(e) => setVerifiedOnly(e.target.checked)}
+            />
+            Verified only
+            {verifiedOnly && hiddenCount > 0 && (
+              <span className="text-muted-foreground">
+                ({hiddenCount} hidden)
+              </span>
+            )}
+          </label>
+          <p className="text-[11px] text-muted-foreground">
+            <Star className="h-3 w-3 inline fill-amber-400 text-amber-500 mr-0.5" />
+            = auto-pick · click columns to sort
+          </p>
+        </div>
       </div>
       <Table>
         <TableHeader>
@@ -1791,7 +1932,16 @@ function ScannedOptionsTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {sorted.map((c) => {
+          {visible.length === 0 && verifiedOnly && (
+            <TableRow>
+              <TableCell colSpan={8} className="text-center py-6 text-xs text-muted-foreground">
+                {autoVerifyState === "running"
+                  ? "Verifying… visible rows will appear as Haiku confirms each."
+                  : "No verified-available candidates yet. Toggle off \"Verified only\" to see all scanned options."}
+              </TableCell>
+            </TableRow>
+          )}
+          {visible.map((c) => {
             const isAutoPick = !!autoPickUrl && c.url === autoPickUrl;
             return (
               <TableRow
