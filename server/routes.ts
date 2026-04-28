@@ -16,6 +16,7 @@ import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
 import { searchVrboViaTrivago } from "./trivago-vrbo-search";
 import { searchVrboViaApifyWebScraper } from "./apify-vrbo-web-scraper";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
+import { searchVrboViaStagehand } from "./stagehand-vrbo-search";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -2577,13 +2578,15 @@ export async function registerRoutes(
     let vrboOsCount = 0;
     let vrboTvCount = 0;
     let vrboAwsCount = 0; // apify web-scraper
+    let vrboShCount = 0;  // stagehand managed agent
     let vrboGoogleCount = 0;
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const bbApiKey = process.env.BROWSERBASE_API_KEY;
       const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
       const targetDestination = resortName ?? community;
 
-      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, googleResults] = await Promise.all([
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, stagehandResults, googleResults] = await Promise.all([
         // Path 1 — Apify (paid actor; priced when regionId resolves)
         searchVrboViaApify({
           resortName: resortName ?? community,
@@ -2665,7 +2668,31 @@ export async function registerRoutes(
           console.error("[find-buy-in] vrbo (apify-web-scraper) error:", e?.message ?? e);
           return [] as Awaited<ReturnType<typeof searchVrboViaApifyWebScraper>>;
         }),
-        // Path 7 — Google site:search (free; unpriced URLs, fallback)
+        // Path 7 — Stagehand managed agent (Browserbase + Anthropic). The
+        // same path director.ai uses to drive Vrbo successfully. Where
+        // every direct-scrape vendor (paths 1-6) keeps returning 0
+        // priced because Vrbo's anti-bot blocks fingerprint-detectable
+        // bots, the Stagehand agent drives the real UI: types the
+        // destination, clicks the autocomplete, picks dates, hits
+        // Search. Costs more (~$0.20-0.50/call, ~60-120s) but is the
+        // only path with a realistic shot at returning priced data
+        // when the cheap paths fall through. Skipped when keys absent.
+        bbApiKey && bbProjectId && anthropicKey
+          ? searchVrboViaStagehand({
+              resortName: resortName ?? community,
+              destination: targetDestination,
+              bedrooms,
+              checkIn,
+              checkOut,
+              bbApiKey,
+              bbProjectId,
+              anthropicKey,
+            }).catch((e: any) => {
+              console.error("[find-buy-in] vrbo (stagehand) error:", e?.message ?? e);
+              return [] as Awaited<ReturnType<typeof searchVrboViaStagehand>>;
+            })
+          : Promise.resolve([] as Awaited<ReturnType<typeof searchVrboViaStagehand>>),
+        // Path 8 — Google site:search (free; unpriced URLs, fallback)
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
@@ -2678,9 +2705,10 @@ export async function registerRoutes(
       vrboOsCount = outscraperResults.length;
       vrboTvCount = trivagoResults.length;
       vrboAwsCount = apifyWebResults.length;
+      vrboShCount = stagehandResults.length;
       vrboGoogleCount = googleResults.candidates.length;
       vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + googleResults.raw;
+      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + vrboShCount + googleResults.raw;
 
       const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
         source: "vrbo" as const,
@@ -2748,12 +2776,26 @@ export async function registerRoutes(
         image: c.image,
         snippet: c.snippet,
       }));
+      const shCandidates: Candidate[] = stagehandResults.map((c): Candidate => ({
+        source: "vrbo" as const,
+        sourceLabel: "Vrbo",
+        title: c.title,
+        url: withStayDates("vrbo", c.url),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        bedrooms: c.bedrooms,
+        image: c.image,
+        snippet: c.snippet,
+      }));
 
-      // Dedupe by Vrbo listing id across all SIX paths. Priority order:
-      // Trivago (priced via meta-search; weaker anti-bot than Vrbo direct) →
-      // Outscraper → Apify → Browserbase → ScrapingBee → Google (free,
-      // unpriced fallback). First id wins; later occurrences of the
-      // same id are dropped so we don't duplicate cards.
+      // Dedupe by Vrbo listing id across all SEVEN scraping paths plus
+      // Google fallback. Priority order: Stagehand managed agent (the
+      // path director.ai uses, most likely to actually return priced
+      // data because it drives the real UI) → Trivago meta-search →
+      // Apify web-scraper → Outscraper → Apify direct → Browserbase
+      // raw → ScrapingBee → Google (free, unpriced fallback). First
+      // id wins; later occurrences of the same id are dropped so we
+      // don't duplicate cards.
       const listingIdOf = (url: string): string | null => {
         const m = url.match(/vrbo\.com\/(\d+)/);
         return m ? m[1] : null;
@@ -2766,11 +2808,14 @@ export async function registerRoutes(
         if (id) seenIds.add(id);
         out.push(c);
       };
-      // Trivago first — meta-search has weaker anti-bot than Vrbo
-      // direct, and the all-in is computed by Trivago. Most likely
-      // path to actually return priced data. Apify web-scraper
+      // Stagehand first — it's the only path that drives Vrbo's
+      // actual UI (autocomplete + date picker + Search) the same way
+      // a real user does. When it returns priced data we trust it
+      // most. Trivago second — meta-search has weaker anti-bot than
+      // Vrbo direct and computes its own all-in. Apify web-scraper
       // (residential proxy + custom JS) ranks just below since it's
       // robust to Vrbo's DOM rev churn.
+      for (const c of shCandidates) pushIfNew(c);
       for (const c of tvCandidates) pushIfNew(c);
       for (const c of awsCandidates) pushIfNew(c);
       for (const c of osCandidates) pushIfNew(c);
@@ -3297,7 +3342,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (telemetry-only — bookable list excludes airbnb) `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
+      + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
