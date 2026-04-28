@@ -481,4 +481,160 @@ assert.ok(
 );
 console.log("  ✓ extractBedroomsFromListing handles real engine shapes");
 
+// ---------- VRBO compliance detection (getChannelStatus) ----------
+// Replicates the vrboLicense block from
+// client/src/services/guestyService.ts. The original implementation only
+// read listing.channels.homeaway, which doesn't exist on real Guesty
+// payloads — every listing reported "not yet in Guesty" even when the
+// data was clearly present. New detection layers tags + Booking.com
+// Hawaii variant + channels.homeaway, returning whichever has data.
+
+type VrboLicense = { licenseNumber: string | null; taxId: string | null; parcelNumber: string | null } | null;
+
+function detectVrboLicense(listing: Record<string, unknown>): VrboLicense {
+  const integrations = Array.isArray(listing.integrations)
+    ? listing.integrations as Record<string, unknown>[]
+    : [];
+
+  const tagsArr: string[] = Array.isArray(listing.tags) ? listing.tags as string[] : [];
+  const tagValue = (prefix: string): string | null => {
+    const m = tagsArr.find((t) => typeof t === "string" && t.startsWith(prefix));
+    return m ? m.slice(prefix.length).trim() || null : null;
+  };
+  const fromTagsTat = tagValue("TAT:");
+  const fromTagsGet = tagValue("GET:");
+  const fromTagsTmk = tagValue("TMK:");
+
+  const bookingInteg = integrations.find((i) => i.platform === "bookingCom" || i.platform === "bookingCom2");
+  const bookingLicenseInfo = ((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined;
+  const contentData = bookingLicenseInfo?.contentData as Array<{ name?: string; value?: string }> | undefined;
+  const contentValue = (name: string): string | null => {
+    if (!Array.isArray(contentData)) return null;
+    const m = contentData.find((c) => c?.name === name);
+    return (m?.value && typeof m.value === "string") ? m.value : null;
+  };
+  const fromBookingTat = contentValue("number");
+  const fromBookingTmk = contentValue("tmk_number");
+
+  const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
+
+  const licenseNumber = fromTagsTat || fromBookingTat || homeaway.licenseNumber || null;
+  const taxId         = fromTagsGet || homeaway.taxId || null;
+  const parcelNumber  = fromTagsTmk || fromBookingTmk || homeaway.parcelNumber || null;
+  if (!licenseNumber && !taxId && !parcelNumber) return null;
+  return { licenseNumber, taxId, parcelNumber };
+}
+
+console.log("\nVRBO compliance detection suite");
+
+// Case 1: Real production Pili Mai shape (no channels object, all data
+// in tags + bookingCom Hawaii variant). This was the failing case.
+{
+  const detected = detectVrboLicense({
+    tags: ["TMK:420140050001", "TAT:TA-024-120-9012-01", "GET:GE-024-120-9012-01"],
+    integrations: [
+      { platform: "homeaway2", homeaway2: { advertiserId: "58d6Q4", status: "COMPLETED" } },
+      {
+        platform: "bookingCom",
+        bookingCom: {
+          license: {
+            information: {
+              variantId: 6,
+              contentData: [
+                { name: "number", value: "TA-024-120-9012-01" },
+                { name: "tmk_number", value: "420140050001" },
+                { name: "permit_number", value: "TVR-2022-037" },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    // No `channels` key — like every real listing.
+  });
+  assert.ok(detected, "tags + bookingCom should return a non-null vrboLicense");
+  assert.equal(detected?.licenseNumber, "TA-024-120-9012-01", "TAT from tags");
+  assert.equal(detected?.taxId, "GE-024-120-9012-01", "GET from tags");
+  assert.equal(detected?.parcelNumber, "420140050001", "TMK from tags");
+  console.log("  ✓ Production Pili Mai shape (tags + bookingCom) detects all three");
+}
+
+// Case 2: tags-only fallback (Booking.com not connected).
+{
+  const detected = detectVrboLicense({
+    tags: ["TMK:420140050001", "TAT:TA-024-120-9012-01", "GET:GE-024-120-9012-01"],
+    integrations: [],
+  });
+  assert.equal(detected?.licenseNumber, "TA-024-120-9012-01", "TAT from tags");
+  assert.equal(detected?.taxId, "GE-024-120-9012-01", "GET from tags");
+  assert.equal(detected?.parcelNumber, "420140050001", "TMK from tags");
+  console.log("  ✓ Tags-only listing detects all three");
+}
+
+// Case 3: Booking.com Hawaii variant only (no tags) — TAT + TMK only,
+// GET will be null because the Hawaii variant doesn't carry it.
+{
+  const detected = detectVrboLicense({
+    tags: [],
+    integrations: [
+      {
+        platform: "bookingCom",
+        bookingCom: {
+          license: {
+            information: {
+              variantId: 6,
+              contentData: [
+                { name: "number", value: "TA-024-120-9012-01" },
+                { name: "tmk_number", value: "420140050001" },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.ok(detected, "bookingCom-only should still return non-null");
+  assert.equal(detected?.licenseNumber, "TA-024-120-9012-01", "TAT from bookingCom");
+  assert.equal(detected?.taxId, null, "GET is null when only bookingCom is present");
+  assert.equal(detected?.parcelNumber, "420140050001", "TMK from bookingCom");
+  console.log("  ✓ Booking.com-only fallback returns TAT+TMK with GET null");
+}
+
+// Case 4: Empty listing → null (the "actually not in Guesty" case).
+{
+  const detected = detectVrboLicense({ tags: [], integrations: [] });
+  assert.equal(detected, null, "empty listing should return null");
+  console.log("  ✓ Empty listing returns null");
+}
+
+// Case 5: Legacy/future-proof channels.homeaway path still works.
+{
+  const detected = detectVrboLicense({
+    tags: [],
+    integrations: [],
+    channels: { homeaway: { licenseNumber: "X", taxId: "Y", parcelNumber: "Z" } },
+  });
+  assert.equal(detected?.licenseNumber, "X");
+  assert.equal(detected?.taxId, "Y");
+  assert.equal(detected?.parcelNumber, "Z");
+  console.log("  ✓ channels.homeaway legacy fallback still works");
+}
+
+// Case 6: tags take priority over bookingCom when both present.
+{
+  const detected = detectVrboLicense({
+    tags: ["TAT:TAGS-WINS"],
+    integrations: [
+      {
+        platform: "bookingCom",
+        bookingCom: {
+          license: { information: { contentData: [{ name: "number", value: "BOOKING-LOSES" }] } },
+        },
+      },
+    ],
+  });
+  assert.equal(detected?.licenseNumber, "TAGS-WINS", "tags should win priority");
+  console.log("  ✓ tags take priority over bookingCom contentData");
+}
+
 console.log("\nall suites passed ✅");

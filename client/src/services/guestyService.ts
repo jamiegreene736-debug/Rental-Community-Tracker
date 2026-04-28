@@ -115,13 +115,11 @@ export type ChannelInfo = {
     regulationType: string | null;      // e.g. "registration"
     lastUpdatedOn: string | null;
   } | null;
-  // VRBO only: license fields pulled from listing.channels.homeaway.
-  // Populated by /api/builder/push-compliance and the new VRBO submit-
-  // compliance endpoint. null = none of the three fields are set;
-  // otherwise each field is independently nullable. Used by the VRBO
-  // compliance card sub-block to show a persistent "compliance on file"
-  // state across page reloads (instead of the session-local flag the
-  // first version of the card relied on).
+  // VRBO only: compliance fields detected from any of the paths Guesty
+  // actually persists them on a real listing payload — see getChannelStatus
+  // for the full lookup. null = none detected; otherwise each field is
+  // independently nullable. Used by the VRBO compliance card sub-block to
+  // show a persistent "compliance on file" state across page reloads.
   vrboLicense?: {
     licenseNumber: string | null;       // TAT (Transient Accommodations Tax)
     taxId: string | null;               // GET (General Excise Tax)
@@ -460,18 +458,56 @@ class GuestyService {
       airbnbInfo.publicUrl = `https://www.airbnb.com/rooms/${airbnbInfo.id}`;
     }
 
-    // VRBO license fields. Guesty stores these at listing.channels.homeaway,
-    // not on the integrations[] entry — see /api/builder/push-compliance
-    // which writes there and reads back the same path. Surface them on
-    // ChannelInfo so the VRBO compliance card sub-block can show a
-    // persistent green-check after the data lands instead of a session-
-    // local one. null when none of the three fields are set.
+    // VRBO compliance fields. The original implementation read only
+    // `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`,
+    // but real Guesty listing payloads don't carry a top-level `channels`
+    // object at all — that path was theoretical. The data actually lands
+    // in (any of) three places, so detect from all of them and prefer
+    // whichever has the most complete picture:
+    //
+    //   1. `listing.tags`  — TMK:/TAT:/GET: prefixed entries written by
+    //      /api/builder/push-compliance Step 1. Carries all three values
+    //      (TAT, GET, TMK) and is the most reliable when this codebase
+    //      pushed the compliance data.
+    //   2. `integrations[platform=bookingCom].bookingCom.license.information.contentData`
+    //      — Booking.com Hawaii variant 6 (`hawaii-hotel_v1`) license
+    //      object written by push-compliance Step 3b. Carries TAT
+    //      (`number`) and TMK (`tmk_number`) but NOT GET. Guesty's UI
+    //      "Vrbo license requirements" panel surfaces these too because
+    //      the variant is shared between VRBO and Booking.com.
+    //   3. `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`
+    //      — the original-but-not-real path. Kept as a last-resort
+    //      fallback in case Guesty ever populates it.
     const vrboInfo = toInfo(vrboData);
-    const vrboChannelData = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
     const vrboLicense = (() => {
-      const licenseNumber = vrboChannelData.licenseNumber || null;
-      const taxId = vrboChannelData.taxId || null;
-      const parcelNumber = vrboChannelData.parcelNumber || null;
+      // From tags (most complete — has TAT/GET/TMK)
+      const tagsArr: string[] = Array.isArray(listing.tags) ? listing.tags as string[] : [];
+      const tagValue = (prefix: string): string | null => {
+        const m = tagsArr.find((t) => typeof t === "string" && t.startsWith(prefix));
+        return m ? m.slice(prefix.length).trim() || null : null;
+      };
+      const fromTagsTat = tagValue("TAT:");
+      const fromTagsGet = tagValue("GET:");
+      const fromTagsTmk = tagValue("TMK:");
+
+      // From Booking.com Hawaii variant contentData (TAT + TMK only)
+      const bookingInteg = integrations.find((i) => i.platform === "bookingCom" || i.platform === "bookingCom2") as Record<string, unknown> | undefined;
+      const bookingLicenseInfo = ((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined;
+      const contentData = bookingLicenseInfo?.contentData as Array<{ name?: string; value?: string }> | undefined;
+      const contentValue = (name: string): string | null => {
+        if (!Array.isArray(contentData)) return null;
+        const m = contentData.find((c) => c?.name === name);
+        return (m?.value && typeof m.value === "string") ? m.value : null;
+      };
+      const fromBookingTat = contentValue("number");
+      const fromBookingTmk = contentValue("tmk_number");
+
+      // Legacy/future-proof: channels.homeaway path
+      const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
+
+      const licenseNumber = fromTagsTat || fromBookingTat || homeaway.licenseNumber || null;
+      const taxId         = fromTagsGet || homeaway.taxId || null;
+      const parcelNumber  = fromTagsTmk || fromBookingTmk || homeaway.parcelNumber || null;
       if (!licenseNumber && !taxId && !parcelNumber) return null;
       return { licenseNumber, taxId, parcelNumber };
     })();
