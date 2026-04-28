@@ -458,26 +458,32 @@ class GuestyService {
       airbnbInfo.publicUrl = `https://www.airbnb.com/rooms/${airbnbInfo.id}`;
     }
 
-    // VRBO compliance fields. The original implementation read only
-    // `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`,
-    // but real Guesty listing payloads don't carry a top-level `channels`
-    // object at all — that path was theoretical. The data actually lands
-    // in (any of) three places, so detect from all of them and prefer
-    // whichever has the most complete picture:
+    // VRBO compliance fields. Detect from the four places Guesty stores
+    // them, in priority order — whichever has the most complete picture
+    // wins. The Kaha Lani case (2026-04-28): operator manually filled the
+    // "Vrbo license requirements" panel in Guesty admin which writes to
+    // the listing's TOP-LEVEL `licenseNumber` / `taxId` fields, but this
+    // readback was missing that path entirely — so the comparison
+    // surfaced as "Compliance on file but incomplete" with GET (taxId)
+    // appearing absent even though Guesty's UI showed it filled in.
     //
     //   1. `listing.tags`  — TMK:/TAT:/GET: prefixed entries written by
     //      /api/builder/push-compliance Step 1. Carries all three values
-    //      (TAT, GET, TMK) and is the most reliable when this codebase
-    //      pushed the compliance data.
-    //   2. `integrations[platform=bookingCom].bookingCom.license.information.contentData`
+    //      (TAT, GET, TMK).
+    //   2. `listing.licenseNumber` (TAT) and `listing.taxId` (GET) at
+    //      the top level. Written by push-compliance Step 2 AND by
+    //      Guesty's "Vrbo license requirements" admin panel when the
+    //      operator edits manually — the canonical Guesty path for
+    //      these fields. TMK doesn't have a top-level slot.
+    //   3. `integrations[platform=bookingCom].bookingCom.license.information.contentData`
     //      — Booking.com Hawaii variant 6 (`hawaii-hotel_v1`) license
     //      object written by push-compliance Step 3b. Carries TAT
     //      (`number`) and TMK (`tmk_number`) but NOT GET. Guesty's UI
     //      "Vrbo license requirements" panel surfaces these too because
     //      the variant is shared between VRBO and Booking.com.
-    //   3. `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`
-    //      — the original-but-not-real path. Kept as a last-resort
-    //      fallback in case Guesty ever populates it.
+    //   4. `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`
+    //      — the original path. Real Guesty payloads rarely populate
+    //      this; kept as a last-resort fallback.
     const vrboInfo = toInfo(vrboData);
     const vrboLicense = (() => {
       // From tags (most complete — has TAT/GET/TMK)
@@ -489,6 +495,13 @@ class GuestyService {
       const fromTagsTat = tagValue("TAT:");
       const fromTagsGet = tagValue("GET:");
       const fromTagsTmk = tagValue("TMK:");
+
+      // From listing top-level (the Guesty-canonical path the admin UI
+      // writes to). `licenseNumber` is the Registration/License Number
+      // field (TAT for Hawaii); `taxId` is the General Excise/Tax ID
+      // field (GET for Hawaii).
+      const fromTopLevelTat = typeof listing.licenseNumber === "string" && listing.licenseNumber.trim() ? listing.licenseNumber.trim() : null;
+      const fromTopLevelGet = typeof listing.taxId === "string" && listing.taxId.trim() ? listing.taxId.trim() : null;
 
       // From Booking.com Hawaii variant contentData (TAT + TMK only)
       const bookingInteg = integrations.find((i) => i.platform === "bookingCom" || i.platform === "bookingCom2") as Record<string, unknown> | undefined;
@@ -505,8 +518,8 @@ class GuestyService {
       // Legacy/future-proof: channels.homeaway path
       const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
 
-      const licenseNumber = fromTagsTat || fromBookingTat || homeaway.licenseNumber || null;
-      const taxId         = fromTagsGet || homeaway.taxId || null;
+      const licenseNumber = fromTagsTat || fromTopLevelTat || fromBookingTat || homeaway.licenseNumber || null;
+      const taxId         = fromTagsGet || fromTopLevelGet || homeaway.taxId || null;
       const parcelNumber  = fromTagsTmk || fromBookingTmk || homeaway.parcelNumber || null;
       if (!licenseNumber && !taxId && !parcelNumber) return null;
       return { licenseNumber, taxId, parcelNumber };
