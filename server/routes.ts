@@ -12712,6 +12712,107 @@ CONSTRAINTS
     }
   });
 
+  // List individual payment records for a reservation, normalized to
+  // `[{ date: "YYYY-MM-DD", amount: number, description?: string }]` so
+  // the inbox receipt-template UI can pre-populate a per-payment
+  // breakdown. Guesty's reservation payload exposes payment data under
+  // several different shapes depending on account / channel /
+  // integration version (`money.payments[]`, `money.transactions[]`,
+  // `money.invoiceItems[]` filtered by type, top-level
+  // `reservation.payments[]`), so we walk all of them and merge
+  // whatever we find. When nothing is extractable we return the raw
+  // `money` object alongside the empty list to make debugging easy.
+  app.get("/api/inbox/reservations/:reservationId/payments", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const r = await guestyRequest(
+        "GET",
+        `/reservations/${reservationId}?fields=money`,
+      ) as any;
+      const reservation = (r && typeof r === "object" && "data" in r) ? (r as any).data : r;
+      const money = (reservation as any)?.money ?? {};
+
+      type Pay = { date: string; amount: number; description?: string };
+      const collected: Pay[] = [];
+      const seen = new Set<string>();
+
+      const isoDate = (v: unknown): string => {
+        if (!v) return "";
+        const d = new Date(String(v));
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toISOString().slice(0, 10);
+      };
+
+      const pushIfPayment = (item: any, defaultDescription = "") => {
+        if (!item || typeof item !== "object") return;
+        const amount = Number(item.amount ?? item.value ?? item.paidAmount ?? 0);
+        if (!Number.isFinite(amount) || amount <= 0) return;
+        const date = isoDate(
+          item.paidAt ?? item.paymentDate ?? item.processedAt ?? item.date ?? item.createdAt,
+        );
+        const description = String(
+          item.description ?? item.note ?? item.label ?? defaultDescription ?? "",
+        );
+        // Dedupe across shapes — Guesty sometimes mirrors the same
+        // payment under both `money.payments` and `money.invoiceItems`.
+        const key = `${date}|${amount.toFixed(2)}|${description}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        collected.push({ date, amount, description });
+      };
+
+      if (Array.isArray(money.payments)) {
+        for (const p of money.payments) pushIfPayment(p);
+      }
+
+      if (Array.isArray(money.transactions)) {
+        for (const t of money.transactions) {
+          const status = String(t?.status ?? "").toLowerCase();
+          const type = String(t?.type ?? t?.kind ?? "").toLowerCase();
+          // Skip refunds, failed charges, authorizations.
+          if (/refund|void|fail|declin|auth/.test(type) && !/captured/.test(type)) continue;
+          if (/refund|fail|declin|void/.test(status)) continue;
+          if (/payment|charge|paid|capture|succeeded/.test(type) || status === "succeeded") {
+            pushIfPayment(t);
+          }
+        }
+      }
+
+      if (Array.isArray(money.invoiceItems)) {
+        for (const it of money.invoiceItems) {
+          const type = String(it?.type ?? it?.subType ?? "").toUpperCase();
+          if (type.includes("PAYMENT") || type.includes("PAID")) {
+            pushIfPayment(it);
+          }
+        }
+      }
+
+      if (Array.isArray((reservation as any)?.payments)) {
+        for (const p of (reservation as any).payments) pushIfPayment(p);
+      }
+
+      collected.sort((a, b) => {
+        const ta = new Date(a.date || 0).getTime();
+        const tb = new Date(b.date || 0).getTime();
+        return ta - tb;
+      });
+
+      return res.json({
+        payments: collected,
+        totalPrice: Number(money.totalPrice ?? 0),
+        totalPaid: Number(money.totalPaid ?? 0),
+        balanceDue: Number(money.balanceDue ?? 0),
+        // Surface the raw money payload only when extraction came up
+        // empty — gives the operator (and us) a way to see what Guesty
+        // actually returned without having to hit the debug endpoint.
+        ...(collected.length === 0 ? { _money: money } : {}),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/inbox/reservations/:reservationId/airbnb/preapprove", async (req, res) => {
     const reservationId = req.params.reservationId;
     if (!reservationId) return res.status(400).json({ error: "reservationId required" });

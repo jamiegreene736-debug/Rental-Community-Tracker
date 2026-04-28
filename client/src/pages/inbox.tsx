@@ -279,6 +279,45 @@ function channelBadge(raw: string) {
   return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-400 text-white">{src}</span>;
 }
 
+// ─── Inbound message cleanup ───────────────────────────────────────────────────
+// Some Guesty channel integrations forward inbound emails as a full HTML
+// document (`<!DOCTYPE html><html>...</html>`). The inbox renders message
+// bodies as plain text, so without scrubbing the markup leaks through to
+// the operator (and the conversation-list preview) as raw tags. We don't
+// want to render unsanitised HTML — that's a clean XSS path — so this
+// converts to readable plain text instead: strip head/style/script blocks
+// entirely, turn block-level closers and `<br>` into newlines, drop the
+// remaining tags, decode common entities, collapse whitespace. Only fires
+// when the body actually looks like HTML, so plain-text replies that
+// happen to contain a stray `<` or `>` survive untouched.
+function cleanMessageBody(raw: string): string {
+  if (!raw) return "";
+  const trimmed = raw.trim();
+  const looksHtml =
+    /^<!DOCTYPE/i.test(trimmed) ||
+    /<\/?(html|body|head|p|br|div)\b/i.test(raw);
+  if (!looksHtml) return raw;
+  let s = raw;
+  s = s.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "");
+  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  s = s.replace(/<!DOCTYPE[^>]*>/gi, "");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/(p|div|li|tr|h[1-6]|blockquote)\s*>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, "");
+  s = s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+  s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
 // ─── Outbound message templates ────────────────────────────────────────────────
 // Guest-facing messages sent from the inbox are signed by the operator's
 // brand. Sender + brand live in one place so future templates pick up the
@@ -301,10 +340,11 @@ const formatLongDate = (isoYmd: string): string => {
   });
 };
 
-// Renders a payment-receipt body. `paidAfterPayment` is the total the
-// guest has paid AFTER today's payment was applied — Guesty's
-// `money.totalPaid` typically reflects this once the charge posts, but
-// the dialog lets the operator override either field.
+// Renders a payment-receipt body. `pastPayments` lists every prior
+// payment on the booking (date + amount); today's charge is supplied
+// separately as `paymentAmount` / `paymentDateIso` so it can be flagged
+// "(today's payment)" inline. Total paid is derived by summing all
+// payments — there's no separate aggregate field to keep in sync.
 function buildReceiptBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -312,29 +352,51 @@ function buildReceiptBody(args: {
   paymentAmount: number;
   paymentDateIso: string;
   bookingTotal: number;
-  paidAfterPayment: number;
+  pastPayments: Array<{ date: string; amount: number }>;
 }): string {
-  const balance = Math.max(0, args.bookingTotal - args.paidAfterPayment);
+  const past = args.pastPayments
+    .filter((p) => p.amount > 0)
+    .map((p) => ({ date: p.date, amount: p.amount, isToday: false }));
+  const todayRow = args.paymentAmount > 0
+    ? [{ date: args.paymentDateIso, amount: args.paymentAmount, isToday: true }]
+    : [];
+  const allPayments = [...past, ...todayRow];
+  const totalPaid = allPayments.reduce((sum, p) => sum + p.amount, 0);
+  const balance = Math.max(0, args.bookingTotal - totalPaid);
   const stayLabel = args.propertyName ? ` for your stay at ${args.propertyName}` : "";
   const checkInLine = args.checkInIso
     ? ` (check-in ${formatLongDate(args.checkInIso.slice(0, 10))})`
     : "";
 
-  return [
+  const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
     `This is ${OUTBOUND_SENDER_NAME} with ${OUTBOUND_BRAND_NAME} confirming we just processed a payment of ${formatMoney(args.paymentAmount)} on ${formatLongDate(args.paymentDateIso)} on the card we have on file${stayLabel}${checkInLine}.`,
     ``,
-    `Booking total:     ${formatMoney(args.bookingTotal)}`,
-    `Paid to date:      ${formatMoney(args.paidAfterPayment)}`,
-    `Remaining balance: ${formatMoney(balance)}`,
-    ``,
-    `If you have any questions about this charge or your reservation, just reply to this message — happy to help.`,
-    ``,
-    `Thanks,`,
-    `${OUTBOUND_SENDER_NAME}`,
-    `${OUTBOUND_BRAND_NAME}`,
-  ].join("\n");
+    `Booking total: ${formatMoney(args.bookingTotal)}`,
+  ];
+
+  if (allPayments.length > 1) {
+    lines.push(``);
+    lines.push(`Payment history:`);
+    for (const p of allPayments) {
+      const dateLabel = p.date ? formatLongDate(p.date.slice(0, 10)) : "Date —";
+      const tag = p.isToday ? " (today's payment)" : "";
+      lines.push(`  • ${dateLabel}: ${formatMoney(p.amount)}${tag}`);
+    }
+  }
+
+  lines.push(``);
+  lines.push(`Total paid to date: ${formatMoney(totalPaid)}`);
+  lines.push(`Remaining balance:  ${formatMoney(balance)}`);
+  lines.push(``);
+  lines.push(`If you have any questions about this charge or your reservation, just reply to this message — happy to help.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+
+  return lines.join("\n");
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -423,12 +485,13 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.listingTitle ??
     "—";
 
-  const preview =
+  const preview = cleanMessageBody(
     lastMsg.body ??
-    lastMsg.text ??
-    lastMsg.message ??
-    meta.lastMessagePreview ??
-    "";
+      lastMsg.text ??
+      lastMsg.message ??
+      meta.lastMessagePreview ??
+      "",
+  );
 
   // v2 list endpoint doesn't return a last-message timestamp, so fall back to
   // the conversation's createdAt so rows at least show some date.
@@ -677,7 +740,14 @@ export default function InboxPage() {
   const [receiptPaymentAmount, setReceiptPaymentAmount] = useState<string>("");
   const [receiptPaymentDate, setReceiptPaymentDate] = useState<string>("");
   const [receiptTotalPrice, setReceiptTotalPrice] = useState<string>("");
-  const [receiptTotalPaid, setReceiptTotalPaid] = useState<string>("");
+  // Editable list of prior payments shown to the guest as a per-line
+  // breakdown ("Jan 5, 2026: $4,200 · Feb 28, 2026: $4,000 · today: $200").
+  // Pre-populated from Guesty's payment records when the dialog opens;
+  // operator can edit, add, or remove rows on the fly.
+  const [receiptPastPayments, setReceiptPastPayments] = useState<
+    Array<{ id: string; date: string; amount: string }>
+  >([]);
+  const [receiptPaymentsLoading, setReceiptPaymentsLoading] = useState<boolean>(false);
   const [receiptBody, setReceiptBody] = useState<string>("");
   const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
@@ -837,6 +907,9 @@ export default function InboxPage() {
     if (!receiptDialog.open) return;
     if (receiptBodyTouched) return;
     if (!receiptPaymentDate) return;
+    const pastPayments = receiptPastPayments
+      .map((p) => ({ date: p.date, amount: parseFloat(p.amount) || 0 }))
+      .filter((p) => p.amount > 0);
     const body = buildReceiptBody({
       guestFirstName: receiptDialog.guestFirstName,
       propertyName: receiptDialog.propertyName,
@@ -844,7 +917,7 @@ export default function InboxPage() {
       paymentAmount: parseFloat(receiptPaymentAmount) || 0,
       paymentDateIso: receiptPaymentDate,
       bookingTotal: parseFloat(receiptTotalPrice) || 0,
-      paidAfterPayment: parseFloat(receiptTotalPaid) || 0,
+      pastPayments,
     });
     setReceiptBody(body);
   }, [
@@ -855,16 +928,20 @@ export default function InboxPage() {
     receiptPaymentAmount,
     receiptPaymentDate,
     receiptTotalPrice,
-    receiptTotalPaid,
+    receiptPastPayments,
     receiptBodyTouched,
   ]);
+
+  const newReceiptRowId = () =>
+    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   const resetReceiptState = () => {
     setReceiptDialog({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
     setReceiptPaymentAmount("");
     setReceiptPaymentDate("");
     setReceiptTotalPrice("");
-    setReceiptTotalPaid("");
+    setReceiptPastPayments([]);
+    setReceiptPaymentsLoading(false);
     setReceiptBody("");
     setReceiptBodyTouched(false);
   };
@@ -1496,7 +1573,7 @@ export default function InboxPage() {
                           return ta - tb; // ascending: oldest at top, newest at bottom
                         })
                         .map((p: any) => {
-                          const bodyText = p.body ?? p.text ?? p.message ?? "";
+                          const bodyText = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
                           const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
                           const isHost =
                             p.authorType === "host" ||
@@ -1955,7 +2032,6 @@ export default function InboxPage() {
                             onClick={() => {
                               const totalPriceFromMoney =
                                 asNum(m.totalPrice) || guestGross || 0;
-                              const totalPaidFromMoney = asNum(m.totalPaid);
                               const propertyName = listing.title ?? listing.nickname ?? "";
                               const fullName = guest.fullName ?? selectedConv.displayGuestName ?? "";
                               const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
@@ -1969,11 +2045,29 @@ export default function InboxPage() {
                                 checkInIso: res?.checkIn,
                               });
                               setReceiptTotalPrice(totalPriceFromMoney > 0 ? totalPriceFromMoney.toFixed(2) : "");
-                              setReceiptTotalPaid(totalPaidFromMoney > 0 ? totalPaidFromMoney.toFixed(2) : "");
+                              setReceiptPastPayments([]);
+                              setReceiptPaymentsLoading(true);
                               setReceiptPaymentAmount("");
                               setReceiptPaymentDate(todayIso);
                               setReceiptBody("");
                               setReceiptBodyTouched(false);
+                              // Best-effort fetch of prior payment records
+                              // from Guesty. The dialog opens immediately
+                              // and the list backfills when the response
+                              // lands; if it fails or returns nothing the
+                              // operator can add rows manually.
+                              apiRequest("GET", `/api/inbox/reservations/${res._id}/payments`)
+                                .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+                                .then((data: any) => {
+                                  const rows = (data?.payments ?? []).map((p: any) => ({
+                                    id: newReceiptRowId(),
+                                    date: String(p.date ?? "").slice(0, 10),
+                                    amount: typeof p.amount === "number" ? p.amount.toFixed(2) : String(p.amount ?? ""),
+                                  }));
+                                  setReceiptPastPayments(rows);
+                                })
+                                .catch(() => { /* leave list empty; operator can add manually */ })
+                                .finally(() => setReceiptPaymentsLoading(false));
                             }}
                             data-testid="button-send-receipt"
                           >
@@ -2570,39 +2664,93 @@ export default function InboxPage() {
                 </p>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label htmlFor="receipt-total-price">Booking total (USD)</Label>
-                <Input
-                  id="receipt-total-price"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={receiptTotalPrice}
-                  onChange={(e) => setReceiptTotalPrice(e.target.value)}
-                  placeholder="1500.00"
-                  data-testid="input-receipt-total-price"
-                />
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Pre-filled from Guesty.
-                </p>
+            <div>
+              <Label htmlFor="receipt-total-price">Booking total (USD)</Label>
+              <Input
+                id="receipt-total-price"
+                type="number"
+                min={0}
+                step="0.01"
+                value={receiptTotalPrice}
+                onChange={(e) => setReceiptTotalPrice(e.target.value)}
+                placeholder="1500.00"
+                className="max-w-xs"
+                data-testid="input-receipt-total-price"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Pre-filled from Guesty.
+              </p>
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <Label>Previous payments</Label>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() =>
+                    setReceiptPastPayments((rows) => [
+                      ...rows,
+                      { id: newReceiptRowId(), date: "", amount: "" },
+                    ])
+                  }
+                  data-testid="button-receipt-add-payment"
+                >
+                  <Plus className="h-3 w-3 mr-1" /> Add payment
+                </Button>
               </div>
-              <div>
-                <Label htmlFor="receipt-total-paid">Paid to date (USD)</Label>
-                <Input
-                  id="receipt-total-paid"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={receiptTotalPaid}
-                  onChange={(e) => setReceiptTotalPaid(e.target.value)}
-                  placeholder="900.00"
-                  data-testid="input-receipt-total-paid"
-                />
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Total paid <em>after</em> this payment was applied. Pre-filled from Guesty — adjust if Guesty hasn't caught up yet.
+              {receiptPaymentsLoading ? (
+                <p className="text-[11px] text-muted-foreground italic">
+                  Loading payment history from Guesty…
                 </p>
-              </div>
+              ) : receiptPastPayments.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground italic">
+                  No previous payments on file. Today's charge below will be the only line item — add rows here if you took earlier payments outside Guesty.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {receiptPastPayments.map((row) => (
+                    <div key={row.id} className="flex items-center gap-2">
+                      <Input
+                        type="date"
+                        value={row.date}
+                        onChange={(e) =>
+                          setReceiptPastPayments((rows) =>
+                            rows.map((r) => (r.id === row.id ? { ...r, date: e.target.value } : r)),
+                          )
+                        }
+                        className="w-44"
+                        data-testid={`input-receipt-past-date-${row.id}`}
+                      />
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={row.amount}
+                        onChange={(e) =>
+                          setReceiptPastPayments((rows) =>
+                            rows.map((r) => (r.id === row.id ? { ...r, amount: e.target.value } : r)),
+                          )
+                        }
+                        placeholder="amount"
+                        className="flex-1"
+                        data-testid={`input-receipt-past-amount-${row.id}`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-9 w-9 p-0 shrink-0"
+                        onClick={() =>
+                          setReceiptPastPayments((rows) => rows.filter((r) => r.id !== row.id))
+                        }
+                        data-testid={`button-receipt-remove-payment-${row.id}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div>
               <Label htmlFor="receipt-body">Message preview</Label>
