@@ -46,7 +46,10 @@ type CacheEntry = { value: PmFinderResult[]; expiresAt: number };
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const AGENT_MODEL = "claude-sonnet-4-5";
+// See note in stagehand-vrbo-search.ts — Stagehand 3.x requires the
+// slash-prefixed CUA model identifier; bare "claude-sonnet-4-5" errors
+// with "Unsupported model" and silently empties the path.
+const AGENT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
 const TOTAL_WALL_BUDGET_MS = 120_000;
 
 // Same domain blacklist used by the Airbnb→Lens photo-match path.
@@ -101,7 +104,9 @@ export async function findPmsViaStagehand(opts: {
       proxies: true,
       browserSettings: { viewport: { width: 1280, height: 800 } },
     },
-    model: { provider: "anthropic", modelName: AGENT_MODEL, apiKey: anthropicKey },
+    // Drop the explicit `provider` field (see stagehand-vrbo-search.ts
+    // for rationale).
+    model: { modelName: AGENT_MODEL, apiKey: anthropicKey },
     verbose: 1,
   });
 

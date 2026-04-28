@@ -25,7 +25,12 @@ import { scrapeVrboRate } from "./pm-scraper-vrbo";
 import Browserbase from "@browserbasehq/sdk";
 import { chromium } from "playwright";
 
-const VERIFIER_MODEL = "claude-haiku-4-5-20251001";
+// Stagehand 3.x requires the `provider/model` slash-prefixed identifier
+// from its AVAILABLE_CUA_MODELS list; the bare model name throws
+// "Unsupported model" and silently turns every per-row verify into
+// `available: "unclear"`. See stagehand-vrbo-search.ts for the deeper
+// note.
+const VERIFIER_MODEL = "anthropic/claude-haiku-4-5-20251001";
 const NAV_TIMEOUT_MS = 30_000;
 const SETTLE_DELAY_MS = 3_500;
 const TOTAL_WALL_BUDGET_MS = 60_000;
@@ -318,7 +323,10 @@ function newStagehand(opts: { bbApiKey: string; bbProjectId: string; anthropicKe
       proxies: true,
       browserSettings: { viewport: { width: 1280, height: 800 } },
     },
-    model: { provider: "anthropic", modelName: VERIFIER_MODEL, apiKey: opts.anthropicKey },
+    // Drop the explicit `provider` field — Stagehand parses the slash
+    // prefix off `modelName` and an explicit provider short-circuits
+    // that parser back into the "Unsupported model" error path.
+    model: { modelName: VERIFIER_MODEL, apiKey: opts.anthropicKey },
     verbose: 1,
   });
 }

@@ -61,7 +61,13 @@ type CacheEntry = { value: StagehandVrboCandidate[]; expiresAt: number };
 const searchCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const AGENT_MODEL = "claude-sonnet-4-5";
+// Stagehand 3.x rejects the old `{ provider, modelName }` config and
+// requires a `provider/model` slash-prefixed string from its
+// AVAILABLE_CUA_MODELS list (see @browserbasehq/stagehand
+// dist/.../agent.js). Bare "claude-sonnet-4-5" returned an
+// "Unsupported model" error and silently emptied every Stagehand-driven
+// search. The dated identifier is the canonical CUA model name.
+const AGENT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
 // Hard wall budget. The agent can stall if Vrbo serves an unexpected
 // modal (cookie banner, currency picker, login prompt) — bound the
 // session so we don't burn $5 of tokens on a single find-buy-in.
@@ -156,7 +162,10 @@ export async function searchVrboViaStagehandWithDebug(opts: {
       proxies: true,
       browserSettings: { viewport: { width: 1280, height: 800 } },
     },
-    model: { provider: "anthropic", modelName: AGENT_MODEL, apiKey: anthropicKey },
+    // Drop the explicit `provider` field — Stagehand parses the slash
+    // prefix off `modelName` and an explicit provider would short-circuit
+    // that parsing and re-trigger the "Unsupported model" path.
+    model: { modelName: AGENT_MODEL, apiKey: anthropicKey },
     verbose: 1,
   });
 
