@@ -17,6 +17,7 @@ import { searchVrboViaTrivago } from "./trivago-vrbo-search";
 import { searchVrboViaApifyWebScraper } from "./apify-vrbo-web-scraper";
 import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { searchVrboViaStagehand } from "./stagehand-vrbo-search";
+import { findPmsViaStagehand } from "./stagehand-pm-finder";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -3290,7 +3291,69 @@ export async function registerRoutes(
         });
       }
     }
-    const pmAugmented: Candidate[] = [...pm, ...photoMatchPmCandidates];
+    // ── Path C: Stagehand PM finder (escalation) ──────────────────────────
+    // When the cheap paths (Booking + PM Google + per-PM sitemaps + Airbnb-
+    // anchored photo-match) all came up dry on priced bookable candidates,
+    // fall back to a Stagehand agent that drives Google like a human:
+    // searches `"<resort>" <BR> bedroom vacation rental property management
+    // book directly`, dismisses any consent overlay, scrolls past the
+    // PAA / Maps panels, and extracts the long-tail organic PM URLs.
+    //
+    // Only fires when `priced bookable < 3` so we don't pay $0.30 on
+    // every find-buy-in. Cached 5min so repeat fires within a window
+    // are free. Returned URLs are unpriced (the agent doesn't drive
+    // each PM's availability widget — that's what verifyPmRate is
+    // for) but they give the operator a click-through link to a PM
+    // site that the structured Google site:search may have missed.
+    const PM_FINDER_THRESHOLD = 3;
+    const pricedBookableSoFar = [...booking, ...pm, ...photoMatchPmCandidates]
+      .filter((c) => c.nightlyPrice > 0).length;
+    const finderBbApiKey = process.env.BROWSERBASE_API_KEY;
+    const finderBbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    const finderAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    let pmFinderCandidates: Candidate[] = [];
+    if (
+      pricedBookableSoFar < PM_FINDER_THRESHOLD &&
+      finderBbApiKey &&
+      finderBbProjectId &&
+      finderAnthropicKey
+    ) {
+      console.log(
+        `[find-buy-in] pm-finder firing: priced bookable=${pricedBookableSoFar} < ${PM_FINDER_THRESHOLD}`,
+      );
+      try {
+        const finderResults = await findPmsViaStagehand({
+          resortName,
+          destination: resortName ?? community,
+          bedrooms,
+          checkIn,
+          checkOut,
+          bbApiKey: finderBbApiKey,
+          bbProjectId: finderBbProjectId,
+          anthropicKey: finderAnthropicKey,
+        });
+        const existingPmUrls = new Set<string>([
+          ...pm.map((c) => c.url),
+          ...photoMatchPmCandidates.map((c) => c.url),
+        ]);
+        pmFinderCandidates = finderResults
+          .filter((r) => !existingPmUrls.has(r.url))
+          .map((r): Candidate => ({
+            source: "pm",
+            sourceLabel: r.domain,
+            title: r.title || `Match on ${r.domain}`,
+            url: r.url,
+            nightlyPrice: 0,
+            totalPrice: 0,
+            bedrooms: undefined,
+          }));
+        console.log(`[find-buy-in] pm-finder added ${pmFinderCandidates.length} new PM URLs`);
+      } catch (e: any) {
+        console.error(`[find-buy-in] pm-finder error:`, e?.message ?? e);
+      }
+    }
+
+    const pmAugmented: Candidate[] = [...pm, ...photoMatchPmCandidates, ...pmFinderCandidates];
 
     // Combined cheapest (top 2) across BOOKABLE sources that have pricing.
     //
@@ -3349,7 +3412,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length} (google+photoMatches+sp+pk+cb) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length}${airbnbCheapest[0] ? ` (airbnb-cheapest=${airbnbCheapest[0].nightlyPrice}, excluded)` : ""}`
     );
@@ -3369,7 +3432,7 @@ export async function registerRoutes(
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: { airbnb: airbnbDropped, vrbo: vrboDropped, booking: bookingDropped },
         searchLocation,
         vrboDestination,
