@@ -7336,6 +7336,96 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/admin/vrbo-stagehand-debug
+  //
+  // One-off diagnostic for the Stagehand VRBO search path. Runs the
+  // same searchVrboViaStagehand the buy-in flow uses, but bypasses the
+  // 5-min in-process cache and returns the full debug payload: agent
+  // success/completed/message, all action tool calls, the final page
+  // URL when extraction ran, the raw extracted property list (before
+  // our filters), the rejection-reason histogram, and a JPEG screenshot
+  // of the page at extraction time.
+  //
+  // Use this when the buy-in cheapest panel keeps showing 0 priced
+  // VRBO results — feed any failing slot's destination + dates here
+  // and the response tells you exactly which step Stagehand stalled
+  // on (autocomplete, date picker, search button, anti-bot wall, etc.).
+  //
+  // Query params:
+  //   destination — required, the human-readable destination string
+  //                 (e.g. "Poipu Kai" / "Princeville")
+  //   checkIn     — required, YYYY-MM-DD
+  //   checkOut    — required, YYYY-MM-DD
+  //   bedrooms    — optional, defaults to 3 (only used as a hint
+  //                 in the agent prompt; doesn't filter results)
+  //
+  // Cost: ~$0.20–0.50 in agent tokens + 1 Browserbase residential-IP
+  // session, ~60-120s wall time per call. Each call is a fresh session
+  // (bypassCache: true) so back-to-back hits don't collide.
+  app.get("/api/admin/vrbo-stagehand-debug", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const destination = String(req.query.destination ?? "").trim();
+    const checkIn = String(req.query.checkIn ?? "").trim();
+    const checkOut = String(req.query.checkOut ?? "").trim();
+    const bedrooms = Number(req.query.bedrooms ?? 3) || 3;
+    if (!destination) return res.status(400).json({ error: "destination query param required" });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn)) return res.status(400).json({ error: "checkIn (YYYY-MM-DD) required" });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) return res.status(400).json({ error: "checkOut (YYYY-MM-DD) required" });
+    const bbApiKey = process.env.BROWSERBASE_API_KEY;
+    const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!bbApiKey || !bbProjectId || !anthropicKey) {
+      return res.status(500).json({
+        error: "BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID / ANTHROPIC_API_KEY not all set",
+      });
+    }
+    try {
+      const { searchVrboViaStagehandWithDebug } = await import("./stagehand-vrbo-search");
+      const result = await searchVrboViaStagehandWithDebug({
+        resortName: destination,
+        destination,
+        bedrooms,
+        checkIn,
+        checkOut,
+        bbApiKey,
+        bbProjectId,
+        anthropicKey,
+        bypassCache: true,
+      });
+      // Save the screenshot to /photos/debug/ so the operator can also
+      // pull it up by URL — easier to inspect than a base64 in the JSON.
+      let screenshotUrl: string | null = null;
+      if (result.debug.screenshotBase64) {
+        try {
+          const debugDir = path.resolve(process.cwd(), "client/public/photos/debug");
+          if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+          const fname = `vrbo-stagehand-${Date.now()}.jpg`;
+          fs.writeFileSync(
+            path.join(debugDir, fname),
+            Buffer.from(result.debug.screenshotBase64, "base64"),
+          );
+          screenshotUrl = `/photos/debug/${fname}`;
+        } catch (e: any) {
+          console.warn(`[vrbo-stagehand-debug] couldn't save screenshot:`, e?.message ?? e);
+        }
+      }
+      return res.json({
+        ok: true,
+        candidatesReturned: result.candidates.length,
+        candidates: result.candidates,
+        debug: {
+          ...result.debug,
+          // Strip the base64 from the JSON payload (it's huge);
+          // operator pulls the file via screenshotUrl instead.
+          screenshotBase64: undefined,
+          screenshotUrl,
+        },
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // POST /api/admin/guesty/save-session
   //
   // Operator paste path. Accepts cookies + okta-token-storage and writes
