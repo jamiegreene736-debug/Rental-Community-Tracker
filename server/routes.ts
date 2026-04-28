@@ -11367,6 +11367,84 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/community/:id/persist-community-photos
+  //
+  // Auto-fetches 6 community-level photos (resort grounds, pools,
+  // building exteriors) for a promoted draft and saves them to a
+  // `community-draft-<id>` folder under client/public/photos. Composes
+  // the existing /api/community-photos/search + /api/community-photos/
+  // save flow that operators run by hand from the Community Photo
+  // Finder page for the static 11 properties. Drafts get the same
+  // treatment automatically on save so the Photos tab's community
+  // section isn't blank when the operator opens the builder.
+  //
+  // Best-effort: returns 200 with `{ ok: false, reason }` if no
+  // candidates were found or the save step failed. The wizard's save
+  // flow keeps going either way — community photos are nice-to-have,
+  // not blocking. Subsequent re-saves will retry the search; an
+  // operator can also re-run by hand from the Community Photo Finder
+  // page once the draft is promoted (folder name is exposed via the
+  // builder's photos tab).
+  app.post("/api/community/:id/persist-community-photos", async (req, res) => {
+    const draftId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
+
+    const draft = await storage.getCommunityDraft(draftId);
+    if (!draft) return res.status(404).json({ error: "Draft not found" });
+
+    const folder = `community-draft-${draftId}`;
+    const port = process.env.PORT || "5000";
+    const base = `http://127.0.0.1:${port}`;
+
+    // Search step. The existing endpoint runs five Google Images
+    // queries in parallel + scoring; reuse it via an in-process HTTP
+    // call rather than copy-pasting ~170 lines of search/scoring code.
+    let topUrls: string[] = [];
+    try {
+      const searchResp = await fetch(
+        `${base}/api/community-photos/search?communityName=${encodeURIComponent(draft.name)}`,
+        { signal: AbortSignal.timeout(45_000) },
+      );
+      if (!searchResp.ok) {
+        const text = await searchResp.text().catch(() => "");
+        return res.status(200).json({ ok: false, reason: `search failed (${searchResp.status}): ${text.slice(0, 200)}` });
+      }
+      const searchData = (await searchResp.json()) as { results?: Array<{ url: string }> };
+      topUrls = (searchData.results || []).slice(0, 6).map((r) => r.url).filter((u) => typeof u === "string" && /^https?:\/\//i.test(u));
+    } catch (e: any) {
+      return res.status(200).json({ ok: false, reason: `search error: ${e.message}` });
+    }
+
+    if (topUrls.length === 0) {
+      return res.status(200).json({ ok: false, folder, reason: "no candidate community photos found" });
+    }
+
+    // Save step. Self-fetch /api/community-photos/save so we get the
+    // shared download + Claude-vision auto-label pipeline (the save
+    // endpoint kicks off labels fire-and-forget after writing the
+    // files, see auto-label block above).
+    try {
+      const saveResp = await fetch(`${base}/api/community-photos/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ communityFolder: folder, imageUrls: topUrls }),
+      });
+      const saveData = (await saveResp.json()) as { saved?: string[]; failed?: string[]; error?: string };
+      if (!saveResp.ok) {
+        return res.status(200).json({ ok: false, folder, reason: saveData?.error || "save failed" });
+      }
+      console.log(`[draft-community-photos] draft ${draftId}: saved ${saveData.saved?.length ?? 0}, failed ${saveData.failed?.length ?? 0}`);
+      return res.json({
+        ok: true,
+        folder,
+        saved: saveData.saved?.length ?? 0,
+        failed: saveData.failed?.length ?? 0,
+      });
+    } catch (e: any) {
+      return res.status(200).json({ ok: false, folder, reason: `save error: ${e.message}` });
+    }
+  });
+
   // ============================================================
   // Step 2: Research communities in a city/state via SearchAPI + Claude scoring
   // ============================================================
