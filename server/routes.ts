@@ -3992,7 +3992,20 @@ export async function registerRoutes(
     // Kaha Lani's units. Same Kapaa Beachfront pricing tier the
     // operator already uses for buy-in calculations, just with a
     // richer sample set.
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0500, lng: -159.3280 },
+    // PR #252's midpoint bbox (22.05, -159.328) returned 18/18
+    // outsideBbox — moving the bbox north of the engine's
+    // q="Kaha Lani Resort Wailua Hawaii" query area meant the engine
+    // kept surfacing Wailua-clustered listings the bbox then rejected.
+    // The engine's text query and the bbox need to align. Realign
+    // both to the operator's hand-curated COMMUNITY_BOUNDS["Kapaa
+    // Beachfront"] zone (center 22.072, -159.320 — Kapaa proper),
+    // which is also how the operator's BUY_IN_RATES["Kapaa
+    // Beachfront"] table is calibrated. The search now returns east-
+    // shore Kapaa condo comps (Lae Nani, Pono Kai, etc.) rather than
+    // Kaha Lani-specific listings — appropriate because the operator's
+    // entire pricing tier for this propertyId is keyed on the
+    // "Kapaa Beachfront" community label, not Kaha Lani specifically.
+    "Kapaa Beachfront":  { searchName: "Kapaa Beachfront",            city: "Kapaa",       state: "Hawaii",                                                lat: 22.0720, lng: -159.3200 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
