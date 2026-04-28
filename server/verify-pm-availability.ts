@@ -22,6 +22,8 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
 import { scrapeVrboRate } from "./pm-scraper-vrbo";
+import Browserbase from "@browserbasehq/sdk";
+import { chromium } from "playwright";
 
 const VERIFIER_MODEL = "claude-haiku-4-5-20251001";
 const NAV_TIMEOUT_MS = 30_000;
@@ -59,6 +61,187 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 
 function isVrboUrl(url: string): boolean {
   return /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+}
+
+function isBookingUrl(url: string): boolean {
+  return /^https?:\/\/(?:www\.)?booking\.com\//i.test(url);
+}
+
+// Force Booking.com URL to carry checkin/checkout query params. Booking
+// renders a different page when dates are absent (the "Reserve" CTA
+// without dates), and the operator's window-specific availability check
+// only works when those params are present. We respect existing values
+// if the URL already has them — operator-pasted URLs sometimes carry
+// useful tracking params that shouldn't be clobbered.
+function ensureBookingDates(url: string, checkIn: string, checkOut: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.searchParams.has("checkin")) u.searchParams.set("checkin", checkIn);
+    if (!u.searchParams.has("checkout")) u.searchParams.set("checkout", checkOut);
+    if (!u.searchParams.has("group_adults")) u.searchParams.set("group_adults", "2");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+// Booking.com-specific deterministic verifier. The Stagehand+Haiku path
+// returned "unclear" on most Booking pages because the unavailability
+// banner ("We have no availability here between ..." in a red error
+// box) sits in the Availability section BELOW the property highlights —
+// Stagehand's default extract reads the visible viewport and missed it.
+//
+// This scraper opens the URL, waits for hydration, scrolls past the
+// fold, then reads the visible text for the banner copy. No LLM —
+// the banner is a deterministic Booking.com string, not a layout we
+// have to interpret. Same Browserbase residential-IP cost as the Vrbo
+// scraper (~$0.005/session). Each URL opens its own session so a
+// batch can fan them out in parallel.
+//
+// Returns:
+//   "no"      — clear unavailability banner present.
+//   "yes"     — Reserve / room-table prices visible (page is in a
+//               bookable state for these dates). Optionally extracts
+//               the lowest visible per-night rate from the rooms table.
+//   "unclear" — neither signal found (login wall, CAPTCHA, location
+//               redirect, etc).
+async function verifyBookingViaScraper(opts: {
+  url: string;
+  checkIn: string;
+  checkOut: string;
+  bbApiKey: string;
+  bbProjectId: string;
+}): Promise<VerifyAvailabilityResult> {
+  const startedAt = Date.now();
+  const finalUrl = ensureBookingDates(opts.url, opts.checkIn, opts.checkOut);
+  const bb = new Browserbase({ apiKey: opts.bbApiKey });
+  let session: Awaited<ReturnType<typeof bb.sessions.create>> | null = null;
+  let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+  try {
+    session = await bb.sessions.create({
+      projectId: opts.bbProjectId,
+      proxies: true,
+      browserSettings: { viewport: { width: 1280, height: 900 } },
+    });
+    browser = await chromium.connectOverCDP(session.connectUrl);
+    const ctx = browser.contexts()[0];
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+
+    await page.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    // Booking is JS-heavy; wait for the property page chrome.
+    await page.waitForTimeout(3500);
+    // Scroll past the property highlights / amenities / overview into
+    // the Availability section. ~2× viewport height covers the
+    // standard Booking layout. Multiple scrolls so lazy-loaded blocks
+    // mount even when the operator's session lands on a slow render.
+    await page.evaluate(() => window.scrollBy(0, 1200)).catch(() => {});
+    await page.waitForTimeout(800);
+    await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
+    await page.waitForTimeout(1200);
+
+    const result = await page.evaluate(() => {
+      const fullText = (document.body?.innerText ?? "").toLowerCase();
+      // Deterministic Booking.com no-availability banner copy. The exact
+      // wording rotates ("We have no availability here between X and Y" /
+      // "We're sorry, but there is no availability on our site for these
+      // dates" / "No rooms available"); list every variant we've seen.
+      const NO_PATTERNS = [
+        /we have no availability here between/,
+        /there (?:is|are) no availability/,
+        /no availability for these dates/,
+        /no rooms available/,
+        /sold out for these dates/,
+        /fully booked/,
+        /unavailable for the dates you selected/,
+      ];
+      for (const re of NO_PATTERNS) {
+        const m = re.exec(fullText);
+        if (m) {
+          // Grab a slice of context for the reason field.
+          const idx = m.index;
+          const context = (document.body?.innerText ?? "").slice(
+            Math.max(0, idx - 20),
+            idx + 140,
+          );
+          return {
+            available: "no",
+            reason: `Booking.com page banner: "${context.replace(/\s+/g, " ").trim()}"`,
+            nightlyPrice: null as number | null,
+          };
+        }
+      }
+      // Positive signal: the rooms table or a Reserve / Select-room
+      // affordance. Booking renders these only when the property is
+      // bookable for the requested dates.
+      const reserveSelectors = [
+        '[data-testid="select-room-trigger"]',
+        'button[name="book_this"]',
+        '.hprt-reservation-cta',
+        'a[data-component="atom/Button"][href*="book"]',
+      ];
+      const hasReserve = reserveSelectors.some((sel) => !!document.querySelector(sel));
+      // Lowest visible per-night rate. Booking's room table cell carries
+      // the price in `[data-testid="price-and-discounted-price"]` (recent
+      // template) or `.bui-price-display__value` (older). Look at every
+      // matching node, parse a "$X" number, take the minimum.
+      const priceNodes = Array.from(
+        document.querySelectorAll(
+          '[data-testid="price-and-discounted-price"], .bui-price-display__value, .prco-valign-middle-helper',
+        ),
+      );
+      let lowestPrice: number | null = null;
+      for (const node of priceNodes) {
+        const txt = node.textContent ?? "";
+        const m = txt.match(/\$\s*([\d,]+)/);
+        if (!m) continue;
+        const n = parseInt(m[1].replace(/,/g, ""), 10);
+        if (!Number.isFinite(n) || n <= 0) continue;
+        if (lowestPrice == null || n < lowestPrice) lowestPrice = n;
+      }
+      if (hasReserve || lowestPrice != null) {
+        return {
+          available: "yes" as const,
+          reason: hasReserve
+            ? `Booking.com page has Reserve / Select-room affordance${lowestPrice ? ` ($${lowestPrice} visible)` : ""}`
+            : `Booking.com page shows priced rooms ($${lowestPrice} lowest visible)`,
+          nightlyPrice: lowestPrice,
+        };
+      }
+      return {
+        available: "unclear" as const,
+        reason: "Booking.com page didn't surface a clear availability banner OR a Reserve affordance — possibly a login/CAPTCHA wall",
+        nightlyPrice: null,
+      };
+    });
+
+    const out: VerifyAvailabilityResult = {
+      available: result.available as "yes" | "no" | "unclear",
+      nightlyPriceUsd: result.nightlyPrice,
+      reason: result.reason,
+      finalUrl: page.url(),
+      ms: Date.now() - startedAt,
+    };
+    console.log(
+      `[verify-availability:booking] ${opts.url} → available=${out.available} price=${out.nightlyPriceUsd} (${out.ms}ms)`,
+    );
+    return out;
+  } catch (e: any) {
+    console.error(`[verify-availability:booking] error for ${opts.url}:`, e?.message ?? e);
+    return {
+      available: "unclear",
+      nightlyPriceUsd: null,
+      reason: `booking scraper error: ${e?.message ?? "unknown"}`,
+      finalUrl: opts.url,
+      ms: Date.now() - startedAt,
+    };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    if (session) {
+      await bb.sessions
+        .update(session.id, { projectId: opts.bbProjectId, status: "REQUEST_RELEASE" })
+        .catch(() => {});
+    }
+  }
 }
 
 // Vrbo-specific shortcut. The generic Haiku-on-screenshot extract
@@ -215,6 +398,14 @@ export async function verifyPmAvailability(opts: {
       url, checkIn, checkOut,
       bbApiKey: opts.bbApiKey, bbProjectId: opts.bbProjectId,
     });
+  } else if (isBookingUrl(url)) {
+    // Booking.com-specific shortcut — scrolls past the fold to read
+    // the deterministic "no availability" banner. Higher accuracy than
+    // the Stagehand+Haiku generic path which doesn't scroll.
+    result = await verifyBookingViaScraper({
+      url, checkIn, checkOut,
+      bbApiKey: opts.bbApiKey, bbProjectId: opts.bbProjectId,
+    });
   } else {
     const stagehand = newStagehand(opts);
     try {
@@ -263,31 +454,46 @@ export async function verifyPmAvailabilityBatch(opts: {
     return out;
   }
 
-  // Split: Vrbo URLs go through the deterministic GraphQL-intercept
-  // scraper (each opens its own Browserbase session — runs all in
-  // parallel since they don't share state). Non-Vrbo URLs go through
+  // Split: Vrbo + Booking.com URLs go through deterministic per-URL
+  // scrapers (each opens its own Browserbase session — runs all in
+  // parallel since they don't share state). Other PM URLs go through
   // the single shared Stagehand session sequentially.
   const vrboUrls = toFetch.filter(isVrboUrl);
-  const stagehandUrls = toFetch.filter((u) => !isVrboUrl(u));
+  const bookingUrls = toFetch.filter(isBookingUrl);
+  const stagehandUrls = toFetch.filter((u) => !isVrboUrl(u) && !isBookingUrl(u));
 
   console.log(
-    `[verify-availability] batch: ${urls.length} requested, ${urls.length - toFetch.length} cached, ${vrboUrls.length} vrbo (parallel scraper), ${stagehandUrls.length} non-vrbo (single Stagehand session)`,
+    `[verify-availability] batch: ${urls.length} requested, ${urls.length - toFetch.length} cached, ${vrboUrls.length} vrbo + ${bookingUrls.length} booking (parallel scrapers), ${stagehandUrls.length} other-pm (single Stagehand session)`,
   );
 
-  // Vrbo path — fire all in parallel.
-  if (vrboUrls.length > 0) {
-    const vrboResults = await Promise.all(
-      vrboUrls.map((url) =>
-        verifyVrboViaScraper({
-          url,
-          checkIn,
-          checkOut,
-          bbApiKey: opts.bbApiKey,
-          bbProjectId: opts.bbProjectId,
-        }).then((result) => ({ url, result })),
-      ),
+  // Vrbo + Booking paths — fire all in parallel. Both use deterministic
+  // scrapers (no LLM) so concurrent Browserbase sessions are cheap.
+  const deterministicTasks: Array<Promise<{ url: string; result: VerifyAvailabilityResult }>> = [];
+  for (const url of vrboUrls) {
+    deterministicTasks.push(
+      verifyVrboViaScraper({
+        url,
+        checkIn,
+        checkOut,
+        bbApiKey: opts.bbApiKey,
+        bbProjectId: opts.bbProjectId,
+      }).then((result) => ({ url, result })),
     );
-    for (const { url, result } of vrboResults) {
+  }
+  for (const url of bookingUrls) {
+    deterministicTasks.push(
+      verifyBookingViaScraper({
+        url,
+        checkIn,
+        checkOut,
+        bbApiKey: opts.bbApiKey,
+        bbProjectId: opts.bbProjectId,
+      }).then((result) => ({ url, result })),
+    );
+  }
+  if (deterministicTasks.length > 0) {
+    const settled = await Promise.all(deterministicTasks);
+    for (const { url, result } of settled) {
       out[url] = result;
       cache.set(`${url}|${checkIn}|${checkOut}`, {
         value: result,

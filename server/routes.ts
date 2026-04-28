@@ -3582,10 +3582,17 @@ export async function registerRoutes(
     let preVerifyNo = 0;
     let preVerifyUnclear = 0;
     if (verifyBbApiKey && verifyBbProjectId && verifyAnthropicKey) {
-      // Pick the top-N cheapest PM candidates that need verification —
-      // skip Booking (already verified) and skip rows past N.
+      // Pick the top-N cheapest candidates that need on-page verification.
+      // PM candidates have no upstream verification → must run them. Booking
+      // candidates ARE auto-verified from the google_hotels engine, but
+      // engine data can be stale (the operator hit a "no availability here
+      // between Sat, Jun 13 - Sat, Jun 20" banner on a Booking listing the
+      // engine had marked bookable). Run them through the deterministic
+      // Booking scraper too so we can DOWNGRADE engine-yes → no when the
+      // page contradicts. We don't downgrade engine-yes → unclear (engine
+      // wins on ambiguity to keep graceful degradation).
       const toVerify = priced
-        .filter((c) => c.source === "pm" && !c.verified)
+        .filter((c) => c.source === "pm" || c.source === "booking")
         .slice(0, PRE_VERIFY_TOP_N);
       if (toVerify.length > 0) {
         try {
@@ -3607,32 +3614,54 @@ export async function registerRoutes(
           preVerifyAttempted = toVerify.length;
           for (const c of toVerify) {
             const r = (verifyResults as Record<string, any>)[c.url];
+            const wasEngineVerified = c.source === "booking" && c.verified === "yes";
             if (!r) {
-              c.verified = "skipped";
+              // Don't overwrite engine-verified Booking with "skipped".
+              if (!wasEngineVerified) c.verified = "skipped";
               continue;
             }
-            c.verified = r.available;
-            c.verifiedReason = r.reason;
-            c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
-            // When the page quoted a real per-night rate, OVERRIDE the
-            // inherited Airbnb-anchor price with the page-quoted value.
-            // This is the whole point of the verify step — the cheapest
-            // panel should show what the PM actually charges, not what
-            // Airbnb's anchor charges.
-            if (r.available === "yes" && typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
-              c.nightlyPrice = Math.round(r.nightlyPriceUsd);
-              c.totalPrice = Math.round(r.nightlyPriceUsd * nights);
-              preVerifyYes++;
-            } else if (r.available === "yes") {
-              preVerifyYes++;
-            } else if (r.available === "no") {
-              preVerifyNo++;
+            // Apply scrape result. Booking gets the conservative
+            // downgrade-only treatment: engine-yes stays unless the
+            // scrape says definitely-no.
+            if (wasEngineVerified) {
+              if (r.available === "no") {
+                c.verified = "no";
+                c.verifiedReason = r.reason;
+                c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
+                preVerifyNo++;
+              } else {
+                // yes / unclear — keep engine's verified=yes. Update the
+                // reason + page-quoted price for transparency.
+                c.verifiedReason = r.reason;
+                if (typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
+                  c.verifiedNightlyPrice = r.nightlyPriceUsd;
+                }
+                preVerifyYes++;
+              }
             } else {
-              preVerifyUnclear++;
+              // PM candidates — first-time verify.
+              c.verified = r.available;
+              c.verifiedReason = r.reason;
+              c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
+              // When the PM page quoted a real per-night rate, OVERRIDE
+              // the inherited Airbnb-anchor price with the page-quoted
+              // value. This is the whole point of the verify step.
+              if (r.available === "yes" && typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
+                c.nightlyPrice = Math.round(r.nightlyPriceUsd);
+                c.totalPrice = Math.round(r.nightlyPriceUsd * nights);
+                preVerifyYes++;
+              } else if (r.available === "yes") {
+                preVerifyYes++;
+              } else if (r.available === "no") {
+                preVerifyNo++;
+              } else {
+                preVerifyUnclear++;
+              }
             }
           }
-          // Mark anyone past the verify cap as skipped so the UI can
-          // distinguish "we tried and got unclear" from "we never tried."
+          // Mark un-verified PM rows past the cap as skipped so the UI
+          // can distinguish "we tried and got unclear" from "we never
+          // tried." Don't touch Booking — engine result stands.
           for (const c of priced) {
             if (c.source === "pm" && !c.verified) c.verified = "skipped";
           }
@@ -3646,7 +3675,8 @@ export async function registerRoutes(
     } else {
       // Browserbase / Anthropic env unset — pre-verify is unavailable.
       // Mark PM candidates as skipped so the UI can render "Verifying
-      // unavailable" rather than implying they ARE verified.
+      // unavailable" rather than implying they ARE verified. Booking
+      // keeps engine-verified=yes.
       for (const c of priced) {
         if (c.source === "pm" && !c.verified) c.verified = "skipped";
       }
