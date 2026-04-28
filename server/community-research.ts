@@ -132,6 +132,17 @@ export async function fetchAmortizedNightlyByBR(
   city: string,
   state: string,
   addressHint?: string,
+  // Optional explicit bbox center. When supplied, skips Nominatim
+  // geocoding entirely. Useful for static properties where we have
+  // operator-validated coordinates (e.g. Regency at Poipu Kai), since
+  // Nominatim can't resolve specific street numbers in resort areas
+  // and falls back to matching the road itself — which can land
+  // ~1km+ off the actual building when the road is long. The
+  // 2026-04-28 backfill failed for the Poipu Kai cluster because
+  // Nominatim resolved "1831 Poipu Rd" to the road's northern end
+  // and the resort sits at the southern end, putting all 19 returned
+  // listings outside the bbox after Airbnb's ±0.5-1km anonymization.
+  bboxCenterOverride?: { lat: number; lng: number },
 ): Promise<AmortizedNightlyResult> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   if (!searchApiKey) return { ratesByBR: {}, bboxApplied: false };
@@ -144,11 +155,21 @@ export async function fetchAmortizedNightlyByBR(
   checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
   const ymd = (d: Date) => d.toISOString().slice(0, 10);
 
-  // Geocode the address hint up front (Nominatim, in-memory cached).
-  // Treat any failure as "fall back to name match" — never throw.
+  // Resolve a bbox center, in priority order:
+  //   1. explicit `bboxCenterOverride` (operator-validated lat/lng)
+  //   2. Nominatim geocode of `addressHint, city, state`
+  //   3. fall through to name-token match (no bbox)
   let bbox: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number } | null = null;
   let bboxCenter: { lat: number; lng: number } | undefined;
-  if (addressHint && addressHint.trim()) {
+  if (bboxCenterOverride && Number.isFinite(bboxCenterOverride.lat) && Number.isFinite(bboxCenterOverride.lng)) {
+    bboxCenter = bboxCenterOverride;
+    bbox = {
+      sw_lat: bboxCenter.lat - BBOX_HALF_DEG,
+      sw_lng: bboxCenter.lng - BBOX_HALF_DEG,
+      ne_lat: bboxCenter.lat + BBOX_HALF_DEG,
+      ne_lng: bboxCenter.lng + BBOX_HALF_DEG,
+    };
+  } else if (addressHint && addressHint.trim()) {
     const fullAddress = `${addressHint.trim()}, ${city}, ${state}`;
     const coord = await geocode(fullAddress);
     if (coord) {

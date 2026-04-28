@@ -3912,33 +3912,33 @@ export async function registerRoutes(
   // (so "Regency at Poipu Kai" beats the bare community key
   // "Poipu Kai" for distinctness against "Poipu Kai Resort", "Poipu Kai
   // Estates", etc.).
-  // Street addresses below match `client/src/data/unit-builder-data.ts`'s
-  // `address:` fields (the operator-validated addresses for each
-  // complex). The 2026-04-28 backfill returned 0 samples for Poipu Kai
-  // (1, 4, 8, 9, 18, 27, 34), Kapaa Beachfront (23), Kekaha Beachfront
-  // (10), Keauhou (14), Poipu Oceanfront (24), and Poipu Brenneckes
-  // (28, 31). Diagnoses were:
-  //   - Poipu Kai street number was wrong (1701, actual 1831). Geocoder
-  //     resolved to a Poipu Rd intersection ~600m off the resort —
-  //     outside BBOX_HALF_DEG=0.015° (~1.65km).
-  //   - Kapaa Beachfront's city was wrong: Kaha Lani Resort sits in
-  //     Lihue (per the operator's address record), not Kapaa.
-  //   - Kekaha / Keauhou / Poipu Oceanfront / Poipu Brenneckes all had
-  //     no `streetAddress` set, so `fetchAmortizedNightlyByBR` skipped
-  //     the geocoded path and fell to the strict name-token match —
-  //     which Airbnb listings rarely satisfy (the resort name often
-  //     isn't in the listing title or description).
-  // Adding accurate addresses + correct cities makes the bbox path
-  // succeed for all 11 active static properties.
-  const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string }> = {
-    "Poipu Kai":         { searchName: "Regency at Poipu Kai",        city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd" },
-    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd" },
-    "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr" },
-    "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd" },
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Lihue",       state: "Hawaii", streetAddress: "4460 Nehe Rd" },
-    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd" },
-    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd" },
-    "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr" },
+  // Hand-curated bbox centers per `PROPERTY_UNIT_NEEDS` community key,
+  // used by `/api/property/:id/refresh-market-rates` as the override
+  // that skips Nominatim geocoding (see fetchAmortizedNightlyByBR's
+  // `bboxCenterOverride` param). Nominatim can't resolve street
+  // numbers in resort areas — it falls back to matching the road
+  // itself, which on long roads (Poipu Rd, Ali'i Dr) lands ~1km+ off
+  // the actual building. The 2026-04-28 backfill probe on property 1
+  // returned 19 Airbnb listings, 19 of 19 dropped by `outsideBbox`
+  // because Nominatim's "1831 Poipu Rd" → Poipu Road (north end) was
+  // ~1.2km from Regency at Poipu Kai (south end), and Airbnb's
+  // ±0.5-1km coordinate anonymization compounded the gap past the
+  // 1.65km bbox half-width.
+  //
+  // Coordinates here are operator-validated against satellite imagery
+  // and the addresses in `client/src/data/unit-builder-data.ts`. The
+  // `streetAddress` field is kept for legibility / future debugging
+  // (also used in the SearchAPI `q=` parameter as additional context)
+  // but is no longer the primary input to bbox computation.
+  const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string; lat: number; lng: number }> = {
+    "Poipu Kai":         { searchName: "Regency at Poipu Kai",        city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd",                lat: 21.8794, lng: -159.4609 },
+    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
+    "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
+    "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Lihue",       state: "Hawaii", streetAddress: "4460 Nehe Rd",                 lat: 22.0079, lng: -159.3471 },
+    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
+    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
+    "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
@@ -11386,6 +11386,7 @@ export async function registerRoutes(
       loc.city,
       loc.state,
       loc.streetAddress,
+      { lat: loc.lat, lng: loc.lng },
     );
 
     // Upsert one row per unique bedroom count this property's units
