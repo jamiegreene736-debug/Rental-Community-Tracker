@@ -8,6 +8,7 @@ import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator from "./PhotoCurator";
+import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
 
@@ -4317,6 +4318,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               </div>
             </div>
           </>
+        )}
+
+        {/* ── Photo Sync Status (per channel) ──────────────────────
+            Shows whether each OTA channel (Airbnb / VRBO / Booking)
+            is on Guesty's master photo sync or has been isolated for
+            independent photo management. Only renders when a Guesty
+            listing is selected — there's nothing meaningful to show
+            without a listing id. */}
+        {selectedId && (
+          <PhotoSyncStatusPanel guestyListingId={selectedId} />
         )}
 
         {/* ── Build Log ─────────────────────────────────────────── */}
