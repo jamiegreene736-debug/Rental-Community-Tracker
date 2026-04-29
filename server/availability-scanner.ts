@@ -40,9 +40,36 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
   34: { name: "Poipu Kai Palms", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
 };
 
-const AVAILABILITY_THRESHOLD = 10;
+// Block a window when verified-bookable inventory across channels is
+// below this threshold. Counts include same-unit cross-channel
+// duplicates (we don't run photo-match here for speed), so 3 here
+// is roughly equivalent to ~2 unique physical units. The legacy
+// Airbnb-only threshold was 10 raw listings; multi-channel "verified
+// + priced" counts much smaller numbers, hence the drop.
+//
+// Tuning: bump to 4-5 if too many windows get blocked in practice
+// (signals our cross-channel duplication is heavier than expected);
+// drop to 2 if we want the operator to take more risk on tight
+// windows.
+const AVAILABILITY_THRESHOLD = 3;
 
-type CacheEntry = { airbnb: number; error: boolean };
+// Defer to the sidecar deep-scan only when Airbnb returns BORDERLINE
+// inventory (< this number of listings). When Airbnb already shows
+// plenty (>= 2× threshold), the window is plainly available and
+// running sidecar VRBO+Booking would just waste the daemon budget.
+// 2× the threshold keeps the deep-scan honest — if Airbnb shows
+// anywhere near the edge, we want VRBO+Booking signal too.
+const SIDECAR_DEEP_SCAN_BORDERLINE = AVAILABILITY_THRESHOLD * 2;
+
+type CacheEntry = {
+  airbnb: number;
+  vrbo: number;
+  booking: number;
+  total: number;
+  sidecarRan: boolean;
+  daemonOnline: boolean;
+  error: boolean;
+};
 type SearchCache = Map<string, CacheEntry>;
 
 function formatDate(date: Date): string {
@@ -166,6 +193,19 @@ async function searchAirbnb(
   return (data.properties || []).length;
 }
 
+// Multi-channel availability check.
+//
+// Step 1 — always: Airbnb engine (fast, ~5s, no daemon needed).
+// Step 2 — only when borderline: sidecar VRBO + sidecar Booking in
+//          parallel via the local Chrome daemon. "Borderline" =
+//          Airbnb listings count < SIDECAR_DEEP_SCAN_BORDERLINE.
+//          Plenty-of-Airbnb windows skip the deep scan to keep the
+//          weekly cron's wall time bounded (~2h instead of ~7h).
+//
+// Returns: a per-channel breakdown + a `total` count that callers
+// compare against AVAILABILITY_THRESHOLD. Total is the sum across
+// channels — cross-channel duplicates inflate it slightly, but the
+// threshold is calibrated for that.
 async function searchCommunityBedroom(
   cache: SearchCache,
   community: string,
@@ -180,16 +220,82 @@ async function searchCommunityBedroom(
   }
 
   const airbnbCount = await searchAirbnb(community, bedrooms, checkIn, checkOut);
-
   const error = airbnbCount === -1;
+  const airbnbSafe = Math.max(0, airbnbCount);
+
+  // Plenty-of-Airbnb fast path: don't burn the sidecar budget. Most
+  // windows hit this branch and finish in ~5s.
+  if (!error && airbnbSafe >= SIDECAR_DEEP_SCAN_BORDERLINE) {
+    const entry: CacheEntry = {
+      airbnb: airbnbSafe,
+      vrbo: 0,
+      booking: 0,
+      total: airbnbSafe,
+      sidecarRan: false,
+      daemonOnline: false,
+      error: false,
+    };
+    cache.set(cacheKey, entry);
+    await sleep(3000);
+    return entry;
+  }
+
+  // Borderline OR Airbnb error → bring in sidecar. Wide error catches
+  // because sidecar is best-effort: if the daemon is offline / VRBO
+  // queries time out, we just count what we have and let the
+  // threshold decide.
+  let vrboCount = 0;
+  let bookingCount = 0;
+  let daemonOnline = false;
+  let sidecarRan = false;
+  try {
+    const { searchVrboViaSidecar, searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
+    sidecarRan = true;
+    const [vrboRes, bookingRes] = await Promise.all([
+      searchVrboViaSidecar({
+        destination: community,
+        checkIn,
+        checkOut,
+        bedrooms,
+        walletBudgetMs: 60_000,
+      }).catch(() => null),
+      searchBookingViaSidecar({
+        destination: community,
+        checkIn,
+        checkOut,
+        bedrooms,
+        walletBudgetMs: 60_000,
+      }).catch(() => null),
+    ]);
+    if (vrboRes) {
+      daemonOnline = daemonOnline || vrboRes.workerOnline;
+      // Count priced cards that match the requested bedroom count
+      // (sidecar VRBO scrape sets `bedrooms` from the card text when
+      // available; null bedrooms is permissive — count it as a match).
+      vrboCount = vrboRes.candidates.filter(
+        (c) => c.nightlyPrice > 0 && (c.bedrooms == null || c.bedrooms === bedrooms),
+      ).length;
+    }
+    if (bookingRes) {
+      daemonOnline = daemonOnline || bookingRes.workerOnline;
+      bookingCount = bookingRes.candidates.filter((c) => c.totalPrice > 0).length;
+    }
+  } catch (e: any) {
+    log(`sidecar deep-scan error (${community} ${bedrooms}BR ${checkIn}): ${e?.message ?? e}`, "scanner");
+  }
+
+  const total = airbnbSafe + vrboCount + bookingCount;
   const entry: CacheEntry = {
-    airbnb: Math.max(0, airbnbCount),
+    airbnb: airbnbSafe,
+    vrbo: vrboCount,
+    booking: bookingCount,
+    total,
+    sidecarRan,
+    daemonOnline,
     error,
   };
-
   cache.set(cacheKey, entry);
   await sleep(3000);
-
   return entry;
 }
 
@@ -279,8 +385,12 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
         const uniqueBedrooms = [...new Set(config.units.map(u => u.bedrooms))];
 
         let totalAirbnb = 0;
+        let totalVrbo = 0;
+        let totalBooking = 0;
+        let totalAcrossChannels = 0;
         let hasError = false;
         let belowThreshold = false;
+        let sidecarRanForThisWindow = false;
 
         for (const bedrooms of uniqueBedrooms) {
           if (scanAborted) break;
@@ -293,22 +403,27 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
             window.checkOut
           );
 
-          if (result.error) {
-            hasError = true;
-          }
-
+          if (result.error) hasError = true;
+          if (result.sidecarRan) sidecarRanForThisWindow = true;
           totalAirbnb += result.airbnb;
+          totalVrbo += result.vrbo;
+          totalBooking += result.booking;
+          totalAcrossChannels += result.total;
 
-          if (result.airbnb < AVAILABILITY_THRESHOLD && !result.error) {
+          // Block decision is per-bedroom: if ANY required bedroom
+          // count comes up short across channels, the property can't
+          // fulfill that window's mix and we should block the whole
+          // window. (Operator buys ONE unit per bedroom slot — short
+          // on 3BR means short overall, even if 2BR has plenty.)
+          if (result.total < AVAILABILITY_THRESHOLD && !result.error) {
             belowThreshold = true;
           }
         }
 
-        const totalResults = totalAirbnb;
         const shouldBlock = belowThreshold && !hasError;
         let status: string;
 
-        if (hasError && totalResults === 0) {
+        if (hasError && totalAcrossChannels === 0) {
           status = "error";
           totalErrors++;
         } else if (shouldBlock) {
@@ -327,12 +442,26 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
           checkOut: window.checkOut,
           bedroomConfig: JSON.stringify(uniqueBedrooms),
           airbnbResults: totalAirbnb,
-          vrboResults: 0,
-          totalResults,
+          // vrboResults persists the sidecar-VRBO count when the
+          // deep-scan ran; legacy callers reading this column still
+          // get a sensible number. Booking + sidecar metadata aren't
+          // schema'd yet — surface them in logs only for now.
+          vrboResults: totalVrbo,
+          totalResults: totalAcrossChannels,
           blocked: shouldBlock ? "true" : "false",
           lodgifyBlockIds: null,
           status,
         });
+
+        if (sidecarRanForThisWindow) {
+          log(
+            `${config.community} ${window.checkIn}→${window.checkOut}: ` +
+            `airbnb=${totalAirbnb} vrbo=${totalVrbo} booking=${totalBooking} ` +
+            `total=${totalAcrossChannels} threshold=${AVAILABILITY_THRESHOLD} ` +
+            `→ ${status}`,
+            "scanner",
+          );
+        }
 
         totalScanned++;
 
@@ -362,6 +491,85 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     });
 
     log(`Scan ${finalStatus}: ${totalScanned} weeks scanned, ${totalBlocked} blocked, ${totalAvailable} available, ${totalErrors} errors`, "scanner");
+
+    // ── Auto-publish blocks to Guesty ─────────────────────────────────
+    // After a clean(ish) run, push the scanner's verdicts to each
+    // property's Guesty calendar. Skip auto-publish when the run was
+    // aborted (mid-flight cancel — incomplete data) or when the run
+    // had errors AND zero successful scans (can't trust the verdicts).
+    //
+    // Only properties with at least one blocked-or-available verdict
+    // get touched. Per-property: build the windows[] from the scan
+    // rows, call the shared sync helper. Failures are logged per
+    // property so one Guesty hiccup doesn't poison the whole batch.
+    //
+    // Auto-publish covers both directions: NEW blocks for newly-tight
+    // windows, and UNBLOCK for previously-blocked windows that came
+    // up green this scan. The shared helper diffs against the
+    // scanner_blocks table and only modifies its own rows
+    // (`source: nexstay-scanner`); operator-placed blocks elsewhere
+    // are never touched.
+    if (finalStatus === "completed" && !(totalErrors > 0 && totalAvailable === 0)) {
+      try {
+        const { syncScannerBlocksForProperty } = await import("./sync-scanner-blocks");
+        const allScans = await storage.getAvailabilityScans({ runId: run.id });
+        type Scan = typeof allScans[number];
+        const scansByProperty = new Map<number, Scan[]>();
+        for (const s of allScans) {
+          if (s.propertyId == null) continue; // defensive — schema allows null
+          const list = scansByProperty.get(s.propertyId) ?? [];
+          list.push(s);
+          scansByProperty.set(s.propertyId, list);
+        }
+        let autoCreated = 0;
+        let autoRemoved = 0;
+        let autoFailed = 0;
+        for (const propertyId of Array.from(scansByProperty.keys())) {
+          const scans = scansByProperty.get(propertyId)!;
+          // Skip properties whose scans had ANY errors — don't risk
+          // over-blocking on a flaky API run.
+          const hasAnyError = scans.some((s: Scan) => s.status === "error");
+          if (hasAnyError) {
+            log(`auto-publish skipped for property ${propertyId} — scan had errors`, "scanner");
+            continue;
+          }
+          const windows = scans.map((s: Scan) => ({
+            startDate: s.checkIn,
+            endDate: s.checkOut,
+            verdict: (s.status === "blocked" ? "blocked" : "available") as "blocked" | "available",
+            reason: s.status === "blocked"
+              ? `multi-channel total ${s.totalResults} < threshold ${AVAILABILITY_THRESHOLD}`
+              : undefined,
+          }));
+          try {
+            const r = await syncScannerBlocksForProperty(propertyId, windows);
+            autoCreated += r.created;
+            autoRemoved += r.removed;
+            autoFailed += r.failures.length;
+            if (r.created > 0 || r.removed > 0 || r.failures.length > 0) {
+              log(
+                `auto-publish ${PROPERTY_UNIT_NEEDS[propertyId].name} (${propertyId}): ` +
+                `+${r.created} blocks, -${r.removed} unblocks` +
+                (r.failures.length > 0 ? `, ${r.failures.length} failures` : ""),
+                "scanner",
+              );
+            }
+          } catch (e: any) {
+            autoFailed++;
+            log(`auto-publish error property ${propertyId}: ${e?.message ?? e}`, "scanner");
+          }
+        }
+        log(
+          `auto-publish summary: +${autoCreated} blocks, -${autoRemoved} unblocks, ${autoFailed} failures`,
+          "scanner",
+        );
+      } catch (e: any) {
+        log(`auto-publish phase failed: ${e?.message ?? e}`, "scanner");
+      }
+    } else {
+      log(`auto-publish skipped — run status=${finalStatus} totalErrors=${totalErrors} totalAvailable=${totalAvailable}`, "scanner");
+    }
+
     return run.id;
   } catch (err: any) {
     log(`Scan failed: ${err.message}`, "scanner");
