@@ -2005,6 +2005,9 @@ export async function registerRoutes(
     pikoCalls: 0,
     pikoHits: 0,
     pikoUnitsTotal: 0,
+    evrhiCalls: 0,        // PR #310
+    evrhiHits: 0,
+    evrhiUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -2022,11 +2025,13 @@ export async function registerRoutes(
       pkHitRate: rate(pmDiscoveryStats.pkHits, pmDiscoveryStats.pkCalls),
       cbHitRate: rate(pmDiscoveryStats.cbHits, pmDiscoveryStats.cbCalls),
       pikoHitRate: rate(pmDiscoveryStats.pikoHits, pmDiscoveryStats.pikoCalls),
+      evrhiHitRate: rate(pmDiscoveryStats.evrhiHits, pmDiscoveryStats.evrhiCalls),
       googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
       spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
       pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
       cbAvgUnits: avg(pmDiscoveryStats.cbUnitsTotal, pmDiscoveryStats.cbCalls),
       pikoAvgUnits: avg(pmDiscoveryStats.pikoUnitsTotal, pmDiscoveryStats.pikoCalls),
+      evrhiAvgUnits: avg(pmDiscoveryStats.evrhiUnitsTotal, pmDiscoveryStats.evrhiCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
   });
@@ -3286,12 +3291,12 @@ export async function registerRoutes(
 
     const vrpDiscoveryPromise = (
       siteKey: keyof typeof VRP_SITES,
-      statsKey: "pkCalls" | "cbCalls" | "pikoCalls",
+      statsKey: "pkCalls" | "cbCalls" | "pikoCalls" | "evrhiCalls",
     ): Promise<Candidate[]> => {
       if (!isHawaii) return Promise.resolve([]);
       const site = VRP_SITES[siteKey];
-      const hitsKey = statsKey.replace("Calls", "Hits") as "pkHits" | "cbHits" | "pikoHits";
-      const totalKey = statsKey.replace("Calls", "UnitsTotal") as "pkUnitsTotal" | "cbUnitsTotal" | "pikoUnitsTotal";
+      const hitsKey = statsKey.replace("Calls", "Hits") as "pkHits" | "cbHits" | "pikoHits" | "evrhiHits";
+      const totalKey = statsKey.replace("Calls", "UnitsTotal") as "pkUnitsTotal" | "cbUnitsTotal" | "pikoUnitsTotal" | "evrhiUnitsTotal";
       return (async () => {
         pmDiscoveryStats[statsKey]++;
         try {
@@ -3323,6 +3328,7 @@ export async function registerRoutes(
     const pkDiscoveryPromise = vrpDiscoveryPromise("parrishKauai", "pkCalls");
     const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
+    const evrhiDiscoveryPromise = vrpDiscoveryPromise("evrhi", "evrhiCalls");
 
     // Per-source wall-budget. Without this, a single hanging source
     // (Stagehand Vrbo agent stuck on a CAPTCHA, an Apify actor that
@@ -3346,7 +3352,7 @@ export async function registerRoutes(
         ),
       ]);
     };
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered] = await Promise.all([
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered] = await Promise.all([
       withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
       withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
@@ -3355,6 +3361,7 @@ export async function registerRoutes(
       withTimeout(pkDiscoveryPromise, 30_000, [] as Candidate[], "pk-sitemap"),
       withTimeout(cbDiscoveryPromise, 30_000, [] as Candidate[], "cb-sitemap"),
       withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
+      withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -3364,12 +3371,14 @@ export async function registerRoutes(
       ...pkDiscovered.map((c) => c.url),
       ...cbDiscovered.map((c) => c.url),
       ...pikoDiscovered.map((c) => c.url),
+      ...evrhiDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
       ...spDiscovered,
       ...pkDiscovered,
       ...cbDiscovered,
       ...pikoDiscovered,
+      ...evrhiDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
