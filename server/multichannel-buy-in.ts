@@ -26,6 +26,49 @@ import { fetchAmortizedNightlyByBR } from "./community-research";
 export type ChannelKey = "airbnb" | "vrbo" | "booking";
 export type RegionKey = "hawaii" | "florida";
 
+// Surfaced to the loading bar via RefreshProgressState.warnings.
+// Lets the operator see "CAPTCHA on VRBO sidecar at HIGH season"
+// instead of just a frozen-looking bar with no signal.
+export type ScanWarning = {
+  season: "LOW" | "HIGH" | "HOLIDAY";
+  channel: ChannelKey | "engine";
+  kind: "captcha" | "blocked" | "rate-limit" | "timeout" | "network" | "unknown";
+  message: string;        // operator-facing one-liner
+  reason?: string;        // raw daemon/wrapper reason for debugging
+};
+
+// Pattern-match a sidecar wrapper's `reason` string against common
+// failure modes the operator cares about. Returns null when the
+// reason looks routine ("completed with 0 results", "no candidates")
+// — those aren't warnings, just empty pulls. Heuristic; if the
+// daemon ever gains a structured error code the orchestrator can
+// switch to it without touching the call sites.
+export function classifyScanReason(reason: string | undefined | null): ScanWarning["kind"] | null {
+  if (!reason) return null;
+  const s = reason.toLowerCase();
+  if (s.includes("captcha") || s.includes("recaptcha") || s.includes("not a robot") || s.includes("i'm not a robot")) return "captcha";
+  if (s.includes("cloudflare") || s.includes("just a moment") || s.includes("ddos protection")) return "blocked";
+  if (s.includes("403") || s.includes("bot detection") || s.includes("access denied")) return "blocked";
+  if (s.includes("429") || s.includes("rate limit") || s.includes("too many requests")) return "rate-limit";
+  if (s.includes("timeout") || s.includes("timed out") || s.includes("navigation timeout") || s.includes("walletbudget")) return "timeout";
+  if (s.includes("econnreset") || s.includes("enotfound") || s.includes("network error") || s.includes("net::")) return "network";
+  // "worker likely offline" / "request expired" cover the daemon-down case;
+  // those surface separately via daemonOnline so don't double-warn.
+  return null;
+}
+
+function describeWarning(kind: ScanWarning["kind"], channel: ScanWarning["channel"], season: ScanWarning["season"]): string {
+  const ch = channel === "engine" ? "Airbnb engine" : channel.toUpperCase();
+  switch (kind) {
+    case "captcha":    return `${ch} hit a CAPTCHA during the ${season} scan — sidecar daemon may need manual unblock before retrying.`;
+    case "blocked":    return `${ch} blocked the ${season} scan (Cloudflare / bot wall) — try again later or rotate the daemon's session.`;
+    case "rate-limit": return `${ch} rate-limited the ${season} scan — back off a few minutes and retry.`;
+    case "timeout":    return `${ch} timed out during the ${season} scan — daemon queue may be busy or the page didn't load.`;
+    case "network":    return `${ch} network error during the ${season} scan — check daemon Mac connectivity.`;
+    case "unknown":    return `${ch} reported an issue during the ${season} scan.`;
+  }
+}
+
 // Tax/fee normalization to bring sidecar VRBO + Booking rates onto
 // the same all-in basis as the Airbnb engine.
 //
@@ -104,6 +147,13 @@ export type MultiChannelBuyInResult = {
   region: RegionKey;
   taxFactor: number;
   durationMs: number;
+  // PR #312: per-channel issues observed during the scan (CAPTCHA,
+  // bot-block, rate-limit, etc.) so the orchestrator can surface
+  // them in the loading bar without inspecting raw `reason` strings.
+  // Empty when the scan ran clean. Pre-seeded with the season label
+  // by the season orchestrator after Promise resolution; the per-BR
+  // helper sets `season: "LOW"` as a placeholder.
+  warnings: ScanWarning[];
 };
 
 export async function fetchMultiChannelBuyInByBR(args: {
@@ -174,6 +224,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     // per-region tax-normalization multiplier downstream.
     cheapestIncludesTaxes?: boolean;
     workerOnline: boolean;
+    // PR #312: capture the wrapper's `reason` string so the
+    // orchestrator can pattern-match for CAPTCHA / bot-block / etc.
+    // without changing every call site.
+    reason?: string;
   };
   const sidecarOps: Promise<SidecarOp>[] = [];
   // PR #282: when caller asked us to skip sidecar (HIGH/HOLIDAY
@@ -199,7 +253,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
           });
-          if (!r) return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false };
+          if (!r) return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false, reason: "wrapper returned null" };
           // Filter to listings that actually quote a per-night and
           // (when bedroom count is known) match the requested BR.
           // Sidecar VRBO scrape returns nightlyPrice already
@@ -225,9 +279,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
             cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
             cheapestIncludesTaxes,
             workerOnline: r.workerOnline,
+            reason: r.reason,
           };
-        } catch {
-          return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false };
+        } catch (e: any) {
+          return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
     );
@@ -264,9 +319,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
             channel: "booking",
             cheapestNightly: Number.isFinite(cheapest) ? cheapest : null,
             workerOnline: r.workerOnline,
+            reason: r.reason,
           };
-        } catch {
-          return { br, channel: "booking", cheapestNightly: null, workerOnline: false };
+        } catch (e: any) {
+          return { br, channel: "booking", cheapestNightly: null, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
     );
@@ -413,6 +469,28 @@ export async function fetchMultiChannelBuyInByBR(args: {
     if (larger.booking != null && larger.booking < floor) larger.booking = null;
   }
 
+  // Scan sidecar results for surfaceable warnings (CAPTCHA, bot wall,
+  // rate-limit, timeout, etc.). De-dup by (channel, kind) so an op
+  // that hit CAPTCHA on every BR doesn't flood the UI with three
+  // identical banners. Season is filled in placeholder-style here;
+  // the per-season orchestrator overwrites with the real label.
+  const warnings: ScanWarning[] = [];
+  const seen = new Set<string>();
+  for (const op of sidecarResults) {
+    const kind = classifyScanReason(op.reason);
+    if (!kind) continue;
+    const key = `${op.channel}|${kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    warnings.push({
+      season: "LOW",  // placeholder; orchestrator rewrites with real season
+      channel: op.channel,
+      kind,
+      message: describeWarning(kind, op.channel, "LOW"),
+      reason: op.reason,
+    });
+  }
+
   return {
     ratesByBR: airbnbResult.ratesByBR,
     channelCheapestByBR,
@@ -422,6 +500,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     region,
     taxFactor: TAX_NORMALIZATION_FACTOR[region],
     durationMs: Date.now() - startedAt,
+    warnings,
   };
 }
 
@@ -569,6 +648,12 @@ export type RefreshProgressState = {
   lastTickAt: number;
   daemonOnline?: boolean;
   daemonLastPollAgeMs?: number | null;
+  // PR #312: surfaceable issues (CAPTCHA on VRBO sidecar, Cloudflare
+  // on Booking, rate-limit, etc.) the operator should know about
+  // without reading server logs. Accumulates as seasons complete; the
+  // loading bar renders them as inline warnings. Empty when the scan
+  // ran clean.
+  warnings?: ScanWarning[];
 };
 const _refreshProgress = new Map<number, RefreshProgressState>();
 export function setRefreshProgress(state: Omit<RefreshProgressState, "lastTickAt"> & { lastTickAt?: number }): void {
@@ -675,13 +760,53 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   // raise the percent, never lower it) so a Promise resolving in a
   // surprise order doesn't make the bar jump backward.
   let highestPercent = 0;
+  const accumulatedWarnings: ScanWarning[] = [];
   const setPhaseAtLeast = (phase: RefreshProgressState["phase"], percent: number, label: string) => {
     if (percent > highestPercent) highestPercent = percent;
-    setPhase(phase, highestPercent, label);
+    const current = _refreshProgress.get(args.propertyId);
+    setRefreshProgress({
+      propertyId: args.propertyId,
+      startedAt,
+      phase,
+      percent: highestPercent,
+      label,
+      // Preserve daemon fields and warnings across phase changes —
+      // the heartbeat updates daemon fields independently, but this
+      // setPhase call would otherwise drop them.
+      daemonOnline: current?.daemonOnline,
+      daemonLastPollAgeMs: current?.daemonLastPollAgeMs,
+      warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
+    });
   };
-  void lowPromise.then(() => setPhaseAtLeast("sidecar-low", 35, "LOW season multichannel scan done"));
-  void highPromise.then(() => setPhaseAtLeast("sidecar-high", 65, "HIGH season multichannel scan done"));
-  void holidayPromise.then(() => setPhaseAtLeast("sidecar-holiday", 90, "HOLIDAY season multichannel scan done"));
+  // Helper: when a season's per-BR result lands, re-label its
+  // placeholder warnings with the real season key and merge into
+  // the accumulator. setPhaseAtLeast then surfaces them on the next
+  // progress write.
+  const ingestSeasonWarnings = (
+    season: SeasonKey,
+    result: MultiChannelBuyInResult | null,
+  ) => {
+    if (!result?.warnings || result.warnings.length === 0) return;
+    for (const w of result.warnings) {
+      accumulatedWarnings.push({
+        ...w,
+        season,
+        message: describeWarning(w.kind, w.channel, season),
+      });
+    }
+  };
+  void lowPromise.then((r) => {
+    ingestSeasonWarnings("LOW", r);
+    setPhaseAtLeast("sidecar-low", 35, "LOW season multichannel scan done");
+  });
+  void highPromise.then((r) => {
+    ingestSeasonWarnings("HIGH", r);
+    setPhaseAtLeast("sidecar-high", 65, "HIGH season multichannel scan done");
+  });
+  void holidayPromise.then((r) => {
+    ingestSeasonWarnings("HOLIDAY", r);
+    setPhaseAtLeast("sidecar-holiday", 90, "HOLIDAY season multichannel scan done");
+  });
 
   // Outer deadline: 15 min hard cap. Sidecar daemon could in theory
   // wedge on a single op (Chrome crashes, network blip, etc.); the
