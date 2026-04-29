@@ -537,10 +537,25 @@ function pickSeasonWindow(
 // propertyId. Lifecycle: set on scan start, updated as each phase
 // completes, cleared after `done`. The Pricing tab polls this every
 // 1.5s while a refresh is in flight to render the progress bar.
+//
+// Phases (in rough order) — all three seasons run sidecar VRBO + Booking
+// after PR #305 (was LOW-only before that):
+//   starting → airbnb-low → airbnb-high → airbnb-holiday →
+//   sidecar-low → sidecar-high → sidecar-holiday → persisting →
+//   done | error
+//
+// Each season's Airbnb engine returns fast (one SearchAPI call); the
+// sidecar work serializes through the daemon's single Chrome, so the
+// sidecar-* phases account for ~85% of the wall time and the
+// percentages reflect that.
 export type RefreshProgressState = {
   propertyId: number;
   startedAt: number;
-  phase: "starting" | "airbnb-low" | "airbnb-high" | "airbnb-holiday" | "sidecar-low" | "persisting" | "done" | "error";
+  phase:
+    | "starting"
+    | "airbnb-low" | "airbnb-high" | "airbnb-holiday"
+    | "sidecar-low" | "sidecar-high" | "sidecar-holiday"
+    | "persisting" | "done" | "error";
   percent: number;
   label: string;
   error?: string;
@@ -576,32 +591,74 @@ export async function fetchMultiChannelBuyInBySeason(args: {
 
   setPhase("starting", 0, "Starting multi-season scan");
 
-  // LOW window — full multichannel (engine + sidecar VRBO + Booking).
-  // HIGH and HOLIDAY — Airbnb engine only (skipSidecar=true).
+  // All three seasons get the full multichannel scan (Airbnb engine
+  // + sidecar VRBO + Booking). Pre-PR #305 only LOW used the sidecar;
+  // operator wanted HIGH and HOLIDAY medians grounded in real
+  // VRBO/Booking observations too. Daemon serializes the sidecar
+  // calls (single Chrome instance), so total wall ≈ N_BRs × 2 channels
+  // × 3 seasons × 90s = 5–18 min for typical 1–2 BR portfolios.
   const lowWindow = pickSeasonWindow(region, "LOW");
   const highWindow = pickSeasonWindow(region, "HIGH");
   const holidayWindow = pickSeasonWindow(region, "HOLIDAY");
 
-  setPhase("airbnb-low", 5, `Scanning Airbnb engine (LOW: ${lowWindow?.checkIn ?? "—"})`);
+  setPhase("airbnb-low", 3, `Scanning Airbnb engine (LOW: ${lowWindow?.checkIn ?? "—"})`);
 
   const lowPromise = lowWindow
     ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: lowWindow })
     : Promise.resolve(null);
   const highPromise = highWindow
-    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: highWindow, skipSidecar: true })
+    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: highWindow })
     : Promise.resolve(null);
   const holidayPromise = holidayWindow
-    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: holidayWindow, skipSidecar: true })
+    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: holidayWindow })
     : Promise.resolve(null);
 
-  // Update progress as each season finishes.
-  void highPromise.then(() => setPhase("airbnb-high", 30, "HIGH season Airbnb pull done"));
-  void holidayPromise.then(() => setPhase("airbnb-holiday", 50, "HOLIDAY season Airbnb pull done"));
-  void lowPromise.then(() => setPhase("sidecar-low", 90, "LOW season multichannel done"));
+  // Progress phases as each season's full result resolves. Airbnb
+  // engine pulls usually finish in ~5–10s while the sidecar is still
+  // queued, so these `airbnb-*` markers fire early; the `sidecar-*`
+  // markers represent the season fully done. Percentages tier the
+  // sidecar work since it dominates wall time.
+  //
+  // Order isn't deterministic — daemon dequeues in FIFO order so
+  // whichever season was enqueued first finishes first. The percent
+  // we set is a floor, not a step counter (later phases can only
+  // raise the percent, never lower it) so a Promise resolving in a
+  // surprise order doesn't make the bar jump backward.
+  let highestPercent = 0;
+  const setPhaseAtLeast = (phase: RefreshProgressState["phase"], percent: number, label: string) => {
+    if (percent > highestPercent) highestPercent = percent;
+    setPhase(phase, highestPercent, label);
+  };
+  void lowPromise.then(() => setPhaseAtLeast("sidecar-low", 35, "LOW season multichannel scan done"));
+  void highPromise.then(() => setPhaseAtLeast("sidecar-high", 65, "HIGH season multichannel scan done"));
+  void holidayPromise.then(() => setPhaseAtLeast("sidecar-holiday", 90, "HOLIDAY season multichannel scan done"));
 
-  const [low, high, holiday] = await Promise.all([lowPromise, highPromise, holidayPromise]);
+  // Outer deadline: 15 min hard cap. Sidecar daemon could in theory
+  // wedge on a single op (Chrome crashes, network blip, etc.); the
+  // per-op walletBudgetMs covers individual ops but the sum across
+  // 6–18 ops can pile up. If we exceed 15 min, abort the wait —
+  // partial perSeason results (whichever Promises resolved) get
+  // returned so the caller can salvage what completed.
+  const DEADLINE_MS = 15 * 60_000;
+  const waitWithDeadline = <T>(p: Promise<T>): Promise<T | null> =>
+    Promise.race([
+      p,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), DEADLINE_MS)),
+    ]);
 
-  setPhase("persisting", 95, "Persisting medians");
+  const [low, high, holiday] = await Promise.all([
+    waitWithDeadline(lowPromise),
+    waitWithDeadline(highPromise),
+    waitWithDeadline(holidayPromise),
+  ]);
+  const hitDeadline = (low === null && lowWindow !== null) ||
+    (high === null && highWindow !== null) ||
+    (holiday === null && holidayWindow !== null);
+  if (hitDeadline) {
+    console.warn(`[multichannel-buy-in] hit 15-min deadline, returning partial seasons`);
+  }
+
+  setPhaseAtLeast("persisting", 95, "Persisting medians");
 
   return {
     perSeason: { LOW: low, HIGH: high, HOLIDAY: holiday },
