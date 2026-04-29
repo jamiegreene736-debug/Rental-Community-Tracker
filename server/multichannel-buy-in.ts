@@ -263,6 +263,35 @@ export async function fetchMultiChannelBuyInByBR(args: {
     ...sidecarOps,
   ]);
 
+  // Sparse-BR retry (PR #288). The initial engine call is unfiltered
+  // by bedroom count — it returns whatever 2BR/3BR/4BR listings sit
+  // inside the bbox, then we bucket by extracted BR. Tight bboxes
+  // (e.g. Kapaa Beachfront's 2.7×2.6km) sometimes return zero 3BR
+  // listings even when 3BR rentals exist nearby. For each BR the
+  // caller asked about, if we got zero samples, fire one targeted
+  // fallback call: bedrooms=N pinned to the engine + 2× wider bbox.
+  // One extra SearchAPI hit per missing BR, only when the cheap
+  // unfiltered pull came up dry — bounded extra cost per refresh.
+  for (const br of args.bedroomCounts) {
+    if ((airbnbResult.ratesByBR[br] ?? []).length > 0) continue;
+    try {
+      const fallback = await fetchAmortizedNightlyByBR(
+        args.community,
+        args.city,
+        args.state,
+        args.streetAddress,
+        args.bboxCenterOverride,
+        args.dateOverride ? { checkIn, checkOut } : undefined,
+        { bedrooms: br, bboxScale: 2 },
+      );
+      const samples = fallback.ratesByBR[br] ?? [];
+      if (samples.length > 0) airbnbResult.ratesByBR[br] = samples;
+    } catch {
+      /* sparse-BR retry failure is non-fatal — caller falls back to
+         BUY_IN_RATES static for any BR that stayed empty. */
+    }
+  }
+
   const daemonOnline = sidecarResults.some((r) => r.workerOnline);
   const region = inferRegion(args.city, args.state);
 

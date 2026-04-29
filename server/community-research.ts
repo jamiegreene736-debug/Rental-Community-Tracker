@@ -147,6 +147,17 @@ export async function fetchAmortizedNightlyByBR(
   // "30d-out, 7-night" behavior. Used by the multi-season scan (PR
   // #282) to pull per-season basis from the engine.
   dateOverride?: { checkIn: string; checkOut: string },
+  // PR #288: optional sparse-BR retry. When `bedrooms` is supplied,
+  // the engine query includes `bedrooms=N` so the engine prioritises
+  // that BR. `bboxScale` widens the bounding box (e.g. 2 = 2× the
+  // default ±0.015° half-width = ~3.3km radius), helping when the
+  // default Kapaa-tight bbox returns 0 listings for sparse BRs like
+  // 3BR. Use only as a fallback when the initial scan came up empty
+  // — costs an extra SearchAPI call per missing BR.
+  options?: {
+    bedrooms?: number;
+    bboxScale?: number;
+  },
 ): Promise<AmortizedNightlyResult> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   if (!searchApiKey) return { ratesByBR: {}, bboxApplied: false };
@@ -170,15 +181,16 @@ export async function fetchAmortizedNightlyByBR(
   //   1. explicit `bboxCenterOverride` (operator-validated lat/lng)
   //   2. Nominatim geocode of `addressHint, city, state`
   //   3. fall through to name-token match (no bbox)
+  const halfDeg = BBOX_HALF_DEG * (options?.bboxScale ?? 1);
   let bbox: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number } | null = null;
   let bboxCenter: { lat: number; lng: number } | undefined;
   if (bboxCenterOverride && Number.isFinite(bboxCenterOverride.lat) && Number.isFinite(bboxCenterOverride.lng)) {
     bboxCenter = bboxCenterOverride;
     bbox = {
-      sw_lat: bboxCenter.lat - BBOX_HALF_DEG,
-      sw_lng: bboxCenter.lng - BBOX_HALF_DEG,
-      ne_lat: bboxCenter.lat + BBOX_HALF_DEG,
-      ne_lng: bboxCenter.lng + BBOX_HALF_DEG,
+      sw_lat: bboxCenter.lat - halfDeg,
+      sw_lng: bboxCenter.lng - halfDeg,
+      ne_lat: bboxCenter.lat + halfDeg,
+      ne_lng: bboxCenter.lng + halfDeg,
     };
   } else if (addressHint && addressHint.trim()) {
     const fullAddress = `${addressHint.trim()}, ${city}, ${state}`;
@@ -186,10 +198,10 @@ export async function fetchAmortizedNightlyByBR(
     if (coord) {
       bboxCenter = coord;
       bbox = {
-        sw_lat: coord.lat - BBOX_HALF_DEG,
-        sw_lng: coord.lng - BBOX_HALF_DEG,
-        ne_lat: coord.lat + BBOX_HALF_DEG,
-        ne_lng: coord.lng + BBOX_HALF_DEG,
+        sw_lat: coord.lat - halfDeg,
+        sw_lng: coord.lng - halfDeg,
+        ne_lat: coord.lat + halfDeg,
+        ne_lng: coord.lng + halfDeg,
       };
     }
   }
@@ -221,6 +233,7 @@ export async function fetchAmortizedNightlyByBR(
       check_out_date: ymd(checkOutDate),
       adults: "2",
       type_of_place: "entire_home",
+      ...(options?.bedrooms ? { bedrooms: String(options.bedrooms) } : {}),
       currency: "USD",
       api_key: searchApiKey,
     };
