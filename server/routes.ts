@@ -3579,6 +3579,56 @@ export async function registerRoutes(
     const finderBbApiKey = process.env.BROWSERBASE_API_KEY;
     const finderBbProjectId = process.env.BROWSERBASE_PROJECT_ID;
     const finderAnthropicKey = process.env.ANTHROPIC_API_KEY;
+
+    // ── Sidecar Google SERP (operator's real Chrome) ────────────────
+    // Fires when the local Mac daemon is online. Drives a Google
+    // search from the operator's actual home IP, returns organic
+    // results, and contributes any non-OTA URLs to the PM pool. Adds
+    // long-tail PM coverage that SearchAPI misses (Google personalises
+    // results by IP / cookies / history; the operator's real session
+    // sees PM listings the API doesn't index).
+    //
+    // Always fires (even when priced bookable >= 3). Cheap when the
+    // daemon is online; gracefully empty when offline.
+    let pmSidecarFinderCandidates: Candidate[] = [];
+    try {
+      const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
+      const target = resortName ?? community;
+      const sidecarSerp = await googleSerpViaSidecar({
+        query: `"${target}" ${bedrooms} bedroom vacation rental property management book directly`,
+        maxResults: 20,
+        walletBudgetMs: 75_000,
+      });
+      if (sidecarSerp.workerOnline && sidecarSerp.hits.length > 0) {
+        const otaDomains = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com)$/i;
+        const existingPmUrls = new Set(pm.map((c) => c.url));
+        for (const hit of sidecarSerp.hits) {
+          let host = "";
+          try { host = new URL(hit.url).hostname.replace(/^www\./, ""); } catch { continue; }
+          if (otaDomains.test(host)) continue;
+          if (existingPmUrls.has(hit.url)) continue;
+          existingPmUrls.add(hit.url);
+          pmSidecarFinderCandidates.push({
+            source: "pm",
+            sourceLabel: host,
+            title: hit.title.slice(0, 100),
+            url: withStayDates("pm", hit.url),
+            nightlyPrice: 0,
+            totalPrice: 0,
+            bedrooms: undefined,
+            snippet: hit.snippet?.slice(0, 160),
+          });
+        }
+        console.log(
+          `[find-buy-in] sidecar-google-serp added ${pmSidecarFinderCandidates.length} PM URLs (worker online, query="${target}" ${bedrooms}BR)`,
+        );
+      } else if (!sidecarSerp.workerOnline) {
+        console.log(`[find-buy-in] sidecar-google-serp skipped (worker offline)`);
+      }
+    } catch (e: any) {
+      console.error(`[find-buy-in] sidecar-google-serp error:`, e?.message ?? e);
+    }
+
     let pmFinderCandidates: Candidate[] = [];
     if (
       pricedBookableSoFar < PM_FINDER_THRESHOLD &&
@@ -3630,7 +3680,12 @@ export async function registerRoutes(
       }
     }
 
-    const pmAugmented: Candidate[] = [...pm, ...photoMatchPmCandidates, ...pmFinderCandidates];
+    const pmAugmented: Candidate[] = [
+      ...pm,
+      ...photoMatchPmCandidates,
+      ...pmSidecarFinderCandidates,
+      ...pmFinderCandidates,
+    ];
 
     // Combined priced pool across all bookable sources.
     //
