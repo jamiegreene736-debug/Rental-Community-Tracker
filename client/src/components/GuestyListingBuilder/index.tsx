@@ -1835,11 +1835,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   // Live progress state for the in-flight refresh — polled every
   // 1.5s while marketRatesRefreshing is true.
+  //
+  // PR #311: also surface lastTickAt + daemonOnline so the UI can
+  // distinguish "scan still running, daemon alive, just queued behind
+  // other ops" from "scan actually frozen — daemon dead or wedged."
+  // Server emits a heartbeat tick every 15s during non-terminal
+  // phases so lastTickAt stays fresh even when no phase boundary
+  // passes for several minutes (typical during sidecar phases).
   const [refreshProgress, setRefreshProgress] = useState<{
     phase: string;
     percent: number;
     label: string;
+    lastTickAt?: number;
+    daemonOnline?: boolean;
+    daemonLastPollAgeMs?: number | null;
   } | null>(null);
+  // 1Hz ticker so the elapsed-time display + staleness warning re-
+  // render between the 1.5s progress polls. Cheap (no network); keyed
+  // off marketRatesRefreshing so it stops when the scan ends.
+  const [nowTick, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!marketRatesRefreshing) return;
+    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [marketRatesRefreshing]);
+  const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
   // AbortController for the in-flight refresh fetch. Lets the operator
   // cancel a long multi-season scan (5–15 min) without freezing the
   // tab. Server-side scan continues in the background — that's fine,
@@ -1872,6 +1892,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const refreshThisPropertyMarketRates = useCallback(async () => {
     if (!propertyId || marketRatesRefreshing) return;
     setMarketRatesRefreshing(true);
+    setRefreshStartedAt(Date.now());
     setRefreshProgress({ phase: "starting", percent: 0, label: "Starting…" });
 
     // Poll progress endpoint while refresh is in flight.
@@ -1881,8 +1902,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         try {
           const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
           if (r.ok) {
-            const p = await r.json() as { phase: string; percent: number; label: string };
-            setRefreshProgress({ phase: p.phase, percent: p.percent, label: p.label });
+            const p = await r.json() as {
+              phase: string;
+              percent: number;
+              label: string;
+              lastTickAt?: number;
+              daemonOnline?: boolean;
+              daemonLastPollAgeMs?: number | null;
+            };
+            setRefreshProgress({
+              phase: p.phase,
+              percent: p.percent,
+              label: p.label,
+              lastTickAt: p.lastTickAt,
+              daemonOnline: p.daemonOnline,
+              daemonLastPollAgeMs: p.daemonLastPollAgeMs,
+            });
           }
         } catch {}
       };
@@ -1985,6 +2020,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       refreshAbortRef.current = null;
       if (progressTimer) window.clearInterval(progressTimer);
       setRefreshProgress(null);
+      setRefreshStartedAt(null);
       setMarketRatesRefreshing(false);
     }
   }, [propertyId, marketRatesRefreshing, reloadMarketRates, toast]);
@@ -3533,37 +3569,76 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 server scan continues to record progress
                                 in the background, the client just
                                 stops awaiting. */}
-                            {marketRatesRefreshing && refreshProgress && (
-                              <div style={{ marginBottom: 8, padding: "6px 10px", border: "1px solid #cfe2ff", background: "#eef4ff", borderRadius: 4, fontSize: 11, color: "#1e3a8a" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                  <span style={{ fontWeight: 500 }}>Scanning per-season basis…</span>
-                                  <span style={{ fontFamily: "ui-monospace, monospace", marginLeft: "auto" }}>{refreshProgress.percent}%</span>
-                                  <button
-                                    type="button"
-                                    onClick={cancelRefresh}
-                                    title="Cancel the refresh. Server scan continues in the background; refresh later to pick up partial results."
-                                    style={{
-                                      fontSize: 10,
-                                      padding: "1px 6px",
-                                      borderRadius: 3,
-                                      border: "1px solid #93c5fd",
-                                      background: "#ffffff",
-                                      color: "#1e3a8a",
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    Cancel
-                                  </button>
+                            {marketRatesRefreshing && refreshProgress && (() => {
+                              // Computed values for freeze detection.
+                              // nowTick is unused-but-referenced so React
+                              // re-renders this block each second.
+                              void nowTick;
+                              const now = Date.now();
+                              const elapsedMs = refreshStartedAt ? now - refreshStartedAt : 0;
+                              const elapsedMin = Math.floor(elapsedMs / 60000);
+                              const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
+                              const elapsedStr = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
+                              const ageSinceTickMs = refreshProgress.lastTickAt ? now - refreshProgress.lastTickAt : 0;
+                              const ageSinceTickSec = Math.round(ageSinceTickMs / 1000);
+                              // Stale if no server tick in 60s — heartbeat
+                              // is supposed to fire every 15s, so 60s of
+                              // silence means the scan loop itself is
+                              // wedged (not just a slow sidecar op).
+                              const STALE_MS = 60_000;
+                              const isStale = !!refreshProgress.lastTickAt && ageSinceTickMs > STALE_MS;
+                              const daemonStatus = refreshProgress.daemonOnline === true
+                                ? { label: "Daemon online", color: "#15803d" }
+                                : refreshProgress.daemonOnline === false
+                                ? { label: "Daemon offline", color: "#b91c1c" }
+                                : { label: "Daemon status unknown", color: "#6b7280" };
+                              return (
+                                <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
+                                    <span style={{ fontWeight: 500 }}>Scanning per-season basis…</span>
+                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
+                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{refreshProgress.percent}%</span>
+                                    <button
+                                      type="button"
+                                      onClick={cancelRefresh}
+                                      title="Cancel the refresh. Server scan continues in the background; refresh later to pick up partial results."
+                                      style={{
+                                        fontSize: 10,
+                                        padding: "1px 6px",
+                                        borderRadius: 3,
+                                        border: `1px solid ${isStale ? "#fca5a5" : "#93c5fd"}`,
+                                        background: "#ffffff",
+                                        color: isStale ? "#991b1b" : "#1e3a8a",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                  <div style={{ height: 6, background: isStale ? "#fee2e2" : "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
+                                    <div style={{ width: `${Math.max(0, Math.min(100, refreshProgress.percent))}%`, height: "100%", background: isStale ? "#dc2626" : "#2563eb", transition: "width 250ms ease" }} />
+                                  </div>
+                                  <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
+                                  {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
+                                  <div style={{ marginTop: 4, display: "flex", gap: 12, fontSize: 9, opacity: 0.85 }}>
+                                    <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>
+                                    {refreshProgress.lastTickAt && (
+                                      <span style={{ opacity: 0.7 }}>
+                                        Heartbeat: {ageSinceTickSec}s ago
+                                      </span>
+                                    )}
+                                  </div>
+                                  {isStale && (
+                                    <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
+                                      ⚠ No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry, or wait — partial results from completed seasons are kept after this scan finishes.
+                                    </div>
+                                  )}
+                                  <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
+                                    Multi-channel scan; the daemon serializes through one Chrome instance — typical wall time 5–15 min for multi-unit listings.
+                                  </div>
                                 </div>
-                                <div style={{ height: 6, background: "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
-                                  <div style={{ width: `${Math.max(0, Math.min(100, refreshProgress.percent))}%`, height: "100%", background: "#2563eb", transition: "width 250ms ease" }} />
-                                </div>
-                                <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
-                                <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                  Multi-channel scan; the daemon serializes through one Chrome instance — typical wall time 5–15 min for multi-unit listings.
-                                </div>
-                              </div>
-                            )}
+                              );
+                            })()}
                             {/* Per-season basis card — ALWAYS visible
                                 when there's persisted basis data for
                                 this property. Earlier this only rendered
