@@ -2539,8 +2539,10 @@ export async function registerRoutes(
     let bookingRawCount = 0;
     let bookingDropped = { noResort: 0, wrongBedrooms: 0 };
     let bookingPricedCount = 0;
+    let bookingSidecarCount = 0;
+    let bookingSidecarOnline = false;
     const bookingPromise: Promise<Candidate[]> = (async () => {
-      const [site, priced] = await Promise.all([
+      const [site, priced, sidecar] = await Promise.all([
         siteSearch("booking.com", "booking", "Booking.com"),
         (async (): Promise<Candidate[]> => {
           try {
@@ -2607,13 +2609,56 @@ export async function registerRoutes(
             return [];
           }
         })(),
+        // ── Path 3: local-Mac sidecar (operator's real Chrome) ──────
+        // When the daemon is online, drives booking.com search on the
+        // operator's actual browser. Same approach we already use for
+        // VRBO. Falls through gracefully when worker offline (75s
+        // wallet, then empty array).
+        (async (): Promise<Candidate[]> => {
+          try {
+            const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
+            const r = await searchBookingViaSidecar({
+              destination: searchLocation,
+              checkIn,
+              checkOut,
+              bedrooms,
+              walletBudgetMs: 75_000,
+            });
+            bookingSidecarCount = r.candidates.length;
+            bookingSidecarOnline = r.workerOnline;
+            // Booking sidecar returns total without per-night; fill it in
+            // using our known nights count.
+            return r.candidates.map((c): Candidate => ({
+              source: "booking",
+              sourceLabel: "Booking.com",
+              title: c.title.slice(0, 100),
+              url: c.url,
+              nightlyPrice: c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(c.totalPrice / Math.max(1, nights)),
+              totalPrice: c.totalPrice,
+              bedrooms: c.bedrooms,
+              image: c.image,
+              snippet: c.snippet,
+              verified: "yes",
+              verifiedReason: "Booking sidecar (operator's real Chrome) returned a date-specific quote",
+            }));
+          } catch (e: any) {
+            console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
+            return [];
+          }
+        })(),
       ]);
       bookingRawCount = site.raw;
       bookingDropped = site.dropped;
-      // Dedupe by URL — prefer the priced (engine) version when both
-      // surfaces have the same listing.
+      // Dedupe by URL — sidecar (operator's real Chrome) ranks FIRST,
+      // then engine, then site:search. The sidecar prices are the
+      // most authoritative when present.
       const seen = new Set<string>();
       const out: Candidate[] = [];
+      for (const c of sidecar) {
+        if (seen.has(c.url)) continue;
+        seen.add(c.url);
+        out.push(c);
+      }
       for (const c of priced) {
         if (seen.has(c.url)) continue;
         seen.add(c.url);
@@ -7488,33 +7533,114 @@ export async function registerRoutes(
 
   // POST /api/vrbo-sidecar/enqueue — find-buy-in enqueues a request.
   // No admin gate: server-to-server only on this Railway instance.
-  // Body: { destination, checkIn, checkOut, bedrooms }
+  //
+  // Two body shapes accepted:
+  //
+  //   Legacy (vrbo-only): { destination, checkIn, checkOut, bedrooms }
+  //                        — kept for the existing find-buy-in path 9.
+  //   Generic op-type:    { opType, params }
+  //                        — new path for booking/google/pm callers.
+  //
+  // Both round-trip through the same queue + dedup machinery.
   app.post("/api/vrbo-sidecar/enqueue", async (req, res) => {
-    const body = (req.body ?? {}) as {
-      destination?: string;
-      checkIn?: string;
-      checkOut?: string;
-      bedrooms?: number;
-    };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { enqueueOp } = await import("./vrbo-sidecar-queue");
+
+    // Generic op-type shape — discriminate on body.opType.
+    if (typeof body.opType === "string") {
+      const opType = body.opType as
+        | "vrbo_search"
+        | "booking_search"
+        | "google_serp"
+        | "pm_url_check";
+      const params = body.params as Record<string, unknown>;
+      if (!params || typeof params !== "object") {
+        return res.status(400).json({ error: "params (object) required when opType is set" });
+      }
+      try {
+        let result;
+        if (opType === "vrbo_search" || opType === "booking_search") {
+          if (
+            typeof params.destination !== "string" ||
+            !params.destination ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkIn ?? "")) ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkOut ?? ""))
+          ) {
+            return res.status(400).json({ error: `${opType}: destination + checkIn + checkOut required` });
+          }
+          const bedrooms = Number(params.bedrooms);
+          if (!Number.isFinite(bedrooms) || bedrooms <= 0) {
+            return res.status(400).json({ error: `${opType}: bedrooms (positive number) required` });
+          }
+          result = enqueueOp({
+            opType,
+            params: {
+              destination: String(params.destination),
+              checkIn: String(params.checkIn),
+              checkOut: String(params.checkOut),
+              bedrooms,
+            },
+          });
+        } else if (opType === "google_serp") {
+          if (typeof params.query !== "string" || !params.query) {
+            return res.status(400).json({ error: "google_serp: query (string) required" });
+          }
+          const maxResults = Number(params.maxResults ?? 20);
+          result = enqueueOp({
+            opType: "google_serp",
+            params: { query: String(params.query), maxResults: Number.isFinite(maxResults) ? maxResults : 20 },
+          });
+        } else if (opType === "pm_url_check") {
+          if (typeof params.url !== "string" || !/^https?:\/\//.test(params.url)) {
+            return res.status(400).json({ error: "pm_url_check: url (http(s) URL) required" });
+          }
+          if (
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkIn ?? "")) ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkOut ?? ""))
+          ) {
+            return res.status(400).json({ error: "pm_url_check: checkIn + checkOut required" });
+          }
+          const bedrooms = params.bedrooms != null ? Number(params.bedrooms) : undefined;
+          result = enqueueOp({
+            opType: "pm_url_check",
+            params: {
+              url: String(params.url),
+              checkIn: String(params.checkIn),
+              checkOut: String(params.checkOut),
+              bedrooms: Number.isFinite(bedrooms ?? NaN) ? bedrooms : undefined,
+            },
+          });
+        } else {
+          return res.status(400).json({ error: `unknown opType: ${opType}` });
+        }
+        return res.json(result);
+      } catch (e: any) {
+        return res.status(500).json({ error: e?.message ?? String(e) });
+      }
+    }
+
+    // Legacy vrbo-only shape — keep working unchanged.
     if (!body.destination || typeof body.destination !== "string") {
       return res.status(400).json({ error: "destination (string) required" });
     }
-    if (!body.checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkIn)) {
+    if (!body.checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(String(body.checkIn))) {
       return res.status(400).json({ error: "checkIn (YYYY-MM-DD) required" });
     }
-    if (!body.checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkOut)) {
+    if (!body.checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(String(body.checkOut))) {
       return res.status(400).json({ error: "checkOut (YYYY-MM-DD) required" });
     }
     const bedrooms = Number(body.bedrooms);
     if (!Number.isFinite(bedrooms) || bedrooms <= 0) {
       return res.status(400).json({ error: "bedrooms (positive number) required" });
     }
-    const { enqueue } = await import("./vrbo-sidecar-queue");
-    const result = enqueue({
-      destination: body.destination,
-      checkIn: body.checkIn,
-      checkOut: body.checkOut,
-      bedrooms,
+    const result = enqueueOp({
+      opType: "vrbo_search",
+      params: {
+        destination: String(body.destination),
+        checkIn: String(body.checkIn),
+        checkOut: String(body.checkOut),
+        bedrooms,
+      },
     });
     return res.json(result);
   });
@@ -7522,6 +7648,12 @@ export async function registerRoutes(
   // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
   // ADMIN_SECRET so only the operator's worker (not arbitrary callers)
   // can claim queue items.
+  //
+  // Response shape (post-2026-04-29 op-type generalization):
+  //   { request: { id, opType, params } } | { request: null }
+  //
+  // Old daemons that read `request.destination` etc. directly will
+  // break — both `worker.mjs` and routes.ts here ship together.
   app.get("/api/admin/vrbo-sidecar/next", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
     const { next } = await import("./vrbo-sidecar-queue");
@@ -7530,10 +7662,15 @@ export async function registerRoutes(
     return res.json({
       request: {
         id: r.id,
-        destination: r.destination,
-        checkIn: r.checkIn,
-        checkOut: r.checkOut,
-        bedrooms: r.bedrooms,
+        opType: r.opType,
+        params: r.params,
+        // Backward-compat: include the vrbo-shaped fields at the top
+        // level too. An older daemon that only knows about VRBO can
+        // still drive the search by reading these. The new daemon
+        // ignores them and uses opType+params instead.
+        ...(r.opType === "vrbo_search"
+          ? { destination: (r.params as any).destination, checkIn: (r.params as any).checkIn, checkOut: (r.params as any).checkOut, bedrooms: (r.params as any).bedrooms }
+          : {}),
       },
     });
   });

@@ -1,26 +1,26 @@
-// Local-Chrome VRBO sidecar queue.
+// Local-Chrome sidecar queue.
 //
-// Background: Vrbo's anti-bot fingerprints every Browserbase residential
-// session and blocks them at the bot wall, even with a persistent context
-// seeded with the operator's real-Chrome cookies (the cookies survive
-// the homepage hop but Vrbo escalates to a slider CAPTCHA on the search
-// endpoint — IP fingerprint, not session-trust). See diagnostic from
-// PR #265 + screenshot at /photos/debug/vrbo-stagehand-1777422718433.jpg.
+// Bridges find-buy-in (running on Railway) to a daemon running on the
+// operator's Mac that drives their REAL Chrome via CDP. Vrbo's anti-bot
+// fingerprints every Browserbase residential session (see PR #265's
+// diagnostic + the Decision Log entry from 2026-04-29); driving the
+// operator's actual home-IP Chrome is the only path that consistently
+// gets past the bot wall.
 //
-// The operator's REAL Chrome session (their home IP) reaches Vrbo
-// cleanly — verified end-to-end via Chrome MCP in PR #268 follow-up.
-// This module bridges find-buy-in (running on Railway) to that real
-// Chrome session via a tiny in-memory queue:
+// Originally just for VRBO search. Generalized 2026-04-29 to handle
+// four op types with the same queue machinery:
+//   - vrbo_search      (drive vrbo.com search, return priced cards)
+//   - booking_search   (drive booking.com search, return priced cards)
+//   - google_serp      (run a Google query, return organic results
+//                       — used for PM company discovery)
+//   - pm_url_check     (visit a specific PM URL, scrape availability +
+//                       price for the requested dates)
 //
-//   1. find-buy-in calls `enqueue(destination, dates, bedrooms)` and
-//      polls `getResult(id)` for up to ~60s.
-//   2. A "/loop" worker running inside the operator's Claude Code
-//      session polls `next()` every ~30s, drives Chrome MCP to do the
-//      Vrbo search on their real browser, extracts priced cards, and
-//      calls `complete(id, results)`.
-//
-// When the worker is offline, find-buy-in's poll times out and falls
-// back to the existing Vrbo paths (Google site:search etc.) gracefully.
+// Why one queue with op-type dispatch instead of four queues:
+//   - Single endpoint surface, single set of TTLs, single dedup logic.
+//   - The daemon can process them all on the same Chrome instance,
+//     reusing the existing tab when possible.
+//   - Heartbeat tracking is per-daemon, not per-op.
 //
 // Why in-memory and not a DB table:
 //   - Single-instance Railway deploy; no need to share queue across
@@ -30,32 +30,56 @@
 //   - Restart / deploy wipes the queue, but find-buy-in's existing
 //     fallback paths cover the gap automatically.
 //
-// Auth note: all four endpoints accept a worker / find-buy-in caller
-// without auth except the worker-poll one, which honours ADMIN_SECRET
-// when set (matches the pattern in /api/admin/guesty/save-session).
-// find-buy-in's enqueue/poll happen server-side so they don't need
-// auth either.
+// Auth: worker endpoints (/next, /result) honor ADMIN_SECRET when
+// set, matching the rest of /api/admin/*. Public endpoints (/enqueue,
+// /result/:id, /heartbeat) don't — find-buy-in calls them
+// server-to-server on the same instance and the heartbeat exposes
+// only booleans + ms-age.
 
-export type SidecarRequest = {
-  id: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
+// Op types the daemon knows how to handle. Each has its own params
+// shape and result shape; the daemon dispatches in worker.mjs based
+// on `opType`.
+export type SidecarOpType =
+  | "vrbo_search"
+  | "booking_search"
+  | "google_serp"
+  | "pm_url_check";
+
+export type SidecarVrboParams = {
   destination: string;
   checkIn: string;
   checkOut: string;
   bedrooms: number;
-  // Dedup key: same (destination, dates, bedrooms) within the TTL
-  // returns the EXISTING request id rather than creating a duplicate.
-  // Reduces redundant Chrome scrapes when the operator opens multiple
-  // buy-in dialogs in a row for the same reservation.
-  requestKey: string;
-  results?: SidecarVrboCandidate[];
-  error?: string;
-  createdAt: number;
-  claimedAt?: number;
-  completedAt?: number;
 };
 
-export type SidecarVrboCandidate = {
+export type SidecarBookingParams = {
+  destination: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+};
+
+export type SidecarGoogleSerpParams = {
+  query: string;
+  maxResults?: number;
+};
+
+export type SidecarPmUrlCheckParams = {
+  url: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms?: number;
+};
+
+export type SidecarParamsByOp = {
+  vrbo_search: SidecarVrboParams;
+  booking_search: SidecarBookingParams;
+  google_serp: SidecarGoogleSerpParams;
+  pm_url_check: SidecarPmUrlCheckParams;
+};
+
+// Result shapes per op type.
+export type SidecarPropertyCandidate = {
   url: string;
   title: string;
   totalPrice: number;
@@ -64,6 +88,44 @@ export type SidecarVrboCandidate = {
   image?: string;
   snippet?: string;
 };
+
+export type SidecarSerpHit = {
+  url: string;
+  title: string;
+  snippet?: string;
+};
+
+export type SidecarPmUrlCheckResult = {
+  available: "yes" | "no" | "unclear";
+  nightlyPrice: number | null;
+  totalPrice: number | null;
+  reason: string;
+};
+
+export type SidecarRequest = {
+  id: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  opType: SidecarOpType;
+  params:
+    | SidecarVrboParams
+    | SidecarBookingParams
+    | SidecarGoogleSerpParams
+    | SidecarPmUrlCheckParams;
+  requestKey: string;
+  results?:
+    | SidecarPropertyCandidate[]
+    | SidecarSerpHit[]
+    | SidecarPmUrlCheckResult
+    | null;
+  error?: string;
+  createdAt: number;
+  claimedAt?: number;
+  completedAt?: number;
+};
+
+// Backward-compat alias — old code imported this name when the queue
+// was VRBO-only.
+export type SidecarVrboCandidate = SidecarPropertyCandidate;
 
 const queue = new Map<string, SidecarRequest>();
 const requestKeyIndex = new Map<string, string>(); // requestKey → id
@@ -78,13 +140,14 @@ const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
-const PENDING_TTL_MS = 5 * 60 * 1000;       // pending requests > 5 min are dropped
-const IN_PROGRESS_RECLAIM_MS = 90 * 1000;   // in_progress > 90s is re-queued (worker probably crashed)
-const TERMINAL_TTL_MS = 5 * 60 * 1000;      // completed/failed > 5 min are dropped (find-buy-in already moved on)
+const PENDING_TTL_MS = 5 * 60 * 1000;
+const IN_PROGRESS_RECLAIM_MS = 90 * 1000;
+const TERMINAL_TTL_MS = 5 * 60 * 1000;
 
-function nowMs(): number { return Date.now(); }
+function nowMs(): number {
+  return Date.now();
+}
 
-// Inline cleanup pass — keeps the Map bounded without a separate timer.
 function cleanup(): void {
   const now = nowMs();
   for (const [id, r] of queue) {
@@ -93,68 +156,103 @@ function cleanup(): void {
       r.error = "expired waiting for worker";
       r.completedAt = now;
     }
-    if (r.status === "in_progress" && r.claimedAt && now - r.claimedAt > IN_PROGRESS_RECLAIM_MS) {
-      // Worker probably crashed mid-request. Put it back in pending so
-      // the next worker poll picks it up.
+    if (
+      r.status === "in_progress" &&
+      r.claimedAt &&
+      now - r.claimedAt > IN_PROGRESS_RECLAIM_MS
+    ) {
       r.status = "pending";
       r.claimedAt = undefined;
     }
-    if ((r.status === "completed" || r.status === "failed") && r.completedAt && now - r.completedAt > TERMINAL_TTL_MS) {
+    if (
+      (r.status === "completed" || r.status === "failed") &&
+      r.completedAt &&
+      now - r.completedAt > TERMINAL_TTL_MS
+    ) {
       queue.delete(id);
       requestKeyIndex.delete(r.requestKey);
     }
   }
 }
 
-function makeRequestKey(destination: string, checkIn: string, checkOut: string, bedrooms: number): string {
-  return `${destination.toLowerCase().trim()}|${checkIn}|${checkOut}|${bedrooms}`;
+// Build a stable, opType-aware dedup key. Two enqueues with the same
+// op type AND same canonical params get folded into one request.
+function makeRequestKey(
+  opType: SidecarOpType,
+  params: SidecarRequest["params"],
+): string {
+  switch (opType) {
+    case "vrbo_search":
+    case "booking_search": {
+      const p = params as SidecarVrboParams | SidecarBookingParams;
+      return `${opType}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
+    }
+    case "google_serp": {
+      const p = params as SidecarGoogleSerpParams;
+      return `google_serp|${p.query.toLowerCase().trim()}|${p.maxResults ?? 20}`;
+    }
+    case "pm_url_check": {
+      const p = params as SidecarPmUrlCheckParams;
+      return `pm_url_check|${p.url}|${p.checkIn}|${p.checkOut}|${p.bedrooms ?? "any"}`;
+    }
+  }
 }
 
 function makeId(): string {
-  // 12 random hex chars — enough entropy for a single-process queue.
-  return Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  return Array.from({ length: 12 }, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  ).join("");
 }
 
 /**
- * Enqueue a Vrbo search. If an identical request is already in flight
- * (pending or in_progress), returns the EXISTING id so callers
- * deduplicate cleanly. If a recent completed/failed result exists for
- * the same key (within 1 minute), also returns that id so callers
- * can pick up the cached answer.
+ * Generic enqueue. The discriminated `req` parameter ensures op-type
+ * and params shape match.
+ *
+ * Dedup: same op + canonical params within TTL returns the existing
+ * id (whether the prior is pending, in-progress, or recently
+ * completed).
  */
-export function enqueue(opts: {
-  destination: string;
-  checkIn: string;
-  checkOut: string;
-  bedrooms: number;
-}): { id: string; deduped: boolean } {
+export function enqueueOp(
+  req:
+    | { opType: "vrbo_search"; params: SidecarVrboParams }
+    | { opType: "booking_search"; params: SidecarBookingParams }
+    | { opType: "google_serp"; params: SidecarGoogleSerpParams }
+    | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams },
+): { id: string; deduped: boolean } {
   cleanup();
-  const requestKey = makeRequestKey(opts.destination, opts.checkIn, opts.checkOut, opts.bedrooms);
+  const requestKey = makeRequestKey(req.opType, req.params);
   const existingId = requestKeyIndex.get(requestKey);
   if (existingId) {
     const existing = queue.get(existingId);
     if (existing) {
       const isFresh =
-        existing.status === "pending"
-        || existing.status === "in_progress"
-        || (existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
+        existing.status === "pending" ||
+        existing.status === "in_progress" ||
+        (existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
       if (isFresh) return { id: existingId, deduped: true };
     }
   }
   const id = makeId();
-  const req: SidecarRequest = {
+  const queueReq: SidecarRequest = {
     id,
     status: "pending",
-    destination: opts.destination,
-    checkIn: opts.checkIn,
-    checkOut: opts.checkOut,
-    bedrooms: opts.bedrooms,
+    opType: req.opType,
+    params: req.params,
     requestKey,
     createdAt: nowMs(),
   };
-  queue.set(id, req);
+  queue.set(id, queueReq);
   requestKeyIndex.set(requestKey, id);
   return { id, deduped: false };
+}
+
+// Backward-compat: VRBO-only enqueue kept for callers that haven't
+// been updated. Internally just delegates to enqueueOp.
+export function enqueue(opts: SidecarVrboParams): {
+  id: string;
+  deduped: boolean;
+} {
+  return enqueueOp({ opType: "vrbo_search", params: opts });
 }
 
 /**
@@ -168,7 +266,6 @@ export function enqueue(opts: {
 export function next(): SidecarRequest | null {
   cleanup();
   lastWorkerPollAt = nowMs();
-  // Oldest pending first.
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
@@ -181,14 +278,84 @@ export function next(): SidecarRequest | null {
 }
 
 /**
- * Heartbeat snapshot for the UI. Returns booleans + ms-age so the
- * client can render a green/red badge plus "last seen Ns ago" text.
- *
- * `isOnline` flips true when the worker has polled within the last
- * 90s. We don't surface a "stale heartbeat" middle state because
- * the UI only really cares about "can we expect priced VRBO this
- * find-buy-in or not?" — yes/no.
+ * Worker reports completion. Either `results` (success) or `error`
+ * (failure) must be provided.
  */
+export function complete(opts: {
+  id: string;
+  results?: SidecarRequest["results"];
+  error?: string;
+}): { ok: boolean; reason?: string } {
+  const r = queue.get(opts.id);
+  if (!r) return { ok: false, reason: "request not found (already expired?)" };
+  if (r.status === "completed" || r.status === "failed") {
+    return { ok: false, reason: `request already in terminal state ${r.status}` };
+  }
+  if (opts.results !== undefined) {
+    r.status = "completed";
+    r.results = opts.results;
+  } else {
+    r.status = "failed";
+    r.error = opts.error || "worker reported failure with no message";
+  }
+  r.completedAt = nowMs();
+  return { ok: true };
+}
+
+export function getResult(id: string): SidecarRequest | null {
+  cleanup();
+  return queue.get(id) ?? null;
+}
+
+export function getStatus(): {
+  total: number;
+  pending: number;
+  inProgress: number;
+  completed: number;
+  failed: number;
+  oldestPendingAgeSec: number | null;
+  newestRequestAt: string | null;
+  byOpType: Record<SidecarOpType, number>;
+} {
+  cleanup();
+  let pending = 0,
+    inProgress = 0,
+    completed = 0,
+    failed = 0;
+  let oldestPendingAge: number | null = null;
+  let newestAt = 0;
+  const byOpType: Record<SidecarOpType, number> = {
+    vrbo_search: 0,
+    booking_search: 0,
+    google_serp: 0,
+    pm_url_check: 0,
+  };
+  const now = nowMs();
+  for (const r of queue.values()) {
+    if (r.status === "pending") {
+      pending++;
+      const age = (now - r.createdAt) / 1000;
+      if (oldestPendingAge === null || age > oldestPendingAge)
+        oldestPendingAge = age;
+    }
+    if (r.status === "in_progress") inProgress++;
+    if (r.status === "completed") completed++;
+    if (r.status === "failed") failed++;
+    if (r.createdAt > newestAt) newestAt = r.createdAt;
+    byOpType[r.opType]++;
+  }
+  return {
+    total: queue.size,
+    pending,
+    inProgress,
+    completed,
+    failed,
+    oldestPendingAgeSec: oldestPendingAge,
+    newestRequestAt: newestAt > 0 ? new Date(newestAt).toISOString() : null,
+    byOpType,
+  };
+}
+
 export function getHeartbeat(): {
   isOnline: boolean;
   lastWorkerPollAt: string | null;
@@ -213,82 +380,10 @@ export function getHeartbeat(): {
 }
 
 /**
- * Worker reports the result. Either `results` (success) or `error`
- * (failure) must be provided; callers shouldn't pass both.
- */
-export function complete(opts: {
-  id: string;
-  results?: SidecarVrboCandidate[];
-  error?: string;
-}): { ok: boolean; reason?: string } {
-  const r = queue.get(opts.id);
-  if (!r) return { ok: false, reason: "request not found (already expired?)" };
-  if (r.status === "completed" || r.status === "failed") {
-    return { ok: false, reason: `request already in terminal state ${r.status}` };
-  }
-  if (opts.results) {
-    r.status = "completed";
-    r.results = opts.results;
-  } else {
-    r.status = "failed";
-    r.error = opts.error || "worker reported failure with no message";
-  }
-  r.completedAt = nowMs();
-  return { ok: true };
-}
-
-/**
- * Caller (find-buy-in) reads result. Returns the request shape so the
- * caller can branch on status + pick up `results` or `error`.
- */
-export function getResult(id: string): SidecarRequest | null {
-  cleanup();
-  return queue.get(id) ?? null;
-}
-
-/**
- * Diagnostic snapshot for /api/admin/vrbo-sidecar/status.
- */
-export function getStatus(): {
-  total: number;
-  pending: number;
-  inProgress: number;
-  completed: number;
-  failed: number;
-  oldestPendingAgeSec: number | null;
-  newestRequestAt: string | null;
-} {
-  cleanup();
-  let pending = 0, inProgress = 0, completed = 0, failed = 0;
-  let oldestPendingAge: number | null = null;
-  let newestAt = 0;
-  const now = nowMs();
-  for (const r of queue.values()) {
-    if (r.status === "pending") {
-      pending++;
-      const age = (now - r.createdAt) / 1000;
-      if (oldestPendingAge === null || age > oldestPendingAge) oldestPendingAge = age;
-    }
-    if (r.status === "in_progress") inProgress++;
-    if (r.status === "completed") completed++;
-    if (r.status === "failed") failed++;
-    if (r.createdAt > newestAt) newestAt = r.createdAt;
-  }
-  return {
-    total: queue.size,
-    pending,
-    inProgress,
-    completed,
-    failed,
-    oldestPendingAgeSec: oldestPendingAge,
-    newestRequestAt: newestAt > 0 ? new Date(newestAt).toISOString() : null,
-  };
-}
-
-/**
- * Convenience helper for find-buy-in: enqueue + poll up to a wall
- * budget. Returns the candidate list on success, null on
- * timeout/failure (caller falls back to other VRBO paths).
+ * Convenience: enqueue a VRBO search, poll for result, return cards
+ * (or null on timeout/failure). Used by find-buy-in's path 9.
+ *
+ * Generic equivalents for the other op types live below.
  */
 export async function searchVrboViaSidecar(opts: {
   destination: string;
@@ -298,27 +393,149 @@ export async function searchVrboViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
 }): Promise<{
-  candidates: SidecarVrboCandidate[];
+  candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
   durationMs: number;
   reason: string;
 } | null> {
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "vrbo_search",
+      params: {
+        destination: opts.destination,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs,
+  });
+  return {
+    candidates: (r.results ?? []) as SidecarPropertyCandidate[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+export async function searchBookingViaSidecar(opts: {
+  destination: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  candidates: SidecarPropertyCandidate[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "booking_search",
+      params: {
+        destination: opts.destination,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs,
+  });
+  return {
+    candidates: (r.results ?? []) as SidecarPropertyCandidate[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+export async function googleSerpViaSidecar(opts: {
+  query: string;
+  maxResults?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  hits: SidecarSerpHit[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "google_serp",
+      params: { query: opts.query, maxResults: opts.maxResults ?? 20 },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs,
+  });
+  return {
+    hits: (r.results ?? []) as SidecarSerpHit[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+export async function checkPmUrlViaSidecar(opts: {
+  url: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  result: SidecarPmUrlCheckResult | null;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "pm_url_check",
+      params: {
+        url: opts.url,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs,
+  });
+  return {
+    result: (r.results as SidecarPmUrlCheckResult | undefined) ?? null,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Shared enqueue + poll loop. Each `searchXViaSidecar` is a thin
+// op-typed wrapper around this.
+async function awaitOpResult(opts: {
+  enqueueArgs: Parameters<typeof enqueueOp>[0];
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  results: SidecarRequest["results"];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
   const startedAt = nowMs();
   const pollMs = opts.pollIntervalMs ?? 2000;
   const walletMs = opts.walletBudgetMs ?? 75_000;
-  const { id } = enqueue({
-    destination: opts.destination,
-    checkIn: opts.checkIn,
-    checkOut: opts.checkOut,
-    bedrooms: opts.bedrooms,
-  });
+  const { id } = enqueueOp(opts.enqueueArgs);
 
   while (nowMs() - startedAt < walletMs) {
     const r = getResult(id);
     if (!r) {
-      // Request expired (probably no worker online). Fall back.
       return {
-        candidates: [],
+        results: null,
         workerOnline: false,
         durationMs: nowMs() - startedAt,
         reason: "request expired before completion (worker likely offline)",
@@ -326,15 +543,17 @@ export async function searchVrboViaSidecar(opts: {
     }
     if (r.status === "completed") {
       return {
-        candidates: r.results ?? [],
+        results: r.results ?? null,
         workerOnline: true,
         durationMs: nowMs() - startedAt,
-        reason: `worker returned ${r.results?.length ?? 0} candidates`,
+        reason: `worker returned ${
+          Array.isArray(r.results) ? r.results.length : r.results ? "1" : "0"
+        } result(s)`,
       };
     }
     if (r.status === "failed") {
       return {
-        candidates: [],
+        results: null,
         workerOnline: true,
         durationMs: nowMs() - startedAt,
         reason: r.error || "worker reported failure",
@@ -342,13 +561,10 @@ export async function searchVrboViaSidecar(opts: {
     }
     await new Promise((res) => setTimeout(res, pollMs));
   }
-  // Wall budget exceeded — caller falls back. Don't mark the request
-  // failed; the worker may still complete it (and a future identical
-  // enqueue will dedupe to the cached result).
   return {
-    candidates: [],
+    results: null,
     workerOnline: false,
     durationMs: nowMs() - startedAt,
-    reason: `wall budget ${walletMs}ms exceeded waiting for worker`,
+    reason: `wallet budget ${walletMs}ms exceeded waiting for worker`,
   };
 }
