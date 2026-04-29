@@ -359,4 +359,11 @@ export const VRP_SITES = {
     label: "Piko Properties",
     baseUrl: "https://pikoproperties.com",
   },
+  // PR #310: discovered via /api/admin/pm-discovery on Pili Mai —
+  // sitemap probe returned 8 /vrp/unit/ entries, fingerprint match.
+  // Sample URL: https://evrhi.com/vrp/unit/Pili_Mai_11I/
+  evrhi: {
+    label: "EVR Hawaii",
+    baseUrl: "https://evrhi.com",
+  },
 } as const satisfies Record<string, VrpSiteConfig>;
