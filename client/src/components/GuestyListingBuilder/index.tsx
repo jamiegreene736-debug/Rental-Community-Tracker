@@ -2845,11 +2845,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         {selectedId && (() => {
           const builder = propertyId ? getUnitBuilderByPropertyId(propertyId) : undefined;
           const totalBedrooms = builder?.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0);
+          // Pre-fill partnerListingRef from Guesty's per-channel
+          // identifiers — VRBO's advertiserId IS the partner-portal
+          // listing id; Booking's hotelId is the extranet id.
+          // channelStatus is already loaded by the existing channel-
+          // info effect.
           return (
             <PhotoSyncStatusPanel
               guestyListingId={selectedId}
               communityFolder={builder?.communityPhotoFolder}
               bedrooms={totalBedrooms && totalBedrooms > 0 ? totalBedrooms : undefined}
+              channelIds={{
+                vrbo: channelStatus?.vrbo?.id ?? null,
+                booking: channelStatus?.bookingCom?.id ?? null,
+              }}
             />
           );
         })()}

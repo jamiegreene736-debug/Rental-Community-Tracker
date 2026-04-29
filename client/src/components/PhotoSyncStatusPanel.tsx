@@ -76,9 +76,18 @@ type Props = {
   // with a tooltip explaining why.
   communityFolder?: string;
   bedrooms?: number;
+  // Auto-fill source for partnerListingRef when the operator hasn't
+  // saved one yet. Guesty stores the VRBO `advertiserId` (= partner
+  // portal listing id) under channels.homeaway2 and the Booking
+  // `hotelId` under channels.bookingCom — guestyService.
+  // getChannelStatus surfaces both as ChannelInfo.id.
+  channelIds?: {
+    vrbo?: string | null;
+    booking?: string | null;
+  };
 };
 
-export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedrooms }: Props) {
+export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedrooms, channelIds }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isolating, setIsolating] = useState<{ channel: string; label: string } | null>(null);
@@ -332,7 +341,13 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                   onClick={() => setFullFlow({
                     channel: key,
                     label,
-                    partnerListingRef: row.partnerListingRef ?? "",
+                    // Persisted server value wins over channelIds (operator
+                    // override survives). channelIds is the auto-derived
+                    // fallback from Guesty's advertiserId / hotelId on
+                    // first-ever click for this channel.
+                    partnerListingRef: row.partnerListingRef
+                      ?? channelIds?.[key]
+                      ?? "",
                     bedrooms: bedrooms ?? 0,
                     reason: "",
                   })}
