@@ -7582,6 +7582,18 @@ export async function registerRoutes(
     return res.json(getStatus());
   });
 
+  // GET /api/vrbo-sidecar/heartbeat — public health check for the UI.
+  // Returns whether the operator's local Mac daemon has polled the
+  // queue recently (within the 90s online window). The buy-in panel
+  // shows a green/red badge based on this so the operator can tell at
+  // a glance whether find-buy-in will get real VRBO results or fall
+  // back to the existing 8 paths. No admin gate — this exposes only
+  // booleans + ms-age, no sensitive data.
+  app.get("/api/vrbo-sidecar/heartbeat", async (_req, res) => {
+    const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+    return res.json(getHeartbeat());
+  });
+
   // GET /api/admin/vrbo-stagehand-debug
   //
   // One-off diagnostic for the Stagehand VRBO search path. Runs the

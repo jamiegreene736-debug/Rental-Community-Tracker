@@ -68,6 +68,14 @@ export type SidecarVrboCandidate = {
 const queue = new Map<string, SidecarRequest>();
 const requestKeyIndex = new Map<string, string>(); // requestKey → id
 
+// Worker liveness: every time the worker calls `next()`, we stamp this.
+// The UI polls `getHeartbeat()` to decide whether to show "Local sidecar
+// online / offline" — purely a UX signal, not load-bearing for queue
+// correctness. Online window is 90s (1.5× the daemon's POLL_IDLE_MS so
+// a single missed poll doesn't flicker the indicator).
+let lastWorkerPollAt: number | null = null;
+const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
+
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
 const PENDING_TTL_MS = 5 * 60 * 1000;       // pending requests > 5 min are dropped
@@ -152,9 +160,14 @@ export function enqueue(opts: {
 /**
  * Worker pulls the oldest pending request and marks it in_progress.
  * Returns null when the queue has nothing for the worker to do.
+ *
+ * Side effect: stamps `lastWorkerPollAt` for the heartbeat surface.
+ * Even an empty-queue poll counts as a heartbeat — the worker is
+ * alive, just no work right now.
  */
 export function next(): SidecarRequest | null {
   cleanup();
+  lastWorkerPollAt = nowMs();
   // Oldest pending first.
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
@@ -165,6 +178,38 @@ export function next(): SidecarRequest | null {
   oldest.status = "in_progress";
   oldest.claimedAt = nowMs();
   return oldest;
+}
+
+/**
+ * Heartbeat snapshot for the UI. Returns booleans + ms-age so the
+ * client can render a green/red badge plus "last seen Ns ago" text.
+ *
+ * `isOnline` flips true when the worker has polled within the last
+ * 90s. We don't surface a "stale heartbeat" middle state because
+ * the UI only really cares about "can we expect priced VRBO this
+ * find-buy-in or not?" — yes/no.
+ */
+export function getHeartbeat(): {
+  isOnline: boolean;
+  lastWorkerPollAt: string | null;
+  ageMs: number | null;
+  onlineWindowMs: number;
+} {
+  if (lastWorkerPollAt === null) {
+    return {
+      isOnline: false,
+      lastWorkerPollAt: null,
+      ageMs: null,
+      onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+    };
+  }
+  const ageMs = nowMs() - lastWorkerPollAt;
+  return {
+    isOnline: ageMs < HEARTBEAT_ONLINE_WINDOW_MS,
+    lastWorkerPollAt: new Date(lastWorkerPollAt).toISOString(),
+    ageMs,
+    onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+  };
 }
 
 /**
