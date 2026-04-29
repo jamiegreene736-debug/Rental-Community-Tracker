@@ -2834,6 +2834,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           </>
         )}
 
+        {/* ── Photo Sync Status (per channel) ──────────────────────
+            Shows whether each OTA channel (Airbnb / VRBO / Booking)
+            is on Guesty's master photo sync or has been isolated for
+            independent photo management. Lives next to the Re-publish
+            channel cards so all per-channel controls are one band. */}
+        {selectedId && (
+          <PhotoSyncStatusPanel guestyListingId={selectedId} />
+        )}
+
         {/* ── Data Preview Panel ────────────────────────────────── */}
         {propertyData && (
           <>
@@ -4318,16 +4327,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               </div>
             </div>
           </>
-        )}
-
-        {/* ── Photo Sync Status (per channel) ──────────────────────
-            Shows whether each OTA channel (Airbnb / VRBO / Booking)
-            is on Guesty's master photo sync or has been isolated for
-            independent photo management. Only renders when a Guesty
-            listing is selected — there's nothing meaningful to show
-            without a listing id. */}
-        {selectedId && (
-          <PhotoSyncStatusPanel guestyListingId={selectedId} />
         )}
 
         {/* ── Build Log ─────────────────────────────────────────── */}
