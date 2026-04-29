@@ -187,7 +187,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
             checkIn,
             checkOut,
             bedrooms: br,
-            walletBudgetMs: 60_000,
+            // 60s was hitting the wall when the daemon was busy with
+            // back-to-back property refreshes from the cron. 90s
+            // gives the LOW-season VRBO + Booking pulls room to
+            // finish even on a queued daemon. Worst-case wall per
+            // property = 90s VRBO + 90s Booking serialized = 180s,
+            // still well under Railway's 5-min edge timeout.
+            walletBudgetMs: 90_000,
           });
           if (!r) return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false };
           // Filter to listings that actually quote a per-night and
@@ -220,7 +226,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
             checkIn,
             checkOut,
             bedrooms: br,
-            walletBudgetMs: 60_000,
+            // 60s was hitting the wall when the daemon was busy with
+            // back-to-back property refreshes from the cron. 90s
+            // gives the LOW-season VRBO + Booking pulls room to
+            // finish even on a queued daemon. Worst-case wall per
+            // property = 90s VRBO + 90s Booking serialized = 180s,
+            // still well under Railway's 5-min edge timeout.
+            walletBudgetMs: 90_000,
           });
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the
@@ -254,6 +266,28 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const daemonOnline = sidecarResults.some((r) => r.workerOnline);
   const region = inferRegion(args.city, args.state);
 
+  // Sanity floor for outlier channel rates. Surfaced 2026-04-29: the
+  // Booking scraper was regex-matching a "$28 savings" badge instead
+  // of the listing total, returning a $28 nightly that polluted the
+  // median for 2BR Hawaii rentals (real basis ~$300+).
+  //
+  // Strategy: when the Airbnb engine returns a baseline, drop any
+  // sidecar channel rate that's < SANITY_FLOOR_RATIO of it. Airbnb
+  // is always all-in and engine-validated, so its cheapest sample
+  // is a reasonable lower bound for "what a real rental for these
+  // dates looks like." Anything below half of that is almost
+  // certainly a scraper bug.
+  //
+  // When Airbnb returned no samples (rare — engine offline), we
+  // can't compute a baseline; pass channel rates through unfiltered
+  // and let downstream handle it. Region-tier minimums could be
+  // added here later if needed (Hawaii ~$100/n floor, FL ~$40).
+  const SANITY_FLOOR_RATIO = 0.5;
+  const passSanity = (rate: number, baseline: number | null): boolean => {
+    if (baseline == null || baseline <= 0) return true;
+    return rate >= baseline * SANITY_FLOOR_RATIO;
+  };
+
   // Build the channel cheapest map, normalized to all-in nightly.
   // Airbnb engine totals already include service fee + taxes; VRBO +
   // Booking sidecar scrapes are pre-tax, so we multiply them by the
@@ -270,13 +304,21 @@ export async function fetchMultiChannelBuyInByBR(args: {
     const bookingSidecar = sidecarResults.find(
       (r) => r.br === br && r.channel === "booking",
     );
+
+    const vrboNormalized = vrboSidecar?.cheapestNightly != null
+      ? applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region)
+      : null;
+    const bookingNormalized = bookingSidecar?.cheapestNightly != null
+      ? applyTaxNormalization(bookingSidecar.cheapestNightly, "booking", region)
+      : null;
+
     channelCheapestByBR[br] = {
       airbnb: airbnbCheapest,
-      vrbo: vrboSidecar?.cheapestNightly != null
-        ? applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region)
+      vrbo: vrboNormalized != null && passSanity(vrboNormalized, airbnbCheapest)
+        ? vrboNormalized
         : null,
-      booking: bookingSidecar?.cheapestNightly != null
-        ? applyTaxNormalization(bookingSidecar.cheapestNightly, "booking", region)
+      booking: bookingNormalized != null && passSanity(bookingNormalized, airbnbCheapest)
+        ? bookingNormalized
         : null,
     };
   }
