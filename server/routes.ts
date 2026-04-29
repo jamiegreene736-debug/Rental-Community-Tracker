@@ -2659,13 +2659,17 @@ export async function registerRoutes(
     let vrboAwsCount = 0; // apify web-scraper
     let vrboShCount = 0;  // stagehand managed agent
     let vrboGoogleCount = 0;
+    let vrboSidecarCount = 0;
+    let vrboSidecarOnline = false;
+    let vrboSidecarMs = 0;
+    let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const bbApiKey = process.env.BROWSERBASE_API_KEY;
       const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
       const targetDestination = resortName ?? community;
 
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
-      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, stagehandResults, googleResults] = await Promise.all([
+      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, stagehandResults, googleResults, sidecarResults] = await Promise.all([
         // Path 1 — Apify (paid actor; priced when regionId resolves)
         searchVrboViaApify({
           resortName: resortName ?? community,
@@ -2776,6 +2780,50 @@ export async function registerRoutes(
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
         }),
+        // Path 9 — Local-Chrome sidecar via the operator's real browser.
+        // Vrbo's anti-bot fingerprints all 7 priced server-side paths
+        // (Apify, BB, ScrapingBee, Outscraper, Trivago, Apify-web,
+        // Stagehand) — even with a Browserbase persistent context
+        // seeded with real-Chrome cookies, the search endpoint
+        // escalates to a slider CAPTCHA tied to the residential IP
+        // ("There is a robot on the same network as you"). The
+        // operator's actual home-IP Chrome session reaches Vrbo
+        // cleanly. This path enqueues a request and waits for the
+        // operator-side /loop worker (running in their Claude Code
+        // session) to drive Chrome MCP and post results back. When
+        // the worker is offline (operator not at desk), the wallet
+        // budget expires and we gracefully fall through to the other
+        // 8 paths.
+        (async (): Promise<{ candidates: Candidate[]; workerOnline: boolean; durationMs: number; reason: string }> => {
+          const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+          const r = await searchVrboViaSidecar({
+            destination: targetDestination,
+            checkIn,
+            checkOut,
+            bedrooms,
+            walletBudgetMs: 75_000,
+          });
+          if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
+          return {
+            candidates: r.candidates.map((c): Candidate => ({
+              source: "vrbo" as const,
+              sourceLabel: "Vrbo",
+              title: c.title,
+              url: withStayDates("vrbo", c.url),
+              nightlyPrice: c.nightlyPrice,
+              totalPrice: c.totalPrice,
+              bedrooms: c.bedrooms,
+              image: c.image,
+              snippet: c.snippet,
+            })),
+            workerOnline: r.workerOnline,
+            durationMs: r.durationMs,
+            reason: r.reason,
+          };
+        })().catch((e: any) => {
+          console.error("[find-buy-in] vrbo (sidecar) error:", e?.message ?? e);
+          return { candidates: [] as Candidate[], workerOnline: false, durationMs: 0, reason: e?.message ?? "sidecar error" };
+        }),
       ]);
 
       vrboApifyCount = apifyResults.length;
@@ -2786,8 +2834,12 @@ export async function registerRoutes(
       vrboAwsCount = apifyWebResults.length;
       vrboShCount = stagehandResults.length;
       vrboGoogleCount = googleResults.candidates.length;
+      vrboSidecarCount = sidecarResults.candidates.length;
+      vrboSidecarOnline = sidecarResults.workerOnline;
+      vrboSidecarMs = sidecarResults.durationMs;
+      vrboSidecarReason = sidecarResults.reason;
       vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + vrboShCount + googleResults.raw;
+      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + vrboShCount + googleResults.raw + vrboSidecarCount;
 
       const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
         source: "vrbo" as const,
@@ -2894,6 +2946,11 @@ export async function registerRoutes(
       // Vrbo direct and computes its own all-in. Apify web-scraper
       // (residential proxy + custom JS) ranks just below since it's
       // robust to Vrbo's DOM rev churn.
+      // Sidecar (operator's real Chrome) ranks FIRST when it's online —
+      // it's the only path that reliably gets past Vrbo's IP fingerprint
+      // wall. When the worker is offline the array is empty so this
+      // collapses to the existing priority chain below.
+      for (const c of sidecarResults.candidates) pushIfNew(c);
       for (const c of shCandidates) pushIfNew(c);
       for (const c of tvCandidates) pushIfNew(c);
       for (const c of awsCandidates) pushIfNew(c);
@@ -3724,7 +3781,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only) `
+      + `vrbo=${vrbo.length} (sidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
@@ -7413,6 +7470,116 @@ export async function registerRoutes(
     } catch (e: any) {
       return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
+  });
+
+  // ============================================================
+  // VRBO local-Chrome sidecar queue
+  //
+  // Sister system to the Stagehand path. Where Stagehand drives
+  // Browserbase (which Vrbo's anti-bot fingerprints and blocks),
+  // these endpoints bridge find-buy-in to the operator's REAL Chrome
+  // session via a tiny in-memory queue. A "/loop" worker running
+  // inside the operator's Claude Code session polls /next, drives
+  // Chrome MCP to do the search on their actual browser (real IP,
+  // real cookies, no bot wall), and posts results back via /result.
+  //
+  // See server/vrbo-sidecar-queue.ts for queue semantics + dedup.
+  // ============================================================
+
+  // POST /api/vrbo-sidecar/enqueue — find-buy-in enqueues a request.
+  // No admin gate: server-to-server only on this Railway instance.
+  // Body: { destination, checkIn, checkOut, bedrooms }
+  app.post("/api/vrbo-sidecar/enqueue", async (req, res) => {
+    const body = (req.body ?? {}) as {
+      destination?: string;
+      checkIn?: string;
+      checkOut?: string;
+      bedrooms?: number;
+    };
+    if (!body.destination || typeof body.destination !== "string") {
+      return res.status(400).json({ error: "destination (string) required" });
+    }
+    if (!body.checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkIn)) {
+      return res.status(400).json({ error: "checkIn (YYYY-MM-DD) required" });
+    }
+    if (!body.checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkOut)) {
+      return res.status(400).json({ error: "checkOut (YYYY-MM-DD) required" });
+    }
+    const bedrooms = Number(body.bedrooms);
+    if (!Number.isFinite(bedrooms) || bedrooms <= 0) {
+      return res.status(400).json({ error: "bedrooms (positive number) required" });
+    }
+    const { enqueue } = await import("./vrbo-sidecar-queue");
+    const result = enqueue({
+      destination: body.destination,
+      checkIn: body.checkIn,
+      checkOut: body.checkOut,
+      bedrooms,
+    });
+    return res.json(result);
+  });
+
+  // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
+  // ADMIN_SECRET so only the operator's worker (not arbitrary callers)
+  // can claim queue items.
+  app.get("/api/admin/vrbo-sidecar/next", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { next } = await import("./vrbo-sidecar-queue");
+    const r = next();
+    if (!r) return res.json({ request: null });
+    return res.json({
+      request: {
+        id: r.id,
+        destination: r.destination,
+        checkIn: r.checkIn,
+        checkOut: r.checkOut,
+        bedrooms: r.bedrooms,
+      },
+    });
+  });
+
+  // POST /api/admin/vrbo-sidecar/result — worker reports completion.
+  // Body: { id, results?: SidecarVrboCandidate[], error?: string }
+  app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as {
+      id?: string;
+      results?: unknown;
+      error?: string;
+    };
+    if (!body.id || typeof body.id !== "string") {
+      return res.status(400).json({ error: "id (string) required" });
+    }
+    const { complete } = await import("./vrbo-sidecar-queue");
+    const result = complete({
+      id: body.id,
+      results: Array.isArray(body.results) ? (body.results as any[]) : undefined,
+      error: body.error,
+    });
+    return res.json(result);
+  });
+
+  // GET /api/vrbo-sidecar/result/:id — find-buy-in polls this for
+  // its enqueued request. No admin gate (caller is server-side
+  // find-buy-in on the same instance).
+  app.get("/api/vrbo-sidecar/result/:id", async (req, res) => {
+    const { getResult } = await import("./vrbo-sidecar-queue");
+    const r = getResult(String(req.params.id));
+    if (!r) return res.status(404).json({ error: "not found (expired?)" });
+    return res.json({
+      id: r.id,
+      status: r.status,
+      results: r.results ?? null,
+      error: r.error ?? null,
+      createdAt: new Date(r.createdAt).toISOString(),
+      completedAt: r.completedAt ? new Date(r.completedAt).toISOString() : null,
+    });
+  });
+
+  // GET /api/admin/vrbo-sidecar/status — diagnostic snapshot of queue.
+  app.get("/api/admin/vrbo-sidecar/status", async (_req, res) => {
+    const { getStatus } = await import("./vrbo-sidecar-queue");
+    return res.json(getStatus());
   });
 
   // GET /api/admin/vrbo-stagehand-debug
