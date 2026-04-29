@@ -40,7 +40,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { ShieldOff, Shield, RotateCw, Zap } from "lucide-react";
+import { ShieldOff, Shield, RotateCw, Zap, Check, X, Circle } from "lucide-react";
 
 const CHANNELS = [
   { key: "airbnb", label: "Airbnb" },
@@ -102,12 +102,23 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
     bedrooms: number;
     reason: string;
   } | null>(null);
-  // Streaming progress state for the full flow. While running, button
-  // is disabled and the dialog shows phase + last message.
+  // Streaming progress state for the full flow. Per-step status so the
+  // operator sees exactly which steps succeeded vs which failed —
+  // single-phase + message wasn't enough signal for trust.
+  type StepKey = "find" | "scrape" | "snapshot" | "isolate" | "upload" | "disconnect";
+  type StepState = "pending" | "running" | "done" | "error" | "skipped";
+  type StepRow = { key: StepKey; label: string; state: StepState; detail: string | null };
+  const initialSteps = (channel: FullFlowChannel): StepRow[] => [
+    { key: "find",       label: "Find a replacement Zillow unit",                   state: "pending", detail: null },
+    { key: "scrape",     label: "Read candidate's photos",                          state: "pending", detail: null },
+    { key: "snapshot",   label: "Snapshot current Guesty photos",                   state: "pending", detail: null },
+    { key: "isolate",    label: "Mark channel isolated + capture bad-hash set",     state: "pending", detail: null },
+    { key: "upload",     label: `Upload photos to ${prettyChannel(channel)} portal`, state: "pending", detail: null },
+    { key: "disconnect", label: `Disconnect ${prettyChannel(channel)} from Guesty`, state: "pending", detail: null },
+  ];
   const [fullFlowRun, setFullFlowRun] = useState<{
     channel: FullFlowChannel;
-    phase: string;
-    message: string;
+    steps: StepRow[];
     done: boolean;
     error: string | null;
   } | null>(null);
@@ -175,12 +186,50 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
 
   // Full flow: NDJSON streaming. Updates fullFlowRun as events arrive
   // so the dialog shows live phase + message progress.
+  // Helper: mutate one step in the steps[] array.
+  const updateStep = (key: StepKey, patch: Partial<StepRow>) =>
+    setFullFlowRun((s) => s ? {
+      ...s,
+      steps: s.steps.map((row) => row.key === key ? { ...row, ...patch } : row),
+    } : s);
+
+  // Helper: any later step that's still "pending" when an error fires
+  // earlier should be marked "skipped" so the operator sees clearly
+  // that the chain was halted, not that those steps mysteriously
+  // didn't run.
+  const skipPendingAfter = (failedKey: StepKey) =>
+    setFullFlowRun((s) => {
+      if (!s) return s;
+      const failedIndex = s.steps.findIndex((r) => r.key === failedKey);
+      return {
+        ...s,
+        steps: s.steps.map((r, i) => i > failedIndex && r.state === "pending" ? { ...r, state: "skipped" } : r),
+      };
+    });
+
+  // Map a server `phase` name to the steps[] key (sometimes 1-to-many:
+  // the server's "find-replacement" covers our find step; "isolate" is
+  // implicit between snapshot-result and upload phase).
+  const phaseToStep = (phase: string): StepKey | null => {
+    if (phase === "find-replacement") return "find";
+    if (phase === "scrape") return "scrape";
+    if (phase === "snapshot") return "snapshot";
+    if (phase === "upload") return "upload";
+    if (phase === "disconnect") return "disconnect";
+    return null;
+  };
+
   const runFullFlow = async (params: { channel: FullFlowChannel; partnerListingRef: string; bedrooms: number; reason: string | null }) => {
     if (!communityFolder) {
       toast({ title: "Can't run full flow", description: "communityFolder missing — pass it as a prop from the builder.", variant: "destructive" });
       return;
     }
-    setFullFlowRun({ channel: params.channel, phase: "starting", message: "Connecting to server…", done: false, error: null });
+    setFullFlowRun({
+      channel: params.channel,
+      steps: initialSteps(params.channel),
+      done: false,
+      error: null,
+    });
     console.info(`[isolate-replace-disconnect] click → POST /api/listings/${guestyListingId}/isolate-replace-disconnect`, params);
     try {
       const resp = await fetch(`/api/listings/${guestyListingId}/isolate-replace-disconnect`, {
@@ -204,6 +253,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
       let buf = "";
       let didFinish = false;
       let lastError: string | null = null;
+      let lastErrorPhase: string | null = null;
       while (true) {
         const { done: streamDone, value } = await reader.read();
         if (streamDone) break;
@@ -216,44 +266,79 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
             const ev = JSON.parse(line) as any;
             console.debug("[isolate-replace-disconnect] event:", ev);
             if (ev.type === "phase") {
-              setFullFlowRun((s) => s ? { ...s, phase: ev.name, message: ev.message ?? ev.name } : s);
+              const stepKey = phaseToStep(ev.name);
+              if (stepKey) updateStep(stepKey, { state: "running", detail: ev.message ?? null });
             } else if (ev.type === "candidate") {
-              setFullFlowRun((s) => s ? { ...s, message: `Found ${ev.unitLabel} (${ev.bedrooms ?? "?"}BR)` } : s);
+              updateStep("find", { state: "done", detail: `${ev.unitLabel} (${ev.bedrooms ?? "?"}BR)` });
             } else if (ev.type === "scrape-result") {
-              setFullFlowRun((s) => s ? { ...s, message: `Scraped ${ev.count} photos` } : s);
+              updateStep("scrape", { state: "done", detail: `${ev.count} photos read` });
+              // Snapshot phase fires next on the server; the isolate
+              // step is implicit (DB write between snapshot-result and
+              // the upload phase) — we mark it done as soon as the
+              // upload phase begins below.
             } else if (ev.type === "snapshot-result") {
-              setFullFlowRun((s) => s ? { ...s, message: `Snapshotted ${ev.hashCount} current hashes` } : s);
+              updateStep("snapshot", { state: "done", detail: `${ev.hashCount} hash${ev.hashCount === 1 ? "" : "es"} captured` });
+              // Server immediately writes the photo_sync row + audit
+              // before emitting the next "upload" phase event. Mark
+              // isolate done as the implicit success.
+              updateStep("isolate", { state: "done", detail: "photo_sync row written + audit logged" });
             } else if (ev.type === "upload-result") {
-              setFullFlowRun((s) => s ? { ...s, message: `Uploaded ${ev.uploaded} (${ev.failed} failed) in ${Math.round(ev.durationMs / 1000)}s` } : s);
+              if (ev.uploaded > 0) {
+                updateStep("upload", {
+                  state: "done",
+                  detail: `${ev.uploaded} uploaded${ev.failed ? `, ${ev.failed} failed` : ""} in ${Math.round((ev.durationMs ?? 0) / 1000)}s`,
+                });
+              } else {
+                updateStep("upload", {
+                  state: "error",
+                  detail: ev.workerOnline
+                    ? `0/${ev.uploaded + (ev.failed ?? 0)} uploaded — sidecar reported all failed`
+                    : "Sidecar worker offline",
+                });
+              }
             } else if (ev.type === "disconnect-result") {
-              setFullFlowRun((s) => s ? { ...s, message: ev.ok ? "Disconnected from Guesty" : `Disconnect failed: ${ev.message}` } : s);
+              if (ev.ok) {
+                updateStep("disconnect", { state: "done", detail: ev.message ?? "Disconnected" });
+              } else {
+                updateStep("disconnect", {
+                  state: "error",
+                  detail: ev.workerOnline ? `Failed: ${ev.message}` : "Sidecar worker offline",
+                });
+              }
             } else if (ev.type === "done") {
               didFinish = true;
             } else if (ev.type === "error") {
               lastError = ev.message ?? `${ev.phase} error`;
+              lastErrorPhase = ev.phase ?? null;
+              // Mark the failing step as error, then mark all later
+              // pending steps as skipped.
+              const stepKey = lastErrorPhase ? phaseToStep(lastErrorPhase) : null;
+              if (stepKey) {
+                updateStep(stepKey, { state: "error", detail: lastError });
+                skipPendingAfter(stepKey);
+              }
             }
           } catch { /* ignore malformed line */ }
         }
       }
       if (didFinish) {
-        setFullFlowRun((s) => s ? { ...s, phase: "done", message: "✓ Done", done: true, error: null } : s);
+        setFullFlowRun((s) => s ? { ...s, done: true, error: null } : s);
         toast({
           title: `${prettyChannel(params.channel)} migrated to channel-specific photos`,
-          description: "New photos uploaded to the partner portal and Guesty integration disconnected. From now on, manage photos for this channel directly in its portal.",
+          description: "Photos uploaded to the partner portal and Guesty integration disconnected. Manage this channel's photos directly in its portal from now on.",
         });
-        // Brief pause so the operator sees the "✓ Done" state, then close.
         setTimeout(() => {
           setFullFlowRun(null);
           setFullFlow(null);
           queryClient.invalidateQueries({ queryKey });
-        }, 1800);
+        }, 2200);
       } else {
         throw new Error(lastError ?? "Flow ended without a done event");
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       console.error(`[isolate-replace-disconnect] error:`, msg);
-      setFullFlowRun((s) => s ? { ...s, phase: "error", message: msg, done: false, error: msg } : s);
+      setFullFlowRun((s) => s ? { ...s, error: msg, done: false } : s);
       toast({ title: "Migration failed", description: msg, variant: "destructive" });
     }
   };
@@ -441,17 +526,68 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
             </DialogDescription>
           </DialogHeader>
           {fullFlowRun ? (
-            <div className="space-y-2 py-2">
-              <div className="text-xs">
-                <span className="font-mono uppercase text-muted-foreground">{fullFlowRun.phase}</span>
-                {!fullFlowRun.done && !fullFlowRun.error && <RotateCw className="inline-block ml-2 h-3 w-3 animate-spin" />}
-              </div>
-              <div className={`text-sm ${fullFlowRun.error ? "text-red-600" : fullFlowRun.done ? "text-green-700" : ""}`}>
-                {fullFlowRun.message}
-              </div>
+            <div className="space-y-1.5 py-2">
+              {fullFlowRun.steps.map((step, idx) => (
+                <div
+                  key={step.key}
+                  className="flex items-start gap-2 text-sm"
+                  data-testid={`fullflow-step-${step.key}`}
+                  data-state={step.state}
+                >
+                  <span className="mt-0.5 flex h-4 w-4 flex-none items-center justify-center">
+                    {step.state === "done" && (
+                      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-green-600 text-white">
+                        <Check className="h-3 w-3" strokeWidth={3} />
+                      </span>
+                    )}
+                    {step.state === "error" && (
+                      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-white">
+                        <X className="h-3 w-3" strokeWidth={3} />
+                      </span>
+                    )}
+                    {step.state === "running" && (
+                      <RotateCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                    )}
+                    {step.state === "pending" && (
+                      <Circle className="h-3 w-3 text-muted-foreground" />
+                    )}
+                    {step.state === "skipped" && (
+                      <Circle className="h-3 w-3 text-muted-foreground/40" />
+                    )}
+                  </span>
+                  <div className="flex-1">
+                    <div
+                      className={
+                        step.state === "done"
+                          ? "text-green-700 dark:text-green-400"
+                          : step.state === "error"
+                          ? "text-red-700 dark:text-red-400"
+                          : step.state === "running"
+                          ? "text-blue-700 dark:text-blue-400"
+                          : step.state === "skipped"
+                          ? "text-muted-foreground/60 line-through"
+                          : "text-muted-foreground"
+                      }
+                    >
+                      <span className="text-muted-foreground/70 mr-1.5 font-mono text-xs">{idx + 1}.</span>
+                      {step.label}
+                    </div>
+                    {step.detail && (
+                      <div className="text-xs text-muted-foreground mt-0.5 ml-6">
+                        {step.detail}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {fullFlowRun.done && (
+                <div className="mt-3 rounded-md bg-green-50 dark:bg-green-950/30 border border-green-300 dark:border-green-800 p-2 text-xs text-green-800 dark:text-green-200">
+                  ✓ All steps complete. Closing in a moment…
+                </div>
+              )}
               {fullFlowRun.error && (
-                <div className="text-xs text-muted-foreground">
-                  Audit trail of what happened is in <code>photo_sync_audit</code> — re-run after fixing.
+                <div className="mt-3 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-300 dark:border-red-800 p-2 text-xs text-red-800 dark:text-red-200">
+                  Stopped at the failed step. Audit trail is in <code>photo_sync_audit</code> — re-run after fixing the cause.
                 </div>
               )}
             </div>
