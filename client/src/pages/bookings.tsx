@@ -1432,6 +1432,29 @@ type LiveCandidate = {
   verifiedReason?: string;
 };
 
+// Single channel inside a clustered unit (one row inside a UnitRow).
+// Mirrors server's ListingChannel from /api/operations/find-buy-in.
+type LiveUnitListing = {
+  channel: "airbnb" | "vrbo" | "booking" | "pm";
+  channelLabel: string;
+  url: string;
+  nightlyPrice: number;
+  totalPrice: number;
+  bedrooms?: number;
+  verified?: "yes" | "no" | "unclear" | "skipped";
+  verifiedReason?: string;
+};
+
+type LiveUnit = {
+  unitTitle: string;
+  bedrooms?: number;
+  image?: string;
+  minNightlyPrice: number;
+  primaryUrl: string;
+  primaryChannel: "airbnb" | "vrbo" | "booking" | "pm";
+  listings: LiveUnitListing[];
+};
+
 type FindBuyInResponse = {
   community: string;
   resortName?: string | null;
@@ -1452,6 +1475,13 @@ type FindBuyInResponse = {
     pm: LiveCandidate[];
   };
   cheapest: LiveCandidate[];
+  // Same units as `cheapest` but grouped: when the same physical unit
+  // is listed across multiple channels (Airbnb + VRBO + a PM site, all
+  // sharing photos), they collapse into ONE row with a per-channel
+  // sub-list. Shipped in PR #275 alongside the redundant-VRBO-provider
+  // teardown — older deploys may not return this field, so the panel
+  // falls back to the flat `cheapest` list.
+  cheapestUnits?: LiveUnit[];
   debug?: {
     rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number; photoMatches?: number };
     dropped?: {
@@ -1636,6 +1666,26 @@ function LiveSearchSection({
   const booking = data?.sources.booking ?? [];
   const pm      = data?.sources.pm      ?? [];
   const cheapest = data?.cheapest       ?? [];
+  const cheapestUnits = data?.cheapestUnits ?? [];
+
+  // Map a unit's primary listing back to a LiveCandidate so the existing
+  // record-buy-in dialog can keep its current contract. PRs #275+ will
+  // pass channel-specific listings instead, but until then the dialog
+  // reads from a single LiveCandidate.
+  const unitToCandidate = (u: LiveUnit, listing: LiveUnitListing): LiveCandidate => {
+    return {
+      source: listing.channel,
+      sourceLabel: listing.channelLabel,
+      title: u.unitTitle,
+      url: listing.url,
+      nightlyPrice: listing.nightlyPrice,
+      totalPrice: listing.totalPrice,
+      bedrooms: listing.bedrooms ?? u.bedrooms,
+      image: u.image,
+      verified: listing.verified,
+      verifiedReason: listing.verifiedReason,
+    };
+  };
 
   return (
     <div className="space-y-3">
@@ -1683,7 +1733,31 @@ function LiveSearchSection({
           When the verify pass came back empty, show a clear "no
           verified options" state rather than promoting un-verified
           inherited-price rows. */}
-      {cheapest.length > 0 ? (
+      {cheapestUnits.length > 0 ? (
+        <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
+          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
+            <TrendingDown className="h-3.5 w-3.5" />
+            Cheapest {cheapestUnits.length} {cheapestUnits.length === 1 ? "unit" : "units"} — buy these
+            {data?.debug?.verification?.attempted ? (
+              <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
+                · verified bookable for {checkInYmd} → {checkOutYmd}
+              </span>
+            ) : null}
+          </p>
+          <div className="space-y-2">
+            {cheapestUnits.map((u, i) => (
+              <UnitRow
+                key={`unit-${i}-${u.primaryUrl}`}
+                unit={u}
+                onRecord={(listing) => setRecordTarget(unitToCandidate(u, listing))}
+                highlight
+              />
+            ))}
+          </div>
+        </div>
+      ) : cheapest.length > 0 ? (
+        // Backwards-compat fallback for old deploys that don't return
+        // cheapestUnits — render the flat list as before.
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
           <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
             <TrendingDown className="h-3.5 w-3.5" />
@@ -1725,7 +1799,7 @@ function LiveSearchSection({
         vrbo={vrbo}
         booking={booking}
         pm={pm}
-        autoPickUrl={cheapest[0]?.url}
+        autoPickUrl={cheapestUnits[0]?.primaryUrl ?? cheapest[0]?.url}
         checkIn={checkInYmd}
         checkOut={checkOutYmd}
         onRecord={(c) => setRecordTarget(c)}
@@ -2257,6 +2331,102 @@ function VerifyCell({ state, onVerify }: { state: VerifyState; onVerify: () => v
       <AlertCircle className="h-3 w-3" />
       Unclear
     </span>
+  );
+}
+
+// One row in the cheapest panel — represents a SINGLE physical unit
+// with possibly multiple channel listings (Airbnb + VRBO + PM site).
+// The row header shows the unit identity (title + bedrooms + thumb).
+// Below it, each channel renders as a sub-row with its rate + Open
+// + Record buttons. This is what the operator sees when the same
+// unit cross-lists across OTAs and PM sites — instead of 3 separate
+// rows competing for the cheapest slot, it's one unit with a
+// transparent breakdown of where it's listed and at what price.
+function UnitRow({
+  unit,
+  onRecord,
+  highlight,
+}: {
+  unit: LiveUnit;
+  onRecord: (listing: LiveUnitListing) => void;
+  highlight?: boolean;
+}) {
+  const verifiedListings = unit.listings.filter((l) => l.verified === "yes" && l.nightlyPrice > 0);
+  const otherListings = unit.listings.filter((l) => !(l.verified === "yes" && l.nightlyPrice > 0));
+  return (
+    <div
+      className={`border rounded-lg p-2.5 ${highlight ? "bg-white dark:bg-background" : ""}`}
+    >
+      <div className="flex items-start gap-2.5">
+        {unit.image && (
+          <img src={unit.image} alt="" className="h-14 w-14 rounded object-cover shrink-0" />
+        )}
+        <div className="grow min-w-0">
+          <p className="font-medium text-sm truncate" title={unit.unitTitle}>
+            {unit.unitTitle}
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            {unit.bedrooms ? `${unit.bedrooms}BR · ` : ""}
+            from <span className="font-semibold text-emerald-700">{fmtMoney(unit.minNightlyPrice)}/night</span>
+            {" "}across {unit.listings.length} {unit.listings.length === 1 ? "listing" : "listings"}
+          </p>
+        </div>
+      </div>
+
+      {/* Per-channel listings — verified bookable on top, then everything
+          else (no/unclear/skipped). Each row has its own Open + Record
+          so the operator can pick the channel they want to book through. */}
+      <div className="mt-2 pt-2 border-t border-dashed border-border space-y-1">
+        {[...verifiedListings, ...otherListings].map((l, idx) => (
+          <div
+            key={`${unit.primaryUrl}-listing-${idx}`}
+            className="flex items-center gap-2 px-1 py-1 rounded hover:bg-muted/40 transition-colors"
+          >
+            <Badge className={`text-[9px] ${sourceBadgeClass(l.channel)} shrink-0`}>
+              {l.channelLabel}
+            </Badge>
+            {l.verified === "yes" ? (
+              <Badge className="text-[9px] bg-emerald-600 text-white shrink-0" title={l.verifiedReason ?? undefined}>
+                ✓
+              </Badge>
+            ) : l.verified === "no" ? (
+              <Badge className="text-[9px] bg-red-600 text-white shrink-0" title={l.verifiedReason ?? undefined}>
+                ✗
+              </Badge>
+            ) : l.verified === "unclear" ? (
+              <Badge className="text-[9px] bg-amber-500 text-white shrink-0" title={l.verifiedReason ?? undefined}>
+                ?
+              </Badge>
+            ) : null}
+            <div className="grow min-w-0">
+              {l.nightlyPrice > 0 ? (
+                <p className="text-[12px]">
+                  <span className="font-semibold">{fmtMoney(l.nightlyPrice)}</span>
+                  <span className="text-muted-foreground">/night ({fmtMoney(l.totalPrice)} total)</span>
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+              )}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[10px] shrink-0"
+              onClick={() => window.open(l.url, "_blank", "noopener,noreferrer")}
+            >
+              <ExternalLink className="h-3 w-3 mr-1" /> Open
+            </Button>
+            <Button
+              size="sm"
+              className="h-6 px-2 text-[10px] shrink-0"
+              onClick={() => onRecord(l)}
+            >
+              <ShoppingCart className="h-3 w-3 mr-1" /> Record
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
