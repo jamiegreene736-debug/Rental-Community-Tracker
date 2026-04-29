@@ -58,6 +58,13 @@ export interface PmDiscoveryResult {
   queries: string[];
   rawHits: number;
   domains: DiscoveredDomain[];
+  /**
+   * PR #309: breakdown of which path served each Google query. Sums
+   * to `queries.length`. Lets the admin endpoint surface "X/Y queries
+   * went through the operator's real Chrome (sidecar) vs Y/Z went
+   * through SearchAPI fallback".
+   */
+  sourceBreakdown?: { sidecar: number; searchapi: number };
 }
 
 // Public booking marketplaces. We get listings from these via
@@ -127,7 +134,7 @@ function classify(
   return { classification: "unknown" };
 }
 
-async function fetchOrganic(
+async function fetchOrganicViaSearchApi(
   query: string,
   page: number,
   apiKey: string,
@@ -145,6 +152,60 @@ async function fetchOrganic(
   return Array.isArray(data.organic_results)
     ? data.organic_results.filter((o): o is { link: string } => typeof o?.link === "string")
     : [];
+}
+
+/**
+ * Sidecar-primary Google fetch (PR #309). Drives the operator's real
+ * Chrome on home IP via `googleSerpViaSidecar`, falling back to
+ * SearchAPI when the daemon is offline. Returns up to `pages * 10`
+ * results per query in one sidecar call (the daemon's google_serp op
+ * supports `maxResults` natively); SearchAPI fallback keeps the
+ * page-by-page paging behaviour. Per-PM site:search ranking is
+ * meaningfully Hawaii/Florida-tilted on the operator's home IP — PMs
+ * that don't rank well on SearchAPI's datacenter IPs surface here.
+ *
+ * Returns a tuple: `[hits, source]` so the caller can log/expose
+ * whichever path served the request.
+ */
+async function fetchOrganicViaSidecarOrApi(
+  query: string,
+  pages: number,
+  apiKey: string,
+): Promise<{ hits: Array<{ link: string }>; source: "sidecar" | "searchapi"; durationMs: number }> {
+  // Try sidecar first. One call returns `pages * 10` organic results
+  // — sidecar's google_serp doesn't paginate but `maxResults` lets
+  // us widen the scrape per call. Note: Playwright's evaluator scans
+  // a single SERP, so we get whatever Google fits onto the first
+  // page of results for that `num=` value (Google itself caps at 10
+  // per page, so for 20 we'd need pagination — sidecar caps at 20
+  // for now which matches the existing find-buy-in usage).
+  const sidecarStart = Date.now();
+  try {
+    const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
+    const r = await googleSerpViaSidecar({
+      query,
+      maxResults: Math.min(20, pages * 10),
+      walletBudgetMs: 60_000,
+    });
+    if (r.workerOnline && r.hits.length > 0) {
+      return {
+        hits: r.hits.map((h) => ({ link: h.url })),
+        source: "sidecar",
+        durationMs: Date.now() - sidecarStart,
+      };
+    }
+  } catch {
+    // Fall through to SearchAPI.
+  }
+
+  // SearchAPI fallback — paginate as before.
+  const apiStart = Date.now();
+  const all: Array<{ link: string }> = [];
+  for (let page = 1; page <= pages; page++) {
+    const hits = await fetchOrganicViaSearchApi(query, page, apiKey);
+    all.push(...hits);
+  }
+  return { hits: all, source: "searchapi", durationMs: Date.now() - apiStart };
 }
 
 export async function discoverPmDomains(opts: {
@@ -177,30 +238,37 @@ export async function discoverPmDomains(opts: {
   const covered = coveredHostnames();
   const byHost = new Map<string, DiscoveredDomain>();
   let rawHits = 0;
+  // PR #309: track which path served each Google query so the admin
+  // endpoint can show the operator how often the sidecar was used vs.
+  // the SearchAPI fallback. Useful for diagnosing daemon-offline
+  // periods and verifying the operator's home-IP ranking is actually
+  // hitting the discovery flow.
+  let sidecarQueryCount = 0;
+  let searchapiQueryCount = 0;
 
   for (const query of queries) {
-    for (let page = 1; page <= pages; page++) {
-      const organic = await fetchOrganic(query, page, opts.apiKey);
-      rawHits += organic.length;
-      for (const o of organic) {
-        const host = normalizeHostname(o.link);
-        if (!host) continue;
-        const existing = byHost.get(host);
-        if (existing) {
-          existing.hits += 1;
-          if (existing.sampleUrls.length < 3 && !existing.sampleUrls.includes(o.link)) {
-            existing.sampleUrls.push(o.link);
-          }
-        } else {
-          const c = classify(host, covered);
-          byHost.set(host, {
-            hostname: host,
-            hits: 1,
-            sampleUrls: [o.link],
-            classification: c.classification,
-            knownAs: c.knownAs,
-          });
+    const r = await fetchOrganicViaSidecarOrApi(query, pages, opts.apiKey);
+    if (r.source === "sidecar") sidecarQueryCount++;
+    else searchapiQueryCount++;
+    rawHits += r.hits.length;
+    for (const o of r.hits) {
+      const host = normalizeHostname(o.link);
+      if (!host) continue;
+      const existing = byHost.get(host);
+      if (existing) {
+        existing.hits += 1;
+        if (existing.sampleUrls.length < 3 && !existing.sampleUrls.includes(o.link)) {
+          existing.sampleUrls.push(o.link);
         }
+      } else {
+        const c = classify(host, covered);
+        byHost.set(host, {
+          hostname: host,
+          hits: 1,
+          sampleUrls: [o.link],
+          classification: c.classification,
+          knownAs: c.knownAs,
+        });
       }
     }
   }
@@ -252,5 +320,12 @@ export async function discoverPmDomains(opts: {
     }
   }
 
-  return { community, location, queries, rawHits, domains };
+  return {
+    community,
+    location,
+    queries,
+    rawHits,
+    domains,
+    sourceBreakdown: { sidecar: sidecarQueryCount, searchapi: searchapiQueryCount },
+  };
 }
