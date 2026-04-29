@@ -1930,7 +1930,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         setLiveSnapshot(null);
       }
       await reloadMarketRates();
-      toast({ title: "Market rates refreshed", description: "Per-season basis updated for LOW / HIGH / HOLIDAY" });
+      // Persistent green-check confirmation — only goes away when the
+      // user clicks the X (PR #305). Default Radix duration auto-
+      // dismisses at 5s; Infinity keeps it open until manual dismiss.
+      // The check goes in `description` (not `title`) because Radix
+      // Root extends HTMLAttributes whose `title: string` collapses
+      // the union back to string-only.
+      toast({
+        duration: Infinity,
+        title: "Market rates refreshed",
+        description: (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#16a34a"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ flexShrink: 0 }}
+            >
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Per-season basis updated for LOW / HIGH / HOLIDAY
+          </span>
+        ),
+      });
     } catch (e: any) {
       toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
     } finally {
