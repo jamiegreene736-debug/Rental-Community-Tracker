@@ -590,22 +590,48 @@ export default function Home() {
   };
 
   // Per-alert "Replace & push" status. Idle when absent. The state is
-  //   { phase: "running" | "done" | "error", message }
+  //   { phase: "running" | "done" | "error", message, percent }
   // so the row can render a green "✓ Done!" pill for ~1.5s before the
-  // refetch removes it, and surface errors inline + sticky (not just in
-  // a transient toast that the operator can miss).
-  type RemediateState = { phase: "running" | "done" | "error"; message: string };
+  // refetch removes it, surface errors inline + sticky (not just in
+  // a transient toast that the operator can miss), and show a visual
+  // progress bar that advances as phase events stream in (PR #316).
+  type RemediateState = { phase: "running" | "done" | "error"; message: string; percent: number };
   const [remediating, setRemediating] = useState<Record<number, RemediateState>>({});
   const setStatus = (id: number, s: RemediateState) =>
     setRemediating((r) => ({ ...r, [id]: s }));
   const clearStatus = (id: number) =>
     setRemediating((r) => { const n = { ...r }; delete n[id]; return n; });
 
+  // Map a server phase name to the cumulative percent the operator
+  // should see when that phase STARTS. Tuned to the rough wall-time
+  // distribution of a typical remediate (find ~30%, scrape ~30%,
+  // download+vision ~25%, push ~10%):
+  //   start            5%  — set immediately on click
+  //   find-replacement 10% — kicks off Zillow + platform-check fan-out
+  //   candidate        40% — replacement unit chosen
+  //   scrape           55% — downloading photos from Zillow
+  //   download         75% — vision rerank + write into folder
+  //   push             90% — Guesty channel-republish
+  //   done            100% — final inline pill
+  // Server emits: phase events for "find-replacement", "scrape",
+  // "download-photos", "push"; plus "candidate", "swap", "push", "done".
+  // Anything we don't recognize falls back to whatever percent we're at.
+  const phasePercent = (phaseName: string | undefined, currentPercent: number): number => {
+    switch (phaseName) {
+      case "find-replacement": return 10;
+      case "scrape":           return 55;
+      case "download-photos":  return 75;
+      case "downloadAndPrioritize": return 75; // alt name some emit paths use
+      case "push":             return 90;
+      default:                 return currentPercent;
+    }
+  };
+
   const remediateAlert = async (id: number) => {
     // Console breadcrumb so a silent client-side failure (network drop,
     // adblocker, etc) is visible to anyone debugging via DevTools.
     console.info(`[remediate] click → POST /api/photo-listing-alerts/${id}/remediate`);
-    setStatus(id, { phase: "running", message: "Starting…" });
+    setStatus(id, { phase: "running", message: "Starting…", percent: 5 });
     try {
       const resp = await fetch(`/api/photo-listing-alerts/${id}/remediate`, {
         method: "POST",
@@ -622,6 +648,7 @@ export default function Home() {
       let buf = "";
       let didFinish = false;
       let lastError: string | null = null;
+      let percent = 5;
       while (true) {
         const { done: streamDone, value } = await reader.read();
         if (streamDone) break;
@@ -634,15 +661,20 @@ export default function Home() {
             const ev = JSON.parse(line) as any;
             console.debug(`[remediate] alert ${id} event:`, ev);
             if (ev.type === "phase") {
-              setStatus(id, { phase: "running", message: ev.message ?? ev.name });
+              percent = phasePercent(ev.name, percent);
+              setStatus(id, { phase: "running", message: ev.message ?? ev.name, percent });
             } else if (ev.type === "candidate") {
-              setStatus(id, { phase: "running", message: `Found ${ev.unitLabel}` });
+              percent = Math.max(percent, 40);
+              setStatus(id, { phase: "running", message: `Found ${ev.unitLabel}`, percent });
             } else if (ev.type === "swap") {
-              setStatus(id, { phase: "running", message: `Swapped ${ev.kept} photos` });
+              percent = Math.max(percent, 80);
+              setStatus(id, { phase: "running", message: `Swapped ${ev.kept} photos`, percent });
             } else if (ev.type === "push") {
+              percent = Math.max(percent, 90);
               setStatus(id, {
                 phase: "running",
                 message: ev.success ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}` : `Push failed: ${ev.listing}`,
+                percent,
               });
             } else if (ev.type === "done") {
               didFinish = true;
@@ -656,7 +688,7 @@ export default function Home() {
         console.info(`[remediate] alert ${id} → success`);
         // Brief inline confirmation BEFORE the row disappears, so the
         // operator sees the click "took". Toast also fires for context.
-        setStatus(id, { phase: "done", message: "✓ Done!" });
+        setStatus(id, { phase: "done", message: "✓ Done!", percent: 100 });
         toast({
           title: "Photos replaced and pushed",
           description: "Guesty will sync new photos to Airbnb/VRBO/Booking over the next few minutes.",
@@ -672,7 +704,7 @@ export default function Home() {
       console.error(`[remediate] alert ${id} → error:`, msg);
       // Sticky inline error (cleared after 8s) so the operator can read
       // it even if they miss the toast. Toast still fires for emphasis.
-      setStatus(id, { phase: "error", message: `✗ ${msg}` });
+      setStatus(id, { phase: "error", message: `✗ ${msg}`, percent: 100 });
       toast({ title: "Couldn't remediate alert", description: msg, variant: "destructive" });
       setTimeout(() => clearStatus(id), 8000);
     }
@@ -885,62 +917,88 @@ export default function Home() {
               {alerts.slice(0, 5).map((a) => {
                 const platformLabel = a.platform === "airbnb" ? "Airbnb" : a.platform === "vrbo" ? "VRBO" : "Booking.com";
                 const firstUrl = a.matchedUrls?.[0]?.listingUrl;
+                const status = remediating[a.id];
+                const isRunning = status?.phase === "running";
+                const isDone = status?.phase === "done";
+                const isError = status?.phase === "error";
                 return (
-                  <div key={a.id} className="flex items-center gap-2 text-xs" data-testid={`photo-alert-${a.id}`}>
-                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 font-medium">
-                      {platformLabel}
-                    </span>
-                    <span className="font-mono text-[11px]">{a.folder}</span>
-                    <span className="text-muted-foreground">{a.priorStatus} → {a.newStatus}</span>
-                    {firstUrl && (
-                      <a
-                        href={firstUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:underline"
-                      >
-                        view listing ↗
-                      </a>
-                    )}
-                    <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
-                    {(() => {
-                      const status = remediating[a.id];
-                      const isRunning = status?.phase === "running";
-                      const isDone = status?.phase === "done";
-                      const isError = status?.phase === "error";
-                      const colorClass = isDone
-                        ? "bg-green-600 hover:bg-green-600 text-white"
-                        : isError
-                        ? "bg-red-600 hover:bg-red-600 text-white"
-                        : "";
-                      return (
-                        <Button
-                          size="sm"
-                          className={`h-6 text-xs px-2 ${colorClass}`}
-                          onClick={() => remediateAlert(a.id)}
-                          disabled={isRunning || isDone}
-                          data-testid={`button-remediate-alert-${a.id}`}
-                          title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
+                  <div key={a.id} className="flex flex-col gap-1" data-testid={`photo-alert-${a.id}`}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 font-medium">
+                        {platformLabel}
+                      </span>
+                      <span className="font-mono text-[11px]">{a.folder}</span>
+                      <span className="text-muted-foreground">{a.priorStatus} → {a.newStatus}</span>
+                      {firstUrl && (
+                        <a
+                          href={firstUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:underline"
                         >
-                          {isDone ? (
-                            <Check className="h-3 w-3 mr-1" />
-                          ) : (
-                            <RotateCw className={`h-3 w-3 mr-1 ${isRunning ? "animate-spin" : ""}`} />
-                          )}
-                          {status?.message ?? "Replace & push"}
-                        </Button>
-                      );
-                    })()}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-6 text-xs px-2"
-                      onClick={() => acknowledgeAlert(a.id)}
-                      disabled={remediating[a.id]?.phase === "running"}
-                      data-testid={`button-acknowledge-alert-${a.id}`}
-                    >
-                      Dismiss
-                    </Button>
+                          view listing ↗
+                        </a>
+                      )}
+                      <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
+                      {(() => {
+                        const colorClass = isDone
+                          ? "bg-green-600 hover:bg-green-600 text-white"
+                          : isError
+                          ? "bg-red-600 hover:bg-red-600 text-white"
+                          : "";
+                        return (
+                          <Button
+                            size="sm"
+                            className={`h-6 text-xs px-2 ${colorClass}`}
+                            onClick={() => remediateAlert(a.id)}
+                            disabled={isRunning || isDone}
+                            data-testid={`button-remediate-alert-${a.id}`}
+                            title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
+                          >
+                            {isDone ? (
+                              <Check className="h-3 w-3 mr-1" />
+                            ) : (
+                              <RotateCw className={`h-3 w-3 mr-1 ${isRunning ? "animate-spin" : ""}`} />
+                            )}
+                            {status?.message ?? "Replace & push"}
+                          </Button>
+                        );
+                      })()}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-xs px-2"
+                        onClick={() => acknowledgeAlert(a.id)}
+                        disabled={isRunning}
+                        data-testid={`button-acknowledge-alert-${a.id}`}
+                      >
+                        Dismiss
+                      </Button>
+                    </div>
+                    {/* Progress bar (PR #316). Visible while running and
+                        for ~1.5s after done so the operator sees the
+                        bar fill to 100% before the row disappears. */}
+                    {(isRunning || isDone) && (
+                      <div className="flex items-center gap-2 pl-1 pr-1">
+                        <div
+                          className="h-1.5 flex-1 rounded-full bg-red-200 dark:bg-red-900/40 overflow-hidden"
+                          data-testid={`progress-remediate-alert-${a.id}`}
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={status?.percent ?? 0}
+                          aria-label={`Replace & push progress: ${status?.message ?? ""}`}
+                        >
+                          <div
+                            className={`h-full transition-[width] duration-300 ease-out ${isDone ? "bg-green-600" : "bg-red-600"}`}
+                            style={{ width: `${Math.max(0, Math.min(100, status?.percent ?? 0))}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] tabular-nums text-muted-foreground min-w-[2.5rem] text-right">
+                          {Math.round(status?.percent ?? 0)}%
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
