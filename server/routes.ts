@@ -11730,10 +11730,18 @@ export async function registerRoutes(
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    const { communityFolder, requiredBedrooms, skipUrls = [] } = req.body as {
+    // `strict` opts a caller into rejecting candidates with any
+    // UNKNOWN platform verdict, not just FOUND. The default (loose)
+    // behavior accepts a candidate when SearchAPI errors leave us
+    // genuinely unsure; strict mode treats that as a possible
+    // contamination and skips the candidate. Used by the photo-listing
+    // alert remediation flow where a wrong pick re-publishes someone
+    // else's stolen photos to our Guesty listing.
+    const { communityFolder, requiredBedrooms, skipUrls = [], strict = false } = req.body as {
       communityFolder: string;
       requiredBedrooms?: number;
       skipUrls?: string[];
+      strict?: boolean;
     };
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -11906,8 +11914,16 @@ export async function registerRoutes(
           console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping`);
           continue;
         }
-        // All CLEAN, or a mix of CLEAN and UNKNOWN. Fall through to the
-        // photo+vision gates and surface the verdict in the response.
+        if (strict) {
+          const unknownOn = platformHosts.find((p) => platformCheck[p.key] === "unknown");
+          if (unknownOn) {
+            console.error(`[find-unit] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode) — skipping`);
+            continue;
+          }
+        }
+        // Loose mode: all CLEAN, or a mix of CLEAN and UNKNOWN. Strict
+        // mode: all CLEAN. Fall through to the photo+vision gates and
+        // surface the verdict in the response.
 
         {
           // Two-stage quality filter before suggesting this candidate:
@@ -13180,6 +13196,12 @@ export async function registerRoutes(
       const port = process.env.PORT || "5000";
       let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
       try {
+        // `strict: true` rejects candidates with any UNKNOWN verdict on
+        // Airbnb/VRBO/Booking. We're about to overwrite a Guesty listing's
+        // photos with this candidate's images, so a SearchAPI hiccup that
+        // hides a real OTA listing would re-publish someone else's photos
+        // — much worse than failing the remediate and asking the operator
+        // to retry.
         const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -13187,6 +13209,7 @@ export async function registerRoutes(
             communityFolder: lead.communityFolder,
             requiredBedrooms: lead.bedrooms,
             skipUrls,
+            strict: true,
           }),
         });
         const findBody = await findResp.json() as any;
