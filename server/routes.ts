@@ -7738,6 +7738,70 @@ export async function registerRoutes(
     return res.json(result);
   });
 
+  // POST /api/admin/solve-recaptcha (PR #313)
+  //
+  // Phase 2b sidecar handlers (worker.mjs) call this when Google
+  // SERP scraping or any other Google-hosted page throws reCAPTCHA.
+  // Keeping the 2captcha API key in Railway env (not on the operator's
+  // Mac) means the daemon doesn't need its own copy or its own
+  // billing relationship — it just hits this endpoint, gets back the
+  // `g-recaptcha-response` token, and injects it into the page's
+  // hidden response field.
+  //
+  // Body: { kind: "v2" | "v3", sitekey, pageurl, action?, minScore?, invisible?, pollSeconds? }
+  // Returns: { ok: true, solution, captchaId } | { ok: false, error }
+  //
+  // Scope (per operator's call): Google reCAPTCHA only. VRBO /
+  // Booking partner-portal walls aren't 2captcha-solvable, so this
+  // endpoint isn't wired into those flows — the operator handles
+  // those manually when the loading bar's CAPTCHA warning fires.
+  app.post("/api/admin/solve-recaptcha", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const apiKey = process.env.TWOCAPTCHA_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
+    }
+    const body = req.body as {
+      kind?: unknown;
+      sitekey?: unknown;
+      pageurl?: unknown;
+      action?: unknown;
+      minScore?: unknown;
+      invisible?: unknown;
+      pollSeconds?: unknown;
+    };
+    const kind = body.kind === "v2" || body.kind === "v3" ? body.kind : null;
+    if (!kind) return res.status(400).json({ ok: false, error: "kind must be 'v2' or 'v3'" });
+    const sitekey = typeof body.sitekey === "string" ? body.sitekey.trim() : "";
+    const pageurl = typeof body.pageurl === "string" ? body.pageurl.trim() : "";
+    if (!sitekey) return res.status(400).json({ ok: false, error: "sitekey required (Google reCAPTCHA data-sitekey)" });
+    if (!pageurl || !/^https?:\/\//i.test(pageurl)) return res.status(400).json({ ok: false, error: "pageurl required (the URL of the page hosting the CAPTCHA)" });
+    const pollSeconds = typeof body.pollSeconds === "number" && body.pollSeconds > 0 && body.pollSeconds < 600 ? body.pollSeconds : undefined;
+
+    try {
+      const { solveRecaptchaV2, solveRecaptchaV3 } = await import("./captcha-solver");
+      console.log(`[solve-recaptcha] kind=${kind} sitekey=${sitekey.slice(0, 16)}… pageurl=${pageurl.slice(0, 80)}`);
+      const result = kind === "v2"
+        ? await solveRecaptchaV2(sitekey, pageurl, apiKey, {
+            pollSeconds,
+            invisible: body.invisible === true,
+          })
+        : await solveRecaptchaV3(sitekey, pageurl, typeof body.action === "string" ? body.action : "verify", apiKey, {
+            pollSeconds,
+            minScore: typeof body.minScore === "number" ? body.minScore : undefined,
+          });
+      if (result.ok) {
+        console.log(`[solve-recaptcha] ✓ id=${result.captchaId} (kind=${kind})`);
+      } else {
+        console.error(`[solve-recaptcha] ✗ kind=${kind}: ${result.error}`);
+      }
+      res.json(result);
+    } catch (e: any) {
+      console.error(`[solve-recaptcha] unhandled error: ${e?.message ?? e}`);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
   // ADMIN_SECRET so only the operator's worker (not arbitrary callers)
   // can claim queue items.
