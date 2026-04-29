@@ -3329,7 +3329,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }}>Live buy-in (median):</span>
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = the cheapest verified nightly across Airbnb / VRBO / Booking for the LOW-season sample window. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                  Buy-in basis (cheapest channel):
+                                </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
                                     return (
@@ -3343,9 +3345,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const stale = ageDays > 14;
                                   const bg = stale ? "#fef3c7" : "#dbeafe";
                                   const fg = stale ? "#92400e" : "#1e40af";
+                                  // Surface which channel won — when source is
+                                  // "live-multichannel-cheapest" the Pricing
+                                  // tab is calibrated against the cheapest of
+                                  // Airbnb/VRBO/Booking; when "airbnb" the
+                                  // sidecar was offline so it fell back to
+                                  // the engine median.
+                                  const isMultichannel = live.source === "live-multichannel-cheapest";
+                                  const sourceLabel = isMultichannel
+                                    ? "cheapest across channels"
+                                    : live.source === "airbnb"
+                                      ? "Airbnb-only fallback (sidecar was offline)"
+                                      : live.source;
                                   return (
                                     <span key={bedrooms}
-                                      title={`${live.sampleCount} comparable listings · refreshed ${ageDays} day${ageDays === 1 ? "" : "s"} ago · source: ${live.source}`}
+                                      title={`${bedrooms}BR buy-in $${Math.round(live.medianNightly).toLocaleString()} · ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"} · ${sourceLabel} · refreshed ${ageDays} day${ageDays === 1 ? "" : "s"} ago`}
                                       style={{ background: bg, color: fg, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
                                       {bedrooms}BR ${Math.round(live.medianNightly).toLocaleString()}
                                       <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 4 }}>· {ageDays}d</span>
@@ -3367,29 +3381,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. Persists Airbnb median as the cost basis (pricing floor formula); shows per-channel cheapest snapshot below. ~30-90s when local sidecar online; ~10s when offline."
+                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. The cheapest channel's nightly becomes the buy-in basis that drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). When the sidecar daemon is offline only Airbnb runs; basis falls back to the Airbnb median (legacy behavior). ~30-90s online; ~10s offline."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
                               </div>
                             )}
-                            {/* Live channel snapshot — what the operator
-                                could actually book TODAY (not the
-                                median basis). Surfaces from the most
-                                recent refresh; cleared when they
-                                navigate away. Renders one row per
-                                bedroom showing cheapest verified
-                                nightly per channel — when one channel
-                                undercuts the median basis, that's a
-                                buy-in opportunity. */}
+                            {/* Per-channel breakdown of the most recent
+                                refresh. The starred channel's rate IS
+                                the buy-in basis (not just adjacent to
+                                it) — that's what got persisted into
+                                property_market_rates and what feeds
+                                the (basis × 1.20) ÷ (1 − channelFee)
+                                sell-rate formula above. Other channels
+                                are shown for context so the operator
+                                can see the spread. */}
                             {liveSnapshot && liveSnapshot.perBR.length > 0 && (
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Live cheapest {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
+                                    Per-channel cheapest · {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
                                   </span>
                                   <span style={{ fontSize: 10, color: liveSnapshot.daemonOnline ? "#059669" : "#9ca3af" }}>
-                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online (VRBO + Booking included)" : "○ sidecar offline (Airbnb only)"}
+                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online — VRBO + Booking included in basis" : "○ sidecar offline — basis falls back to Airbnb median"}
                                   </span>
                                 </div>
                                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -3430,7 +3444,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  ★ = cheapest channel. The persisted cost basis above stays at the Airbnb-engine median (stable for the sell-price floor formula); this snapshot shows what's actually available right now across channels — useful when sourcing actual buy-ins.
+                                  ★ = cheapest channel — its nightly rate IS the buy-in basis above, and drives the per-channel Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Other chips are shown for context. When two channels diverge materially, the operator should source through the starred channel.
                                 </div>
                               </div>
                             )}
