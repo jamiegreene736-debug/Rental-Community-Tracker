@@ -140,3 +140,153 @@ export async function reportBadCaptcha(
     /* best-effort */
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// reCAPTCHA v2 / v3 (PR #313)
+//
+// Used by Phase 2b sidecar handlers when Google SERP scraping or any
+// other Google-hosted page throws reCAPTCHA. Operator's call: VRBO /
+// Booking partner-portal walls aren't 2captcha-solvable (Cloudflare /
+// Akamai fingerprint blocks, no challenge to solve), so this module
+// is scoped to Google reCAPTCHA only.
+//
+// 2captcha's `userrecaptcha` method takes the page's site key and
+// page URL, queues a worker to solve in a real browser, and returns
+// the `g-recaptcha-response` token (a long opaque string). The
+// caller injects that token into the page's hidden response field
+// and submits the form — Google validates the token server-side
+// against their record of who solved it.
+//
+// v2 = the visible "I'm not a robot" checkbox + image grid.
+// v3 = invisible scoring; submit also needs the `action` string and
+// optionally a `min_score` threshold (default 0.3, raise to 0.7+
+// for strict pages that reject low-confidence solves).
+//
+// Polling deadline: reCAPTCHA solves take 30-60s typically, well
+// past image CAPTCHA's 5-15s. Default 180s wallet rides out a busy
+// queue without blocking the caller forever.
+// ─────────────────────────────────────────────────────────────────
+
+const RECAPTCHA_DEFAULT_POLL_SECONDS = 180;
+const RECAPTCHA_DEFAULT_POLL_INTERVAL_MS = 5000;
+
+// Shared poll loop. Submitter passes the URLSearchParams; we just
+// dispatch + poll. Returns the solution token on success.
+async function submitAndPoll(
+  submitBody: URLSearchParams,
+  apiKey: string,
+  pollSeconds: number,
+  pollIntervalMs: number,
+): Promise<CaptchaSolveResult> {
+  let submitData: SubmitResponse;
+  try {
+    const submitRes = await fetch(SUBMIT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: submitBody.toString(),
+    });
+    submitData = (await submitRes.json()) as SubmitResponse;
+  } catch (e: any) {
+    return { ok: false, error: `2captcha submit network error: ${e?.message ?? String(e)}` };
+  }
+  if (submitData.status !== 1) {
+    return {
+      ok: false,
+      error: `2captcha submit rejected: ${submitData.request} (common causes: ERROR_WRONG_USER_KEY = bad TWOCAPTCHA_API_KEY; ERROR_ZERO_BALANCE = top up at 2captcha.com; ERROR_GOOGLEKEY = bad sitekey)`,
+    };
+  }
+  const captchaId = submitData.request;
+  const deadline = Date.now() + pollSeconds * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    const pollUrl = `${POLL_URL}?key=${encodeURIComponent(apiKey)}&action=get&id=${encodeURIComponent(captchaId)}&json=1`;
+    let pollData: PollResponse;
+    try {
+      const pollRes = await fetch(pollUrl);
+      pollData = (await pollRes.json()) as PollResponse;
+    } catch {
+      continue;
+    }
+    if (pollData.status === 1) {
+      return { ok: true, solution: pollData.request, captchaId };
+    }
+    if (pollData.request !== "CAPCHA_NOT_READY") {
+      return { ok: false, error: `2captcha poll returned error after id ${captchaId}: ${pollData.request}` };
+    }
+  }
+  return {
+    ok: false,
+    error: `2captcha didn't return a solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`,
+  };
+}
+
+/**
+ * Solve a Google reCAPTCHA v2 ("I'm not a robot" checkbox + image
+ * grid). Caller passes the page's `data-sitekey` (visible in the
+ * <div class="g-recaptcha"> element, or in the <iframe src> on
+ * older pages) plus the page URL the CAPTCHA appears on. 2captcha's
+ * worker solves in a real browser and hands back the
+ * g-recaptcha-response token — inject it into the page's hidden
+ * <textarea name="g-recaptcha-response"> and submit.
+ *
+ * `invisible: true` for invisible reCAPTCHA v2 (no checkbox; fires
+ * on form submit). 2captcha needs the flag to spawn the right
+ * worker pool.
+ */
+export async function solveRecaptchaV2(
+  sitekey: string,
+  pageurl: string,
+  apiKey: string,
+  opts: { pollSeconds?: number; pollIntervalMs?: number; invisible?: boolean } = {},
+): Promise<CaptchaSolveResult> {
+  const submitBody = new URLSearchParams({
+    key: apiKey,
+    method: "userrecaptcha",
+    googlekey: sitekey,
+    pageurl,
+    json: "1",
+  });
+  if (opts.invisible) submitBody.set("invisible", "1");
+  return submitAndPoll(
+    submitBody,
+    apiKey,
+    opts.pollSeconds ?? RECAPTCHA_DEFAULT_POLL_SECONDS,
+    opts.pollIntervalMs ?? RECAPTCHA_DEFAULT_POLL_INTERVAL_MS,
+  );
+}
+
+/**
+ * Solve a Google reCAPTCHA v3 (invisible, behavioral scoring).
+ * Caller passes the sitekey, page URL, the `action` name registered
+ * on the page (e.g. "submit", "login", "search"), and optionally a
+ * `minScore` threshold (default 0.3 — raise toward 0.7+ for strict
+ * pages that reject low-confidence solves).
+ *
+ * Solution is the same shape as v2: a token to POST as
+ * `g-recaptcha-response` (or whatever field the page expects;
+ * v3 page integrations vary).
+ */
+export async function solveRecaptchaV3(
+  sitekey: string,
+  pageurl: string,
+  action: string,
+  apiKey: string,
+  opts: { pollSeconds?: number; pollIntervalMs?: number; minScore?: number } = {},
+): Promise<CaptchaSolveResult> {
+  const submitBody = new URLSearchParams({
+    key: apiKey,
+    method: "userrecaptcha",
+    version: "v3",
+    googlekey: sitekey,
+    pageurl,
+    action,
+    min_score: String(opts.minScore ?? 0.3),
+    json: "1",
+  });
+  return submitAndPoll(
+    submitBody,
+    apiKey,
+    opts.pollSeconds ?? RECAPTCHA_DEFAULT_POLL_SECONDS,
+    opts.pollIntervalMs ?? RECAPTCHA_DEFAULT_POLL_INTERVAL_MS,
+  );
+}
