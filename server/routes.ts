@@ -12458,41 +12458,110 @@ export async function registerRoutes(
     });
     const { ratesByBR, channelCheapestByBR, snapshotCheckIn, snapshotCheckOut, daemonOnline, durationMs } = scan;
 
-    // Upsert one row per unique bedroom count this property's units
-    // actually carry. Skipping bedroom counts not in the property's
-    // unit set keeps the table tight — a 2BR+2BR Caribe Cove property
-    // doesn't need a 4BR row even if the engine returned 4BR samples.
-    const persisted: Array<{
+    // Buy-in basis = the cheapest verified nightly across all channels
+    // we scanned for that bedroom count.
+    //
+    // Methodology change in PR #277: previously we persisted the
+    // Airbnb-engine median as the "buy-in" the sell-price floor formula
+    // calibrates against. The operator's actual buy-in cost is whichever
+    // channel has the cheapest available unit (Airbnb / VRBO / Booking),
+    // not the market median — they buy ONE unit at one price, not the
+    // average. So the persisted basis is now `min(airbnb_cheapest,
+    // vrbo_cheapest, booking_cheapest)`, which directly drives the
+    // Guesty sell rate via `(buyIn × 1.20) / (1 - channelFee)`.
+    //
+    // Fallback chain for the basis when channels are missing:
+    //   1. Multi-channel cheapest (preferred — uses real cheapest deal)
+    //   2. Airbnb-engine median (legacy basis — when sidecar is offline
+    //      and only the engine returned data)
+    //   3. Skip persist for that BR; UI falls through to BUY_IN_RATES
+    //      static table.
+    //
+    // Source string differentiates the two so we can later count how
+    // often each path ran:
+    //   - "live-multichannel-cheapest" — basis came from multi-channel min
+    //   - "airbnb"                     — basis came from Airbnb median
+    //                                    (sidecar offline or empty channels)
+    type Persisted = {
       bedrooms: number;
-      median: number;
+      basis: number;
+      basisSource: "live-multichannel-cheapest" | "airbnb" | "none";
+      cheapestChannel: "airbnb" | "vrbo" | "booking" | null;
       samples: number;
       channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
-    }> = [];
+    };
+    const persisted: Persisted[] = [];
     for (const br of wantBedrooms) {
       const samples = ratesByBR[br] ?? [];
       const channels = channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
-      if (samples.length === 0) {
-        persisted.push({ bedrooms: br, median: 0, samples: 0, channels });
+
+      // Pick the cheapest channel that actually returned a price.
+      const channelEntries: Array<{ ch: "airbnb" | "vrbo" | "booking"; rate: number }> = [];
+      if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelEntries.push({ ch: "airbnb", rate: channels.airbnb });
+      if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelEntries.push({ ch: "vrbo", rate: channels.vrbo });
+      if (typeof channels.booking === "number" && channels.booking > 0) channelEntries.push({ ch: "booking", rate: channels.booking });
+      channelEntries.sort((a, b) => a.rate - b.rate);
+      const cheapest = channelEntries[0] ?? null;
+
+      // Fallback to Airbnb median when no channel returned a priced
+      // result — better than nothing, and matches legacy behavior.
+      const fallbackMedian = samples.length > 0 ? medianRate(samples) : null;
+
+      let basis: number | null = null;
+      let basisSource: Persisted["basisSource"] = "none";
+      if (cheapest) {
+        basis = cheapest.rate;
+        basisSource = "live-multichannel-cheapest";
+      } else if (typeof fallbackMedian === "number" && fallbackMedian > 0) {
+        basis = fallbackMedian;
+        basisSource = "airbnb";
+      }
+
+      if (basis == null) {
+        persisted.push({
+          bedrooms: br,
+          basis: 0,
+          basisSource: "none",
+          cheapestChannel: null,
+          samples: 0,
+          channels,
+        });
         continue;
       }
-      const sorted = [...samples].sort((a, b) => a - b);
-      const median = medianRate(samples);
+
+      // lowNightly / highNightly: when we have channel data, use the
+      // channel range (cheapest → most expensive of the channels that
+      // returned). Falls through to the Airbnb sample range otherwise
+      // — same as the legacy refresh-market-rates response shape.
+      const sortedSamples = samples.length > 0 ? [...samples].sort((a, b) => a - b) : [];
+      const low = channelEntries.length > 0 ? channelEntries[0].rate : sortedSamples[0];
+      const high = channelEntries.length > 0 ? channelEntries[channelEntries.length - 1].rate : sortedSamples[sortedSamples.length - 1];
+
       await storage.upsertPropertyMarketRate({
         propertyId,
         bedrooms: br,
-        medianNightly: String(median),
-        lowNightly: String(sorted[0]),
-        highNightly: String(sorted[sorted.length - 1]),
-        sampleCount: samples.length,
-        source: "airbnb",
+        medianNightly: String(basis),
+        lowNightly: String(low ?? basis),
+        highNightly: String(high ?? basis),
+        sampleCount: channelEntries.length > 0 ? channelEntries.length : samples.length,
+        source: basisSource === "live-multichannel-cheapest"
+          ? "live-multichannel-cheapest"
+          : "airbnb",
       });
-      persisted.push({ bedrooms: br, median: median ?? 0, samples: samples.length, channels });
+      persisted.push({
+        bedrooms: br,
+        basis,
+        basisSource,
+        cheapestChannel: cheapest?.ch ?? null,
+        samples: samples.length,
+        channels,
+      });
     }
 
     console.log(
       `[refresh-market-rates] property ${propertyId} (${config.community}) ${durationMs}ms daemonOnline=${daemonOnline}: ` +
       persisted.map((p) =>
-        `${p.bedrooms}BR=$${p.median}/${p.samples} (ab=${p.channels.airbnb ?? "—"} vr=${p.channels.vrbo ?? "—"} bk=${p.channels.booking ?? "—"})`
+        `${p.bedrooms}BR=$${p.basis}/${p.basisSource}${p.cheapestChannel ? "(" + p.cheapestChannel + ")" : ""} (ab=${p.channels.airbnb ?? "—"} vr=${p.channels.vrbo ?? "—"} bk=${p.channels.booking ?? "—"})`
       ).join(", "),
     );
     res.json({
@@ -12504,7 +12573,7 @@ export async function registerRoutes(
       // render "Cheapest right now: airbnb $X · vrbo $Y · booking $Z".
       // Window is the same 7-night 30-day-out one used for the cost
       // basis, so the snapshot rates are directly comparable to the
-      // persisted median.
+      // persisted basis.
       snapshot: {
         checkIn: snapshotCheckIn,
         checkOut: snapshotCheckOut,
