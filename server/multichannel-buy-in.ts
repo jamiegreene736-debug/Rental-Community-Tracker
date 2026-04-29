@@ -24,6 +24,51 @@
 import { fetchAmortizedNightlyByBR } from "./community-research";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking";
+export type RegionKey = "hawaii" | "florida";
+
+// Tax/fee normalization to bring sidecar VRBO + Booking rates onto
+// the same all-in basis as the Airbnb engine.
+//
+// Airbnb engine returns `extracted_total_price` which already
+// includes Airbnb's guest service fee + state/county taxes — so
+// dividing by 7 nights gives a true all-in nightly.
+//
+// VRBO sidecar scrapes `$X for Y nights` from the search-card
+// label, which is the listing total + Vrbo service fee BUT
+// EXCLUDES state/local taxes (those land at checkout). Booking.com
+// is the same shape.
+//
+// To make per-channel medians honest, multiply VRBO + Booking
+// nightlies by the region's combined tax rate. Hawaii TAT (10.25%)
+// + GET (4.71%) + County GET (0.5%) ≈ 15.5%, round to 1.155.
+// Florida sales tax (6%) + tourist development tax (5%) ≈ 11%,
+// round to 1.11. These are coarse — actual rates vary by county —
+// but they get the median within ~1-2% of correct, which is
+// already better than the old "raw mix of pre/post-tax" basis.
+const TAX_NORMALIZATION_FACTOR: Record<RegionKey, number> = {
+  hawaii: 1.155,
+  florida: 1.11,
+};
+
+function inferRegion(city: string, state: string): RegionKey {
+  const s = state.toLowerCase();
+  if (s === "hawaii" || s === "hi") return "hawaii";
+  if (s === "florida" || s === "fl") return "florida";
+  // Best guess — most of our inventory is Hawaii. Pricing tab
+  // tooltip surfaces the inferred region so the operator can
+  // sanity-check.
+  return "hawaii";
+}
+
+function applyTaxNormalization(
+  rate: number,
+  channel: ChannelKey,
+  region: RegionKey,
+): number {
+  // Airbnb engine total already inclusive of taxes/fees — leave it.
+  if (channel === "airbnb") return rate;
+  return Math.round(rate * TAX_NORMALIZATION_FACTOR[region]);
+}
 
 export type MultiChannelBuyInResult = {
   // Per-bedroom rate samples — same shape as
@@ -53,6 +98,11 @@ export type MultiChannelBuyInResult = {
   // distinguish "Booking offline today" from "Booking has no
   // inventory in the window" (both surface as null cheapest).
   daemonOnline: boolean;
+  // Region the helper inferred from city/state for the tax
+  // normalization factor — surfaced so the UI can show
+  // "+15.5% tax for Hawaii" in the tooltip.
+  region: RegionKey;
+  taxFactor: number;
   durationMs: number;
 };
 
@@ -185,10 +235,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
   ]);
 
   const daemonOnline = sidecarResults.some((r) => r.workerOnline);
+  const region = inferRegion(args.city, args.state);
 
-  // Build the channel cheapest map. Airbnb cheapest = min of the
-  // engine samples for that BR (samples are already filtered by
-  // bbox + bedroom).
+  // Build the channel cheapest map, normalized to all-in nightly.
+  // Airbnb engine totals already include service fee + taxes; VRBO +
+  // Booking sidecar scrapes are pre-tax, so we multiply them by the
+  // region's combined tax factor (see TAX_NORMALIZATION_FACTOR comment
+  // above).
   const channelCheapestByBR: MultiChannelBuyInResult["channelCheapestByBR"] = {};
   for (const br of args.bedroomCounts) {
     const airbnbSamples = airbnbResult.ratesByBR[br] ?? [];
@@ -202,8 +255,12 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     channelCheapestByBR[br] = {
       airbnb: airbnbCheapest,
-      vrbo: vrboSidecar?.cheapestNightly ?? null,
-      booking: bookingSidecar?.cheapestNightly ?? null,
+      vrbo: vrboSidecar?.cheapestNightly != null
+        ? applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region)
+        : null,
+      booking: bookingSidecar?.cheapestNightly != null
+        ? applyTaxNormalization(bookingSidecar.cheapestNightly, "booking", region)
+        : null,
     };
   }
 
@@ -213,6 +270,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
     snapshotCheckIn: checkIn,
     snapshotCheckOut: checkOut,
     daemonOnline,
+    region,
+    taxFactor: TAX_NORMALIZATION_FACTOR[region],
     durationMs: Date.now() - startedAt,
   };
 }
