@@ -42,6 +42,7 @@ import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimit
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
+import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
 // Fetch the latest Guesty login verification code from the operator's Gmail
 // inbox via IMAP. Polls for up to 90s (checking every 5s) so the server can
@@ -13059,6 +13060,289 @@ export async function registerRoutes(
       res.json({ ok: true, alert: row });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to acknowledge alert" });
+    }
+  });
+
+  // POST /api/photo-listing-alerts/:id/remediate
+  // One-click "Replace photos & push" for a unit-folder photo-listing
+  // alert. Streams NDJSON. The flow is:
+  //   1. Look up every property combo whose builder includes the
+  //      alerted folder. Skip community-* folders (those are Dismiss-only).
+  //   2. Call /api/replacement/find-unit (localhost) for the lead
+  //      property. The route already filters Airbnb/VRBO/Booking and
+  //      we pass alert.matchedUrls as skipUrls so we don't pick the
+  //      offending listing.
+  //   3. Scrape the chosen Zillow URL into the unit folder, replacing
+  //      the contaminated photos. Stamp _source.json so the next
+  //      rescrape is one click.
+  //   4. For each affected Guesty listing, assemble photos[] from
+  //      disk (community folder + every unit folder, captions from
+  //      photoLabels DB) and POST /api/builder/push-photos. Guesty
+  //      auto-fans out to the OTA channels (Airbnb/VRBO/Booking) on
+  //      its own schedule — we don't push per-channel.
+  //   5. Acknowledge the alert only when every listing's PUT succeeded.
+  //
+  // Stream events:
+  //   { type: "phase", name, message? }
+  //   { type: "candidate", url, address, unitLabel, bedrooms }
+  //   { type: "swap", folder, kept, downloaded }
+  //   { type: "push", listing, guestyListingId, success, savedOnGuesty }
+  //   { type: "done", ok: true, acknowledgedAlertId }
+  //   { type: "error", phase, message }
+  app.post("/api/photo-listing-alerts/:id/remediate", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+
+    // Pre-stream sanity checks. These return real HTTP statuses so the
+    // client UI can show inline errors without parsing NDJSON.
+    const alert = await storage.getPhotoListingAlertById(id);
+    if (!alert) return res.status(404).json({ error: "Alert not found" });
+    if (alert.acknowledgedAt) return res.status(409).json({ error: "Already acknowledged" });
+    if (alert.photoFolder.startsWith("community-")) {
+      return res.status(400).json({
+        error: "Community-folder alerts are Dismiss-only — only unit photos are remediated.",
+      });
+    }
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (o: Record<string, unknown>) => res.write(JSON.stringify(o) + "\n");
+
+    try {
+      emit({ type: "phase", name: "lookup", message: `Resolving ${alert.photoFolder}` });
+
+      // 1. Find every property combo using this folder + its Guesty mapping.
+      type Affected = {
+        propertyId: number;
+        propertyName: string;
+        guestyListingId: string;
+        communityFolder: string;
+        bedrooms: number;
+      };
+      const affected: Affected[] = [];
+      for (const builder of unitBuilderData) {
+        const matchingUnit = builder.units.find((u) => u.photoFolder === alert.photoFolder);
+        if (!matchingUnit) continue;
+        const guestyListingId = await storage.getGuestyListingId(builder.propertyId);
+        if (!guestyListingId) {
+          emit({
+            type: "phase", name: "lookup-warn",
+            message: `Skipping ${builder.propertyName} (propertyId=${builder.propertyId}) — no Guesty mapping`,
+          });
+          continue;
+        }
+        affected.push({
+          propertyId: builder.propertyId,
+          propertyName: builder.propertyName,
+          guestyListingId,
+          communityFolder: builder.communityPhotoFolder,
+          bedrooms: matchingUnit.bedrooms,
+        });
+      }
+      if (affected.length === 0) {
+        emit({ type: "error", phase: "lookup", message: "No Guesty-mapped property uses this folder." });
+        return res.end();
+      }
+
+      // 2. Find a replacement candidate via the existing endpoint.
+      // SearchAPI + the route's own platform filter will skip anything
+      // already on Airbnb/VRBO/Booking. We pass the offending listing
+      // URLs as skipUrls so the next pick can't loop back to them.
+      const skipUrls = (() => {
+        try {
+          const m: any[] = alert.matchedUrls ? JSON.parse(alert.matchedUrls) : [];
+          return Array.from(new Set(m.map((x) => x?.listingUrl).filter(Boolean))) as string[];
+        } catch { return [] as string[]; }
+      })();
+      const lead = affected[0];
+      emit({
+        type: "phase", name: "find-replacement",
+        message: `Searching for a clean ${lead.bedrooms}BR unit at ${lead.communityFolder}`,
+      });
+      const port = process.env.PORT || "5000";
+      let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
+      try {
+        const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            communityFolder: lead.communityFolder,
+            requiredBedrooms: lead.bedrooms,
+            skipUrls,
+          }),
+        });
+        const findBody = await findResp.json() as any;
+        if (!findResp.ok || findBody.error || !findBody.unit) {
+          emit({
+            type: "error", phase: "find-replacement",
+            message: findBody?.error ?? `find-unit HTTP ${findResp.status}`,
+          });
+          return res.end();
+        }
+        candidate = findBody.unit;
+      } catch (e: any) {
+        emit({ type: "error", phase: "find-replacement", message: e?.message ?? String(e) });
+        return res.end();
+      }
+      emit({
+        type: "candidate",
+        url: candidate.url,
+        address: candidate.address,
+        unitLabel: candidate.unitLabel,
+        bedrooms: candidate.bedrooms,
+      });
+
+      // 3. Scrape replacement photos into the unit folder + stamp _source.json.
+      emit({ type: "phase", name: "scrape", message: `Downloading photos from ${candidate.url}` });
+      const folder = alert.photoFolder;
+      const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+      const listingFacts: ListingFacts = {};
+      const scraped = await scrapeListingPhotos(candidate.url, undefined, listingFacts);
+      if (!scraped.length) {
+        emit({ type: "error", phase: "scrape", message: "Scraper returned 0 photos." });
+        return res.end();
+      }
+      const swapResult = await downloadAndPrioritize({
+        folder,
+        folderPath,
+        scrapedUrls: scraped.map((s) => s.url),
+        maxKeep: 25,
+        anthropicKey: process.env.ANTHROPIC_API_KEY,
+        kind: inferKindFromFolder(folder),
+        requiredBedrooms: listingFacts.bedrooms ?? candidate.bedrooms ?? lead.bedrooms,
+        requiredBathrooms: listingFacts.bathrooms ?? undefined,
+      });
+      try {
+        const sourcePath = path.join(folderPath, "_source.json");
+        let doc: any = {};
+        try { doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
+        doc.sourceListing = {
+          url: candidate.url,
+          platform: /zillow/i.test(candidate.url) ? "zillow" : "other",
+          scrapedDate: new Date().toISOString().slice(0, 10),
+        };
+        doc.verificationStatus = "needs-review";
+        doc.verifiedDate = new Date().toISOString().slice(0, 10);
+        doc.verifiedBy = "alert-remediate";
+        await fs.promises.writeFile(sourcePath, JSON.stringify(doc, null, 2));
+      } catch { /* non-fatal */ }
+      emit({ type: "swap", folder, kept: swapResult.kept, downloaded: swapResult.downloaded });
+
+      // 4. Assemble photos[] from disk + push to each affected Guesty listing.
+      // Order: community folder first, then each unit folder in builder.units
+      // order. Filenames sorted lexicographically inside each folder. Captions
+      // come from the photoLabels DB (userLabel beats label) with a humanized-
+      // filename fallback. push-photos enforces the 40-photo Booking.com cap
+      // server-side, so we don't trim here.
+      const photosRoot = path.join(process.cwd(), "client/public/photos");
+      const captionFallback = (filename: string): string =>
+        filename.replace(/\.[^.]+$/, "")
+          .replace(/^\d+[-_]?/, "")
+          .replace(/[-_]+/g, " ")
+          .replace(/\b\w/g, (c) => c.toUpperCase())
+          .trim() || "Photo";
+      async function assemblePhotosFor(propertyId: number): Promise<{ localPath: string; caption: string }[]> {
+        const builder = unitBuilderData.find((p) => p.propertyId === propertyId);
+        if (!builder) return [];
+        const orderedFolders = [builder.communityPhotoFolder, ...builder.units.map((u) => u.photoFolder)];
+        const out: { localPath: string; caption: string }[] = [];
+        const seen = new Set<string>();   // dedupe in case the same folder appears twice
+        for (const f of orderedFolders) {
+          if (seen.has(f)) continue;
+          seen.add(f);
+          const dir = path.join(photosRoot, f);
+          let files: string[] = [];
+          try { files = await listPhotoFiles(dir); } catch { continue; }
+          if (files.length === 0) continue;
+          const labels = await storage.getPhotoLabelsByFolder(f);
+          const labelByFile = new Map(labels.map((r) => [r.filename, r.userLabel ?? r.label]));
+          for (const filename of files.slice().sort()) {
+            out.push({
+              localPath: `/photos/${f}/${filename}`,
+              caption: labelByFile.get(filename) ?? captionFallback(filename),
+            });
+          }
+        }
+        return out;
+      }
+
+      const successes: string[] = [];
+      for (const a of affected) {
+        emit({ type: "phase", name: "push", message: `Pushing photos to ${a.propertyName}` });
+        const photos = await assemblePhotosFor(a.propertyId);
+        if (photos.length === 0) {
+          emit({
+            type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
+            success: false, savedOnGuesty: 0,
+          });
+          continue;
+        }
+        let savedOnGuesty = 0;
+        try {
+          const pushResp = await fetch(`http://127.0.0.1:${port}/api/builder/push-photos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ guestyListingId: a.guestyListingId, photos, upscale: true }),
+          });
+          if (!pushResp.ok || !pushResp.body) {
+            emit({
+              type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
+              success: false, savedOnGuesty: 0,
+            });
+            continue;
+          }
+          // Drain the streaming NDJSON. Only the final {type:"done"} line
+          // tells us how many pictures Guesty actually saved.
+          const reader = pushResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop()!;
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const ev = JSON.parse(line);
+                if (ev.type === "done") savedOnGuesty = ev.successCount ?? 0;
+              } catch { /* malformed line — ignore */ }
+            }
+          }
+        } catch (e: any) {
+          emit({
+            type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
+            success: false, savedOnGuesty: 0, error: e?.message,
+          });
+          continue;
+        }
+        const ok = savedOnGuesty > 0;
+        if (ok) successes.push(a.guestyListingId);
+        emit({
+          type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
+          success: ok, savedOnGuesty,
+        });
+      }
+
+      // 5. Only acknowledge if every affected listing was updated. A
+      // partial success leaves the alert open so the operator (or a
+      // re-run) can finish the job.
+      if (successes.length === affected.length) {
+        await storage.acknowledgePhotoListingAlert(id);
+        emit({ type: "done", ok: true, acknowledgedAlertId: id });
+      } else {
+        emit({
+          type: "error", phase: "push",
+          message: `${successes.length}/${affected.length} listings succeeded. Alert kept open — re-run after investigating.`,
+        });
+      }
+    } catch (err: any) {
+      emit({ type: "error", phase: "unhandled", message: err?.message ?? String(err) });
+    } finally {
+      res.end();
     }
   });
 
