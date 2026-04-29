@@ -11,14 +11,11 @@ import { verifyPmRate } from "./pm-rate-agent";
 import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
-import { searchVrboViaApify, getApifyVrboDebugSnapshot } from "./apify-vrbo";
-import { searchVrboViaBrowserbase } from "./browserbase-vrbo-search";
-import { searchVrboViaScrapingBee } from "./scrapingbee-vrbo-search";
-import { searchVrboViaTrivago } from "./trivago-vrbo-search";
-import { searchVrboViaApifyWebScraper } from "./apify-vrbo-web-scraper";
-import { searchVrboViaOutscraper, getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
-import { searchVrboViaStagehand } from "./stagehand-vrbo-search";
-import { findPmsViaStagehand } from "./stagehand-pm-finder";
+// VRBO scraping providers were collapsed to sidecar + Google site:search
+// in PR #275 — these helpers are still used by the admin debug routes
+// below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
+import { getApifyVrboDebugSnapshot } from "./apify-vrbo";
+import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -2694,151 +2691,37 @@ export async function registerRoutes(
     // available), then Google-unpriced URLs that aren't already in the
     // priced list. Auto-fill still treats Vrbo as awareness-only (same
     // Vrbo TOS sublet restriction as Airbnb).
+    // Vrbo: simplified to two paths after PR #275.
+    //
+    // Old shape: 9 parallel paths (Apify direct, Browserbase, ScrapingBee,
+    // Outscraper, Trivago meta-search, Apify web-scraper, Stagehand managed
+    // agent, Google site:search, sidecar). Vrbo's anti-bot fingerprints
+    // every server-side residential-proxy path; only the operator's local
+    // Chrome (sidecar, path 9) consistently returned priced cards. The
+    // other 7 priced paths returned empty 95%+ of the time, costing money
+    // and producing duplicate noise on the rare occasion something leaked
+    // through. Per operator directive 2026-04-29: sidecar is the primary,
+    // Google site:search is the cheap unpriced fallback.
+    //
+    // Daemon online  → priced cards from the operator's home-IP Chrome.
+    // Daemon offline → unpriced URLs from Google site:search (operator
+    //                  clicks through to confirm). No cheapest-pool entry
+    //                  for VRBO when offline; sources.vrbo still populates
+    //                  for awareness.
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
-    let vrboApifyCount = 0;
-    let vrboBbCount = 0;
-    let vrboSbCount = 0;
-    let vrboOsCount = 0;
-    let vrboTvCount = 0;
-    let vrboAwsCount = 0; // apify web-scraper
-    let vrboShCount = 0;  // stagehand managed agent
     let vrboGoogleCount = 0;
     let vrboSidecarCount = 0;
     let vrboSidecarOnline = false;
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const bbApiKey = process.env.BROWSERBASE_API_KEY;
-      const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
       const targetDestination = resortName ?? community;
-
-      const anthropicKey = process.env.ANTHROPIC_API_KEY;
-      const [apifyResults, browserbaseResults, scrapingbeeResults, outscraperResults, trivagoResults, apifyWebResults, stagehandResults, googleResults, sidecarResults] = await Promise.all([
-        // Path 1 — Apify (paid actor; priced when regionId resolves)
-        searchVrboViaApify({
-          resortName: resortName ?? community,
-          location: resortName ?? community,
-          bedrooms,
-          checkIn,
-          checkOut,
-        }).catch((e: any) => {
-          console.error("[find-buy-in] vrbo (apify) error:", e?.message ?? e);
-          return [] as Awaited<ReturnType<typeof searchVrboViaApify>>;
-        }),
-        // Path 2 — Browserbase-driven Vrbo search (priced; independent
-        // of Apify regionId). Skipped when Browserbase isn't configured.
-        bbApiKey && bbProjectId
-          ? searchVrboViaBrowserbase({
-              resortName: resortName ?? community,
-              destination: targetDestination,
-              bedrooms,
-              checkIn,
-              checkOut,
-              bbApiKey,
-              bbProjectId,
-            }).catch((e: any) => {
-              console.error("[find-buy-in] vrbo (browserbase) error:", e?.message ?? e);
-              return [] as Awaited<ReturnType<typeof searchVrboViaBrowserbase>>;
-            })
-          : Promise.resolve([] as Awaited<ReturnType<typeof searchVrboViaBrowserbase>>),
-        // Path 3 — ScrapingBee (different vendor than Browserbase;
-        // pure resilience). Skipped when SCRAPINGBEE_API_KEY isn't set.
-        searchVrboViaScrapingBee({
-          resortName: resortName ?? community,
-          destination: targetDestination,
-          bedrooms,
-          checkIn,
-          checkOut,
-        }).catch((e: any) => {
-          console.error("[find-buy-in] vrbo (scrapingbee) error:", e?.message ?? e);
-          return [] as Awaited<ReturnType<typeof searchVrboViaScrapingBee>>;
-        }),
-        // Path 4 — Outscraper (dedicated Vrbo scraper from a different
-        // vendor). Skipped when OUTSCRAPER_API_KEY isn't set.
-        searchVrboViaOutscraper({
-          resortName: resortName ?? community,
-          destination: targetDestination,
-          bedrooms,
-          checkIn,
-          checkOut,
-        }).catch((e: any) => {
-          console.error("[find-buy-in] vrbo (outscraper) error:", e?.message ?? e);
-          return [] as Awaited<ReturnType<typeof searchVrboViaOutscraper>>;
-        }),
-        // Path 5 — Trivago meta-search via ScrapingBee (different
-        // attack vector — Trivago aggregates Vrbo with all-in totals
-        // and has materially weaker anti-bot than Vrbo direct).
-        // Skipped when SCRAPINGBEE_API_KEY isn't set (shares the key).
-        searchVrboViaTrivago({
-          resortName: resortName ?? community,
-          destination: targetDestination,
-          bedrooms,
-          checkIn,
-          checkOut,
-        }).catch((e: any) => {
-          console.error("[find-buy-in] vrbo (trivago) error:", e?.message ?? e);
-          return [] as Awaited<ReturnType<typeof searchVrboViaTrivago>>;
-        }),
-        // Path 6 — Apify generic `web-scraper` actor with custom JS
-        // page function (Grok rec #2). Different from path 1's
-        // Vrbo-specific actor — this one drives a residential-proxy
-        // headless browser through Vrbo's hydrated search page and
-        // reads property cards from the rendered DOM. Costs more per
-        // call (~$0.05) but is robust to Vrbo's frontend rev churn.
-        searchVrboViaApifyWebScraper({
-          resortName: resortName ?? community,
-          destination: targetDestination,
-          bedrooms,
-          checkIn,
-          checkOut,
-        }).catch((e: any) => {
-          console.error("[find-buy-in] vrbo (apify-web-scraper) error:", e?.message ?? e);
-          return [] as Awaited<ReturnType<typeof searchVrboViaApifyWebScraper>>;
-        }),
-        // Path 7 — Stagehand managed agent (Browserbase + Anthropic). The
-        // same path director.ai uses to drive Vrbo successfully. Where
-        // every direct-scrape vendor (paths 1-6) keeps returning 0
-        // priced because Vrbo's anti-bot blocks fingerprint-detectable
-        // bots, the Stagehand agent drives the real UI: types the
-        // destination, clicks the autocomplete, picks dates, hits
-        // Search. Costs more (~$0.20-0.50/call, ~60-120s) but is the
-        // only path with a realistic shot at returning priced data
-        // when the cheap paths fall through. Skipped when keys absent.
-        bbApiKey && bbProjectId && anthropicKey
-          ? searchVrboViaStagehand({
-              resortName: resortName ?? community,
-              destination: targetDestination,
-              bedrooms,
-              checkIn,
-              checkOut,
-              bbApiKey,
-              bbProjectId,
-              anthropicKey,
-            }).catch((e: any) => {
-              console.error("[find-buy-in] vrbo (stagehand) error:", e?.message ?? e);
-              return [] as Awaited<ReturnType<typeof searchVrboViaStagehand>>;
-            })
-          : Promise.resolve([] as Awaited<ReturnType<typeof searchVrboViaStagehand>>),
-        // Path 8 — Google site:search (free; unpriced URLs, fallback)
+      const [googleResults, sidecarResults] = await Promise.all([
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
         }),
-        // Path 9 — Local-Chrome sidecar via the operator's real browser.
-        // Vrbo's anti-bot fingerprints all 7 priced server-side paths
-        // (Apify, BB, ScrapingBee, Outscraper, Trivago, Apify-web,
-        // Stagehand) — even with a Browserbase persistent context
-        // seeded with real-Chrome cookies, the search endpoint
-        // escalates to a slider CAPTCHA tied to the residential IP
-        // ("There is a robot on the same network as you"). The
-        // operator's actual home-IP Chrome session reaches Vrbo
-        // cleanly. This path enqueues a request and waits for the
-        // operator-side /loop worker (running in their Claude Code
-        // session) to drive Chrome MCP and post results back. When
-        // the worker is offline (operator not at desk), the wallet
-        // budget expires and we gracefully fall through to the other
-        // 8 paths.
         (async (): Promise<{ candidates: Candidate[]; workerOnline: boolean; durationMs: number; reason: string }> => {
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchVrboViaSidecar({
@@ -2871,107 +2754,17 @@ export async function registerRoutes(
         }),
       ]);
 
-      vrboApifyCount = apifyResults.length;
-      vrboBbCount = browserbaseResults.length;
-      vrboSbCount = scrapingbeeResults.length;
-      vrboOsCount = outscraperResults.length;
-      vrboTvCount = trivagoResults.length;
-      vrboAwsCount = apifyWebResults.length;
-      vrboShCount = stagehandResults.length;
       vrboGoogleCount = googleResults.candidates.length;
       vrboSidecarCount = sidecarResults.candidates.length;
       vrboSidecarOnline = sidecarResults.workerOnline;
       vrboSidecarMs = sidecarResults.durationMs;
       vrboSidecarReason = sidecarResults.reason;
       vrboDropped = googleResults.dropped;
-      vrboRawCount = vrboApifyCount + vrboBbCount + vrboSbCount + vrboOsCount + vrboTvCount + vrboAwsCount + vrboShCount + googleResults.raw + vrboSidecarCount;
+      vrboRawCount = googleResults.raw + vrboSidecarCount;
 
-      const apifyCandidates: Candidate[] = apifyResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const bbCandidates: Candidate[] = browserbaseResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const sbCandidates: Candidate[] = scrapingbeeResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const osCandidates: Candidate[] = outscraperResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const tvCandidates: Candidate[] = trivagoResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo (via Trivago)",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const awsCandidates: Candidate[] = apifyWebResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-      const shCandidates: Candidate[] = stagehandResults.map((c): Candidate => ({
-        source: "vrbo" as const,
-        sourceLabel: "Vrbo",
-        title: c.title,
-        url: withStayDates("vrbo", c.url),
-        nightlyPrice: c.nightlyPrice,
-        totalPrice: c.totalPrice,
-        bedrooms: c.bedrooms,
-        image: c.image,
-        snippet: c.snippet,
-      }));
-
-      // Dedupe by Vrbo listing id across all SEVEN scraping paths plus
-      // Google fallback. Priority order: Stagehand managed agent (the
-      // path director.ai uses, most likely to actually return priced
-      // data because it drives the real UI) → Trivago meta-search →
-      // Apify web-scraper → Outscraper → Apify direct → Browserbase
-      // raw → ScrapingBee → Google (free, unpriced fallback). First
-      // id wins; later occurrences of the same id are dropped so we
-      // don't duplicate cards.
+      // Dedupe by Vrbo listing id (e.g. /3208123) — sidecar ranks first
+      // because it carries real prices; Google fills in when the daemon
+      // is offline or returned only a subset.
       const listingIdOf = (url: string): string | null => {
         const m = url.match(/vrbo\.com\/(\d+)/);
         return m ? m[1] : null;
@@ -2984,25 +2777,7 @@ export async function registerRoutes(
         if (id) seenIds.add(id);
         out.push(c);
       };
-      // Stagehand first — it's the only path that drives Vrbo's
-      // actual UI (autocomplete + date picker + Search) the same way
-      // a real user does. When it returns priced data we trust it
-      // most. Trivago second — meta-search has weaker anti-bot than
-      // Vrbo direct and computes its own all-in. Apify web-scraper
-      // (residential proxy + custom JS) ranks just below since it's
-      // robust to Vrbo's DOM rev churn.
-      // Sidecar (operator's real Chrome) ranks FIRST when it's online —
-      // it's the only path that reliably gets past Vrbo's IP fingerprint
-      // wall. When the worker is offline the array is empty so this
-      // collapses to the existing priority chain below.
       for (const c of sidecarResults.candidates) pushIfNew(c);
-      for (const c of shCandidates) pushIfNew(c);
-      for (const c of tvCandidates) pushIfNew(c);
-      for (const c of awsCandidates) pushIfNew(c);
-      for (const c of osCandidates) pushIfNew(c);
-      for (const c of apifyCandidates) pushIfNew(c);
-      for (const c of bbCandidates) pushIfNew(c);
-      for (const c of sbCandidates) pushIfNew(c);
       for (const c of googleResults.candidates) pushIfNew(c);
       return out;
     })();
@@ -3559,26 +3334,13 @@ export async function registerRoutes(
         });
       }
     }
-    // ── Path C: Stagehand PM finder (escalation) ──────────────────────────
-    // When the cheap paths (Booking + PM Google + per-PM sitemaps + Airbnb-
-    // anchored photo-match) all came up dry on priced bookable candidates,
-    // fall back to a Stagehand agent that drives Google like a human:
-    // searches `"<resort>" <BR> bedroom vacation rental property management
-    // book directly`, dismisses any consent overlay, scrolls past the
-    // PAA / Maps panels, and extracts the long-tail organic PM URLs.
-    //
-    // Only fires when `priced bookable < 3` so we don't pay $0.30 on
-    // every find-buy-in. Cached 5min so repeat fires within a window
-    // are free. Returned URLs are unpriced (the agent doesn't drive
-    // each PM's availability widget — that's what verifyPmRate is
-    // for) but they give the operator a click-through link to a PM
-    // site that the structured Google site:search may have missed.
-    const PM_FINDER_THRESHOLD = 3;
-    const pricedBookableSoFar = [...booking, ...pm, ...photoMatchPmCandidates]
-      .filter((c) => c.nightlyPrice > 0).length;
-    const finderBbApiKey = process.env.BROWSERBASE_API_KEY;
-    const finderBbProjectId = process.env.BROWSERBASE_PROJECT_ID;
-    const finderAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    // ── PM discovery via Google ─────────────────────────────────────
+    // The Stagehand-based PM finder (Browserbase + Anthropic agent that
+    // drove Google search like a human) was retired in PR #275. Sidecar
+    // Google SERP below replaces it: same query, same data, but driven
+    // from the operator's actual home-IP Chrome — gets long-tail PM
+    // results SearchAPI's Google misses *and* doesn't burn an extra
+    // ~$0.30 + 60s per find-buy-in.
 
     // ── Sidecar Google SERP (operator's real Chrome) ────────────────
     // Fires when the local Mac daemon is online. Drives a Google
@@ -3691,56 +3453,10 @@ export async function registerRoutes(
       }
     }
 
-    let pmFinderCandidates: Candidate[] = [];
-    if (
-      pricedBookableSoFar < PM_FINDER_THRESHOLD &&
-      finderBbApiKey &&
-      finderBbProjectId &&
-      finderAnthropicKey
-    ) {
-      console.log(
-        `[find-buy-in] pm-finder firing: priced bookable=${pricedBookableSoFar} < ${PM_FINDER_THRESHOLD}`,
-      );
-      try {
-        // 90s wall budget — internal Stagehand session has its own
-        // 120s budget but we cap tighter here so a stuck PM-finder
-        // can't push the whole find-buy-in over Railway's 5-min edge
-        // timeout.
-        const finderResults = await withTimeout(
-          findPmsViaStagehand({
-            resortName,
-            destination: resortName ?? community,
-            bedrooms,
-            checkIn,
-            checkOut,
-            bbApiKey: finderBbApiKey,
-            bbProjectId: finderBbProjectId,
-            anthropicKey: finderAnthropicKey,
-          }),
-          90_000,
-          [] as Awaited<ReturnType<typeof findPmsViaStagehand>>,
-          "pm-finder",
-        );
-        const existingPmUrls = new Set<string>([
-          ...pm.map((c) => c.url),
-          ...photoMatchPmCandidates.map((c) => c.url),
-        ]);
-        pmFinderCandidates = finderResults
-          .filter((r) => !existingPmUrls.has(r.url))
-          .map((r): Candidate => ({
-            source: "pm",
-            sourceLabel: r.domain,
-            title: r.title || `Match on ${r.domain}`,
-            url: r.url,
-            nightlyPrice: 0,
-            totalPrice: 0,
-            bedrooms: undefined,
-          }));
-        console.log(`[find-buy-in] pm-finder added ${pmFinderCandidates.length} new PM URLs`);
-      } catch (e: any) {
-        console.error(`[find-buy-in] pm-finder error:`, e?.message ?? e);
-      }
-    }
+    // Stagehand PM finder retired in PR #275 — sidecar Google SERP above
+    // replaces it. Variable kept (always empty) so the merging code below
+    // doesn't need to change shape.
+    const pmFinderCandidates: Candidate[] = [];
 
     const pmAugmented: Candidate[] = [
       ...pm,
@@ -3791,118 +3507,18 @@ export async function registerRoutes(
     // each + Vrbo parallel scraper ≈ 8s). Past the budget, remaining URLs
     // are marked "skipped" and excluded from cheapest. The whole find-buy-
     // in handler aims for ~3-5 min total; this is the last expensive step.
-    const PRE_VERIFY_TOP_N = 6;
-    const PRE_VERIFY_WALL_MS = 90_000;
-    const verifyBbApiKey = process.env.BROWSERBASE_API_KEY;
-    const verifyBbProjectId = process.env.BROWSERBASE_PROJECT_ID;
-    const verifyAnthropicKey = process.env.ANTHROPIC_API_KEY;
-    let preVerifyAttempted = 0;
-    let preVerifyYes = 0;
-    let preVerifyNo = 0;
-    let preVerifyUnclear = 0;
-    if (verifyBbApiKey && verifyBbProjectId && verifyAnthropicKey) {
-      // Pick the top-N cheapest candidates that need on-page verification.
-      // PM candidates have no upstream verification → must run them. Booking
-      // candidates ARE auto-verified from the google_hotels engine, but
-      // engine data can be stale (the operator hit a "no availability here
-      // between Sat, Jun 13 - Sat, Jun 20" banner on a Booking listing the
-      // engine had marked bookable). Run them through the deterministic
-      // Booking scraper too so we can DOWNGRADE engine-yes → no when the
-      // page contradicts. We don't downgrade engine-yes → unclear (engine
-      // wins on ambiguity to keep graceful degradation).
-      // Skip URLs already verified by the sidecar batch — same operator
-      // home-IP, same date window, same DOM heuristics; re-running through
-      // Browserbase wastes the budget without changing the result.
-      const toVerify = priced
-        .filter((c) => c.source === "pm" || c.source === "booking")
-        .filter((c) => !sidecarBatchVerifiedUrls.has(c.url))
-        .slice(0, PRE_VERIFY_TOP_N);
-      if (toVerify.length > 0) {
-        try {
-          const { verifyPmAvailabilityBatch } = await import("./verify-pm-availability");
-          const verifyResults = await withTimeout(
-            verifyPmAvailabilityBatch({
-              urls: toVerify.map((c) => c.url),
-              checkIn,
-              checkOut,
-              bbApiKey: verifyBbApiKey,
-              bbProjectId: verifyBbProjectId,
-              anthropicKey: verifyAnthropicKey,
-              maxUrls: PRE_VERIFY_TOP_N,
-            }),
-            PRE_VERIFY_WALL_MS,
-            {} as Record<string, never>,
-            "pre-verify",
-          );
-          preVerifyAttempted = toVerify.length;
-          for (const c of toVerify) {
-            const r = (verifyResults as Record<string, any>)[c.url];
-            const wasEngineVerified = c.source === "booking" && c.verified === "yes";
-            if (!r) {
-              // Don't overwrite engine-verified Booking with "skipped".
-              if (!wasEngineVerified) c.verified = "skipped";
-              continue;
-            }
-            // Apply scrape result. Booking gets the conservative
-            // downgrade-only treatment: engine-yes stays unless the
-            // scrape says definitely-no.
-            if (wasEngineVerified) {
-              if (r.available === "no") {
-                c.verified = "no";
-                c.verifiedReason = r.reason;
-                c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
-                preVerifyNo++;
-              } else {
-                // yes / unclear — keep engine's verified=yes. Update the
-                // reason + page-quoted price for transparency.
-                c.verifiedReason = r.reason;
-                if (typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
-                  c.verifiedNightlyPrice = r.nightlyPriceUsd;
-                }
-                preVerifyYes++;
-              }
-            } else {
-              // PM candidates — first-time verify.
-              c.verified = r.available;
-              c.verifiedReason = r.reason;
-              c.verifiedNightlyPrice = r.nightlyPriceUsd ?? null;
-              // When the PM page quoted a real per-night rate, OVERRIDE
-              // the inherited Airbnb-anchor price with the page-quoted
-              // value. This is the whole point of the verify step.
-              if (r.available === "yes" && typeof r.nightlyPriceUsd === "number" && r.nightlyPriceUsd > 0) {
-                c.nightlyPrice = Math.round(r.nightlyPriceUsd);
-                c.totalPrice = Math.round(r.nightlyPriceUsd * nights);
-                preVerifyYes++;
-              } else if (r.available === "yes") {
-                preVerifyYes++;
-              } else if (r.available === "no") {
-                preVerifyNo++;
-              } else {
-                preVerifyUnclear++;
-              }
-            }
-          }
-          // Mark un-verified PM rows past the cap as skipped so the UI
-          // can distinguish "we tried and got unclear" from "we never
-          // tried." Don't touch Booking — engine result stands.
-          for (const c of priced) {
-            if (c.source === "pm" && !c.verified) c.verified = "skipped";
-          }
-        } catch (e: any) {
-          console.error("[find-buy-in] pre-verify failed:", e?.message ?? e);
-          for (const c of priced) {
-            if (c.source === "pm" && !c.verified) c.verified = "skipped";
-          }
-        }
-      }
-    } else {
-      // Browserbase / Anthropic env unset — pre-verify is unavailable.
-      // Mark PM candidates as skipped so the UI can render "Verifying
-      // unavailable" rather than implying they ARE verified. Booking
-      // keeps engine-verified=yes.
-      for (const c of priced) {
-        if (c.source === "pm" && !c.verified) c.verified = "skipped";
-      }
+    // Pre-verify: sidecar batch already covered the top-5 PM URLs above
+    // (parallel tabs on the operator's real Chrome). The Browserbase
+    // pre-verify pass that previously ran here was retired in PR #275 —
+    // same operator home-IP, same DOM heuristics, but free + faster. PM
+    // rows the sidecar didn't cover (sidecar offline OR > 5 PMs) get
+    // marked "skipped" so the UI distinguishes them from confirmed-yes.
+    const preVerifyAttempted = sidecarBatchVerifiedUrls.size;
+    const preVerifyYes = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
+    const preVerifyNo = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
+    const preVerifyUnclear = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "unclear").length;
+    for (const c of priced) {
+      if (c.source === "pm" && !c.verified) c.verified = "skipped";
     }
 
     // Re-sort priced after verification — verified-yes candidates may
@@ -3943,11 +3559,132 @@ export async function registerRoutes(
       ? verifiedCheapest.slice(0, 20)
       : unpricedFallback;
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
+
+    // ── Unit clustering ─────────────────────────────────────────────
+    // Group listings that represent the SAME physical unit (same Yes
+    // Drive penthouse, same 3BR cottage, etc.) across channels using
+    // the photo-match graph as the join key. The cheapest panel
+    // historically showed N rows for N URLs — but if the same unit is
+    // listed on Airbnb at $400 AND on a PM site at $410, the operator
+    // wants to see ONE row "Yes Drive 3BR Penthouse — $400 Airbnb,
+    // $410 Direct" instead of two ranking near each other.
+    //
+    // Anchoring rules:
+    //   - Airbnb listing with photoMatches[] → cluster anchor; matching
+    //     PM URLs (which already carry `airbnbAnchorUrl`) join.
+    //   - Airbnb listing without matches      → singleton cluster.
+    //   - PM with airbnbAnchorUrl pointing into the Airbnb pool → joins
+    //     that Airbnb's cluster.
+    //   - VRBO / Booking / standalone PM      → singleton clusters.
+    //
+    // VRBO ↔ Airbnb cross-channel matching isn't done yet (would need
+    // photo-match against VRBO listings too). Until then VRBO/Booking
+    // present as one-channel rows. Same for sidecar-Google PM URLs that
+    // didn't share photos with any Airbnb anchor.
+    type ListingChannel = {
+      channel: "airbnb" | "vrbo" | "booking" | "pm";
+      channelLabel: string;
+      url: string;
+      nightlyPrice: number;
+      totalPrice: number;
+      bedrooms?: number;
+      verified?: "yes" | "no" | "unclear" | "skipped";
+      verifiedReason?: string;
+    };
+    type CheapestUnit = {
+      unitTitle: string;
+      bedrooms?: number;
+      image?: string;
+      minNightlyPrice: number;
+      // Best click-through URL for one-click auto-fill — the lowest-
+      // priced verified=yes listing in the cluster.
+      primaryUrl: string;
+      primaryChannel: "airbnb" | "vrbo" | "booking" | "pm";
+      listings: ListingChannel[];
+    };
+    const candidateToListing = (c: Candidate): ListingChannel => ({
+      channel: c.source,
+      channelLabel: c.sourceLabel,
+      url: c.url,
+      nightlyPrice: c.nightlyPrice,
+      totalPrice: c.totalPrice,
+      bedrooms: c.bedrooms,
+      verified: c.verified,
+      verifiedReason: c.verifiedReason,
+    });
+    // anchorKey → cluster builder. The anchor key is the Airbnb anchor
+    // URL when the candidate is part of a photo-match cluster, else the
+    // candidate's own URL (singleton).
+    const clusters = new Map<
+      string,
+      { anchor: Candidate; members: Candidate[] }
+    >();
+    const allKnown: Candidate[] = [
+      ...airbnbWithMatches,
+      ...vrbo,
+      ...booking,
+      ...pmAugmented,
+    ];
+    const airbnbUrlSet = new Set(airbnbWithMatches.map((c) => c.url));
+    for (const c of allKnown) {
+      let anchorKey: string;
+      let anchor: Candidate;
+      if (c.source === "pm" && c.airbnbAnchorUrl && airbnbUrlSet.has(c.airbnbAnchorUrl)) {
+        anchorKey = c.airbnbAnchorUrl;
+        // anchor is the Airbnb candidate; will be set/updated when we
+        // hit it in the loop. If not yet hit, defer by using c temporarily.
+        anchor = airbnbWithMatches.find((a) => a.url === c.airbnbAnchorUrl) ?? c;
+      } else {
+        anchorKey = c.url;
+        anchor = c;
+      }
+      const cluster = clusters.get(anchorKey);
+      if (cluster) {
+        cluster.members.push(c);
+        // Prefer an Airbnb anchor over a PM provisional anchor.
+        if (cluster.anchor.source !== "airbnb" && c.source === "airbnb") {
+          cluster.anchor = c;
+        }
+      } else {
+        clusters.set(anchorKey, { anchor, members: [c] });
+      }
+    }
+    // Build CheapestUnit per cluster. A cluster is "buyable" if any
+    // member is verified=yes (Airbnb engine + Booking google_hotels +
+    // sidecar-batch yes all set this). Sort listings within the unit
+    // by nightlyPrice (verified > unverified, then price ASC). Sort
+    // units by minNightlyPrice across the verified subset of listings.
+    const units: CheapestUnit[] = [];
+    for (const { anchor, members } of clusters.values()) {
+      const listingChannels: ListingChannel[] = members
+        .map(candidateToListing)
+        .sort((a: ListingChannel, b: ListingChannel) => {
+          const aRank = a.verified === "yes" ? 0 : 1;
+          const bRank = b.verified === "yes" ? 0 : 1;
+          if (aRank !== bRank) return aRank - bRank;
+          return (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999);
+        });
+      const verifiedYes = listingChannels.filter((l: ListingChannel) => l.verified === "yes" && l.nightlyPrice > 0);
+      if (verifiedYes.length === 0) continue; // skip un-buyable clusters
+      const cheapestVerified = verifiedYes[0];
+      units.push({
+        unitTitle: anchor.title,
+        bedrooms: anchor.bedrooms,
+        image: anchor.image,
+        minNightlyPrice: cheapestVerified.nightlyPrice,
+        primaryUrl: cheapestVerified.url,
+        primaryChannel: cheapestVerified.channel,
+        listings: listingChannels,
+      });
+    }
+    units.sort((a, b) => a.minNightlyPrice - b.minNightlyPrice);
+    const cheapestUnits = units.slice(0, 20);
+
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (sidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, sh=${vrboShCount}, tv=${vrboTvCount}, aws=${vrboAwsCount}, os=${vrboOsCount}, apify=${vrboApifyCount}, bb=${vrboBbCount}, sb=${vrboSbCount}, google=${vrboGoogleCount} — TOS awareness-only${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
+      + `vrbo=${vrbo.length} (sidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, google=${vrboGoogleCount} — TOS awareness-only${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
@@ -3982,13 +3719,16 @@ export async function registerRoutes(
           yes: preVerifyYes,
           no: preVerifyNo,
           unclear: preVerifyUnclear,
-          available: !!(verifyBbApiKey && verifyBbProjectId && verifyAnthropicKey),
+          // Verification path is the sidecar batch — available iff the
+          // daemon was online during this find-buy-in.
+          available: vrboSidecarOnline || sidecarBatchVerifiedUrls.size > 0,
         },
         searchLocation,
         vrboDestination,
         resortName,
       },
       cheapest,
+      cheapestUnits,
       totalPricedResults: priced.length,
     });
   });
