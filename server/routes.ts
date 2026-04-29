@@ -3629,6 +3629,68 @@ export async function registerRoutes(
       console.error(`[find-buy-in] sidecar-google-serp error:`, e?.message ?? e);
     }
 
+    // ── Sidecar batch PM URL verify (operator's real Chrome) ─────────
+    // Take the top-5 sidecar-Google PM URLs (unpriced) and ask the
+    // daemon to fan out 5 parallel Chrome tabs to scrape availability
+    // + price for the requested window. Total wall ≈ 15-25s (paid
+    // once for the slowest tab, not summed). Yields:
+    //   - verified=yes with real per-night price → joins priced pool
+    //     correctly ranked by cost.
+    //   - verified=no               → stays unpriced, excluded from
+    //                                  priced pool by the > 0 filter.
+    //   - verified=unclear          → unpriced, excluded from priced
+    //                                  pool but visible in sources.pm.
+    // Skipped entirely when the daemon is offline (sidecarSerp above
+    // already logged that). Tracked in `sidecarBatchVerifiedUrls` so
+    // the Browserbase pre-verify pass below doesn't double-charge on
+    // the same URLs.
+    const sidecarBatchVerifiedUrls = new Set<string>();
+    if (pmSidecarFinderCandidates.length > 0) {
+      try {
+        const { checkPmUrlsBatchViaSidecar } = await import("./vrbo-sidecar-queue");
+        const top5 = pmSidecarFinderCandidates.slice(0, 5);
+        const batchRes = await checkPmUrlsBatchViaSidecar({
+          urls: top5.map((c) => c.url),
+          checkIn,
+          checkOut,
+          bedrooms,
+          walletBudgetMs: 60_000,
+        });
+        if (batchRes.workerOnline && batchRes.results.length > 0) {
+          const byUrl = new Map(batchRes.results.map((r) => [r.url, r] as const));
+          for (const c of top5) {
+            const r = byUrl.get(c.url);
+            if (!r) continue;
+            sidecarBatchVerifiedUrls.add(c.url);
+            c.verified = r.available;
+            c.verifiedReason = r.reason;
+            c.verifiedNightlyPrice = r.nightlyPrice ?? null;
+            // Promote the page-quoted price onto the candidate so the
+            // priced filter `nightlyPrice > 0` admits it.
+            if (r.available === "yes") {
+              if (typeof r.nightlyPrice === "number" && r.nightlyPrice > 0) {
+                c.nightlyPrice = Math.round(r.nightlyPrice);
+                c.totalPrice = Math.round(r.nightlyPrice * nights);
+              } else if (typeof r.totalPrice === "number" && r.totalPrice > 0) {
+                c.totalPrice = Math.round(r.totalPrice);
+                c.nightlyPrice = Math.round(r.totalPrice / nights);
+              }
+            }
+          }
+          const yes = top5.filter((c) => c.verified === "yes").length;
+          const no = top5.filter((c) => c.verified === "no").length;
+          const unclear = top5.filter((c) => c.verified === "unclear").length;
+          console.log(
+            `[find-buy-in] sidecar-batch-verify yes=${yes} no=${no} unclear=${unclear} (${batchRes.durationMs}ms)`,
+          );
+        } else if (!batchRes.workerOnline) {
+          console.log(`[find-buy-in] sidecar-batch-verify skipped (worker offline): ${batchRes.reason}`);
+        }
+      } catch (e: any) {
+        console.error(`[find-buy-in] sidecar-batch-verify error:`, e?.message ?? e);
+      }
+    }
+
     let pmFinderCandidates: Candidate[] = [];
     if (
       pricedBookableSoFar < PM_FINDER_THRESHOLD &&
@@ -3748,8 +3810,12 @@ export async function registerRoutes(
       // Booking scraper too so we can DOWNGRADE engine-yes → no when the
       // page contradicts. We don't downgrade engine-yes → unclear (engine
       // wins on ambiguity to keep graceful degradation).
+      // Skip URLs already verified by the sidecar batch — same operator
+      // home-IP, same date window, same DOM heuristics; re-running through
+      // Browserbase wastes the budget without changing the result.
       const toVerify = priced
         .filter((c) => c.source === "pm" || c.source === "booking")
+        .filter((c) => !sidecarBatchVerifiedUrls.has(c.url))
         .slice(0, PRE_VERIFY_TOP_N);
       if (toVerify.length > 0) {
         try {
@@ -7607,7 +7673,8 @@ export async function registerRoutes(
         | "vrbo_search"
         | "booking_search"
         | "google_serp"
-        | "pm_url_check";
+        | "pm_url_check"
+        | "pm_url_check_batch";
       const params = body.params as Record<string, unknown>;
       if (!params || typeof params !== "object") {
         return res.status(400).json({ error: "params (object) required when opType is set" });
@@ -7660,6 +7727,32 @@ export async function registerRoutes(
             opType: "pm_url_check",
             params: {
               url: String(params.url),
+              checkIn: String(params.checkIn),
+              checkOut: String(params.checkOut),
+              bedrooms: Number.isFinite(bedrooms ?? NaN) ? bedrooms : undefined,
+            },
+          });
+        } else if (opType === "pm_url_check_batch") {
+          if (!Array.isArray(params.urls) || params.urls.length === 0) {
+            return res.status(400).json({ error: "pm_url_check_batch: urls (non-empty array) required" });
+          }
+          if (params.urls.length > 5) {
+            return res.status(400).json({ error: "pm_url_check_batch: max 5 urls per batch" });
+          }
+          if (!params.urls.every((u) => typeof u === "string" && /^https?:\/\//.test(u))) {
+            return res.status(400).json({ error: "pm_url_check_batch: every url must be http(s)" });
+          }
+          if (
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkIn ?? "")) ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(params.checkOut ?? ""))
+          ) {
+            return res.status(400).json({ error: "pm_url_check_batch: checkIn + checkOut required" });
+          }
+          const bedrooms = params.bedrooms != null ? Number(params.bedrooms) : undefined;
+          result = enqueueOp({
+            opType: "pm_url_check_batch",
+            params: {
+              urls: (params.urls as string[]).map(String),
               checkIn: String(params.checkIn),
               checkOut: String(params.checkOut),
               bedrooms: Number.isFinite(bedrooms ?? NaN) ? bedrooms : undefined,

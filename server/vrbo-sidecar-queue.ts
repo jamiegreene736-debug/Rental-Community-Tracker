@@ -43,7 +43,8 @@ export type SidecarOpType =
   | "vrbo_search"
   | "booking_search"
   | "google_serp"
-  | "pm_url_check";
+  | "pm_url_check"
+  | "pm_url_check_batch";
 
 export type SidecarVrboParams = {
   destination: string;
@@ -71,11 +72,32 @@ export type SidecarPmUrlCheckParams = {
   bedrooms?: number;
 };
 
+// Batch variant: daemon opens N parallel Chrome tabs and verifies
+// each URL concurrently. Way faster than firing N pm_url_check
+// requests sequentially (which would block on the daemon's single
+// active page). Cap to 5 URLs per batch — Chrome handles 5 parallel
+// loads comfortably; more risks DOM-extract races.
+export type SidecarPmUrlCheckBatchParams = {
+  urls: string[];
+  checkIn: string;
+  checkOut: string;
+  bedrooms?: number;
+};
+
+export type SidecarPmUrlCheckBatchResult = Array<{
+  url: string;
+  available: "yes" | "no" | "unclear";
+  nightlyPrice: number | null;
+  totalPrice: number | null;
+  reason: string;
+}>;
+
 export type SidecarParamsByOp = {
   vrbo_search: SidecarVrboParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
   pm_url_check: SidecarPmUrlCheckParams;
+  pm_url_check_batch: SidecarPmUrlCheckBatchParams;
 };
 
 // Result shapes per op type.
@@ -110,12 +132,14 @@ export type SidecarRequest = {
     | SidecarVrboParams
     | SidecarBookingParams
     | SidecarGoogleSerpParams
-    | SidecarPmUrlCheckParams;
+    | SidecarPmUrlCheckParams
+    | SidecarPmUrlCheckBatchParams;
   requestKey: string;
   results?:
     | SidecarPropertyCandidate[]
     | SidecarSerpHit[]
     | SidecarPmUrlCheckResult
+    | SidecarPmUrlCheckBatchResult
     | null;
   error?: string;
   createdAt: number;
@@ -195,6 +219,11 @@ function makeRequestKey(
       const p = params as SidecarPmUrlCheckParams;
       return `pm_url_check|${p.url}|${p.checkIn}|${p.checkOut}|${p.bedrooms ?? "any"}`;
     }
+    case "pm_url_check_batch": {
+      const p = params as SidecarPmUrlCheckBatchParams;
+      const sortedUrls = [...p.urls].sort().join(",");
+      return `pm_url_check_batch|${sortedUrls}|${p.checkIn}|${p.checkOut}|${p.bedrooms ?? "any"}`;
+    }
   }
 }
 
@@ -217,7 +246,8 @@ export function enqueueOp(
     | { opType: "vrbo_search"; params: SidecarVrboParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
-    | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams },
+    | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams }
+    | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams },
 ): { id: string; deduped: boolean } {
   cleanup();
   const requestKey = makeRequestKey(req.opType, req.params);
@@ -329,6 +359,7 @@ export function getStatus(): {
     booking_search: 0,
     google_serp: 0,
     pm_url_check: 0,
+    pm_url_check_batch: 0,
   };
   const now = nowMs();
   for (const r of queue.values()) {
@@ -508,6 +539,54 @@ export async function checkPmUrlViaSidecar(opts: {
   });
   return {
     result: (r.results as SidecarPmUrlCheckResult | undefined) ?? null,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Verify N PM URLs in parallel against the operator's home-IP Chrome.
+// The daemon opens up to 5 concurrent tabs; total wall time is roughly
+// the slowest single-URL check, not the sum. Used by find-buy-in to
+// upgrade unpriced sidecar-Google PM URLs into priced+verified rows
+// without spending a Browserbase verify on each.
+export async function checkPmUrlsBatchViaSidecar(opts: {
+  urls: string[];
+  checkIn: string;
+  checkOut: string;
+  bedrooms?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  results: SidecarPmUrlCheckBatchResult;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (opts.urls.length === 0) {
+    return {
+      results: [],
+      workerOnline: false,
+      durationMs: 0,
+      reason: "no urls supplied",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "pm_url_check_batch",
+      params: {
+        urls: opts.urls,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    // Default 60s — daemon does up to 5 in parallel ≈ 20-30s typical.
+    walletBudgetMs: opts.walletBudgetMs ?? 60_000,
+  });
+  return {
+    results: (r.results as SidecarPmUrlCheckBatchResult | undefined) ?? [],
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
