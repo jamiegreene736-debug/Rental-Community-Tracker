@@ -46,7 +46,8 @@ export type SidecarOpType =
   | "pm_url_check"
   | "pm_url_check_batch"
   | "vrbo_upload_photos"
-  | "booking_upload_photos";
+  | "booking_upload_photos"
+  | "guesty_disconnect_channel";
 
 export type SidecarVrboParams = {
   destination: string;
@@ -123,6 +124,27 @@ export type SidecarPhotoUploadResult = {
   details?: Array<{ url: string; ok: boolean; error?: string }>;
 };
 
+// Guesty admin channel disconnect. Sidecar Playwright navigates the
+// operator's authenticated Guesty admin session to the listing's
+// Settings → Integrations → [Channel] panel and clicks Disconnect,
+// permanently severing Guesty's master sync to that channel for that
+// listing (calendar, rates, photos, descriptions). The operator
+// manages everything for that channel directly from there onward.
+//
+// Used as the final step of the per-channel isolate-replace-disconnect
+// flow — runs only after the channel-specific photo upload has
+// confirmed-succeeded, so Guesty's last sync state is the operator's
+// hand-curated photo set.
+export type SidecarGuestyDisconnectParams = {
+  guestyListingId: string;
+  channel: "vrbo" | "booking";
+};
+
+export type SidecarGuestyDisconnectResult = {
+  ok: boolean;
+  message: string;
+};
+
 export type SidecarParamsByOp = {
   vrbo_search: SidecarVrboParams;
   booking_search: SidecarBookingParams;
@@ -131,6 +153,7 @@ export type SidecarParamsByOp = {
   pm_url_check_batch: SidecarPmUrlCheckBatchParams;
   vrbo_upload_photos: SidecarPhotoUploadParams;
   booking_upload_photos: SidecarPhotoUploadParams;
+  guesty_disconnect_channel: SidecarGuestyDisconnectParams;
 };
 
 // Result shapes per op type.
@@ -174,7 +197,8 @@ export type SidecarRequest = {
     | SidecarGoogleSerpParams
     | SidecarPmUrlCheckParams
     | SidecarPmUrlCheckBatchParams
-    | SidecarPhotoUploadParams;
+    | SidecarPhotoUploadParams
+    | SidecarGuestyDisconnectParams;
   requestKey: string;
   results?:
     | SidecarPropertyCandidate[]
@@ -182,6 +206,7 @@ export type SidecarRequest = {
     | SidecarPmUrlCheckResult
     | SidecarPmUrlCheckBatchResult
     | SidecarPhotoUploadResult
+    | SidecarGuestyDisconnectResult
     | null;
   error?: string;
   createdAt: number;
@@ -277,6 +302,10 @@ function makeRequestKey(
       const sortedUrls = [...p.photos.map((ph) => ph.url)].sort().join(",");
       return `${opType}|${p.partnerListingRef}|${sortedUrls}`;
     }
+    case "guesty_disconnect_channel": {
+      const p = params as SidecarGuestyDisconnectParams;
+      return `guesty_disconnect_channel|${p.guestyListingId}|${p.channel}`;
+    }
   }
 }
 
@@ -302,7 +331,8 @@ export function enqueueOp(
     | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams }
     | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams }
     | { opType: "vrbo_upload_photos"; params: SidecarPhotoUploadParams }
-    | { opType: "booking_upload_photos"; params: SidecarPhotoUploadParams },
+    | { opType: "booking_upload_photos"; params: SidecarPhotoUploadParams }
+    | { opType: "guesty_disconnect_channel"; params: SidecarGuestyDisconnectParams },
 ): { id: string; deduped: boolean } {
   cleanup();
   const requestKey = makeRequestKey(req.opType, req.params);
@@ -417,6 +447,7 @@ export function getStatus(): {
     pm_url_check_batch: 0,
     vrbo_upload_photos: 0,
     booking_upload_photos: 0,
+    guesty_disconnect_channel: 0,
   };
   const now = nowMs();
   for (const r of queue.values()) {
@@ -430,7 +461,7 @@ export function getStatus(): {
     if (r.status === "completed") completed++;
     if (r.status === "failed") failed++;
     if (r.createdAt > newestAt) newestAt = r.createdAt;
-    byOpType[r.opType]++;
+    byOpType[r.opType as SidecarOpType]++;
   }
   return {
     total: queue.size,
@@ -691,6 +722,48 @@ export async function uploadPhotosToChannelViaSidecar(opts: {
   });
   return {
     result: (r.results as SidecarPhotoUploadResult | undefined) ?? null,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Channel-photo-independence: instruct the sidecar to disconnect a
+// channel integration on the Guesty admin side. Sidecar Playwright
+// navigates the operator's authenticated Guesty admin session and
+// clicks Disconnect for the named channel on the named listing.
+//
+// Default wallet 4 minutes — Guesty admin can be slow on the listing
+// detail page; enough buffer for navigation + confirm dialogs.
+export async function disconnectGuestyChannelViaSidecar(opts: {
+  guestyListingId: string;
+  channel: "vrbo" | "booking";
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  result: SidecarGuestyDisconnectResult | null;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.guestyListingId) {
+    return {
+      result: null,
+      workerOnline: false,
+      durationMs: 0,
+      reason: "guestyListingId required",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "guesty_disconnect_channel",
+      params: { guestyListingId: opts.guestyListingId, channel: opts.channel },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 4 * 60_000,
+  });
+  return {
+    result: (r.results as SidecarGuestyDisconnectResult | undefined) ?? null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,

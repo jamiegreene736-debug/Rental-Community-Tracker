@@ -593,6 +593,13 @@ export const photoSync = pgTable("photo_sync", {
   isolatedAt: timestamp("isolated_at"),
   isolatedReason: text("isolated_reason"),
   previousBadHashes: text("previous_bad_hashes"),    // JSON array of dHash hex strings
+  // Partner-portal listing reference — operator-supplied identifier the
+  // sidecar uses to navigate to this property's edit page on the
+  // channel's portal (VRBO partner-portal property id, Booking extranet
+  // hotel id). Persisted so the operator only enters it once per
+  // (listing, channel). Null until the first isolate-replace-disconnect
+  // run records it.
+  partnerListingRef: text("partner_listing_ref"),
   reEnabledAt: timestamp("re_enabled_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

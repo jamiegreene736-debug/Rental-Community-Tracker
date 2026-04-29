@@ -2838,10 +2838,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             Shows whether each OTA channel (Airbnb / VRBO / Booking)
             is on Guesty's master photo sync or has been isolated for
             independent photo management. Lives next to the Re-publish
-            channel cards so all per-channel controls are one band. */}
-        {selectedId && (
-          <PhotoSyncStatusPanel guestyListingId={selectedId} />
-        )}
+            channel cards so all per-channel controls are one band.
+            communityFolder + bedrooms come from unit-builder-data so
+            the full Isolate + Replace + Disconnect flow can call
+            find-unit without the operator re-entering them. */}
+        {selectedId && (() => {
+          const builder = propertyId ? getUnitBuilderByPropertyId(propertyId) : undefined;
+          const totalBedrooms = builder?.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0);
+          return (
+            <PhotoSyncStatusPanel
+              guestyListingId={selectedId}
+              communityFolder={builder?.communityPhotoFolder}
+              bedrooms={totalBedrooms && totalBedrooms > 0 ? totalBedrooms : undefined}
+            />
+          );
+        })()}
 
         {/* ── Data Preview Panel ────────────────────────────────── */}
         {propertyData && (
