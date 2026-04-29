@@ -2888,7 +2888,12 @@ export async function registerRoutes(
               homepageUrl: url,
               snippet: String(o?.snippet ?? "").slice(0, 140),
             });
-            if (pmSites.length >= 6) break;
+            // Cap raised 6→10 (PR #307). Stage 2 fans out 2 SearchAPI
+            // calls per domain in parallel, ~1s each — 4 extra domains
+            // adds at most ~1s wall (parallel) but meaningfully widens
+            // the PM funnel for resorts where the relevant manager
+            // ranks 7th-10th on Google rather than top-6.
+            if (pmSites.length >= 10) break;
           } catch { /* skip malformed URLs */ }
         }
 
