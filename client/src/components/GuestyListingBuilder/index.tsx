@@ -1813,11 +1813,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     checkIn: string;
     checkOut: string;
     daemonOnline: boolean;
+    region: "hawaii" | "florida" | null;
+    taxFactor: number | null;
     perBR: Array<{
       bedrooms: number;
       airbnb: number | null;
       vrbo: number | null;
       booking: number | null;
+      basis: number;
+      basisSource: "live-multichannel-median" | "airbnb" | "none";
+      channelCount: number;
     }>;
   } | null>(null);
   const reloadMarketRates = useCallback(async () => {
@@ -1858,15 +1863,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const persisted = (data as any)?.persisted;
       const snapshot = (data as any)?.snapshot;
       if (Array.isArray(persisted) && snapshot && typeof snapshot === "object") {
+        const region: "hawaii" | "florida" | null =
+          (snapshot as any).region === "hawaii" || (snapshot as any).region === "florida"
+            ? (snapshot as any).region
+            : null;
+        const taxFactor =
+          typeof (snapshot as any).taxFactor === "number" ? (snapshot as any).taxFactor : null;
         setLiveSnapshot({
           checkIn: String(snapshot.checkIn ?? ""),
           checkOut: String(snapshot.checkOut ?? ""),
           daemonOnline: !!snapshot.daemonOnline,
+          region,
+          taxFactor,
           perBR: persisted.map((p: any) => ({
             bedrooms: Number(p.bedrooms),
             airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
             vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
             booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
+            basis: typeof p.basis === "number" ? p.basis : 0,
+            basisSource: (p.basisSource === "live-multichannel-median" || p.basisSource === "airbnb")
+              ? p.basisSource
+              : "none",
+            channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
           })),
         });
       } else {
@@ -3329,8 +3347,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = the cheapest verified nightly across Airbnb / VRBO / Booking for the LOW-season sample window. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
-                                  Buy-in basis (cheapest channel):
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the cheapest verified nightly per channel (Airbnb / VRBO / Booking) for the LOW-season sample window. Rates are normalized all-in: Airbnb engine totals natively include service fee + taxes; VRBO + Booking sidecar rates are scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). Seasonal multipliers handle HIGH/HOLIDAY months.">
+                                  Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
@@ -3345,15 +3363,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const stale = ageDays > 14;
                                   const bg = stale ? "#fef3c7" : "#dbeafe";
                                   const fg = stale ? "#92400e" : "#1e40af";
-                                  // Surface which channel won — when source is
-                                  // "live-multichannel-cheapest" the Pricing
-                                  // tab is calibrated against the cheapest of
-                                  // Airbnb/VRBO/Booking; when "airbnb" the
-                                  // sidecar was offline so it fell back to
-                                  // the engine median.
-                                  const isMultichannel = live.source === "live-multichannel-cheapest";
+                                  // Surface which methodology produced the
+                                  // basis: the multi-channel median is the
+                                  // intended path; the Airbnb-only fallback
+                                  // means the sidecar was offline during the
+                                  // last refresh.
+                                  const isMultichannel = live.source === "live-multichannel-median";
                                   const sourceLabel = isMultichannel
-                                    ? "cheapest across channels"
+                                    ? `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
                                     : live.source === "airbnb"
                                       ? "Airbnb-only fallback (sidecar was offline)"
                                       : live.source;
@@ -3381,70 +3398,84 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. The cheapest channel's nightly becomes the buy-in basis that drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). When the sidecar daemon is offline only Airbnb runs; basis falls back to the Airbnb median (legacy behavior). ~30-90s online; ~10s offline."
+                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. Basis = MEDIAN of per-channel cheapest verified nightly, all-in (taxes + fees normalized). Drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Single 7-night LOW-season window; HIGH/HOLIDAY months get the seasonal multipliers. When the sidecar is offline only Airbnb runs; basis falls back to the Airbnb-engine median. ~30-90s online; ~10s offline."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
                               </div>
                             )}
-                            {/* Per-channel breakdown of the most recent
-                                refresh. The starred channel's rate IS
-                                the buy-in basis (not just adjacent to
-                                it) — that's what got persisted into
-                                property_market_rates and what feeds
-                                the (basis × 1.20) ÷ (1 − channelFee)
-                                sell-rate formula above. Other channels
-                                are shown for context so the operator
-                                can see the spread. */}
+                            {/* Per-channel snapshot of the most recent
+                                refresh. Each row shows per-channel
+                                all-in nightly + the resulting median
+                                that became the persisted buy-in basis.
+                                Operator scans this to spot-check the
+                                normalization and confirm the median
+                                makes sense before pushing rates to
+                                Guesty. */}
                             {liveSnapshot && liveSnapshot.perBR.length > 0 && (
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
-                                  <span style={{ fontWeight: 600 }}>
-                                    Per-channel cheapest · {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
+                                  <span style={{ fontWeight: 600 }} title={
+                                    liveSnapshot.region && liveSnapshot.taxFactor
+                                      ? `Region: ${liveSnapshot.region}. Tax factor applied to VRBO + Booking rates: ×${liveSnapshot.taxFactor} (Airbnb is already all-in).`
+                                      : undefined
+                                  }>
+                                    Per-channel all-in · {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
+                                    {liveSnapshot.region && (
+                                      <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
+                                        ({liveSnapshot.region}, +{(((liveSnapshot.taxFactor ?? 1) - 1) * 100).toFixed(1)}% tax on VRBO/Booking)
+                                      </span>
+                                    )}
                                   </span>
                                   <span style={{ fontSize: 10, color: liveSnapshot.daemonOnline ? "#059669" : "#9ca3af" }}>
-                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online — VRBO + Booking included in basis" : "○ sidecar offline — basis falls back to Airbnb median"}
+                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online — VRBO + Booking in median" : "○ sidecar offline — basis fell back to Airbnb median"}
                                   </span>
                                 </div>
                                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  {liveSnapshot.perBR.map(({ bedrooms, airbnb, vrbo, booking }) => {
-                                    const presentRates = [airbnb, vrbo, booking].filter((n): n is number => typeof n === "number" && n > 0);
-                                    const minRate = presentRates.length > 0 ? Math.min(...presentRates) : null;
+                                  {liveSnapshot.perBR.map((row) => {
+                                    const { bedrooms, airbnb, vrbo, booking, basis, basisSource, channelCount } = row;
                                     const fmt = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
-                                    const channelChip = (label: string, rate: number | null, color: string) => {
-                                      const isMin = rate != null && rate === minRate;
-                                      return (
-                                        <span
-                                          key={label}
-                                          style={{
-                                            display: "inline-flex",
-                                            alignItems: "center",
-                                            gap: 4,
-                                            padding: "2px 7px",
-                                            borderRadius: 4,
-                                            background: isMin ? color : "#f3f4f6",
-                                            color: isMin ? "#ffffff" : (rate != null ? "#374151" : "#9ca3af"),
-                                            fontWeight: isMin ? 600 : 400,
-                                          }}
-                                        >
-                                          <span style={{ fontSize: 10, opacity: isMin ? 0.85 : 0.7 }}>{label}</span>
-                                          <span>{fmt(rate)}</span>
-                                          {isMin && <span style={{ fontSize: 10 }}>★</span>}
-                                        </span>
-                                      );
-                                    };
+                                    const channelChip = (label: string, rate: number | null, color: string) => (
+                                      <span
+                                        key={label}
+                                        style={{
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          gap: 4,
+                                          padding: "2px 7px",
+                                          borderRadius: 4,
+                                          background: rate != null ? color : "#f3f4f6",
+                                          color: rate != null ? "#ffffff" : "#9ca3af",
+                                          fontWeight: 500,
+                                        }}
+                                      >
+                                        <span style={{ fontSize: 10, opacity: 0.85 }}>{label}</span>
+                                        <span>{fmt(rate)}</span>
+                                      </span>
+                                    );
                                     return (
                                       <div key={bedrooms} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{ fontWeight: 600, minWidth: 38 }}>{bedrooms}BR</span>
                                         {channelChip("airbnb", airbnb, "#FF5A5F")}
                                         {channelChip("vrbo", vrbo, "#2563eb")}
                                         {channelChip("booking", booking, "#1e40af")}
+                                        <span style={{ marginLeft: "auto", fontSize: 11 }}>
+                                          <span style={{ color: "#6b7280" }}>→ basis</span>{" "}
+                                          <span style={{ fontWeight: 700, color: "#059669" }}>${basis.toLocaleString()}</span>{" "}
+                                          <span style={{ fontSize: 10, color: "#6b7280" }}>
+                                            ({basisSource === "live-multichannel-median"
+                                              ? `median of ${channelCount}`
+                                              : basisSource === "airbnb"
+                                                ? "Airbnb fallback"
+                                                : "no data"})
+                                          </span>
+                                        </span>
                                       </div>
                                     );
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  ★ = cheapest channel — its nightly rate IS the buy-in basis above, and drives the per-channel Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Other chips are shown for context. When two channels diverge materially, the operator should source through the starred channel.
+                                  Basis = MEDIAN of per-channel all-in nightlies. Drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Single LOW-season window; HIGH/HOLIDAY months use seasonal multipliers on top of this basis.
                                 </div>
                               </div>
                             )}
