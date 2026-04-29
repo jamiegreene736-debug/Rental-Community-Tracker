@@ -3472,21 +3472,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
                               </div>
                             )}
-                            {/* Per-season basis card — shows what the
-                                most recent refresh persisted for LOW /
-                                HIGH / HOLIDAY. LOW row also shows the
-                                per-channel chips (where the median was
-                                taken from); HIGH/HOLIDAY are Airbnb-
-                                only by design. The seasonal monthly
-                                rate table further down reads from these
-                                values directly when present, falling
-                                back to LOW × multiplier when absent. */}
-                            {liveSnapshot && liveSnapshot.perBR.length > 0 && (
+                            {/* Per-season basis card — ALWAYS visible
+                                when there's persisted basis data for
+                                this property. Earlier this only rendered
+                                from `liveSnapshot` which is component
+                                state set after a successful refresh —
+                                meaning the card disappeared on page
+                                reload. Now we read primarily from
+                                `liveBuyInSummary` (loaded from the cache
+                                on mount) and overlay transient channel
+                                chips + window dates from `liveSnapshot`
+                                when a fresh refresh is available.
+                                Survives page reloads. */}
+                            {liveBuyInSummary.length > 0 && liveBuyInSummary.some(({ live }) => live != null) && (
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
                                     Per-season buy-in basis
-                                    {liveSnapshot.region && (
+                                    {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
                                       </span>
@@ -3496,16 +3499,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     Auto-refresh every 7 days · click ↻ to scan now
                                   </span>
                                 </div>
-                                {/* Window labels */}
-                                <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>
-                                  Windows:{" "}
-                                  {liveSnapshot.seasons.LOW && <>LOW {liveSnapshot.seasons.LOW.checkIn}→{liveSnapshot.seasons.LOW.checkOut}{liveSnapshot.seasons.LOW.daemonOnline ? " 🟢" : " ○"}</>}
-                                  {liveSnapshot.seasons.HIGH && <> · HIGH {liveSnapshot.seasons.HIGH.checkIn}→{liveSnapshot.seasons.HIGH.checkOut}</>}
-                                  {liveSnapshot.seasons.HOLIDAY && <> · HOLIDAY {liveSnapshot.seasons.HOLIDAY.checkIn}→{liveSnapshot.seasons.HOLIDAY.checkOut}</>}
-                                </div>
+                                {/* Window labels — only shown after a
+                                    fresh refresh sets liveSnapshot. On
+                                    cold load the card still renders
+                                    without dates. */}
+                                {liveSnapshot && (
+                                  <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>
+                                    Windows:{" "}
+                                    {liveSnapshot.seasons.LOW && <>LOW {liveSnapshot.seasons.LOW.checkIn}→{liveSnapshot.seasons.LOW.checkOut}{liveSnapshot.seasons.LOW.daemonOnline ? " 🟢" : " ○"}</>}
+                                    {liveSnapshot.seasons.HIGH && <> · HIGH {liveSnapshot.seasons.HIGH.checkIn}→{liveSnapshot.seasons.HIGH.checkOut}</>}
+                                    {liveSnapshot.seasons.HOLIDAY && <> · HOLIDAY {liveSnapshot.seasons.HOLIDAY.checkIn}→{liveSnapshot.seasons.HOLIDAY.checkOut}</>}
+                                  </div>
+                                )}
                                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                  {liveSnapshot.perBR.map((row) => {
-                                    const { bedrooms, low, high, holiday, basisSource, channelCount, channels } = row;
+                                  {liveBuyInSummary.map(({ bedrooms, live }) => {
+                                    // Prefer liveSnapshot.perBR row when fresh — it has channel breakdown.
+                                    // Otherwise build from cache (live) — no channel chips, just basis values.
+                                    const snapshotRow = liveSnapshot?.perBR.find((r) => r.bedrooms === bedrooms);
+                                    const low = snapshotRow?.low ?? live?.medianNightly ?? null;
+                                    const high = snapshotRow?.high ?? live?.medianNightlyHigh ?? null;
+                                    const holiday = snapshotRow?.holiday ?? live?.medianNightlyHoliday ?? null;
+                                    const basisSource = snapshotRow?.basisSource
+                                      ?? (live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
+                                        : live?.source === "airbnb" ? "airbnb" as const
+                                        : live ? "airbnb" as const : "none" as const);
+                                    const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
+                                    const channels = snapshotRow?.channels ?? { airbnb: null, vrbo: null, booking: null };
                                     const fmtBasis = (n: number | null) => n != null && n > 0 ? `$${n.toLocaleString()}` : "—";
                                     const fmtChip = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
                                     const seasonChip = (season: "LOW" | "HIGH" | "HOLIDAY", value: number | null, color: string) => (
