@@ -169,6 +169,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     br: number;
     channel: ChannelKey;
     cheapestNightly: number | null;
+    // PR #299: when daemon used Vrbo's new "$X total includes taxes &
+    // fees" format, cheapestNightly is already all-in. Skip the
+    // per-region tax-normalization multiplier downstream.
+    cheapestIncludesTaxes?: boolean;
     workerOnline: boolean;
   };
   const sidecarOps: Promise<SidecarOp>[] = [];
@@ -200,16 +204,26 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // (when bedroom count is known) match the requested BR.
           // Sidecar VRBO scrape returns nightlyPrice already
           // amortized from the multi-night total.
+          //
+          // PR #299: also track whether the cheapest came from Vrbo's
+          // new all-in format ("$X total includes taxes & fees"). If
+          // so, downstream skips the per-region tax multiplier — the
+          // value is already fully loaded.
           let cheapest = Infinity;
+          let cheapestIncludesTaxes = false;
           for (const c of r.candidates) {
             if (!(c.nightlyPrice > 0)) continue;
             if (c.bedrooms != null && c.bedrooms !== br) continue;
-            if (c.nightlyPrice < cheapest) cheapest = c.nightlyPrice;
+            if (c.nightlyPrice < cheapest) {
+              cheapest = c.nightlyPrice;
+              cheapestIncludesTaxes = c.priceIncludesTaxes ?? false;
+            }
           }
           return {
             br,
             channel: "vrbo",
             cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
+            cheapestIncludesTaxes,
             workerOnline: r.workerOnline,
           };
         } catch {
@@ -334,8 +348,14 @@ export async function fetchMultiChannelBuyInByBR(args: {
       (r) => r.br === br && r.channel === "booking",
     );
 
+    // PR #299: Vrbo's new card format ("$X total includes taxes & fees")
+    // gives us all-in nightly directly — skip the per-region tax
+    // normalization in that case. Old "$X for Y nights" format (pre-
+    // tax) still gets multiplied by the tax factor as before.
     const vrboNormalized = vrboSidecar?.cheapestNightly != null
-      ? applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region)
+      ? (vrboSidecar.cheapestIncludesTaxes
+          ? vrboSidecar.cheapestNightly
+          : applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region))
       : null;
     const bookingNormalized = bookingSidecar?.cheapestNightly != null
       ? applyTaxNormalization(bookingSidecar.cheapestNightly, "booking", region)

@@ -142,6 +142,13 @@ export type SidecarPropertyCandidate = {
   bedrooms?: number;
   image?: string;
   snippet?: string;
+  // PR #299: when daemon extracted from Vrbo's new "$X total includes
+  // taxes & fees" format, the price is already all-in and downstream
+  // should skip the per-region tax-normalization multiplier. Old
+  // "$X for Y nights" format is pre-tax and still needs normalization.
+  // Optional + defaults to false so older daemon binaries (pre-#299)
+  // get the legacy normalization behavior automatically.
+  priceIncludesTaxes?: boolean;
 };
 
 export type SidecarSerpHit = {
