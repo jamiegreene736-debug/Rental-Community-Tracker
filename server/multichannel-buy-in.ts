@@ -352,6 +352,40 @@ export async function fetchMultiChannelBuyInByBR(args: {
     };
   }
 
+  // Cross-BR monotonicity filter (PR #289). A larger bedroom count
+  // should never have a basis below a smaller one — vacation rental
+  // pricing is monotonic in bedrooms. When the per-BR-vs-Airbnb
+  // sanity floor can't catch a scraper bug (because Airbnb returned
+  // 0 listings for that BR + window), this catches it instead.
+  //
+  // Concrete case from 2026-04-29: Kaha Lani 3BR LOW window had no
+  // Airbnb data at all (engine + sparse-BR retry both empty) and
+  // sidecar Booking returned a $58/night (× 1.155 tax = $67 chip)
+  // — the Booking scraper's regex matched a discount/per-person
+  // rate, not the listing total. Without an Airbnb baseline the
+  // first-pass sanity filter let it through. The 2BR Airbnb LOW
+  // came back at $256 — so any 3BR channel rate < $256 is implausible
+  // and gets dropped here.
+  //
+  // Walks BRs ascending. For each BR > the smallest, computes a
+  // floor from the previous (smaller) BR's lowest non-null channel,
+  // then nulls any channel on the larger BR that falls below.
+  const sortedBRs = [...args.bedroomCounts].sort((a, b) => a - b);
+  for (let i = 1; i < sortedBRs.length; i++) {
+    const smallerBR = sortedBRs[i - 1];
+    const largerBR = sortedBRs[i];
+    const smaller = channelCheapestByBR[smallerBR];
+    const larger = channelCheapestByBR[largerBR];
+    if (!smaller || !larger) continue;
+    const smallerCandidates = [smaller.airbnb, smaller.vrbo, smaller.booking]
+      .filter((n): n is number => typeof n === "number" && n > 0);
+    if (smallerCandidates.length === 0) continue;
+    const floor = Math.min(...smallerCandidates);
+    if (larger.airbnb != null && larger.airbnb < floor) larger.airbnb = null;
+    if (larger.vrbo != null && larger.vrbo < floor) larger.vrbo = null;
+    if (larger.booking != null && larger.booking < floor) larger.booking = null;
+  }
+
   return {
     ratesByBR: airbnbResult.ratesByBR,
     channelCheapestByBR,
