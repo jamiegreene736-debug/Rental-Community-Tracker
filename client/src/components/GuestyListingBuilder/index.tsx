@@ -1840,6 +1840,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     percent: number;
     label: string;
   } | null>(null);
+  // AbortController for the in-flight refresh fetch. Lets the operator
+  // cancel a long multi-season scan (5–15 min) without freezing the
+  // tab. Server-side scan continues in the background — that's fine,
+  // it just records progress to the in-memory map and we stop polling.
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const cancelRefresh = useCallback(() => {
+    if (refreshAbortRef.current) {
+      console.info("[refresh-market-rates] operator cancelled");
+      refreshAbortRef.current.abort();
+      refreshAbortRef.current = null;
+    }
+  }, []);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -1883,7 +1895,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const path = propertyId < 0
         ? `/api/community/${-propertyId}/refresh-pricing`
         : `/api/property/${propertyId}/refresh-market-rates`;
-      const r = await fetch(path, { method: "POST" });
+      const controller = new AbortController();
+      refreshAbortRef.current = controller;
+      const r = await fetch(path, { method: "POST", signal: controller.signal });
       if (!r.ok) {
         const data = await r.json().catch(() => ({}));
         toast({ title: "Refresh failed", description: data?.error || `HTTP ${r.status}`, variant: "destructive" });
@@ -1960,8 +1974,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ),
       });
     } catch (e: any) {
-      toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
+      // AbortError = operator cancelled, distinct copy. Server scan
+      // continues in the background; nothing else to clean up.
+      if (e?.name === "AbortError") {
+        toast({ title: "Refresh cancelled", description: "Server scan continues in the background — refresh later to pick up partial results." });
+      } else {
+        toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
+      }
     } finally {
+      refreshAbortRef.current = null;
       if (progressTimer) window.clearInterval(progressTimer);
       setRefreshProgress(null);
       setMarketRatesRefreshing(false);
@@ -3496,7 +3517,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY: LOW gets the full multichannel scan (Airbnb engine + sidecar VRBO + sidecar Booking, median, all-in, taxes/fees normalized); HIGH and HOLIDAY use Airbnb engine only for speed (sidecar reserved for the LOW-season basis). Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). When sidecar is offline LOW falls back to Airbnb-only median. Auto-refreshes weekly via the scheduler; click to refresh now (~30-90s)."
+                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY using the Airbnb engine + sidecar VRBO + sidecar Booking — all three seasons multichannel as of PR #305 (was LOW-only before). Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome) so wall time scales with N_BRs × 6 ops × ~90s = 5–15 min for typical 1–2 BR multi-unit listings. Cancellable mid-flight; partial results persist. When sidecar is offline a season falls back to Airbnb-only median. Auto-refreshes weekly via the scheduler."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
@@ -3504,20 +3525,43 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             )}
                             {/* Inline progress bar — visible while a
                                 refresh is in flight. Server-side phase
-                                drives the percent (0% → starting → 5%
-                                airbnb-low → 30% airbnb-high done →
-                                50% airbnb-holiday done → 90% sidecar-low
-                                done → 95% persisting → 100% done). */}
+                                drives the percent (0% starting →
+                                3% airbnb-low → 35% sidecar-low →
+                                65% sidecar-high → 90% sidecar-holiday →
+                                95% persisting → 100% done). Cancel
+                                button calls AbortController.abort() —
+                                server scan continues to record progress
+                                in the background, the client just
+                                stops awaiting. */}
                             {marketRatesRefreshing && refreshProgress && (
                               <div style={{ marginBottom: 8, padding: "6px 10px", border: "1px solid #cfe2ff", background: "#eef4ff", borderRadius: 4, fontSize: 11, color: "#1e3a8a" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
                                   <span style={{ fontWeight: 500 }}>Scanning per-season basis…</span>
-                                  <span style={{ fontFamily: "ui-monospace, monospace" }}>{refreshProgress.percent}%</span>
+                                  <span style={{ fontFamily: "ui-monospace, monospace", marginLeft: "auto" }}>{refreshProgress.percent}%</span>
+                                  <button
+                                    type="button"
+                                    onClick={cancelRefresh}
+                                    title="Cancel the refresh. Server scan continues in the background; refresh later to pick up partial results."
+                                    style={{
+                                      fontSize: 10,
+                                      padding: "1px 6px",
+                                      borderRadius: 3,
+                                      border: "1px solid #93c5fd",
+                                      background: "#ffffff",
+                                      color: "#1e3a8a",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    Cancel
+                                  </button>
                                 </div>
                                 <div style={{ height: 6, background: "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
                                   <div style={{ width: `${Math.max(0, Math.min(100, refreshProgress.percent))}%`, height: "100%", background: "#2563eb", transition: "width 250ms ease" }} />
                                 </div>
                                 <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
+                                <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
+                                  Multi-channel scan; the daemon serializes through one Chrome instance — typical wall time 5–15 min for multi-unit listings.
+                                </div>
                               </div>
                             )}
                             {/* Per-season basis card — ALWAYS visible

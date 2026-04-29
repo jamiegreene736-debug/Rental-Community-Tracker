@@ -12677,8 +12677,11 @@ export async function registerRoutes(
     const allLowRates: number[] = [];
     for (const br of bedroomCounts) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, false);
-      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, false);
+      // PR #305: HIGH and HOLIDAY now run sidecar VRBO + Booking too,
+      // so the basis pulls in the channel medians the same way LOW
+      // always has.
+      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
+      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
         await storage.deletePropertyMarketRate(-id, br);
@@ -12872,8 +12875,11 @@ export async function registerRoutes(
     const persisted: Persisted[] = [];
     for (const br of wantBedrooms) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, false);
-      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, false);
+      // PR #305: HIGH and HOLIDAY now run sidecar VRBO + Booking too,
+      // so the basis pulls in the channel medians the same way LOW
+      // always has.
+      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
+      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 
       const basisSource: Persisted["basisSource"] =
         lowResult.basis == null
