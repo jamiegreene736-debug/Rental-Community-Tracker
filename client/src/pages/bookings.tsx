@@ -1484,6 +1484,77 @@ function sourceBadgeClass(src: string) {
   }
 }
 
+// Local-Mac sidecar status indicator. The buy-in tool delegates VRBO
+// (and soon Booking + PM) scrapes to a daemon running on the
+// operator's Mac, which drives their real Chrome via CDP. When the
+// Mac is asleep / Claude Code closed without the daemon installed /
+// daemon crashed, find-buy-in falls back to its existing 8 paths
+// gracefully — but the operator should know they're getting the
+// fallback experience, not the rich one. Polls /heartbeat every 30s
+// while the buy-in panel is mounted.
+function SidecarStatusBadge() {
+  const [state, setState] = useState<{
+    isOnline: boolean | null;
+    ageMs: number | null;
+    everSeen: boolean;
+  }>({ isOnline: null, ageMs: null, everSeen: false });
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch("/api/vrbo-sidecar/heartbeat");
+        if (!r.ok) return;
+        const data = await r.json() as { isOnline: boolean; ageMs: number | null; lastWorkerPollAt: string | null };
+        if (cancelled) return;
+        setState({
+          isOnline: data.isOnline,
+          ageMs: data.ageMs,
+          everSeen: !!data.lastWorkerPollAt,
+        });
+      } catch {
+        if (!cancelled) setState((p) => ({ ...p, isOnline: false }));
+      }
+    };
+    tick();
+    const id = setInterval(tick, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  if (state.isOnline === null) {
+    // First heartbeat poll hasn't returned yet — render nothing rather
+    // than flicker a "checking…" state.
+    return null;
+  }
+  if (state.isOnline) {
+    return (
+      <Badge
+        className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300 cursor-help"
+        title={
+          state.ageMs != null
+            ? `Local Mac sidecar polled ${Math.round(state.ageMs / 1000)}s ago — VRBO (and soon Booking/PM) drives through your real Chrome.`
+            : "Local Mac sidecar online."
+        }
+      >
+        🟢 Local sidecar online
+      </Badge>
+    );
+  }
+  // Offline: distinguish "never seen" from "stale" so the operator
+  // knows whether to install the daemon or just wake their Mac.
+  const tooltip = state.everSeen
+    ? `Last poll ${state.ageMs != null ? Math.round(state.ageMs / 60_000) + "m" : "?"} ago — Mac may be asleep, daemon crashed, or Claude Code closed without launchd handoff. find-buy-in is using its server-side fallback paths instead.`
+    : "Local Mac daemon never connected. find-buy-in is using server-side fallbacks. Install instructions: ~/Downloads/vrbo-sidecar/README.md";
+  return (
+    <Badge
+      className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400 cursor-help"
+      title={tooltip}
+    >
+      ⚠ Can't reach Mac sidecar — fallback mode
+    </Badge>
+  );
+}
+
 function LiveSearchSection({
   reservation,
   propertyId,
@@ -1579,9 +1650,12 @@ function LiveSearchSection({
             </p>
           )}
         </div>
-        <Button size="sm" variant="ghost" onClick={() => refetch()}>
-          <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <SidecarStatusBadge />
+          <Button size="sm" variant="ghost" onClick={() => refetch()}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
+          </Button>
+        </div>
       </div>
       {/* Raw hit counts + drop counts per source — lets us see why a source
           returned few results (upstream empty vs resort/bedroom filtered). */}
