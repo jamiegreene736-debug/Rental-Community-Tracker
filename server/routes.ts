@@ -12311,67 +12311,175 @@ export async function registerRoutes(
       return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     }
 
-    const { ratesByBR, bboxApplied, bboxCenter, drops, firstListingSample } = await fetchAmortizedNightlyByBR(
-      draft.name,
-      draft.city,
-      draft.state,
-      draft.streetAddress ?? undefined,
-    );
-    const allRates: number[] = [];
-    for (const list of Object.values(ratesByBR)) allRates.push(...list);
+    // PR #298: drafts get the same multi-channel + per-season scan
+    // treatment as static properties. Previously this route only
+    // queried the Airbnb engine for a single LOW window — drafts
+    // missed sidecar VRBO/Booking entirely and only got LOW basis
+    // (no per-season HIGH/HOLIDAY persistence).
+    //
+    // Critically, drafts pass `draft.name` for BOTH `community` (the
+    // engine q=) AND `searchName` (the sidecar destination). One name
+    // means the searchName-vs-community mismatch that bit Kapaa
+    // Beachfront in #297 can't happen for drafts by construction —
+    // there's no second name to override the first.
+    //
+    // Operators adding a new community via the wizard should enter
+    // the SPECIFIC resort/property name as it appears on Vrbo/Airbnb
+    // (e.g. "Kaha Lani Resort" not "Kapaa Beachfront"), since this
+    // single name drives all three channels.
+    const bedroomsRaw = [draft.unit1Bedrooms, draft.unit2Bedrooms]
+      .filter((b): b is number => typeof b === "number" && b > 0);
+    const bedroomCounts = Array.from(new Set(bedroomsRaw)).sort((a, b) => a - b);
+    if (bedroomCounts.length === 0) {
+      // Wizard hasn't filled in unit bedrooms yet — fall back to the
+      // legacy single-window engine pull so we still surface estimated
+      // low/high rates for the dashboard. No persistence to
+      // property_market_rates (we don't know which BR row to write).
+      const { ratesByBR, bboxApplied, bboxCenter, drops, firstListingSample } = await fetchAmortizedNightlyByBR(
+        draft.name,
+        draft.city,
+        draft.state,
+        draft.streetAddress ?? undefined,
+      );
+      const allRates: number[] = [];
+      for (const list of Object.values(ratesByBR)) allRates.push(...list);
+      let estimatedLowRate: number | null = null;
+      let estimatedHighRate: number | null = null;
+      if (allRates.length > 0) {
+        const sorted = [...allRates].sort((a, b) => a - b);
+        estimatedLowRate = sorted[0];
+        estimatedHighRate = sorted[sorted.length - 1];
+      }
+      const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
+      return res.json({
+        ok: true,
+        ratesByBR: Object.fromEntries(
+          Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length, samples: v }]),
+        ),
+        estimatedLowRate,
+        estimatedHighRate,
+        usedAddressGeoBounds: bboxApplied,
+        bboxCenter,
+        drops,
+        firstListingSample,
+        draft: updated,
+        note: "draft has no units yet — used legacy single-window engine fallback",
+      });
+    }
+
+    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const startedAt = Date.now();
+    setRefreshProgress({ propertyId: -id, startedAt, phase: "starting", percent: 0, label: "Initializing draft scan" });
+    const seasonScan = await fetchMultiChannelBuyInBySeason({
+      community: draft.name,        // engine q= : "Kaha Lani Resort Wailua Hawaii"
+      city: draft.city,
+      state: draft.state,
+      streetAddress: draft.streetAddress ?? undefined,
+      // No bboxCenterOverride for drafts — let fetchAmortizedNightlyByBR
+      // geocode the streetAddress via Nominatim. Drafts don't have
+      // operator-validated lat/lng yet; the wizard could collect that
+      // in a future enhancement.
+      searchName: draft.name,        // sidecar destination — same as engine q
+      bedroomCounts,
+      propertyId: -id,               // negative id convention for drafts
+    });
+    setRefreshProgress({ propertyId: -id, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
+
+    const medianOfSorted = (sorted: number[]): number => {
+      if (sorted.length === 0) return 0;
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 === 0
+        ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+        : sorted[mid];
+    };
+    const basisForSeason = (
+      scan: typeof seasonScan.perSeason["LOW"],
+      br: number,
+      sidecarRan: boolean,
+    ) => {
+      if (!scan) return { basis: null as number | null, channelRates: [] as number[], samples: 0, channels: { airbnb: null, vrbo: null, booking: null } };
+      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
+      const samples = scan.ratesByBR[br] ?? [];
+      const channelRates: number[] = [];
+      if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
+      if (sidecarRan) {
+        if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
+        if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
+      }
+      channelRates.sort((a, b) => a - b);
+      let basis: number | null = null;
+      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
+      else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
+      return { basis, channelRates, samples: samples.length, channels };
+    };
 
     let estimatedLowRate: number | null = null;
     let estimatedHighRate: number | null = null;
-    if (allRates.length > 0) {
-      const sorted = [...allRates].sort((a, b) => a - b);
+    const allLowRates: number[] = [];
+    for (const br of bedroomCounts) {
+      const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
+      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, false);
+      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, false);
+
+      if (lowResult.basis == null || lowResult.basis <= 0) {
+        await storage.deletePropertyMarketRate(-id, br);
+        continue;
+      }
+      if (lowResult.basis) allLowRates.push(lowResult.basis);
+
+      const sortedSamples = lowResult.samples > 0 ? [...(seasonScan.perSeason.LOW?.ratesByBR[br] ?? [])].sort((a, b) => a - b) : [];
+      const lowRangeMin = lowResult.channelRates.length > 0 ? lowResult.channelRates[0] : sortedSamples[0];
+      const lowRangeMax = lowResult.channelRates.length > 0 ? lowResult.channelRates[lowResult.channelRates.length - 1] : sortedSamples[sortedSamples.length - 1];
+
+      const basisSource = lowResult.channelRates.length >= 2
+        ? "live-multichannel-median"
+        : "airbnb";
+      await storage.upsertPropertyMarketRate({
+        propertyId: -id,
+        bedrooms: br,
+        medianNightly: String(lowResult.basis),
+        medianNightlyHigh: highResult.basis != null ? String(highResult.basis) : null,
+        medianNightlyHoliday: holidayResult.basis != null ? String(holidayResult.basis) : null,
+        lowNightly: String(lowRangeMin ?? lowResult.basis),
+        highNightly: String(lowRangeMax ?? lowResult.basis),
+        sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.samples,
+        source: basisSource,
+      });
+    }
+
+    if (allLowRates.length > 0) {
+      const sorted = [...allLowRates].sort((a, b) => a - b);
       estimatedLowRate = sorted[0];
       estimatedHighRate = sorted[sorted.length - 1];
     }
+    const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
 
-    const updated = await storage.updateCommunityDraft(id, {
-      estimatedLowRate,
-      estimatedHighRate,
-    });
+    setRefreshProgress({ propertyId: -id, startedAt, phase: "done", percent: 100, label: "Done" });
+    clearRefreshProgress(-id);
 
-    // Persist the per-bedroom medians into property_market_rates
-    // keyed by the draft's negative propertyId convention (`-draftId`)
-    // so the Pricing tab's effective-buy-in lookup finds them via the
-    // same code path as static properties. Best-effort — failures here
-    // don't poison the response.
-    try {
-      for (const [brStr, samples] of Object.entries(ratesByBR)) {
-        const bedrooms = parseInt(brStr, 10);
-        if (!Number.isFinite(bedrooms) || samples.length === 0) continue;
-        const sorted = [...samples].sort((a, b) => a - b);
-        await storage.upsertPropertyMarketRate({
-          propertyId: -id, // drafts use negative ids on the dashboard
-          bedrooms,
-          medianNightly: String(medianRate(samples)),
-          lowNightly: String(sorted[0]),
-          highNightly: String(sorted[sorted.length - 1]),
-          sampleCount: samples.length,
-          source: "airbnb",
-        });
-      }
-    } catch (e: any) {
-      console.warn(`[refresh-pricing] market-rates upsert failed for draft ${id}: ${e?.message}`);
-    }
+    console.log(
+      `[refresh-pricing] draft ${id} ("${draft.name}") region=${seasonScan.region} ${seasonScan.durationMs}ms · BRs=${bedroomCounts.join(",")} · estimatedLow=${estimatedLowRate} estimatedHigh=${estimatedHighRate}`,
+    );
 
     res.json({
       ok: true,
-      ratesByBR: Object.fromEntries(
-        Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length, samples: v }]),
-      ),
       estimatedLowRate,
       estimatedHighRate,
-      // True iff geocoding actually succeeded AND the bbox was applied to
-      // the engine query. False means either no streetAddress on the
-      // draft, or geocoding failed, so the function fell back to a
-      // name-token match instead.
-      usedAddressGeoBounds: bboxApplied,
-      bboxCenter,
-      drops,
-      firstListingSample,
+      seasonScan: {
+        region: seasonScan.region,
+        durationMs: seasonScan.durationMs,
+        seasons: {
+          LOW: seasonScan.perSeason.LOW
+            ? { checkIn: seasonScan.perSeason.LOW.snapshotCheckIn, checkOut: seasonScan.perSeason.LOW.snapshotCheckOut, daemonOnline: seasonScan.perSeason.LOW.daemonOnline }
+            : null,
+          HIGH: seasonScan.perSeason.HIGH
+            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: false }
+            : null,
+          HOLIDAY: seasonScan.perSeason.HOLIDAY
+            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: false }
+            : null,
+        },
+      },
       draft: updated,
     });
   });
