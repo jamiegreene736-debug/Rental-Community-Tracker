@@ -44,7 +44,9 @@ export type SidecarOpType =
   | "booking_search"
   | "google_serp"
   | "pm_url_check"
-  | "pm_url_check_batch";
+  | "pm_url_check_batch"
+  | "vrbo_upload_photos"
+  | "booking_upload_photos";
 
 export type SidecarVrboParams = {
   destination: string;
@@ -92,12 +94,43 @@ export type SidecarPmUrlCheckBatchResult = Array<{
   reason: string;
 }>;
 
+// Photo upload ops for the channel-photo-independence flow. The
+// sidecar uses the operator's authenticated VRBO partner portal /
+// Booking extranet session (cookies already auto-synced) to upload
+// photos directly to the channel's listing — bypassing Guesty so
+// the channel can hold a different photo set than what Guesty's
+// pictures[] would push.
+//
+// `partnerListingRef` is whatever the sidecar needs to navigate to
+// the right listing's edit page. For VRBO this is the property ID
+// in the partner portal URL (e.g. "1234567" from
+// vrbo.com/partner/listings/1234567/photos). For Booking, the
+// hotel id from the extranet URL. The operator sets this once per
+// listing in the Photo Sync Status panel.
+//
+// `photos[].url` is a public URL the sidecar can download (typically
+// an ImgBB URL produced earlier in the photo pipeline, or a scraped
+// Zillow URL). Captions are optional; partner portals usually accept
+// photo descriptions during bulk upload.
+export type SidecarPhotoUploadParams = {
+  partnerListingRef: string;
+  photos: Array<{ url: string; caption?: string }>;
+};
+
+export type SidecarPhotoUploadResult = {
+  uploaded: number;
+  failed: number;
+  details?: Array<{ url: string; ok: boolean; error?: string }>;
+};
+
 export type SidecarParamsByOp = {
   vrbo_search: SidecarVrboParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
   pm_url_check: SidecarPmUrlCheckParams;
   pm_url_check_batch: SidecarPmUrlCheckBatchParams;
+  vrbo_upload_photos: SidecarPhotoUploadParams;
+  booking_upload_photos: SidecarPhotoUploadParams;
 };
 
 // Result shapes per op type.
@@ -133,13 +166,15 @@ export type SidecarRequest = {
     | SidecarBookingParams
     | SidecarGoogleSerpParams
     | SidecarPmUrlCheckParams
-    | SidecarPmUrlCheckBatchParams;
+    | SidecarPmUrlCheckBatchParams
+    | SidecarPhotoUploadParams;
   requestKey: string;
   results?:
     | SidecarPropertyCandidate[]
     | SidecarSerpHit[]
     | SidecarPmUrlCheckResult
     | SidecarPmUrlCheckBatchResult
+    | SidecarPhotoUploadResult
     | null;
   error?: string;
   createdAt: number;
@@ -224,6 +259,17 @@ function makeRequestKey(
       const sortedUrls = [...p.urls].sort().join(",");
       return `pm_url_check_batch|${sortedUrls}|${p.checkIn}|${p.checkOut}|${p.bedrooms ?? "any"}`;
     }
+    case "vrbo_upload_photos":
+    case "booking_upload_photos": {
+      const p = params as SidecarPhotoUploadParams;
+      // Dedup on the listing ref + the SET of photo URLs (sorted),
+      // not their order — re-enqueueing the same upload within the
+      // dedup TTL collapses to one request. Caption changes alone
+      // still dedup; the operator can re-trigger with different
+      // photos to invalidate.
+      const sortedUrls = [...p.photos.map((ph) => ph.url)].sort().join(",");
+      return `${opType}|${p.partnerListingRef}|${sortedUrls}`;
+    }
   }
 }
 
@@ -247,7 +293,9 @@ export function enqueueOp(
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
     | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams }
-    | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams },
+    | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams }
+    | { opType: "vrbo_upload_photos"; params: SidecarPhotoUploadParams }
+    | { opType: "booking_upload_photos"; params: SidecarPhotoUploadParams },
 ): { id: string; deduped: boolean } {
   cleanup();
   const requestKey = makeRequestKey(req.opType, req.params);
@@ -360,6 +408,8 @@ export function getStatus(): {
     google_serp: 0,
     pm_url_check: 0,
     pm_url_check_batch: 0,
+    vrbo_upload_photos: 0,
+    booking_upload_photos: 0,
   };
   const now = nowMs();
   for (const r of queue.values()) {
@@ -587,6 +637,53 @@ export async function checkPmUrlsBatchViaSidecar(opts: {
   });
   return {
     results: (r.results as SidecarPmUrlCheckBatchResult | undefined) ?? [],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Channel-photo-independence: upload a fresh photo set to one OTA
+// channel via the operator's authenticated partner-portal session.
+// `channel` picks the op type (vrbo_upload_photos vs
+// booking_upload_photos). The sidecar's worker.mjs is responsible
+// for the Playwright handler — until that lands the request will
+// time out and the caller will see workerOnline=false.
+//
+// Default wall budget is 5 minutes — partner portals are slower than
+// search loads and bulk upload of 25-40 photos can legitimately take
+// minutes. Caller can override.
+export async function uploadPhotosToChannelViaSidecar(opts: {
+  channel: "vrbo" | "booking";
+  partnerListingRef: string;
+  photos: Array<{ url: string; caption?: string }>;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  result: SidecarPhotoUploadResult | null;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.partnerListingRef || opts.photos.length === 0) {
+    return {
+      result: null,
+      workerOnline: false,
+      durationMs: 0,
+      reason: "partnerListingRef and at least one photo required",
+    };
+  }
+  const opType = opts.channel === "vrbo" ? "vrbo_upload_photos" : "booking_upload_photos";
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType,
+      params: { partnerListingRef: opts.partnerListingRef, photos: opts.photos },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 5 * 60_000,
+  });
+  return {
+    result: (r.results as SidecarPhotoUploadResult | undefined) ?? null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
