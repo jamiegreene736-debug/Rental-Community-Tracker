@@ -1984,6 +1984,34 @@ export async function registerRoutes(
   //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
   //     cheapest: [top 2 cross-source by nightly price]
   //   }
+  // PM discovery: Google-search paths feature flag (PR #314).
+  //
+  // Operator directive 2026-04-29: Google started returning 403s on
+  // both the sidecar (home-IP scrape) and SearchAPI engine=google
+  // PM-domain-discovery queries. Three Google-dependent paths in
+  // find-buy-in were affected:
+  //   1. pmPromise         — Stage 1 (find PM domains) + Stage 2
+  //                          (per-PM site:search deep-dive) via
+  //                          SearchAPI engine=google
+  //   2. pmSidecarFinder   — sidecar googleSerpViaSidecar query for
+  //                          additional PM URLs (PR #306 added)
+  //   3. lensMatches       — Google Lens reverse-image search for
+  //                          PM URLs that share photos with the top
+  //                          Airbnb candidates (PR #225-era)
+  //
+  // Until Google unblocks, the cheapest pool draws ONLY from:
+  //   - Airbnb engine (SearchAPI engine=airbnb — not Google)
+  //   - Booking sidecar + google_hotels engine (different API surface)
+  //   - Vrbo sidecar (operator's home-IP Chrome)
+  //   - Suite-Paradise sitemap walk (no Google)
+  //   - VRP_SITES sitemap walks (no Google) — Parrish, CB Island,
+  //     Piko, EVR Hawaii (PR #313)
+  //
+  // To re-enable when Google unblocks: set PM_GOOGLE_DISCOVERY_ENABLED
+  // to true. Code is gated, not removed — flip the flag and the three
+  // paths come back online.
+  const PM_GOOGLE_DISCOVERY_ENABLED = false;
+
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
   // Tracks how often each PM-discovery path returns priced+available units
   // — the data we need to decide when to retire the Google deep-dive in
@@ -3012,6 +3040,11 @@ export async function registerRoutes(
     let pmRawCount = 0;
     let pmStage1Source: "sidecar" | "searchapi" | "none" = "none";
     const pmPromise: Promise<Candidate[]> = (async () => {
+      // PR #314: short-circuit when PM Google-discovery is disabled.
+      // Operator directive after Google 403s on PM-domain queries.
+      if (!PM_GOOGLE_DISCOVERY_ENABLED) {
+        return [];
+      }
       try {
         const qualifier = resortName ? `"${resortName}"` : community;
         const query = `${qualifier} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`;
@@ -3421,6 +3454,12 @@ export async function registerRoutes(
     // reach the candidate pool.
     const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
+      // PR #314: short-circuit when PM Google-discovery is disabled.
+      // Google Lens (engine=google_lens) is a Google search surface
+      // and was 403'd alongside engine=google. Operator directive:
+      // skip PM photo-matching while disabled — find-buy-in falls
+      // back to direct Airbnb/Booking/Vrbo + known-URL VRP_SITES.
+      if (!PM_GOOGLE_DISCOVERY_ENABLED) return [];
       try {
         const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
@@ -3612,6 +3651,12 @@ export async function registerRoutes(
     // daemon is online; gracefully empty when offline.
     let pmSidecarFinderCandidates: Candidate[] = [];
     try {
+      // PR #314: short-circuit when PM Google-discovery is disabled.
+      // Operator directive after Google 403s on PM-domain queries.
+      if (!PM_GOOGLE_DISCOVERY_ENABLED) {
+        // pmSidecarFinderCandidates stays []; downstream sidecar
+        // batch-verify naturally no-ops on the empty input.
+      } else {
       const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
       const target = resortName ?? community;
       const sidecarSerp = await googleSerpViaSidecar({
@@ -3645,6 +3690,7 @@ export async function registerRoutes(
       } else if (!sidecarSerp.workerOnline) {
         console.log(`[find-buy-in] sidecar-google-serp skipped (worker offline)`);
       }
+      } // close PM_GOOGLE_DISCOVERY_ENABLED guard (PR #314)
     } catch (e: any) {
       console.error(`[find-buy-in] sidecar-google-serp error:`, e?.message ?? e);
     }
