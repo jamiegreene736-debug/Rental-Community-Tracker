@@ -17,6 +17,7 @@ import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
+import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
@@ -2071,6 +2072,19 @@ export async function registerRoutes(
   app.get("/api/operations/grok-vrbo-consult", async (_req, res) => {
     try {
       const text = await consultGrokAboutVrbo();
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(text);
+    } catch (e: any) {
+      res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
+  });
+
+  // Same one-off pattern, different brief: per-channel photo
+  // independence vs Guesty's single-pictures[] limitation. See
+  // server/grok-channel-consult.ts for the brief in source control.
+  app.get("/api/operations/grok-channel-independence-consult", async (_req, res) => {
+    try {
+      const text = await consultGrokAboutChannelIndependence();
       res.set("Content-Type", "text/plain; charset=utf-8");
       res.send(text);
     } catch (e: any) {
