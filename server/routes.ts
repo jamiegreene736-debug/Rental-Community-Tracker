@@ -7336,6 +7336,85 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // Vrbo persistent-context bootstrap endpoints
+  //
+  // Vrbo's anti-bot fingerprints Browserbase residential sessions and
+  // serves a "Show us your human side..." spin-and-block page before
+  // vrbo.com renders. Operator's real Chrome session passes through
+  // cleanly. Bootstrap pattern (mirror of Guesty's #261): operator
+  // exports vrbo.com cookies from their real Chrome via Cookie-Editor,
+  // posts them here, server creates a Browserbase persistent context
+  // with those cookies, saves contextId to .vrbo_session_cache.json.
+  // server/stagehand-vrbo-search.ts then attaches the context to its
+  // session via browserSettings.context — Vrbo treats it as a returning
+  // real user and the bot wall stays down.
+  //
+  // Auth: ADMIN_SECRET via X-Admin-Secret header (when set; matches the
+  // existing Guesty admin endpoint posture).
+  // ============================================================
+
+  // GET /api/admin/vrbo/session-status — booleans + metadata only.
+  app.get("/api/admin/vrbo/session-status", async (_req, res) => {
+    try {
+      const { getSessionStatus } = await import("./vrbo-session-cache");
+      const status = getSessionStatus();
+      const browserbaseEnvReady =
+        !!process.env.BROWSERBASE_API_KEY && !!process.env.BROWSERBASE_PROJECT_ID;
+      const adminSecretEnforced = !!process.env.ADMIN_SECRET;
+      return res.json({ ...status, browserbaseEnvReady, adminSecretEnforced });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // POST /api/admin/vrbo/bootstrap-browserbase-context
+  //
+  // One-time setup. Body:
+  //   {
+  //     "cookies": [...]   // Cookie-Editor JSON array, vrbo.com (and
+  //                        // ideally accounts.expedia.com) cookies
+  //   }
+  //
+  // The session-create step verifies the seeded cookies actually let
+  // the Browserbase session past Vrbo's bot wall. If the wall comes
+  // back up despite the cookies (indicates stale cookies, wrong domain
+  // mix, or anti-bot tying trust to additional fingerprint signals),
+  // the endpoint returns ok:false with a remediation hint instead of
+  // saving a useless contextId.
+  app.post("/api/admin/vrbo/bootstrap-browserbase-context", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { cookies?: unknown };
+    if (!Array.isArray(body.cookies) || body.cookies.length === 0) {
+      return res.status(400).json({
+        error:
+          "cookies (non-empty array, Cookie-Editor JSON shape) required. Use the Cookie-Editor extension on vrbo.com (and ideally accounts.expedia.com — same-account tenant) → Export → JSON.",
+      });
+    }
+    try {
+      const { bootstrapVrboBrowserbaseContext } = await import(
+        "./vrbo-browserbase-bootstrap"
+      );
+      const result = await bootstrapVrboBrowserbaseContext({
+        cookies: body.cookies as any[],
+      });
+      if (!result.ok) {
+        return res
+          .status(500)
+          .json({ ok: false, error: result.error, finalUrl: result.finalUrl, trace: result.trace });
+      }
+      return res.json({
+        ok: true,
+        contextId: result.contextId,
+        cookieCount: result.cookieCount,
+        finalUrl: result.finalUrl,
+        durationMs: result.durationMs,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/admin/vrbo-stagehand-debug
   //
   // One-off diagnostic for the Stagehand VRBO search path. Runs the

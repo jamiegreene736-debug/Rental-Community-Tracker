@@ -150,6 +150,17 @@ export async function searchVrboViaStagehandWithDebug(opts: {
     }
   }
 
+  // If the operator has bootstrapped a Vrbo persistent context (via
+  // POST /api/admin/vrbo/bootstrap-browserbase-context), attach it to
+  // the session here. Vrbo's anti-bot recognizes the context as a
+  // returning real user and lets the search through; without the
+  // context the residential-proxy session hits the "Show us your
+  // human side..." spin-and-block wall before vrbo.com renders.
+  // (See diagnostic from PR #265 + screenshot at
+  // /photos/debug/vrbo-stagehand-1777421048110.jpg.)
+  const { resolveBrowserbaseContextId } = await import("./vrbo-session-cache");
+  const persistentContextId = resolveBrowserbaseContextId();
+
   const stagehand = new Stagehand({
     env: "BROWSERBASE",
     apiKey: bbApiKey,
@@ -160,7 +171,16 @@ export async function searchVrboViaStagehandWithDebug(opts: {
       // (see PR #177). Fingerprinting alone doesn't beat their bot
       // wall — the IP source is the load-bearing piece.
       proxies: true,
-      browserSettings: { viewport: { width: 1280, height: 800 } },
+      browserSettings: {
+        viewport: { width: 1280, height: 800 },
+        ...(persistentContextId
+          ? { context: { id: persistentContextId, persist: true } }
+          : {}),
+        // Belt-and-suspenders: enable Browserbase's CAPTCHA solver in
+        // case Vrbo escalates from passive fingerprint to an active
+        // slider/press-and-hold challenge.
+        solveCaptchas: true,
+      },
     },
     // Drop the explicit `provider` field — Stagehand parses the slash
     // prefix off `modelName` and an explicit provider would short-circuit
