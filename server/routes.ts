@@ -11755,11 +11755,20 @@ export async function registerRoutes(
     // contamination and skips the candidate. Used by the photo-listing
     // alert remediation flow where a wrong pick re-publishes someone
     // else's stolen photos to our Guesty listing.
-    const { communityFolder, requiredBedrooms, skipUrls = [], strict = false } = req.body as {
+    // `cleanChannel` opts a caller into checking ONE channel only —
+    // the candidate just needs to be clean on that channel; presence
+    // on the other two OTAs is OK. Used by the per-channel
+    // isolate-replace-disconnect flow where we're about to upload
+    // photos to (say) VRBO independently of Guesty, so we don't care
+    // whether the source unit is also on Airbnb. The default
+    // (cleanChannel undefined) keeps the existing all-three-clean
+    // strict behavior for the dashboard's Replace & push.
+    const { communityFolder, requiredBedrooms, skipUrls = [], strict = false, cleanChannel } = req.body as {
       communityFolder: string;
       requiredBedrooms?: number;
       skipUrls?: string[];
       strict?: boolean;
+      cleanChannel?: "airbnb" | "vrbo" | "booking";
     };
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -11927,21 +11936,35 @@ export async function registerRoutes(
         console.error(
           `[find-unit] ${zillowUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );
-        const foundOn = platformHosts.find((p) => platformCheck[p.key] === "found");
+        // Pick which platforms to enforce. Default: all three. With
+        // cleanChannel set: just that one. The platformCheck object
+        // uses "bookingCom" while the API request uses "booking" —
+        // map here so the body convention stays simple.
+        const channelToKey: Record<"airbnb" | "vrbo" | "booking", keyof PlatformCheck> = {
+          airbnb: "airbnb",
+          vrbo: "vrbo",
+          booking: "bookingCom",
+        };
+        const enforcedKeys: Array<keyof PlatformCheck> = cleanChannel
+          ? [channelToKey[cleanChannel]]
+          : platformHosts.map((p) => p.key);
+        const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
         if (foundOn) {
-          console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping`);
+          console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
           continue;
         }
         if (strict) {
-          const unknownOn = platformHosts.find((p) => platformCheck[p.key] === "unknown");
+          const unknownOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "unknown");
           if (unknownOn) {
-            console.error(`[find-unit] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode) — skipping`);
+            console.error(`[find-unit] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode, cleanChannel=${cleanChannel ?? "all"}) — skipping`);
             continue;
           }
         }
-        // Loose mode: all CLEAN, or a mix of CLEAN and UNKNOWN. Strict
-        // mode: all CLEAN. Fall through to the photo+vision gates and
-        // surface the verdict in the response.
+        // Loose mode: enforced channel(s) all CLEAN, or a mix of CLEAN
+        // and UNKNOWN. Strict mode: enforced channels all CLEAN. Fall
+        // through to the photo+vision gates and surface the full
+        // verdict in the response (caller can see other-channel state
+        // too).
 
         {
           // Two-stage quality filter before suggesting this candidate:
@@ -13712,6 +13735,7 @@ export async function registerRoutes(
           isolatedReason: r?.isolatedReason ?? null,
           reEnabledAt: r?.reEnabledAt ?? null,
           updatedAt: r?.updatedAt ?? null,
+          partnerListingRef: r?.partnerListingRef ?? null,
           hashCount: r?.previousBadHashes ? (() => {
             try { return (JSON.parse(r.previousBadHashes) as string[]).length; } catch { return 0; }
           })() : 0,
@@ -13905,6 +13929,267 @@ export async function registerRoutes(
     } catch (e: any) {
       console.error(`[replace-channel-photos] error: ${e?.message ?? e}`);
       res.status(500).json({ error: e?.message ?? "sidecar enqueue failed" });
+    }
+  });
+
+  // POST /api/listings/:id/isolate-replace-disconnect
+  // The full per-channel migration flow for VRBO or Booking. Streams
+  // NDJSON. End-to-end:
+  //
+  //   1. find-replacement   — find-unit with cleanChannel=<channel>
+  //                            (looser filter — only the target channel
+  //                            needs to be clean; presence on other
+  //                            OTAs is OK).
+  //   2. snapshot           — hash current Guesty pictures[] →
+  //                            previousBadHashes for re-theft detection.
+  //   3. isolate            — flip photo_sync.status to "isolated",
+  //                            persist partnerListingRef so future runs
+  //                            don't need it again. Audit "isolate".
+  //   4. upload             — sidecar Playwright bulk upload to the
+  //                            channel's partner portal. Photos are
+  //                            scraped from the candidate's Zillow
+  //                            URLs; the sidecar downloads them at
+  //                            upload time (no local intermediate).
+  //   5. disconnect         — sidecar Playwright into Guesty admin →
+  //                            Settings → Integrations → [Channel] →
+  //                            Disconnect. Audit "disconnect".
+  //
+  // Order is critical: photos go up BEFORE the disconnect. Otherwise
+  // disconnecting first leaves the channel showing whatever was on
+  // Guesty's pictures[] until the manual upload completes.
+  //
+  // Airbnb is rejected — the operator wants Airbnb to stay on Guesty's
+  // master sync. The dashboard's Replace & push remains the path for
+  // Airbnb-side photo updates.
+  app.post("/api/listings/:id/isolate-replace-disconnect", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    const body = req.body as {
+      channel?: unknown;
+      partnerListingRef?: unknown;
+      communityFolder?: unknown;
+      bedrooms?: unknown;
+      reason?: unknown;
+      maxPhotos?: unknown;
+    };
+    const channel = body.channel === "vrbo" || body.channel === "booking" ? body.channel : null;
+    if (!channel) return res.status(400).json({ error: "channel must be 'vrbo' or 'booking' (airbnb stays on Guesty)" });
+    const partnerListingRef = typeof body.partnerListingRef === "string" ? body.partnerListingRef.trim() : "";
+    if (!partnerListingRef) return res.status(400).json({ error: "partnerListingRef required (your VRBO/Booking partner-portal property id)" });
+    const communityFolder = typeof body.communityFolder === "string" ? body.communityFolder : null;
+    if (!communityFolder) return res.status(400).json({ error: "communityFolder required (the resort/complex folder, e.g. community-regency-poipu-kai)" });
+    const bedrooms = typeof body.bedrooms === "number" && body.bedrooms > 0 ? body.bedrooms : null;
+    if (!bedrooms) return res.status(400).json({ error: "bedrooms required" });
+    const reason = typeof body.reason === "string" ? body.reason : null;
+    const channelCap = channel === "vrbo" ? 50 : 40;
+    const maxPhotos = typeof body.maxPhotos === "number" && body.maxPhotos > 0
+      ? Math.min(body.maxPhotos, channelCap)
+      : channelCap;
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (o: Record<string, unknown>) => {
+      console.log(`[isolate-replace-disconnect] listing=${guestyListingId} channel=${channel} emit=${JSON.stringify(o)}`);
+      res.write(JSON.stringify(o) + "\n");
+    };
+
+    try {
+      // ── Step 1: find a replacement Zillow unit clean on THIS channel.
+      emit({ type: "phase", name: "find-replacement", message: `Searching for a ${bedrooms}BR unit clean on ${channel}` });
+      const port = process.env.PORT || "5000";
+      let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
+      try {
+        const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            communityFolder,
+            requiredBedrooms: bedrooms,
+            cleanChannel: channel,
+            // Strict mode here treats `unknown` SearchAPI verdicts as
+            // a reject so a flake can't slip a contaminated listing
+            // through and surface our (or the thief's) photos as the
+            // "replacement".
+            strict: true,
+          }),
+        });
+        const findBody = await findResp.json() as any;
+        if (!findResp.ok || findBody.error || !findBody.unit) {
+          emit({ type: "error", phase: "find-replacement", message: findBody?.error ?? `find-unit HTTP ${findResp.status}` });
+          return res.end();
+        }
+        candidate = findBody.unit;
+      } catch (e: any) {
+        emit({ type: "error", phase: "find-replacement", message: e?.message ?? String(e) });
+        return res.end();
+      }
+      emit({ type: "candidate", url: candidate.url, address: candidate.address, unitLabel: candidate.unitLabel, bedrooms: candidate.bedrooms });
+
+      // ── Step 2: scrape the candidate's photo URLs. We don't
+      // download/store locally — the sidecar fetches each URL when
+      // uploading. Cap to the channel's published photo limit.
+      emit({ type: "phase", name: "scrape", message: `Reading photos from ${candidate.url}` });
+      let scrapedUrls: string[] = [];
+      try {
+        const scraped = await scrapeListingPhotos(candidate.url);
+        scrapedUrls = scraped.map((s) => s.url).slice(0, maxPhotos);
+      } catch (e: any) {
+        emit({ type: "error", phase: "scrape", message: `Scrape failed: ${e?.message ?? e}` });
+        return res.end();
+      }
+      if (scrapedUrls.length === 0) {
+        emit({ type: "error", phase: "scrape", message: "Scraper returned 0 photos" });
+        return res.end();
+      }
+      emit({ type: "scrape-result", count: scrapedUrls.length });
+
+      // ── Step 3: snapshot the channel's current photos (= Guesty's
+      // current pictures[] since we're still synced) and write
+      // photo_sync row. Audit "isolate".
+      emit({ type: "phase", name: "snapshot", message: "Hashing current Guesty photos for re-theft detection" });
+      let badHashes: string[] = [];
+      try {
+        const { computeDhash } = await import("./photo-hashing");
+        const listing = await guestyRequest(`/listings/${guestyListingId}`) as any;
+        const pictures: Array<{ original?: string }> = Array.isArray(listing?.pictures) ? listing.pictures : [];
+        for (const pic of pictures) {
+          const url = pic?.original;
+          if (typeof url !== "string" || !/^https?:\/\//i.test(url)) continue;
+          try {
+            const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+            if (!r.ok) continue;
+            const buf = Buffer.from(await r.arrayBuffer());
+            badHashes.push(await computeDhash(buf));
+          } catch (e: any) {
+            console.error(`[isolate-replace-disconnect] hash ${url}: ${e?.message ?? e}`);
+          }
+        }
+        badHashes = Array.from(new Set(badHashes));
+      } catch (e: any) {
+        emit({ type: "error", phase: "snapshot", message: `Couldn't snapshot Guesty pictures[]: ${e?.message ?? e}` });
+        return res.end();
+      }
+      emit({ type: "snapshot-result", hashCount: badHashes.length });
+
+      const now = new Date();
+      await storage.upsertPhotoSync({
+        guestyListingId,
+        channel,
+        status: "isolated",
+        isolatedAt: now,
+        isolatedReason: reason,
+        previousBadHashes: JSON.stringify(badHashes),
+        partnerListingRef,
+        reEnabledAt: null,
+      });
+      await storage.createPhotoSyncAudit({
+        guestyListingId,
+        channel,
+        action: "isolate",
+        reason,
+        details: JSON.stringify({ hashCount: badHashes.length, partnerListingRef, replacementUrl: candidate.url }),
+      });
+
+      // ── Step 4: enqueue sidecar upload of the candidate photos.
+      // Photo URLs go directly to the sidecar — it downloads from
+      // the source on its end. No captions yet (Phase 2b can pull
+      // them from Zillow's structured data if useful).
+      emit({ type: "phase", name: "upload", message: `Pushing ${scrapedUrls.length} photos to ${channel} via sidecar` });
+      try {
+        const { uploadPhotosToChannelViaSidecar } = await import("./vrbo-sidecar-queue");
+        const upload = await uploadPhotosToChannelViaSidecar({
+          channel,
+          partnerListingRef,
+          photos: scrapedUrls.map((url) => ({ url })),
+          // Long wallet — partner portals + bulk upload of 40-50
+          // photos can take 5-10 minutes. Allow up to 12.
+          walletBudgetMs: 12 * 60_000,
+        });
+        emit({
+          type: "upload-result",
+          workerOnline: upload.workerOnline,
+          durationMs: upload.durationMs,
+          uploaded: upload.result?.uploaded ?? 0,
+          failed: upload.result?.failed ?? 0,
+        });
+        if (!upload.result || upload.result.uploaded === 0) {
+          emit({
+            type: "error", phase: "upload",
+            message: upload.workerOnline
+              ? `Sidecar reported 0/${scrapedUrls.length} photos uploaded${upload.result?.failed ? ` (${upload.result.failed} failed)` : ""}`
+              : `Sidecar worker offline — ${upload.reason}. Run the worker on the operator's Mac and retry.`,
+          });
+          // Don't proceed to disconnect — would leave the channel
+          // empty. Audit the failed attempt for trace.
+          await storage.createPhotoSyncAudit({
+            guestyListingId,
+            channel,
+            action: "replace",
+            reason: "upload-failed",
+            details: JSON.stringify({ scrapedUrlsCount: scrapedUrls.length, workerOnline: upload.workerOnline, reason: upload.reason }),
+          });
+          return res.end();
+        }
+        await storage.createPhotoSyncAudit({
+          guestyListingId,
+          channel,
+          action: "replace",
+          reason: "upload-succeeded",
+          details: JSON.stringify({ uploaded: upload.result.uploaded, failed: upload.result.failed, sourceZillowUrl: candidate.url }),
+        });
+      } catch (e: any) {
+        emit({ type: "error", phase: "upload", message: e?.message ?? String(e) });
+        return res.end();
+      }
+
+      // ── Step 5: enqueue Guesty admin disconnect via sidecar.
+      // Only runs after upload-confirmed-success above so the channel
+      // never goes through a "no photos" window.
+      emit({ type: "phase", name: "disconnect", message: `Disconnecting ${channel} from Guesty admin` });
+      try {
+        const { disconnectGuestyChannelViaSidecar } = await import("./vrbo-sidecar-queue");
+        const disc = await disconnectGuestyChannelViaSidecar({ guestyListingId, channel });
+        emit({
+          type: "disconnect-result",
+          workerOnline: disc.workerOnline,
+          durationMs: disc.durationMs,
+          ok: !!disc.result?.ok,
+          message: disc.result?.message ?? disc.reason,
+        });
+        if (!disc.result || !disc.result.ok) {
+          emit({
+            type: "error", phase: "disconnect",
+            message: disc.workerOnline
+              ? `Sidecar Guesty disconnect failed: ${disc.result?.message ?? disc.reason}`
+              : `Sidecar worker offline for disconnect — ${disc.reason}. Photos uploaded successfully but channel is still synced from Guesty. Re-run after the worker is back, or disconnect manually in Guesty admin.`,
+          });
+          await storage.createPhotoSyncAudit({
+            guestyListingId,
+            channel,
+            action: "disconnect",
+            reason: "disconnect-failed",
+            details: JSON.stringify({ workerOnline: disc.workerOnline, reason: disc.reason }),
+          });
+          return res.end();
+        }
+        await storage.createPhotoSyncAudit({
+          guestyListingId,
+          channel,
+          action: "disconnect",
+          reason: disc.result.message,
+          details: null,
+        });
+      } catch (e: any) {
+        emit({ type: "error", phase: "disconnect", message: e?.message ?? String(e) });
+        return res.end();
+      }
+
+      emit({ type: "done", ok: true, channel, guestyListingId });
+    } catch (e: any) {
+      emit({ type: "error", phase: "unhandled", message: e?.message ?? String(e) });
+    } finally {
+      res.end();
     }
   });
 
