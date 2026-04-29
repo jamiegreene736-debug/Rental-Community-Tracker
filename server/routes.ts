@@ -2095,17 +2095,198 @@ export async function registerRoutes(
   // Recon helper: surface unique PM-ish domains from Google's first
   // pages for a community. Operator review tool — no rate scraping.
   // Useful when deciding which PMs to add scrapers for next.
-  // ?community=Pili Mai&location=Kauai
+  //
+  // Query params:
+  //   community  required, e.g. "Pili Mai"
+  //   location   optional, e.g. "Kauai" — adds a second query angle
+  //   pages      optional, 1-5, default 2 — Google pages per query
+  //   probe      optional, "true"/"1" — when set (PR #308), every
+  //              `unknown`-classified hostname is probed for the
+  //              vrp_main fingerprint. Hits get `cmsDetected:
+  //              "vrp_main"` + `autoAddable: true` so the operator
+  //              can see at a glance which sites can be added with
+  //              a one-line VRP_SITES config vs. which need a
+  //              bespoke scraper.
+  //
+  // Example: /api/admin/pm-discovery?community=Pili%20Mai&location=Kauai&probe=true
   app.get("/api/admin/pm-discovery", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     const community = String(req.query.community || "").trim();
     const location = (String(req.query.location || "").trim() || undefined) as string | undefined;
     const pages = req.query.pages ? Math.max(1, Math.min(5, parseInt(String(req.query.pages), 10) || 2)) : 2;
+    const probeForVrp = /^(true|1)$/i.test(String(req.query.probe || ""));
     if (!community) return res.status(400).json({ error: "community query param required" });
     try {
-      const result = await discoverPmDomains({ community, location, apiKey, pages });
+      const result = await discoverPmDomains({ community, location, apiKey, pages, probeForVrp });
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // Batch PM auto-discovery across every community in
+  // PROPERTY_UNIT_NEEDS. Runs `discoverPmDomains` with
+  // `probeForVrp: true` for each unique community, then aggregates a
+  // single report so the operator can see the full PM landscape in
+  // one call.
+  //
+  // Output shape:
+  //   {
+  //     communitiesScanned: 6,
+  //     totalDurationMs: 18432,
+  //     proposedAdditions: [
+  //       { hostname, hits, communities: [...], vrpUnitCount, sampleUrls, suggestedConfig: {...} },
+  //       ...
+  //     ],
+  //     unknownNonVrp: [...],   // unknown CMS — needs manual scraper
+  //     coveredHosts: [...],    // already have a scraper
+  //     perCommunity: { [community]: PmDiscoveryResult }
+  //   }
+  //
+  // `proposedAdditions` is the actionable bucket — these are
+  // already-vrp_main-detected sites the operator can add to
+  // VRP_SITES with a single config block (the suggestedConfig is
+  // pre-filled).
+  //
+  // ~10-25s wall depending on how many `unknown` PMs need probing
+  // (5-wide concurrency, each probe ~1-3s, cached 7d so reruns are
+  // near-instant).
+  app.get("/api/admin/pm-auto-discover-all", async (_req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    const startedAt = Date.now();
+    try {
+      // PROPERTY_UNIT_NEEDS lives inside registerRoutes' closure and
+      // a few endpoints down (line 4190). We read it through the
+      // closure here.
+      const uniqueCommunities = new Set<string>();
+      for (const config of Object.values(PROPERTY_UNIT_NEEDS)) {
+        uniqueCommunities.add(config.community);
+      }
+      const communities = Array.from(uniqueCommunities);
+
+      // Run all communities in parallel. SearchAPI burst limit is
+      // generous; the bottleneck is vrp_main probing (HTTP to each
+      // unknown PM's sitemap). Probe cache is keyed by hostname so
+      // shared PM domains across communities only probe once.
+      const perCommunityResults = await Promise.all(
+        communities.map(async (community) => {
+          const location = COMMUNITY_SEARCH_LOCATIONS[community]?.split(",")[1]?.trim();
+          try {
+            const r = await discoverPmDomains({
+              community,
+              location,
+              apiKey,
+              pages: 2,
+              probeForVrp: true,
+            });
+            return [community, r] as const;
+          } catch (e: any) {
+            return [community, { error: e?.message ?? String(e) }] as const;
+          }
+        }),
+      );
+
+      const perCommunity: Record<string, any> = {};
+      const proposedByHost = new Map<
+        string,
+        {
+          hostname: string;
+          hits: number;
+          communities: string[];
+          vrpUnitCount?: number;
+          sampleUrls: string[];
+          suggestedConfig: { key: string; label: string; baseUrl: string };
+        }
+      >();
+      const unknownNonVrpByHost = new Map<
+        string,
+        { hostname: string; hits: number; communities: string[]; cmsProbeReason?: string; sampleUrls: string[] }
+      >();
+      const coveredByHost = new Map<
+        string,
+        { hostname: string; hits: number; communities: string[]; knownAs?: string }
+      >();
+
+      for (const [community, r] of perCommunityResults) {
+        perCommunity[community] = r;
+        if ("error" in r) continue;
+        for (const d of r.domains) {
+          if (d.classification === "covered") {
+            const existing = coveredByHost.get(d.hostname);
+            if (existing) {
+              existing.hits += d.hits;
+              if (!existing.communities.includes(community)) existing.communities.push(community);
+            } else {
+              coveredByHost.set(d.hostname, {
+                hostname: d.hostname,
+                hits: d.hits,
+                communities: [community],
+                knownAs: d.knownAs,
+              });
+            }
+          } else if (d.classification === "unknown" && d.autoAddable && d.cmsDetected === "vrp_main") {
+            const existing = proposedByHost.get(d.hostname);
+            const suggestedKey = d.hostname.replace(/[^a-z0-9]/gi, "");
+            // Title-case label from hostname: "parrishkauai.com" → "Parrishkauai"
+            // (operator can rename in the PR; this is a placeholder).
+            const labelGuess = d.hostname.replace(/\.[a-z]+$/i, "").replace(/(^|[\W_])([a-z])/g, (_m, p, c) => (p ? " " : "") + c.toUpperCase());
+            if (existing) {
+              existing.hits += d.hits;
+              if (!existing.communities.includes(community)) existing.communities.push(community);
+              existing.vrpUnitCount = Math.max(existing.vrpUnitCount ?? 0, d.vrpUnitCount ?? 0);
+              for (const u of d.sampleUrls) if (existing.sampleUrls.length < 3 && !existing.sampleUrls.includes(u)) existing.sampleUrls.push(u);
+            } else {
+              proposedByHost.set(d.hostname, {
+                hostname: d.hostname,
+                hits: d.hits,
+                communities: [community],
+                vrpUnitCount: d.vrpUnitCount,
+                sampleUrls: [...d.sampleUrls],
+                suggestedConfig: {
+                  key: suggestedKey,
+                  label: labelGuess,
+                  baseUrl: `https://${d.hostname}`,
+                },
+              });
+            }
+          } else if (d.classification === "unknown") {
+            const existing = unknownNonVrpByHost.get(d.hostname);
+            if (existing) {
+              existing.hits += d.hits;
+              if (!existing.communities.includes(community)) existing.communities.push(community);
+            } else {
+              unknownNonVrpByHost.set(d.hostname, {
+                hostname: d.hostname,
+                hits: d.hits,
+                communities: [community],
+                cmsProbeReason: d.cmsProbeReason,
+                sampleUrls: [...d.sampleUrls],
+              });
+            }
+          }
+        }
+      }
+
+      const proposedAdditions = Array.from(proposedByHost.values()).sort(
+        (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
+      );
+      const unknownNonVrp = Array.from(unknownNonVrpByHost.values()).sort(
+        (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
+      );
+      const coveredHosts = Array.from(coveredByHost.values()).sort(
+        (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
+      );
+
+      res.json({
+        communitiesScanned: communities.length,
+        totalDurationMs: Date.now() - startedAt,
+        proposedAdditions,
+        unknownNonVrp,
+        coveredHosts,
+        perCommunity,
+      });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
     }

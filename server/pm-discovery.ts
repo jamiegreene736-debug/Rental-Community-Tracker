@@ -14,6 +14,7 @@
 // gets us out of Vrbo's anti-bot fight entirely. See AGENTS.md for the
 // PR series (#211–#220) that established Vrbo's brittleness.
 import { VRP_SITES } from "./pm-scraper-vrp";
+import { detectVrpSites, type VrpDetectResult } from "./vrp-detect";
 
 export type PmDiscoveryClassification =
   | "covered"      // we already have a scraper module for this domain
@@ -21,12 +22,34 @@ export type PmDiscoveryClassification =
   | "aggregator"   // travel directory/SEO site, not directly bookable
   | "unknown";     // candidate PM — operator review needed
 
+export type PmCmsDetection = "vrp_main" | "unknown";
+
 export interface DiscoveredDomain {
   hostname: string;
   hits: number;
   sampleUrls: string[];
   classification: PmDiscoveryClassification;
   knownAs?: string;
+  /**
+   * CMS fingerprint for `unknown` classifications (PR #308). When the
+   * vrp_main probe is enabled (`probeForVrp: true` on
+   * discoverPmDomains) and the hostname's `?vrpsitemap=1` returns the
+   * canonical fingerprint, set to `"vrp_main"` — the operator can
+   * then auto-add the site via a one-line VRP_SITES config.
+   */
+  cmsDetected?: PmCmsDetection;
+  /** Probe ms wall (informational; cached after first probe per host). */
+  cmsProbeMs?: number;
+  /** Probe failure reason when cmsDetected==="unknown". */
+  cmsProbeReason?: string;
+  /** Number of /vrp/unit/ paths in the sitemap (vrp_main only). */
+  vrpUnitCount?: number;
+  /**
+   * Convenience flag: true iff this is `unknown`-classified AND the
+   * CMS probe identified a fingerprint we already have a scraper for.
+   * Operator can auto-add by adding one block to VRP_SITES.
+   */
+  autoAddable?: boolean;
 }
 
 export interface PmDiscoveryResult {
@@ -129,6 +152,15 @@ export async function discoverPmDomains(opts: {
   location?: string;
   apiKey: string;
   pages?: number;
+  /**
+   * When true (PR #308), every `unknown` hostname is probed for the
+   * vrp_main fingerprint via `detectVrpSites`. Adds ~1-3s wall per
+   * unknown domain (parallel, capped at 5 concurrent), then 7-day
+   * in-memory cache for repeat calls. Set true on the admin
+   * "auto-discover" endpoint where the operator wants the
+   * actionable signal; leave false on the recon-only endpoint.
+   */
+  probeForVrp?: boolean;
 }): Promise<PmDiscoveryResult> {
   const community = opts.community.trim();
   const location = opts.location?.trim() || undefined;
@@ -189,6 +221,36 @@ export async function discoverPmDomains(opts: {
     }
     return b.hits - a.hits;
   });
+
+  // PR #308: optionally probe each `unknown` hostname for the
+  // vrp_main fingerprint. Augments each domain with cmsDetected +
+  // autoAddable flags so the operator can see at a glance which
+  // unknowns can be added with a one-line config vs. which need a
+  // bespoke scraper.
+  if (opts.probeForVrp) {
+    const unknowns = domains.filter((d) => d.classification === "unknown");
+    if (unknowns.length > 0) {
+      const probes = await detectVrpSites(
+        unknowns.map((d) => d.hostname),
+        { concurrency: 5 },
+      );
+      const byHostProbe = new Map<string, VrpDetectResult>();
+      for (const p of probes) byHostProbe.set(p.hostname, p);
+      for (const d of unknowns) {
+        const p = byHostProbe.get(d.hostname);
+        if (!p) continue;
+        d.cmsDetected = p.isVrpMain ? "vrp_main" : "unknown";
+        d.cmsProbeMs = p.durationMs;
+        if (p.isVrpMain) {
+          d.vrpUnitCount = p.unitCount;
+          d.autoAddable = true;
+        } else {
+          d.cmsProbeReason = p.reason;
+          d.autoAddable = false;
+        }
+      }
+    }
+  }
 
   return { community, location, queries, rawHits, domains };
 }
