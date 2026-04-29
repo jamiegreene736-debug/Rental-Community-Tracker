@@ -220,7 +220,22 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
 
   const labels = await storage.getPhotoLabelsByFolder(folder);
   const visible = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
-  const heros = visible.slice(0, PHOTOS_PER_FOLDER);
+  // Prefer interior categories for the hero set. "Building Exterior"
+  // and "Views" shots are usually shared resort-amenity images — every
+  // host at the same complex re-uses the pool / lobby / oceanfront
+  // photo, so a Lens match on those is legitimate re-use, not theft.
+  // We only fall back to the first-N-by-filename behavior when the
+  // folder has fewer than N labeled interiors (brand-new folders that
+  // haven't been through the labeler yet, or unit folders whose entire
+  // gallery is exterior shots — rare).
+  const INTERIOR_CATEGORIES = new Set([
+    "Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Dining", "Outdoor & Lanai",
+  ]);
+  const effectiveCategory = (l: typeof labels[number]) => l.userCategory ?? l.category ?? "";
+  const interior = visible.filter((l) => INTERIOR_CATEGORIES.has(effectiveCategory(l)));
+  const heros = interior.length >= PHOTOS_PER_FOLDER
+    ? interior.slice(0, PHOTOS_PER_FOLDER)
+    : visible.slice(0, PHOTOS_PER_FOLDER);
 
   if (heros.length === 0) {
     result.errorMessage = "No visible photos in folder";
@@ -418,7 +433,77 @@ export function startPhotoListingScheduler(maxAgeMs = 24 * 60 * 60 * 1000, tickM
       console.error(`[photo-listing-scanner] scheduler crashed: ${e?.message}`);
     }
   };
+  // Cleanup pass on boot: ack legacy alerts that are community-photo
+  // false positives so they stop showing in the dashboard. Runs ONCE at
+  // startup; future scans won't recreate them because the hero-pick
+  // step now prefers interior categories.
+  setTimeout(() => { void acknowledgeAmenityFalsePositives(); }, 10_000);
   // Kick once after a 30s boot delay so DB and photo routes are up.
   setTimeout(() => { void tick(); }, 30_000);
   setInterval(() => { void tick(); }, tickMs);
+}
+
+// One-time cleanup: acknowledge unacknowledged photo-listing alerts that
+// are community-photo false positives. Two cases get acked:
+//   1. The alert's photoFolder is community-* — these shouldn't exist
+//      after the "skip community folders" change but legacy rows linger.
+//   2. Every hero photo cited in matchedUrls has a non-interior category
+//      (Building Exterior / Views / Other / Reject / community-amenity
+//      vocabulary). Per the operator: "they will always find those" —
+//      shared resort amenity photos legitimately appear on every host
+//      at the same complex.
+// Alerts with at least one interior-category match are left alone — those
+// represent the actual signal we care about (someone copied a unique
+// bedroom / kitchen / living-area shot).
+async function acknowledgeAmenityFalsePositives(): Promise<void> {
+  const INTERIOR = new Set(["Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Dining", "Outdoor & Lanai"]);
+  try {
+    const open = await storage.getUnacknowledgedPhotoListingAlerts();
+    if (open.length === 0) return;
+    let acked = 0;
+    // Build a folder → (filename → category) lookup once. Cheaper than
+    // querying photoLabels per alert when many alerts share folders.
+    // Honors userCategory (human override) over category (Claude's pick).
+    const foldersInvolved = Array.from(new Set(open.map((r) => r.photoFolder)));
+    const labelLookup = new Map<string, Map<string, string>>();
+    for (const f of foldersInvolved) {
+      const rows = await storage.getPhotoLabelsByFolder(f);
+      labelLookup.set(f, new Map(rows.map((r) => [r.filename, r.userCategory ?? r.category ?? ""])));
+    }
+    for (const alert of open) {
+      if (alert.photoFolder.startsWith("community-")) {
+        await storage.acknowledgePhotoListingAlert(alert.id);
+        acked++;
+        continue;
+      }
+      let matches: Array<{ photoUrl?: string }> = [];
+      try { matches = JSON.parse(alert.matchedUrls ?? "[]"); } catch { /* ignore */ }
+      if (matches.length === 0) continue;
+      const folderLabels = labelLookup.get(alert.photoFolder);
+      if (!folderLabels) continue;
+      // Extract our filename from each photoUrl. Skip matches we can't
+      // resolve (don't let an unknown photo flip an alert into "all
+      // amenity" — better to err on keeping the alert open).
+      const categories: string[] = [];
+      for (const m of matches) {
+        if (typeof m?.photoUrl !== "string") continue;
+        const filename = m.photoUrl.split("/").pop()?.split("?")[0];
+        if (!filename) continue;
+        const cat = folderLabels.get(filename);
+        if (!cat) { categories.push("__unknown__"); continue; }
+        categories.push(cat);
+      }
+      if (categories.length === 0) continue;
+      const hasInterior = categories.some((c) => INTERIOR.has(c));
+      if (!hasInterior) {
+        await storage.acknowledgePhotoListingAlert(alert.id);
+        acked++;
+      }
+    }
+    if (acked > 0) {
+      console.error(`[photo-listing-scanner] startup cleanup: acked ${acked}/${open.length} amenity false-positive alerts`);
+    }
+  } catch (e: any) {
+    console.error(`[photo-listing-scanner] startup cleanup failed: ${e?.message ?? e}`);
+  }
 }
