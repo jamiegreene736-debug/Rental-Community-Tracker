@@ -362,20 +362,53 @@ async function tick() {
 // faster refresh can hit `/api/property/:id/refresh-market-rates`
 // directly from the buy-in tracker page.
 const MARKET_RATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
-let _lastMarketRateRefreshAt = 0;
 let _marketRateRefreshRunning = false;
+
+// PR #300: persistence-by-DB-query. Earlier this used in-memory
+// `_lastMarketRateRefreshAt` which reset to 0 on every container
+// restart, causing the cron to re-run all 22 properties on every
+// deploy. The result was 15-20 minutes of daemon queue contention
+// per deploy that starved manual refreshes (operator's "click
+// refresh, see nothing happen" complaint 2026-04-29).
+//
+// Fix: derive "last cron run time" from the most-recent
+// refreshedAt across property_market_rates rows. Persists across
+// restarts since it reads actual DB state. Manual refreshes also
+// update refreshedAt, so a busy operator naturally postpones the
+// cron — exactly what we want (no double-stomping the daemon).
+async function getMostRecentMarketRateRefreshAt(): Promise<number> {
+  try {
+    const allRates = await storage.getAllPropertyMarketRates();
+    let max = 0;
+    for (const r of allRates) {
+      const t = new Date(r.refreshedAt).getTime();
+      if (Number.isFinite(t) && t > max) max = t;
+    }
+    return max;
+  } catch (e: any) {
+    // DB read failures shouldn't block the cron — if we can't
+    // determine last-run, fall through and let it run. Conservative:
+    // worst case we run an extra cron pass.
+    console.error(`[availability-scheduler] getMostRecentMarketRateRefreshAt: ${e?.message ?? e}`);
+    return 0;
+  }
+}
 
 async function maybeRefreshMarketRates() {
   if (_marketRateRefreshRunning) return;
   if (!process.env.SEARCHAPI_API_KEY) return;
-  if (_lastMarketRateRefreshAt > 0 && Date.now() - _lastMarketRateRefreshAt < MARKET_RATE_INTERVAL_MS) return;
+  const lastRefreshAt = await getMostRecentMarketRateRefreshAt();
+  if (lastRefreshAt > 0 && Date.now() - lastRefreshAt < MARKET_RATE_INTERVAL_MS) {
+    const ageDays = Math.round((Date.now() - lastRefreshAt) / (24 * 60 * 60 * 1000) * 10) / 10;
+    console.log(`[availability-scheduler] market-rates skip — last refresh ${ageDays}d ago, interval is ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)}d`);
+    return;
+  }
   _marketRateRefreshRunning = true;
   try {
     const port = process.env.PORT || "5000";
     const r = await fetch(`http://127.0.0.1:${port}/api/admin/refresh-all-market-rates`, { method: "POST" });
     const data = (await r.json().catch(() => ({}))) as { ok?: boolean; succeeded?: number; total?: number };
     if (data.ok) {
-      _lastMarketRateRefreshAt = Date.now();
       console.log(`[availability-scheduler] market-rates refreshed ${data.succeeded}/${data.total}`);
     } else {
       console.warn(`[availability-scheduler] market-rates refresh returned !ok`);
