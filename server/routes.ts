@@ -12380,16 +12380,31 @@ export async function registerRoutes(
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
-    // Multi-channel scan — Airbnb engine (cost basis, persisted) +
-    // sidecar VRBO + sidecar Booking (live snapshot, ephemeral).
-    // Replaces the legacy Airbnb-only `fetchAmortizedNightlyByBR`
-    // call in PR #276; the persisted-median behavior is unchanged
-    // (same 7-night, 30-day-out window, same Airbnb-engine samples)
-    // and the new helper just adds the per-channel cheapest snapshot
-    // alongside.
+    // Multi-season multi-channel scan (PR #282).
+    //
+    // Pulls per-season basis: LOW + HIGH + HOLIDAY. LOW does the full
+    // multichannel pull (Airbnb engine + sidecar VRBO + sidecar
+    // Booking). HIGH and HOLIDAY use Airbnb engine only — the daemon
+    // can't fan out 3× sidecar requests in parallel and HIGH/HOLIDAY
+    // basis is mostly market-driven, so the engine median is a
+    // reasonable proxy. Total wall: ~30-90s per property.
+    //
+    // Persistence:
+    //   - LOW basis     → medianNightly        (legacy single-value
+    //                                            column; primary
+    //                                            sell-rate driver)
+    //   - HIGH basis    → medianNightlyHigh    (new nullable col)
+    //   - HOLIDAY basis → medianNightlyHoliday (new nullable col)
+    //
+    // The Pricing tab's seasonal table reads per-season basis when
+    // populated; falls back to LOW × multiplier for any season that
+    // didn't get scanned (e.g. HOLIDAY pickSeasonWindow returned
+    // null).
     const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
-    const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
-    const scan = await fetchMultiChannelBuyInByBR({
+    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const startedAt = Date.now();
+    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 0, label: "Initializing scan" });
+    const seasonScan = await fetchMultiChannelBuyInBySeason({
       community: loc.searchName,
       city: loc.city,
       state: loc.state,
@@ -12397,49 +12412,12 @@ export async function registerRoutes(
       bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
       searchName: config.community,
       bedroomCounts: wantBedrooms,
+      propertyId,
     });
-    const { ratesByBR, channelCheapestByBR, snapshotCheckIn, snapshotCheckOut, daemonOnline, region, taxFactor, durationMs } = scan;
 
-    // Buy-in basis methodology (PR #279):
-    //
-    // For each unique bedroom count, we have up to 3 channel rates
-    // (airbnb / vrbo / booking) — the cheapest verified nightly per
-    // channel for the same 7-night LOW-season window. All three are
-    // already normalized to "all-in" (Airbnb engine total includes
-    // service fee + taxes natively; VRBO + Booking sidecar rates are
-    // multiplied by the region tax factor — Hawaii 1.155, Florida
-    // 1.11).
-    //
-    // The basis is the MEDIAN of the channels that returned data.
-    // Median is more robust than min: a one-off cheap listing on a
-    // single channel can't crash the Pricing tab's sell-rate floor,
-    // but the basis still tracks the realistic cross-channel "what's
-    // available now" instead of the legacy Airbnb-only median that
-    // ignored VRBO + Booking entirely.
-    //
-    // Edge cases:
-    //   - 1 channel returned    → basis = that channel's rate
-    //   - 2 channels returned   → basis = average of the two (median
-    //                              of an even-sized set)
-    //   - 3 channels returned   → basis = middle value
-    //   - 0 channels returned   → fall back to Airbnb-engine median
-    //                              of the raw samples (legacy basis,
-    //                              sidecar offline scenario)
-    //   - 0 samples too         → skip persist; Pricing tab falls
-    //                              through to BUY_IN_RATES static
-    //
-    // Source string in property_market_rates differentiates:
-    //   - "live-multichannel-median" — basis from per-channel median
-    //   - "airbnb"                   — fallback to Airbnb-only median
-    //                                  (sidecar offline)
-    type Persisted = {
-      bedrooms: number;
-      basis: number;
-      basisSource: "live-multichannel-median" | "airbnb" | "none";
-      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
-      channelCount: number;
-      samples: number;
-    };
+    setRefreshProgress({ propertyId, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
+
+    // Helper: median of a sorted number array.
     const medianOfSorted = (sorted: number[]): number => {
       if (sorted.length === 0) return 0;
       const mid = Math.floor(sorted.length / 2);
@@ -12447,71 +12425,100 @@ export async function registerRoutes(
         ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
         : sorted[mid];
     };
-    const persisted: Persisted[] = [];
-    for (const br of wantBedrooms) {
-      const samples = ratesByBR[br] ?? [];
-      const channels = channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
-
-      // Collect per-channel cheapest rates that came back.
+    // Helper: compute the per-season basis for a BR from a season's
+    // scan result. LOW prefers cross-channel median; HIGH/HOLIDAY use
+    // Airbnb-only median (since sidecar wasn't run for those).
+    const basisForSeason = (
+      scan: typeof seasonScan.perSeason["LOW"],
+      br: number,
+      sidecarRan: boolean,
+    ): { basis: number | null; channelRates: number[]; airbnbSamples: number; channels: { airbnb: number | null; vrbo: number | null; booking: number | null } } => {
+      if (!scan) return { basis: null, channelRates: [], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null } };
+      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
+      const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
-      if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
-      if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
-      channelRates.sort((a, b) => a - b);
-
-      let basis: number | null = null;
-      let basisSource: Persisted["basisSource"] = "none";
-      if (channelRates.length > 0) {
-        basis = medianOfSorted(channelRates);
-        basisSource = "live-multichannel-median";
-      } else if (samples.length > 0) {
-        const sortedSamples = [...samples].sort((a, b) => a - b);
-        basis = medianOfSorted(sortedSamples);
-        basisSource = "airbnb";
+      if (sidecarRan) {
+        if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
+        if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
       }
+      channelRates.sort((a, b) => a - b);
+      let basis: number | null = null;
+      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
+      else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
+      return { basis, channelRates, airbnbSamples: samples.length, channels };
+    };
 
-      if (basis == null || basis <= 0) {
+    type Persisted = {
+      bedrooms: number;
+      low: number;
+      high: number | null;
+      holiday: number | null;
+      basisSource: "live-multichannel-median" | "airbnb" | "none";
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
+      channelCount: number;
+    };
+    const persisted: Persisted[] = [];
+    for (const br of wantBedrooms) {
+      const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
+      const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, false);
+      const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, false);
+
+      const basisSource: Persisted["basisSource"] =
+        lowResult.basis == null
+          ? "none"
+          : lowResult.channelRates.length >= 2
+            ? "live-multichannel-median"
+            : "airbnb";
+
+      if (lowResult.basis == null || lowResult.basis <= 0) {
         persisted.push({
           bedrooms: br,
-          basis: 0,
+          low: 0,
+          high: null,
+          holiday: null,
           basisSource: "none",
-          channels,
-          channelCount: channelRates.length,
-          samples: samples.length,
+          channels: lowResult.channels,
+          channelCount: 0,
         });
         continue;
       }
 
-      // lowNightly / highNightly come from the channel range when we
-      // have channel data, or from the Airbnb sample range as
-      // fallback.
-      const sortedSamples = samples.length > 0 ? [...samples].sort((a, b) => a - b) : [];
-      const low = channelRates.length > 0 ? channelRates[0] : sortedSamples[0];
-      const high = channelRates.length > 0 ? channelRates[channelRates.length - 1] : sortedSamples[sortedSamples.length - 1];
+      // lowNightly / highNightly are diagnostic — keep the LOW
+      // channel range so existing readers don't break.
+      const sortedSamples = lowResult.airbnbSamples > 0 ? [...(seasonScan.perSeason.LOW?.ratesByBR[br] ?? [])].sort((a, b) => a - b) : [];
+      const lowRangeMin = lowResult.channelRates.length > 0 ? lowResult.channelRates[0] : sortedSamples[0];
+      const lowRangeMax = lowResult.channelRates.length > 0 ? lowResult.channelRates[lowResult.channelRates.length - 1] : sortedSamples[sortedSamples.length - 1];
 
       await storage.upsertPropertyMarketRate({
         propertyId,
         bedrooms: br,
-        medianNightly: String(basis),
-        lowNightly: String(low ?? basis),
-        highNightly: String(high ?? basis),
-        sampleCount: channelRates.length > 0 ? channelRates.length : samples.length,
+        medianNightly: String(lowResult.basis),
+        medianNightlyHigh: highResult.basis != null ? String(highResult.basis) : null,
+        medianNightlyHoliday: holidayResult.basis != null ? String(holidayResult.basis) : null,
+        lowNightly: String(lowRangeMin ?? lowResult.basis),
+        highNightly: String(lowRangeMax ?? lowResult.basis),
+        sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.airbnbSamples,
         source: basisSource === "live-multichannel-median" ? "live-multichannel-median" : "airbnb",
       });
       persisted.push({
         bedrooms: br,
-        basis,
+        low: lowResult.basis,
+        high: highResult.basis,
+        holiday: holidayResult.basis,
         basisSource,
-        channels,
-        channelCount: channelRates.length,
-        samples: samples.length,
+        channels: lowResult.channels,
+        channelCount: lowResult.channelRates.length,
       });
     }
 
+    setRefreshProgress({ propertyId, startedAt, phase: "done", percent: 100, label: "Done" });
+    clearRefreshProgress(propertyId);
+
     console.log(
-      `[refresh-market-rates] property ${propertyId} (${config.community}) region=${region} taxFactor=${taxFactor} ${durationMs}ms daemonOnline=${daemonOnline}: ` +
+      `[refresh-market-rates] property ${propertyId} (${config.community}) region=${seasonScan.region} ${seasonScan.durationMs}ms: ` +
       persisted.map((p) =>
-        `${p.bedrooms}BR=$${p.basis}/${p.basisSource}/${p.channelCount}ch (ab=${p.channels.airbnb ?? "—"} vr=${p.channels.vrbo ?? "—"} bk=${p.channels.booking ?? "—"})`
+        `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.channelCount}ch HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
       ).join(", "),
     );
     res.json({
@@ -12519,16 +12526,38 @@ export async function registerRoutes(
       propertyId,
       community: config.community,
       persisted,
-      // Per-channel snapshot for the UI tooltip — non-persisted.
       snapshot: {
-        checkIn: snapshotCheckIn,
-        checkOut: snapshotCheckOut,
-        daemonOnline,
-        region,
-        taxFactor,
-        durationMs,
+        // Window-by-season — UI labels each chip with its season.
+        seasons: {
+          LOW: seasonScan.perSeason.LOW
+            ? { checkIn: seasonScan.perSeason.LOW.snapshotCheckIn, checkOut: seasonScan.perSeason.LOW.snapshotCheckOut, daemonOnline: seasonScan.perSeason.LOW.daemonOnline }
+            : null,
+          HIGH: seasonScan.perSeason.HIGH
+            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: false }
+            : null,
+          HOLIDAY: seasonScan.perSeason.HOLIDAY
+            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: false }
+            : null,
+        },
+        region: seasonScan.region,
+        durationMs: seasonScan.durationMs,
       },
     });
+  });
+
+  // GET /api/property/:id/refresh-progress
+  //
+  // Pricing tab polls this every 1.5s while a refresh is in flight to
+  // render a progress bar. Returns the current phase + percent + label
+  // from the in-memory state in `multichannel-buy-in.ts`. Returns 404
+  // when no refresh is in flight (or terminal state has aged out).
+  app.get("/api/property/:id/refresh-progress", async (req, res) => {
+    const propertyId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid id" });
+    const { getRefreshProgress } = await import("./multichannel-buy-in");
+    const state = getRefreshProgress(propertyId);
+    if (!state) return res.status(404).json({ error: "no active refresh" });
+    return res.json(state);
   });
 
   // POST /api/admin/refresh-all-market-rates

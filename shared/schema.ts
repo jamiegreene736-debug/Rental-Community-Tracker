@@ -251,7 +251,16 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   // path. 10–15% accurate vs operator-validated buy-ins for Caribe Cove
   // / Southern Dunes today; expected to tighten as PM-direct scrapers
   // start tagging samples by source.
+  //
+  // `medianNightly` is the LOW-season basis (the legacy single value
+  // every existing caller reads). The two seasonal columns below were
+  // added in PR #282 and are populated by the multi-channel scan when
+  // it samples HIGH and HOLIDAY windows on top of LOW. Nullable so
+  // existing rows + sidecar-offline runs keep working with just the
+  // LOW value + SEASON_MULTIPLIERS as the fallback.
   medianNightly: numeric("median_nightly", { precision: 10, scale: 2 }).notNull(),
+  medianNightlyHigh: numeric("median_nightly_high", { precision: 10, scale: 2 }),
+  medianNightlyHoliday: numeric("median_nightly_holiday", { precision: 10, scale: 2 }),
   lowNightly: numeric("low_nightly", { precision: 10, scale: 2 }),
   highNightly: numeric("high_nightly", { precision: 10, scale: 2 }),
   sampleCount: integer("sample_count").notNull().default(0),

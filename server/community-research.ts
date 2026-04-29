@@ -143,17 +143,28 @@ export async function fetchAmortizedNightlyByBR(
   // and the resort sits at the southern end, putting all 19 returned
   // listings outside the bbox after Airbnb's ±0.5-1km anonymization.
   bboxCenterOverride?: { lat: number; lng: number },
+  // Optional explicit window. When supplied, overrides the default
+  // "30d-out, 7-night" behavior. Used by the multi-season scan (PR
+  // #282) to pull per-season basis from the engine.
+  dateOverride?: { checkIn: string; checkOut: string },
 ): Promise<AmortizedNightlyResult> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   if (!searchApiKey) return { ratesByBR: {}, bboxApplied: false };
 
-  const now = new Date();
-  now.setUTCHours(0, 0, 0, 0);
-  const checkInDate = new Date(now);
-  checkInDate.setUTCDate(checkInDate.getUTCDate() + 30);
-  const checkOutDate = new Date(checkInDate);
-  checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
   const ymd = (d: Date) => d.toISOString().slice(0, 10);
+  let checkInDate: Date;
+  let checkOutDate: Date;
+  if (dateOverride) {
+    checkInDate = new Date(`${dateOverride.checkIn}T00:00:00Z`);
+    checkOutDate = new Date(`${dateOverride.checkOut}T00:00:00Z`);
+  } else {
+    const now = new Date();
+    now.setUTCHours(0, 0, 0, 0);
+    checkInDate = new Date(now);
+    checkInDate.setUTCDate(checkInDate.getUTCDate() + 30);
+    checkOutDate = new Date(checkInDate);
+    checkOutDate.setUTCDate(checkOutDate.getUTCDate() + 7);
+  }
 
   // Resolve a bbox center, in priority order:
   //   1. explicit `bboxCenterOverride` (operator-validated lat/lng)
