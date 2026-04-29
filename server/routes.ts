@@ -13636,6 +13636,156 @@ export async function registerRoutes(
     res.json({ ok: true, sync: row });
   });
 
+  // POST /api/listings/:id/replace-channel-photos
+  // Body: {
+  //   channel: "vrbo" | "booking",         // airbnb stays on Guesty
+  //   partnerListingRef: string,           // sidecar's portal/extranet id
+  //   folder?: string,                     // pull clean photos from this unit folder
+  //   photos?: Array<{ url, caption? }>,   // OR explicit URL list
+  //   strictCrossChannelClean?: boolean,
+  //   maxPhotos?: number,                  // cap; defaults to channel's published max
+  // }
+  //
+  // Picks a clean photo set (via selectCleanPhotosForChannel if `folder`
+  // supplied, or uses `photos` directly), enqueues a sidecar upload op
+  // (vrbo_upload_photos / booking_upload_photos), and waits for the
+  // worker to complete. On success, marks the uploaded photos as active
+  // on the channel via channelUsage, and audit-logs.
+  //
+  // Phase 2a contract: airbnb stays connected to Guesty (operator's
+  // call), so this endpoint rejects channel="airbnb" — Replace & push
+  // remains the path for Airbnb. Phase 2b implements the actual
+  // sidecar Playwright handlers; until then, requests will time out
+  // with workerOnline=false and the audit log records the attempt.
+  app.post("/api/listings/:id/replace-channel-photos", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    const body = req.body as {
+      channel?: unknown;
+      partnerListingRef?: unknown;
+      folder?: unknown;
+      photos?: unknown;
+      strictCrossChannelClean?: unknown;
+      maxPhotos?: unknown;
+    };
+    const channel = body.channel === "vrbo" || body.channel === "booking" ? body.channel : null;
+    if (!channel) return res.status(400).json({ error: "channel must be 'vrbo' or 'booking' (airbnb stays on Guesty)" });
+    const partnerListingRef = typeof body.partnerListingRef === "string" ? body.partnerListingRef : "";
+    if (!partnerListingRef) return res.status(400).json({ error: "partnerListingRef required" });
+    const folder = typeof body.folder === "string" ? body.folder : null;
+    const explicitPhotos = Array.isArray(body.photos)
+      ? (body.photos as unknown[]).filter((p): p is { url: string; caption?: string } => {
+          if (!p || typeof p !== "object") return false;
+          const o = p as Record<string, unknown>;
+          return typeof o.url === "string" && /^https?:\/\//i.test(o.url);
+        })
+      : null;
+    const strictCrossChannelClean = body.strictCrossChannelClean === true;
+    // Channel published photo caps. Airbnb 100 / VRBO 50 / Booking 40.
+    const channelCap = channel === "vrbo" ? 50 : 40;
+    const maxPhotos = typeof body.maxPhotos === "number" && body.maxPhotos > 0
+      ? Math.min(body.maxPhotos, channelCap)
+      : channelCap;
+
+    // Resolve the photo list. Either the operator passed photos[]
+    // directly (e.g. ImgBB URLs from a prior push-photos run) or we
+    // derive a clean set from the unit folder via the smart selector.
+    let photos: Array<{ url: string; caption?: string }> = [];
+    let derivedFromFolder = false;
+    if (explicitPhotos && explicitPhotos.length > 0) {
+      photos = explicitPhotos.slice(0, maxPhotos);
+    } else if (folder) {
+      try {
+        const { selectCleanPhotosForChannel } = await import("./photo-clean-selector");
+        const sync = await storage.getPhotoSync(guestyListingId, channel);
+        let extraExcludedHashes: string[] = [];
+        if (sync?.previousBadHashes) {
+          try { extraExcludedHashes = JSON.parse(sync.previousBadHashes); } catch { /* ignore */ }
+        }
+        const result = await selectCleanPhotosForChannel(folder, channel, {
+          strictCrossChannelClean,
+          maxResults: maxPhotos,
+          extraExcludedHashes,
+        });
+        // Selected rows reference local files in /photos/<folder>/. The
+        // sidecar can't reach localhost — we need a public URL. Build
+        // a Railway-public URL via PUBLIC_PHOTO_BASE_URL or
+        // RAILWAY_PUBLIC_DOMAIN.
+        const publicHost = (process.env.PUBLIC_PHOTO_BASE_URL?.replace(/\/+$/, "")) ||
+          (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "");
+        if (!publicHost) {
+          return res.status(500).json({ error: "PUBLIC_PHOTO_BASE_URL or RAILWAY_PUBLIC_DOMAIN required for sidecar uploads" });
+        }
+        photos = result.selected.map((r) => ({
+          url: `${publicHost}/photos/${folder}/${r.filename}`,
+          caption: r.userLabel ?? r.label,
+        }));
+        derivedFromFolder = true;
+      } catch (e: any) {
+        return res.status(500).json({ error: `clean-photo selection failed: ${e?.message ?? e}` });
+      }
+    } else {
+      return res.status(400).json({ error: "either folder or photos[] required" });
+    }
+    if (photos.length === 0) {
+      return res.status(409).json({ error: "no clean photos available — every candidate matches a hash currently active on this channel" });
+    }
+
+    console.log(`[replace-channel-photos] listing=${guestyListingId} channel=${channel} ref=${partnerListingRef} photos=${photos.length} derived=${derivedFromFolder}`);
+
+    // Audit the attempt up front so even worker timeouts leave a trace.
+    await storage.createPhotoSyncAudit({
+      guestyListingId,
+      channel,
+      action: "replace",
+      reason: derivedFromFolder ? `auto-selected ${photos.length} clean photos from folder ${folder}` : `${photos.length} explicit photos`,
+      details: JSON.stringify({ partnerListingRef, photoCount: photos.length, derivedFromFolder, strictCrossChannelClean }),
+    });
+
+    try {
+      const { uploadPhotosToChannelViaSidecar } = await import("./vrbo-sidecar-queue");
+      const r = await uploadPhotosToChannelViaSidecar({
+        channel,
+        partnerListingRef,
+        photos,
+      });
+      // On success, mark the uploaded photos active on this channel.
+      // Only meaningful when we derived from a folder — then we have
+      // the photoLabels rows to update.
+      if (r.result && r.result.uploaded > 0 && derivedFromFolder && folder) {
+        const { bumpChannelUsage } = await import("./photo-clean-selector");
+        const labels = await storage.getPhotoLabelsByFolder(folder);
+        const filenamesByUrl = new Map(photos.map((p) => [p.url, p.url.split("/").pop()?.split("?")[0] ?? ""]));
+        const detailsByUrl = new Map((r.result.details ?? []).map((d) => [d.url, d]));
+        let updated = 0;
+        for (const [url, filename] of Array.from(filenamesByUrl.entries())) {
+          const detail = detailsByUrl.get(url);
+          // If the worker reports per-photo status, only bump the ones
+          // it confirmed. If not (older worker just reports counts),
+          // optimistically bump every photo we sent.
+          if (detail && !detail.ok) continue;
+          const row = labels.find((l) => l.filename === filename);
+          if (!row) continue;
+          const next = bumpChannelUsage(row.channelUsage, channel, true);
+          await storage.updatePhotoLabelChannelUsage(folder, filename, next);
+          updated++;
+        }
+        console.log(`[replace-channel-photos] channelUsage updated on ${updated} photos`);
+      }
+
+      res.json({
+        ok: !!r.result,
+        workerOnline: r.workerOnline,
+        durationMs: r.durationMs,
+        reason: r.reason,
+        result: r.result,
+        photosSent: photos.length,
+      });
+    } catch (e: any) {
+      console.error(`[replace-channel-photos] error: ${e?.message ?? e}`);
+      res.status(500).json({ error: e?.message ?? "sidecar enqueue failed" });
+    }
+  });
+
   // GET /api/listings/:id/daily-scan-results
   // Recent photo_sync_audit history for this listing. Used by the UI
   // panel and the future daily scanner detail view.
