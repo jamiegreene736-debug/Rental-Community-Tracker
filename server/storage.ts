@@ -71,6 +71,7 @@ export interface IStorage {
   deleteCommunityDraft(id: number): Promise<boolean>;
 
   upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate>;
+  deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
   getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]>;
   getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
 
@@ -390,6 +391,22 @@ export class DatabaseStorage implements IStorage {
       ));
     const [row] = await db.insert(propertyMarketRates).values(input).returning();
     return row;
+  }
+
+  // PR #291: clear out stale rows when a refresh scan returns no
+  // usable basis. Without this, a previous scan's bad data (e.g. the
+  // booking-regex bug surfaced 2026-04-29 that persisted $67 for
+  // Kaha Lani 3BR) sticks around forever — the route's upsert is
+  // skipped when basis is null/0, so the bad row never gets
+  // overwritten. Deleting on empty-scan lets the Pricing tab fall
+  // through to BUY_IN_RATES static which is at least sane.
+  async deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void> {
+    await db
+      .delete(propertyMarketRates)
+      .where(and(
+        eq(propertyMarketRates.propertyId, propertyId),
+        eq(propertyMarketRates.bedrooms, bedrooms),
+      ));
   }
 
   async getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]> {
