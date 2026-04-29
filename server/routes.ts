@@ -12502,6 +12502,15 @@ export async function registerRoutes(
             : "airbnb";
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
+        // Scan returned no usable LOW basis for this BR. Delete any
+        // stale row in property_market_rates so the Pricing tab
+        // falls through to BUY_IN_RATES static instead of serving
+        // the previous scan's (potentially buggy) value indefinitely.
+        // Surfaced 2026-04-29 by Kaha Lani 3BR: a prior buggy
+        // booking scrape persisted $67, then subsequent clean scans
+        // returned 0 channels and skipped the upsert — so the bad
+        // $67 stuck for hours. Now we explicitly clear it.
+        await storage.deletePropertyMarketRate(propertyId, br);
         persisted.push({
           bedrooms: br,
           low: 0,
