@@ -2748,6 +2748,13 @@ export async function registerRoutes(
           });
           if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
           return {
+            // Sidecar VRBO scrape runs the operator's real Chrome
+            // against vrbo.com search with the date filter applied,
+            // so the prices ARE date-specific (same shape as the
+            // Booking sidecar candidates above). Mark verified=yes
+            // so the cheapest-pool gate (`verified === "yes"`) admits
+            // them — operator wants Vrbo eligible to be the auto-pick
+            // when it's the cheapest option (PR #306).
             candidates: r.candidates.map((c): Candidate => ({
               source: "vrbo" as const,
               sourceLabel: "Vrbo",
@@ -2758,6 +2765,9 @@ export async function registerRoutes(
               bedrooms: c.bedrooms,
               image: c.image,
               snippet: c.snippet,
+              verified: "yes",
+              verifiedNightlyPrice: c.nightlyPrice,
+              verifiedReason: "Vrbo sidecar (operator's real Chrome) returned a date-specific quote",
             })),
             workerOnline: r.workerOnline,
             durationMs: r.durationMs,
@@ -2806,21 +2816,59 @@ export async function registerRoutes(
     // specific property listing pages (not just the homepage) for the target
     // bedroom count. This gives the host actual per-property URLs they can
     // click through to, rather than a generic PM homepage.
+    //
+    // Stage 1 source priority (PR #306):
+    //   1. Sidecar Google SERP — runs against the operator's real Chrome
+    //      on home IP. Returns Hawaii/Florida-tilted PM rankings that
+    //      SearchAPI's datacenter IPs miss. ~3-5s extra wall but more
+    //      relevant domain set feeds Stage 2.
+    //   2. SearchAPI engine=google — fallback when daemon offline.
     let pmRawCount = 0;
+    let pmStage1Source: "sidecar" | "searchapi" | "none" = "none";
     const pmPromise: Promise<Candidate[]> = (async () => {
       try {
         const qualifier = resortName ? `"${resortName}"` : community;
         const query = `${qualifier} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`;
-        const params = new URLSearchParams({
-          engine: "google",
-          q: query,
-          num: "10",
-          api_key: apiKey,
-        });
-        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-        if (!r.ok) return [];
-        const data = await r.json() as any;
-        const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
+
+        // Try sidecar first.
+        let organic: Array<{ link?: string; title?: string; snippet?: string }> = [];
+        try {
+          const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
+          const sidecarSerp = await googleSerpViaSidecar({
+            query,
+            maxResults: 10,
+            walletBudgetMs: 60_000,
+          });
+          if (sidecarSerp.workerOnline && sidecarSerp.hits.length > 0) {
+            organic = sidecarSerp.hits.map((h) => ({
+              link: h.url,
+              title: h.title,
+              snippet: h.snippet,
+            }));
+            pmStage1Source = "sidecar";
+            console.log(
+              `[find-buy-in] pm-stage1 via sidecar: ${organic.length} organic results (${sidecarSerp.durationMs}ms)`,
+            );
+          }
+        } catch (e: any) {
+          console.warn(`[find-buy-in] pm-stage1 sidecar attempt failed:`, e?.message ?? e);
+        }
+
+        // Fallback: SearchAPI engine=google.
+        if (organic.length === 0) {
+          const params = new URLSearchParams({
+            engine: "google",
+            q: query,
+            num: "10",
+            api_key: apiKey,
+          });
+          const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+          if (!r.ok) return [];
+          const data = await r.json() as any;
+          organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
+          pmStage1Source = "searchapi";
+          console.log(`[find-buy-in] pm-stage1 via SearchAPI fallback: ${organic.length} organic results`);
+        }
         pmRawCount = organic.length;
 
         // Dedupe by domain and keep the top N candidate PM sites
@@ -3487,19 +3535,21 @@ export async function registerRoutes(
     // posture. Airbnb engine results are date-specific by construction
     // (the engine query carries check_in / check_out and returns only
     // available units), so they're auto-marked verified=yes upstream
-    // and join the priced pool alongside Booking + PM. The TOS-sublet
-    // warning still appears in client-side auto-fill notes when an
-    // Airbnb URL is picked — that's a billing-flow concern, not a
-    // discovery-flow concern, and the operator wants visibility into
-    // the actually-cheapest option regardless of channel.
+    // and join the priced pool alongside Booking + PM.
     //
-    // Vrbo stays OUT of the priced/cheapest pool — same TOS sublet
-    // restriction as Airbnb but no engine-level date verification, so
-    // surfacing it as "buy this" is a footgun. It still appears under
-    // sources.vrbo for awareness / direct-with-owner outreach.
-    // Booking.com — google_hotels engine results are date-specific.
-    // PM — verified via the Stagehand pre-verify pass below.
-    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...pmAugmented]
+    // Operator directive 2026-04-29 (PR #306): include Vrbo fully in
+    // cheapest as well. The TOS-sublet posture is the same as Airbnb's
+    // (operator handles the channel-specific compliance side) and the
+    // sidecar VRBO scrape runs against the operator's real Chrome with
+    // dates applied, so prices are real and date-specific — same data
+    // honesty as Airbnb engine + Booking google_hotels engine. Only
+    // sidecar-sourced VRBO rows make it into priced (Google
+    // site:search VRBO rows are unpriced and stay out via the
+    // nightlyPrice > 0 filter).
+    //
+    // Booking.com — google_hotels engine + sidecar; both date-specific.
+    // PM — verified via the sidecar batch-verify pass above.
+    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...vrbo, ...pmAugmented]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
