@@ -218,6 +218,18 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     return result;
   }
 
+  // Lazy backfill of perceptual hashes for legacy rows. Cheap if
+  // already done (skips rows that have a hash). Runs before we read
+  // labels so the smart selector + cross-channel-leak check downstream
+  // always have hashes to work with on at least the freshly-touched
+  // folders.
+  try {
+    const { backfillFolderHashes } = await import("./photo-hashing");
+    await backfillFolderHashes(folder);
+  } catch (e: any) {
+    console.error(`[photo-listing-scanner] backfill ${folder}: ${e?.message ?? e}`);
+  }
+
   const labels = await storage.getPhotoLabelsByFolder(folder);
   const visible = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
   // Prefer interior categories for the hero set. "Building Exterior"

@@ -748,6 +748,24 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
+  // Sets photo_labels.perceptual_hash for an existing row. No-op if the
+  // row doesn't exist (folder/filename pair not yet labeled — caller
+  // will catch up on the next labeler pass).
+  async updatePhotoLabelHash(folder: string, filename: string, perceptualHash: string): Promise<void> {
+    await db.update(photoLabels)
+      .set({ perceptualHash })
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
+  // Sets photo_labels.channel_usage (JSON-encoded) for one row. Used
+  // by the channel-photo-independence flow to record that a specific
+  // photo is currently live on a particular channel.
+  async updatePhotoLabelChannelUsage(folder: string, filename: string, channelUsage: string): Promise<void> {
+    await db.update(photoLabels)
+      .set({ channelUsage })
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
   async getRecentPhotoListingAlerts(limit: number): Promise<PhotoListingAlert[]> {
     return db.select().from(photoListingAlerts)
       .orderBy(desc(photoListingAlerts.detectedAt))
