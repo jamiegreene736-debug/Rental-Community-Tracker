@@ -13464,6 +13464,193 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // Channel Photo Independence — isolation API
+  //
+  // Each listing's relationship with each OTA channel is one of:
+  //   "synced"   — Guesty's pictures[] is the source of truth, fans
+  //                out to the channel as usual.
+  //   "isolated" — Guesty's photo sync to this channel is conceptually
+  //                disabled; the operator manages photos for this
+  //                channel independently. We capture the hashes that
+  //                were live at isolation time (`previousBadHashes`)
+  //                so the daily scanner can detect re-theft and the
+  //                smart selector can avoid republishing those photos.
+  //
+  // The actual disconnect on Guesty's side is a manual operator step
+  // (Settings > Integrations > [Channel] > Disconnect) — this API
+  // tracks intent and metadata; the sidecar in Phase 2 will do the
+  // real per-channel photo upload.
+  // ============================================================
+
+  const ISOLATION_CHANNELS = new Set(["airbnb", "vrbo", "booking"]);
+
+  // POST /api/listings/:id/isolate-channel
+  // Body: { channels: string[], reason?: string, badHashes?: string[] }
+  // Records each channel as isolated for this Guesty listing. If
+  // badHashes is omitted, we snapshot the current Guesty photos:
+  // GET the listing, hash each picture URL via download, store as
+  // previousBadHashes. (For the spec's "Step A — fetch the current
+  // live photos on the target channel" flow.) If the operator
+  // already has hashes to record (e.g. from the alert's matchedUrls),
+  // they can pass them directly to skip the network round trip.
+  app.post("/api/listings/:id/isolate-channel", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    const body = req.body as { channels?: unknown; reason?: unknown; badHashes?: unknown };
+    const channels = Array.isArray(body.channels) ? (body.channels as unknown[]).filter((c) => typeof c === "string" && ISOLATION_CHANNELS.has(c)) as string[] : [];
+    const reason = typeof body.reason === "string" ? body.reason : null;
+    const suppliedBadHashes = Array.isArray(body.badHashes)
+      ? (body.badHashes as unknown[]).filter((h): h is string => typeof h === "string" && /^[0-9a-f]+$/i.test(h))
+      : null;
+    if (channels.length === 0) {
+      return res.status(400).json({ error: "channels[] required (subset of airbnb / vrbo / booking)" });
+    }
+
+    // Snapshot the current Guesty pictures + hash them (one per
+    // channel — Guesty has one pictures[] per listing today, so the
+    // bad-hash set is the same across channels. Stored per-channel
+    // for forward compatibility once Guesty or our sidecar tracks
+    // photos per-channel for real.)
+    let badHashes: string[] = [];
+    if (suppliedBadHashes && suppliedBadHashes.length > 0) {
+      badHashes = Array.from(new Set(suppliedBadHashes));
+    } else {
+      try {
+        const { computeDhash } = await import("./photo-hashing");
+        const listing = await guestyRequest(`/listings/${guestyListingId}`) as any;
+        const pictures: Array<{ original?: string }> = Array.isArray(listing?.pictures) ? listing.pictures : [];
+        for (const pic of pictures) {
+          const url = pic?.original;
+          if (typeof url !== "string" || !/^https?:\/\//i.test(url)) continue;
+          try {
+            const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+            if (!r.ok) continue;
+            const buf = Buffer.from(await r.arrayBuffer());
+            const hash = await computeDhash(buf);
+            badHashes.push(hash);
+          } catch (e: any) {
+            console.error(`[isolate-channel] hash ${url}: ${e?.message ?? e}`);
+          }
+        }
+        badHashes = Array.from(new Set(badHashes));
+      } catch (e: any) {
+        return res.status(502).json({ error: `Couldn't snapshot Guesty photos: ${e?.message ?? e}` });
+      }
+    }
+
+    const now = new Date();
+    const results: Record<string, { id: number; status: string; hashCount: number }> = {};
+    for (const channel of channels) {
+      const row = await storage.upsertPhotoSync({
+        guestyListingId,
+        channel,
+        status: "isolated",
+        isolatedAt: now,
+        isolatedReason: reason,
+        previousBadHashes: JSON.stringify(badHashes),
+        reEnabledAt: null,
+      });
+      await storage.createPhotoSyncAudit({
+        guestyListingId,
+        channel,
+        action: "isolate",
+        reason,
+        details: JSON.stringify({ hashCount: badHashes.length }),
+      });
+      results[channel] = { id: row.id, status: row.status, hashCount: badHashes.length };
+    }
+    console.log(`[isolate-channel] listing=${guestyListingId} channels=${channels.join(",")} hashes=${badHashes.length} reason=${reason ?? "(none)"}`);
+    res.json({ ok: true, results, badHashes });
+  });
+
+  // GET /api/listings/:id/photo-sync-status
+  // Returns per-channel state for the UI panel. Channels with no row
+  // are reported as "synced" (default state — Guesty's pictures[] is
+  // fanning out as usual).
+  app.get("/api/listings/:id/photo-sync-status", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    try {
+      const rows = await storage.getPhotoSyncByListing(guestyListingId);
+      const byChannel = new Map(rows.map((r) => [r.channel, r]));
+      const channels = Array.from(ISOLATION_CHANNELS).map((channel) => {
+        const r = byChannel.get(channel);
+        return {
+          channel,
+          status: r?.status ?? "synced",
+          isolatedAt: r?.isolatedAt ?? null,
+          isolatedReason: r?.isolatedReason ?? null,
+          reEnabledAt: r?.reEnabledAt ?? null,
+          updatedAt: r?.updatedAt ?? null,
+          hashCount: r?.previousBadHashes ? (() => {
+            try { return (JSON.parse(r.previousBadHashes) as string[]).length; } catch { return 0; }
+          })() : 0,
+        };
+      });
+      res.json({ guestyListingId, channels });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to load photo sync status" });
+    }
+  });
+
+  // POST /api/listings/:id/re-enable-channel-sync
+  // Body: { channel: string }
+  // Flips the channel back to "synced". Clears previous_bad_hashes.
+  // Does NOT push photos to Guesty — the next operator-initiated
+  // photo update will resume Master Sync naturally. Audit is recorded.
+  app.post("/api/listings/:id/re-enable-channel-sync", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    const body = req.body as { channel?: unknown };
+    const channel = typeof body.channel === "string" && ISOLATION_CHANNELS.has(body.channel) ? body.channel : null;
+    if (!channel) return res.status(400).json({ error: "channel required (airbnb | vrbo | booking)" });
+
+    const existing = await storage.getPhotoSync(guestyListingId, channel);
+    if (!existing) return res.status(404).json({ error: "No isolation record for this listing+channel" });
+    if (existing.status === "synced") return res.json({ ok: true, alreadySynced: true });
+
+    const row = await storage.upsertPhotoSync({
+      guestyListingId,
+      channel,
+      status: "synced",
+      isolatedAt: existing.isolatedAt,
+      isolatedReason: existing.isolatedReason,
+      previousBadHashes: null,
+      reEnabledAt: new Date(),
+    });
+    await storage.createPhotoSyncAudit({
+      guestyListingId,
+      channel,
+      action: "re-enable",
+      reason: null,
+      details: null,
+    });
+    console.log(`[re-enable-channel-sync] listing=${guestyListingId} channel=${channel}`);
+    res.json({ ok: true, sync: row });
+  });
+
+  // GET /api/listings/:id/daily-scan-results
+  // Recent photo_sync_audit history for this listing. Used by the UI
+  // panel and the future daily scanner detail view.
+  app.get("/api/listings/:id/daily-scan-results", async (req, res) => {
+    const guestyListingId = String(req.params.id);
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100)));
+    try {
+      const rows = await storage.getRecentPhotoSyncAudit(guestyListingId, limit);
+      res.json({
+        guestyListingId,
+        results: rows.map((r) => ({
+          id: r.id,
+          channel: r.channel,
+          action: r.action,
+          reason: r.reason,
+          details: r.details ? (() => { try { return JSON.parse(r.details!); } catch { return null; } })() : null,
+          performedAt: r.performedAt,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to load scan results" });
+    }
+  });
+
 
   // ============================================================
   // Step 3: Generate algorithm-based unit pairing suggestions for a community

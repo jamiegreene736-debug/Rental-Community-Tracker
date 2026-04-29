@@ -574,3 +574,47 @@ export const photoListingAlerts = pgTable("photo_listing_alerts", {
 });
 export type PhotoListingAlert = typeof photoListingAlerts.$inferSelect;
 export type InsertPhotoListingAlert = typeof photoListingAlerts.$inferInsert;
+
+// ── Channel Photo Independence ──
+// Per-(listing, channel) sync state. When the operator isolates a
+// channel for a listing, we flip status to "isolated" and capture
+// the hashes of the photos that were live at isolation time
+// ("previous_bad_hashes") so the daily scanner can detect re-theft
+// (same hash reappearing) or cross-channel leak (same hash now
+// active on a different channel). Re-enabling Master Sync sets
+// status back to "synced" and clears previous_bad_hashes.
+//
+// One row per (guestyListingId, channel) — caller upserts.
+export const photoSync = pgTable("photo_sync", {
+  id: serial("id").primaryKey(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  channel: text("channel").notNull(),               // "airbnb" | "vrbo" | "booking"
+  status: text("status").notNull().default("synced"), // "synced" | "isolated"
+  isolatedAt: timestamp("isolated_at"),
+  isolatedReason: text("isolated_reason"),
+  previousBadHashes: text("previous_bad_hashes"),    // JSON array of dHash hex strings
+  reEnabledAt: timestamp("re_enabled_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type PhotoSync = typeof photoSync.$inferSelect;
+export type InsertPhotoSync = typeof photoSync.$inferInsert;
+
+// Append-only audit of every photo-sync state change. Survives the
+// status flip in photoSync — we want history even after re-enable.
+//
+// action values:
+//   "isolate"   — channel flipped synced → isolated
+//   "re-enable" — channel flipped isolated → synced
+//   "replace"   — replacement photos pushed to an isolated channel
+//   "scan"      — daily scanner ran and stored a hash snapshot
+export const photoSyncAudit = pgTable("photo_sync_audit", {
+  id: serial("id").primaryKey(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  channel: text("channel").notNull(),
+  action: text("action").notNull(),
+  reason: text("reason"),
+  details: text("details"),                          // JSON; counts, hashes, etc.
+  performedAt: timestamp("performed_at").defaultNow().notNull(),
+});
+export type PhotoSyncAudit = typeof photoSyncAudit.$inferSelect;
+export type InsertPhotoSyncAudit = typeof photoSyncAudit.$inferInsert;

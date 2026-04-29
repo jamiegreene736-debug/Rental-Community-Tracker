@@ -14,11 +14,13 @@ import {
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
   type PhotoListingAlert, type InsertPhotoListingAlert,
+  type PhotoSync, type InsertPhotoSync,
+  type PhotoSyncAudit, type InsertPhotoSyncAudit,
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -764,6 +766,47 @@ export class DatabaseStorage implements IStorage {
     await db.update(photoLabels)
       .set({ channelUsage })
       .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
+  // ── Channel-photo-independence: photo_sync ──
+  // One row per (guestyListingId, channel). Caller upserts: get existing
+  // by listing+channel and either insert a new row or update in place.
+  async getPhotoSync(guestyListingId: string, channel: string): Promise<PhotoSync | undefined> {
+    const [row] = await db.select().from(photoSync)
+      .where(and(eq(photoSync.guestyListingId, guestyListingId), eq(photoSync.channel, channel)));
+    return row;
+  }
+
+  async getPhotoSyncByListing(guestyListingId: string): Promise<PhotoSync[]> {
+    return db.select().from(photoSync).where(eq(photoSync.guestyListingId, guestyListingId));
+  }
+
+  async upsertPhotoSync(data: InsertPhotoSync): Promise<PhotoSync> {
+    const existing = await this.getPhotoSync(data.guestyListingId, data.channel);
+    if (existing) {
+      const [row] = await db.update(photoSync)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(photoSync.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoSync).values(data).returning();
+    return row;
+  }
+
+  // ── Channel-photo-independence: photo_sync_audit ──
+  // Append-only. Caller passes the action ("isolate" | "re-enable" |
+  // "replace" | "scan") and any structured details as a JSON blob.
+  async createPhotoSyncAudit(data: InsertPhotoSyncAudit): Promise<PhotoSyncAudit> {
+    const [row] = await db.insert(photoSyncAudit).values(data).returning();
+    return row;
+  }
+
+  async getRecentPhotoSyncAudit(guestyListingId: string, limit = 100): Promise<PhotoSyncAudit[]> {
+    return db.select().from(photoSyncAudit)
+      .where(eq(photoSyncAudit.guestyListingId, guestyListingId))
+      .orderBy(desc(photoSyncAudit.performedAt))
+      .limit(limit);
   }
 
   async getRecentPhotoListingAlerts(limit: number): Promise<PhotoListingAlert[]> {
