@@ -312,12 +312,32 @@ const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: numbe
   return months;
 })();
 
-function generateMonthlyRates(baseBuyIn: number, community: string): MonthRate[] {
+function generateMonthlyRates(
+  baseBuyIn: number,
+  community: string,
+  // PR #282: when supplied, each month's buy-in is read directly via
+  // getBuyInRate(community, br, propertyId, season) — picks up the
+  // per-season basis from the live cache when populated. Falls back
+  // to baseBuyIn × multiplier when the cache has no per-season data
+  // for that BR (legacy single-window scan or static BUY_IN_RATES).
+  propertyId?: number,
+  bedrooms?: number,
+): MonthRate[] {
   const region = getCommunityRegion(community);
   return RATE_SCHEDULE_MONTHS.map(({ yearMonth, monthIndex, year }) => {
     const season = getSeasonForMonth(yearMonth, region);
-    const multiplier = SEASON_MULTIPLIERS[region][season];
-    const buyInRate = Math.round(baseBuyIn * multiplier);
+    let buyInRate: number;
+    if (propertyId != null && bedrooms != null) {
+      // getBuyInRate reads per-season basis from live cache when
+      // available; falls through to LOW × multiplier internally
+      // when not.
+      buyInRate = getBuyInRate(community, bedrooms, propertyId, season);
+    } else {
+      // Legacy callers (no propertyId/bedrooms): apply multiplier
+      // to the base.
+      const multiplier = SEASON_MULTIPLIERS[region][season];
+      buyInRate = Math.round(baseBuyIn * multiplier);
+    }
     const sellRate = Math.round(buyInRate * MARKUP);
     return { month: MONTH_NAMES[monthIndex], year, yearMonth, season, buyInRate, sellRate };
   });
@@ -439,7 +459,7 @@ export function getPropertyPricing(propertyId: number): PropertyPricing | null {
   const units: UnitPricing[] = config.units.map((unit) => {
     const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
     const baseSellRate = Math.round(baseBuyIn * MARKUP);
-    const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
+    const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unit.bedrooms);
     return { unitId: unit.unitId, unitLabel: unit.unitLabel, bedrooms: unit.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates };
   });
 
@@ -487,7 +507,7 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
     for (const unitCfg of config.units) {
       const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms, propertyId);
       const baseSellRate = Math.round(baseBuyIn * MARKUP);
-      const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
+      const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unitCfg.bedrooms);
       results.push({
         propertyId,
         community: config.community,

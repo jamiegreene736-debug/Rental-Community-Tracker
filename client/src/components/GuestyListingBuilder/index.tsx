@@ -1810,20 +1810,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // right now: airbnb $620 · vrbo $580 · booking $605" so the operator
   // can see when one channel diverges materially from the median basis.
   const [liveSnapshot, setLiveSnapshot] = useState<{
-    checkIn: string;
-    checkOut: string;
-    daemonOnline: boolean;
+    seasons: {
+      LOW:     { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+      HIGH:    { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+      HOLIDAY: { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+    };
     region: "hawaii" | "florida" | null;
-    taxFactor: number | null;
     perBR: Array<{
       bedrooms: number;
-      airbnb: number | null;
-      vrbo: number | null;
-      booking: number | null;
-      basis: number;
+      // Per-season basis from the multi-season scan. LOW always
+      // present (or 0 if the scan had no data); HIGH/HOLIDAY null
+      // when the scan didn't cover that season.
+      low: number;
+      high: number | null;
+      holiday: number | null;
       basisSource: "live-multichannel-median" | "airbnb" | "none";
       channelCount: number;
+      // LOW-season per-channel breakdown — same as before. HIGH +
+      // HOLIDAY don't get the per-channel chips (Airbnb-only basis).
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
     }>;
+  } | null>(null);
+
+  // Live progress state for the in-flight refresh — polled every
+  // 1.5s while marketRatesRefreshing is true.
+  const [refreshProgress, setRefreshProgress] = useState<{
+    phase: string;
+    percent: number;
+    label: string;
   } | null>(null);
   const reloadMarketRates = useCallback(async () => {
     try {
@@ -1845,6 +1859,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const refreshThisPropertyMarketRates = useCallback(async () => {
     if (!propertyId || marketRatesRefreshing) return;
     setMarketRatesRefreshing(true);
+    setRefreshProgress({ phase: "starting", percent: 0, label: "Starting…" });
+
+    // Poll progress endpoint while refresh is in flight.
+    let progressTimer: number | null = null;
+    if (propertyId > 0) {
+      const tickProgress = async () => {
+        try {
+          const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
+          if (r.ok) {
+            const p = await r.json() as { phase: string; percent: number; label: string };
+            setRefreshProgress({ phase: p.phase, percent: p.percent, label: p.label });
+          }
+        } catch {}
+      };
+      progressTimer = window.setInterval(tickProgress, 1500);
+    }
+
     try {
       // Negative ids (drafts) and positive ids (static) both work —
       // the static endpoint redirects negative ids to the draft path.
@@ -1857,44 +1888,53 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         toast({ title: "Refresh failed", description: data?.error || `HTTP ${r.status}`, variant: "destructive" });
         return;
       }
-      // Static-property endpoint returns the live channel snapshot
-      // (PR #276); draft endpoint doesn't yet, so we no-op for drafts.
       const data = await r.json().catch(() => ({} as Record<string, unknown>));
       const persisted = (data as any)?.persisted;
       const snapshot = (data as any)?.snapshot;
-      if (Array.isArray(persisted) && snapshot && typeof snapshot === "object") {
+      // Static-property endpoint (PR #282 onwards) returns
+      // snapshot.seasons; draft endpoint doesn't yet, so we no-op
+      // for drafts.
+      if (Array.isArray(persisted) && snapshot && typeof snapshot === "object" && snapshot.seasons) {
         const region: "hawaii" | "florida" | null =
           (snapshot as any).region === "hawaii" || (snapshot as any).region === "florida"
             ? (snapshot as any).region
             : null;
-        const taxFactor =
-          typeof (snapshot as any).taxFactor === "number" ? (snapshot as any).taxFactor : null;
+        const parseSeason = (s: any) => s && typeof s === "object"
+          ? { checkIn: String(s.checkIn ?? ""), checkOut: String(s.checkOut ?? ""), daemonOnline: !!s.daemonOnline }
+          : null;
         setLiveSnapshot({
-          checkIn: String(snapshot.checkIn ?? ""),
-          checkOut: String(snapshot.checkOut ?? ""),
-          daemonOnline: !!snapshot.daemonOnline,
+          seasons: {
+            LOW: parseSeason(snapshot.seasons.LOW),
+            HIGH: parseSeason(snapshot.seasons.HIGH),
+            HOLIDAY: parseSeason(snapshot.seasons.HOLIDAY),
+          },
           region,
-          taxFactor,
           perBR: persisted.map((p: any) => ({
             bedrooms: Number(p.bedrooms),
-            airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
-            vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
-            booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
-            basis: typeof p.basis === "number" ? p.basis : 0,
+            low: typeof p.low === "number" ? p.low : 0,
+            high: typeof p.high === "number" ? p.high : null,
+            holiday: typeof p.holiday === "number" ? p.holiday : null,
             basisSource: (p.basisSource === "live-multichannel-median" || p.basisSource === "airbnb")
               ? p.basisSource
               : "none",
             channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
+            channels: {
+              airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
+              vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
+              booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
+            },
           })),
         });
       } else {
         setLiveSnapshot(null);
       }
       await reloadMarketRates();
-      toast({ title: "Market rates refreshed" });
+      toast({ title: "Market rates refreshed", description: "Per-season basis updated for LOW / HIGH / HOLIDAY" });
     } catch (e: any) {
       toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
     } finally {
+      if (progressTimer) window.clearInterval(progressTimer);
+      setRefreshProgress(null);
       setMarketRatesRefreshing(false);
     }
   }, [propertyId, marketRatesRefreshing, reloadMarketRates, toast]);
@@ -3398,84 +3438,104 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. Basis = MEDIAN of per-channel cheapest verified nightly, all-in (taxes + fees normalized). Drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Single 7-night LOW-season window; HIGH/HOLIDAY months get the seasonal multipliers. When the sidecar is offline only Airbnb runs; basis falls back to the Airbnb-engine median. ~30-90s online; ~10s offline."
+                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY: LOW gets the full multichannel scan (Airbnb engine + sidecar VRBO + sidecar Booking, median, all-in, taxes/fees normalized); HIGH and HOLIDAY use Airbnb engine only for speed (sidecar reserved for the LOW-season basis). Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). When sidecar is offline LOW falls back to Airbnb-only median. Auto-refreshes weekly via the scheduler; click to refresh now (~30-90s)."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
                               </div>
                             )}
-                            {/* Per-channel snapshot of the most recent
-                                refresh. Each row shows per-channel
-                                all-in nightly + the resulting median
-                                that became the persisted buy-in basis.
-                                Operator scans this to spot-check the
-                                normalization and confirm the median
-                                makes sense before pushing rates to
-                                Guesty. */}
+                            {/* Inline progress bar — visible while a
+                                refresh is in flight. Server-side phase
+                                drives the percent (0% → starting → 5%
+                                airbnb-low → 30% airbnb-high done →
+                                50% airbnb-holiday done → 90% sidecar-low
+                                done → 95% persisting → 100% done). */}
+                            {marketRatesRefreshing && refreshProgress && (
+                              <div style={{ marginBottom: 8, padding: "6px 10px", border: "1px solid #cfe2ff", background: "#eef4ff", borderRadius: 4, fontSize: 11, color: "#1e3a8a" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                  <span style={{ fontWeight: 500 }}>Scanning per-season basis…</span>
+                                  <span style={{ fontFamily: "ui-monospace, monospace" }}>{refreshProgress.percent}%</span>
+                                </div>
+                                <div style={{ height: 6, background: "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
+                                  <div style={{ width: `${Math.max(0, Math.min(100, refreshProgress.percent))}%`, height: "100%", background: "#2563eb", transition: "width 250ms ease" }} />
+                                </div>
+                                <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
+                              </div>
+                            )}
+                            {/* Per-season basis card — shows what the
+                                most recent refresh persisted for LOW /
+                                HIGH / HOLIDAY. LOW row also shows the
+                                per-channel chips (where the median was
+                                taken from); HIGH/HOLIDAY are Airbnb-
+                                only by design. The seasonal monthly
+                                rate table further down reads from these
+                                values directly when present, falling
+                                back to LOW × multiplier when absent. */}
                             {liveSnapshot && liveSnapshot.perBR.length > 0 && (
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
-                                  <span style={{ fontWeight: 600 }} title={
-                                    liveSnapshot.region && liveSnapshot.taxFactor
-                                      ? `Region: ${liveSnapshot.region}. Tax factor applied to VRBO + Booking rates: ×${liveSnapshot.taxFactor} (Airbnb is already all-in).`
-                                      : undefined
-                                  }>
-                                    Per-channel all-in · {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
+                                  <span style={{ fontWeight: 600 }}>
+                                    Per-season buy-in basis
                                     {liveSnapshot.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
-                                        ({liveSnapshot.region}, +{(((liveSnapshot.taxFactor ?? 1) - 1) * 100).toFixed(1)}% tax on VRBO/Booking)
+                                        ({liveSnapshot.region})
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{ fontSize: 10, color: liveSnapshot.daemonOnline ? "#059669" : "#9ca3af" }}>
-                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online — VRBO + Booking in median" : "○ sidecar offline — basis fell back to Airbnb median"}
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="LOW window samples sidecar VRBO + Booking + Airbnb. HIGH/HOLIDAY pull Airbnb engine only for speed.">
+                                    Auto-refresh every 7 days · click ↻ to scan now
                                   </span>
                                 </div>
-                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                {/* Window labels */}
+                                <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>
+                                  Windows:{" "}
+                                  {liveSnapshot.seasons.LOW && <>LOW {liveSnapshot.seasons.LOW.checkIn}→{liveSnapshot.seasons.LOW.checkOut}{liveSnapshot.seasons.LOW.daemonOnline ? " 🟢" : " ○"}</>}
+                                  {liveSnapshot.seasons.HIGH && <> · HIGH {liveSnapshot.seasons.HIGH.checkIn}→{liveSnapshot.seasons.HIGH.checkOut}</>}
+                                  {liveSnapshot.seasons.HOLIDAY && <> · HOLIDAY {liveSnapshot.seasons.HOLIDAY.checkIn}→{liveSnapshot.seasons.HOLIDAY.checkOut}</>}
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                                   {liveSnapshot.perBR.map((row) => {
-                                    const { bedrooms, airbnb, vrbo, booking, basis, basisSource, channelCount } = row;
-                                    const fmt = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
-                                    const channelChip = (label: string, rate: number | null, color: string) => (
-                                      <span
-                                        key={label}
-                                        style={{
-                                          display: "inline-flex",
-                                          alignItems: "center",
-                                          gap: 4,
-                                          padding: "2px 7px",
-                                          borderRadius: 4,
-                                          background: rate != null ? color : "#f3f4f6",
-                                          color: rate != null ? "#ffffff" : "#9ca3af",
-                                          fontWeight: 500,
-                                        }}
-                                      >
-                                        <span style={{ fontSize: 10, opacity: 0.85 }}>{label}</span>
-                                        <span>{fmt(rate)}</span>
+                                    const { bedrooms, low, high, holiday, basisSource, channelCount, channels } = row;
+                                    const fmtBasis = (n: number | null) => n != null && n > 0 ? `$${n.toLocaleString()}` : "—";
+                                    const fmtChip = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
+                                    const seasonChip = (season: "LOW" | "HIGH" | "HOLIDAY", value: number | null, color: string) => (
+                                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 9px", borderRadius: 4, background: value != null && value > 0 ? color : "#f3f4f6", color: value != null && value > 0 ? "#ffffff" : "#9ca3af", fontWeight: 600 }}>
+                                        <span style={{ fontSize: 9, opacity: 0.85 }}>{season}</span>
+                                        <span>{fmtBasis(value)}</span>
+                                      </span>
+                                    );
+                                    const miniChip = (label: string, value: number | null) => (
+                                      <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", borderRadius: 3, background: value != null ? "#e5e7eb" : "transparent", color: "#6b7280", fontSize: 10, fontWeight: 400 }}>
+                                        {label} {fmtChip(value)}
                                       </span>
                                     );
                                     return (
-                                      <div key={bedrooms} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                        <span style={{ fontWeight: 600, minWidth: 38 }}>{bedrooms}BR</span>
-                                        {channelChip("airbnb", airbnb, "#FF5A5F")}
-                                        {channelChip("vrbo", vrbo, "#2563eb")}
-                                        {channelChip("booking", booking, "#1e40af")}
-                                        <span style={{ marginLeft: "auto", fontSize: 11 }}>
-                                          <span style={{ color: "#6b7280" }}>→ basis</span>{" "}
-                                          <span style={{ fontWeight: 700, color: "#059669" }}>${basis.toLocaleString()}</span>{" "}
-                                          <span style={{ fontSize: 10, color: "#6b7280" }}>
-                                            ({basisSource === "live-multichannel-median"
-                                              ? `median of ${channelCount}`
+                                      <div key={bedrooms} style={{ borderTop: "1px dashed #e5e7eb", paddingTop: 6 }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                          <span style={{ fontWeight: 700, minWidth: 38 }}>{bedrooms}BR</span>
+                                          {seasonChip("LOW", low, "#059669")}
+                                          {seasonChip("HIGH", high, "#d97706")}
+                                          {seasonChip("HOLIDAY", holiday, "#dc2626")}
+                                          <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
+                                            {basisSource === "live-multichannel-median"
+                                              ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "airbnb"
-                                                ? "Airbnb fallback"
-                                                : "no data"})
+                                                ? "LOW = Airbnb-only fallback"
+                                                : "no data"}
                                           </span>
-                                        </span>
+                                        </div>
+                                        {/* LOW per-channel mini chips */}
+                                        <div style={{ display: "flex", gap: 6, marginTop: 4, paddingLeft: 46, fontSize: 10 }}>
+                                          {miniChip("airbnb", channels.airbnb)}
+                                          {miniChip("vrbo", channels.vrbo)}
+                                          {miniChip("booking", channels.booking)}
+                                        </div>
                                       </div>
                                     );
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Basis = MEDIAN of per-channel all-in nightlies. Drives the Guesty sell rate via (basis × 1.20) ÷ (1 − channelFee). Single LOW-season window; HIGH/HOLIDAY months use seasonal multipliers on top of this basis.
+                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). LOW basis = median across Airbnb/VRBO/Booking, all-in (taxes + fees normalized). HIGH/HOLIDAY basis = Airbnb-engine median for that season's window (sidecar reserved for the LOW pull where buy-in deal-hunting matters most). When a season's basis is missing — e.g. HOLIDAY scan returned empty — the formula falls back to LOW × the seasonal multiplier so the table always has a price.
                                 </div>
                               </div>
                             )}

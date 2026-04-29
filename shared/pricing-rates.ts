@@ -157,7 +157,15 @@ export function suggestPricingArea(
 // `unit-builder-data.ts`. One cache covers both.
 type LiveBuyInKey = string;
 type LiveBuyInEntry = {
+  // LOW-season basis — primary value the formula uses when called
+  // without a season argument (and the field every existing reader
+  // already expects). Always present.
   medianNightly: number;
+  // Per-season basis added in PR #282. Populated when the multi-
+  // season scan ran for that property; null when the scan was
+  // legacy single-window OR the season window was unreachable.
+  medianNightlyHigh: number | null;
+  medianNightlyHoliday: number | null;
   sampleCount: number;
   refreshedAt: string;
   source: string;
@@ -169,10 +177,18 @@ export type LivePropertyMarketRateInput = {
   propertyId: number;
   bedrooms: number;
   medianNightly: number | string;
+  medianNightlyHigh?: number | string | null;
+  medianNightlyHoliday?: number | string | null;
   sampleCount: number;
   refreshedAt: string;
   source: string;
 };
+
+function parseNullableRate(v: number | string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
   _liveBuyIns.clear();
@@ -181,6 +197,8 @@ export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[])
     if (!Number.isFinite(median) || median <= 0) continue;
     _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
       medianNightly: median,
+      medianNightlyHigh: parseNullableRate(r.medianNightlyHigh),
+      medianNightlyHoliday: parseNullableRate(r.medianNightlyHoliday),
       sampleCount: r.sampleCount,
       refreshedAt: r.refreshedAt,
       source: r.source,
@@ -193,26 +211,65 @@ export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEnt
 }
 
 // Fallback chain (highest → lowest priority):
-//   1. Live median for (propertyId, bedrooms) — when propertyId is
-//      supplied AND the cache has a row for that pair.
-//   2. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
-//   3. FALLBACK_RATE_PER_BEDROOM[region] × bedrooms — per-region
+//   1. Live per-season basis for (propertyId, bedrooms, season) when
+//      a season is supplied AND the multi-season scan populated it.
+//   2. Live LOW basis × SEASON_MULTIPLIERS for the season (legacy
+//      multiplier model when per-season basis is absent).
+//   3. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
+//   4. FALLBACK_RATE_PER_BEDROOM[region] × bedrooms — per-region
 //      default for areas not in the static table.
-export function getBuyInRate(community: string, bedrooms: number, propertyId?: number): number {
+//
+// `season` is optional: when omitted, returns the LOW basis directly
+// (the legacy single-value behavior). When supplied, returns the
+// season-specific basis from the multi-season scan when available,
+// otherwise applies the multiplier to the LOW basis.
+export function getBuyInRate(
+  community: string,
+  bedrooms: number,
+  propertyId?: number,
+  season?: SeasonType,
+): number {
   if (propertyId != null) {
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
-    if (live) return live.medianNightly;
+    if (live) {
+      // Season-specific basis when available + requested.
+      if (season === "HIGH" && live.medianNightlyHigh != null) return live.medianNightlyHigh;
+      if (season === "HOLIDAY" && live.medianNightlyHoliday != null) return live.medianNightlyHoliday;
+      // LOW or unknown-season → use base. When the caller supplied
+      // HIGH/HOLIDAY but per-season basis isn't populated, apply the
+      // multiplier so the formula still varies seasonally.
+      if (season && season !== "LOW") {
+        const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+        const multiplier = SEASON_MULTIPLIERS[region][season];
+        return Math.round(live.medianNightly * multiplier);
+      }
+      return live.medianNightly;
+    }
   }
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
-  if (typeof rate === "number") return rate;
+  if (typeof rate === "number") {
+    // Static table is calibrated as the LOW basis; apply multiplier
+    // when caller asked for HIGH/HOLIDAY.
+    if (season && season !== "LOW") {
+      const region = entry?.region ?? getCommunityRegion(community);
+      const multiplier = SEASON_MULTIPLIERS[region][season];
+      return Math.round(rate * multiplier);
+    }
+    return rate;
+  }
   // No exact rate. Fall back per region — Florida and Hawaii cost
   // bases differ by ~3.5×, so a global per-BR fallback would inflate
   // one market or under-price the other. If the community isn't in
   // the table at all, getCommunityRegion defaults to hawaii.
   const region = entry?.region ?? getCommunityRegion(community);
-  return FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
+  const fallback = FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
+  if (season && season !== "LOW") {
+    const multiplier = SEASON_MULTIPLIERS[region][season];
+    return Math.round(fallback * multiplier);
+  }
+  return fallback;
 }
 
 export function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
@@ -258,17 +315,22 @@ export const CHANNEL_TO_GUESTY_KEY: Record<ChannelKey, string> = {
 
 // Total nightly buy-in cost for a property's full set of unit slots in
 // a given month. Used as the cost floor for the seasonal rate push.
+//
+// PR #282: when a per-season basis is populated for the (propertyId,
+// bedrooms) pair, getBuyInRate(community, br, propertyId, season)
+// returns it directly — no multiplier applied. Falls back to LOW ×
+// multiplier when the per-season basis is missing.
 export function totalNightlyBuyInForMonth(
   community: string,
   unitSlots: Array<{ bedrooms: number }>,
   yearMonth: string,
+  propertyId?: number,
 ): number {
   const region = getCommunityRegion(community);
   const season = getSeasonForMonth(yearMonth, region);
-  const multiplier = SEASON_MULTIPLIERS[region][season];
   let total = 0;
   for (const slot of unitSlots) {
-    total += Math.round(getBuyInRate(community, slot.bedrooms) * multiplier);
+    total += getBuyInRate(community, slot.bedrooms, propertyId, season);
   }
   return total;
 }
