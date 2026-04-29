@@ -1842,6 +1842,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Server emits a heartbeat tick every 15s during non-terminal
   // phases so lastTickAt stays fresh even when no phase boundary
   // passes for several minutes (typical during sidecar phases).
+  type ScanWarning = {
+    season: "LOW" | "HIGH" | "HOLIDAY";
+    channel: "airbnb" | "vrbo" | "booking" | "engine";
+    kind: "captcha" | "blocked" | "rate-limit" | "timeout" | "network" | "unknown";
+    message: string;
+    reason?: string;
+  };
   const [refreshProgress, setRefreshProgress] = useState<{
     phase: string;
     percent: number;
@@ -1849,6 +1856,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     lastTickAt?: number;
     daemonOnline?: boolean;
     daemonLastPollAgeMs?: number | null;
+    warnings?: ScanWarning[];
   } | null>(null);
   // 1Hz ticker so the elapsed-time display + staleness warning re-
   // render between the 1.5s progress polls. Cheap (no network); keyed
@@ -1909,6 +1917,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               lastTickAt?: number;
               daemonOnline?: boolean;
               daemonLastPollAgeMs?: number | null;
+              warnings?: ScanWarning[];
             };
             setRefreshProgress({
               phase: p.phase,
@@ -1917,6 +1926,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               lastTickAt: p.lastTickAt,
               daemonOnline: p.daemonOnline,
               daemonLastPollAgeMs: p.daemonLastPollAgeMs,
+              warnings: p.warnings,
             });
           }
         } catch {}
@@ -3631,6 +3641,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {isStale && (
                                     <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
                                       ⚠ No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry, or wait — partial results from completed seasons are kept after this scan finishes.
+                                    </div>
+                                  )}
+                                  {/* Per-season / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. Surfaced as each season completes — see PR #312. */}
+                                  {refreshProgress.warnings && refreshProgress.warnings.length > 0 && (
+                                    <div style={{ marginTop: 4 }}>
+                                      {refreshProgress.warnings.map((w, i) => {
+                                        const icon = w.kind === "captcha" ? "🤖" : w.kind === "blocked" ? "🚧" : w.kind === "rate-limit" ? "⏱" : w.kind === "timeout" ? "⌛" : w.kind === "network" ? "🌐" : "⚠";
+                                        return (
+                                          <div
+                                            key={`${w.season}|${w.channel}|${w.kind}|${i}`}
+                                            style={{ padding: "4px 6px", marginBottom: 3, border: "1px solid #fcd34d", background: "#fffbeb", borderRadius: 3, fontSize: 10, color: "#78350f" }}
+                                          >
+                                            <span style={{ marginRight: 4 }}>{icon}</span>
+                                            <strong>{w.season}</strong>: {w.message}
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
