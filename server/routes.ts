@@ -6158,79 +6158,20 @@ export async function registerRoutes(
     const windows = Array.isArray(body.windows) ? body.windows : [];
     if (windows.length === 0) return res.status(400).json({ error: "windows array required" });
 
-    const guestyListingId = await storage.getGuestyListingId(propertyId);
-    if (!guestyListingId) return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
-
-    const active = await storage.getActiveScannerBlocks(propertyId);
-    const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
-    const desiredBlocks = new Set(
-      windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
-    );
-
-    let created = 0;
-    let removed = 0;
-    const failures: Array<{ action: string; startDate: string; error: string }> = [];
-    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
-
-    // Block new windows via calendar PUT with status: "unavailable"
-    for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
-      const key = `${w.startDate}:${w.endDate}`;
-      if (activeKeyed.has(key)) continue; // already blocked by us
-      try {
-        const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets ?? 0} sets`;
-        const resp = await guestyRequest("PUT", calPath, {
-          startDate: w.startDate,
-          endDate: w.endDate,
-          status: "unavailable",
-          note: `nexstay-scanner: ${reason}`,
-        }) as any;
-        // Guesty returns the created blocks in resp.data.blocks.createdBlocks[0]._id
-        const createdBlocksArr = resp?.data?.blocks?.createdBlocks
-          ?? resp?.blocks?.createdBlocks
-          ?? [];
-        const guestyBlockId = createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null;
-        await storage.createScannerBlock({
-          propertyId,
-          guestyListingId,
-          startDate: w.startDate,
-          endDate: w.endDate,
-          guestyBlockId,
-          reason,
-        });
-        created++;
-        await new Promise((r) => setTimeout(r, 120));
-      } catch (e: any) {
-        failures.push({ action: "create", startDate: w.startDate, error: e?.message ?? String(e) });
-      }
+    const { syncScannerBlocksForProperty } = await import("./sync-scanner-blocks");
+    const result = await syncScannerBlocksForProperty(propertyId, windows.map((w) => ({
+      startDate: w.startDate,
+      endDate: w.endDate,
+      verdict: (w.verdict === "blocked" || w.verdict === "available" || w.verdict === "tight" || w.verdict === "error")
+        ? w.verdict
+        : "available",
+      maxSets: w.maxSets,
+      minSets: w.minSets,
+    })));
+    if (!result.guestyListingId) {
+      return res.status(404).json({ error: result.reason ?? `No Guesty listing for property ${propertyId}` });
     }
-
-    // Unblock windows by setting status: "available" on the same range
-    for (const b of active) {
-      const key = `${b.startDate}:${b.endDate}`;
-      if (desiredBlocks.has(key)) continue;
-      try {
-        await guestyRequest("PUT", calPath, {
-          startDate: b.startDate,
-          endDate: b.endDate,
-          status: "available",
-        });
-        await storage.markScannerBlockRemoved(b.id);
-        removed++;
-        await new Promise((r) => setTimeout(r, 120));
-      } catch (e: any) {
-        failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
-      }
-    }
-
-    return res.json({
-      success: failures.length === 0,
-      propertyId,
-      guestyListingId,
-      created,
-      removed,
-      unchanged: active.length - removed,
-      failures,
-    });
+    return res.json(result);
   });
 
   // GET /api/availability/overrides/:propertyId
