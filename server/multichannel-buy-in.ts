@@ -559,10 +559,20 @@ export type RefreshProgressState = {
   percent: number;
   label: string;
   error?: string;
+  // Freeze-detection fields (PR #311). lastTickAt is updated by a
+  // 15-second heartbeat AND every setPhase call — so the client can
+  // tell the scan is still alive even when no phase boundary has
+  // passed for several minutes (typical during sidecar phases that
+  // serialize through the daemon's queue). daemonOnline mirrors
+  // getHeartbeat().isOnline so the UI can warn "daemon offline" vs
+  // just "no progress yet".
+  lastTickAt: number;
+  daemonOnline?: boolean;
+  daemonLastPollAgeMs?: number | null;
 };
 const _refreshProgress = new Map<number, RefreshProgressState>();
-export function setRefreshProgress(state: RefreshProgressState): void {
-  _refreshProgress.set(state.propertyId, state);
+export function setRefreshProgress(state: Omit<RefreshProgressState, "lastTickAt"> & { lastTickAt?: number }): void {
+  _refreshProgress.set(state.propertyId, { ...state, lastTickAt: state.lastTickAt ?? Date.now() });
 }
 export function getRefreshProgress(propertyId: number): RefreshProgressState | null {
   return _refreshProgress.get(propertyId) ?? null;
@@ -571,6 +581,42 @@ export function clearRefreshProgress(propertyId: number): void {
   // Keep "done" or "error" terminal states for 30s so the Pricing tab
   // sees the final result before the cleanup race.
   setTimeout(() => _refreshProgress.delete(propertyId), 30_000);
+}
+
+// Heartbeat ticker. Every 15s during a non-terminal scan, refresh
+// `lastTickAt` and pull current daemon status into the progress
+// state. Lets the client distinguish "scan still running, daemon
+// alive, just queued behind other work" from "scan actually frozen
+// — daemon dead or process wedged."
+//
+// Returns a cleanup function the caller invokes in `finally` to stop
+// the interval.
+function startProgressHeartbeat(propertyId: number): () => void {
+  const tick = async () => {
+    const current = _refreshProgress.get(propertyId);
+    if (!current) return;
+    if (current.phase === "done" || current.phase === "error") return;
+    try {
+      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+      const hb = getHeartbeat();
+      _refreshProgress.set(propertyId, {
+        ...current,
+        lastTickAt: Date.now(),
+        daemonOnline: hb.isOnline,
+        daemonLastPollAgeMs: hb.ageMs,
+      });
+    } catch {
+      // Don't let heartbeat errors poison the scan; just refresh the
+      // tick timestamp so the client at least knows the scan loop
+      // itself is alive.
+      _refreshProgress.set(propertyId, { ...current, lastTickAt: Date.now() });
+    }
+  };
+  // Tick once immediately so the first heartbeat lands within ms,
+  // then every 15s.
+  void tick();
+  const interval = setInterval(tick, 15_000);
+  return () => clearInterval(interval);
 }
 
 export async function fetchMultiChannelBuyInBySeason(args: {
@@ -589,6 +635,10 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   const setPhase = (phase: RefreshProgressState["phase"], percent: number, label: string) =>
     setRefreshProgress({ propertyId: args.propertyId, startedAt, phase, percent, label });
 
+  // Start the daemon-heartbeat ticker so lastTickAt + daemonOnline
+  // refresh every 15s during long sidecar phases. Stopped in finally.
+  const stopHeartbeat = startProgressHeartbeat(args.propertyId);
+  try {
   setPhase("starting", 0, "Starting multi-season scan");
 
   // All three seasons get the full multichannel scan (Airbnb engine
@@ -665,4 +715,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
     region,
     durationMs: Date.now() - startedAt,
   };
+  } finally {
+    stopHeartbeat();
+  }
 }

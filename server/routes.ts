@@ -12735,10 +12735,10 @@ export async function registerRoutes(
             ? { checkIn: seasonScan.perSeason.LOW.snapshotCheckIn, checkOut: seasonScan.perSeason.LOW.snapshotCheckOut, daemonOnline: seasonScan.perSeason.LOW.daemonOnline }
             : null,
           HIGH: seasonScan.perSeason.HIGH
-            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: false }
+            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: seasonScan.perSeason.HIGH.daemonOnline }
             : null,
           HOLIDAY: seasonScan.perSeason.HOLIDAY
-            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: false }
+            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: seasonScan.perSeason.HOLIDAY.daemonOnline }
             : null,
         },
       },
@@ -12959,10 +12959,10 @@ export async function registerRoutes(
             ? { checkIn: seasonScan.perSeason.LOW.snapshotCheckIn, checkOut: seasonScan.perSeason.LOW.snapshotCheckOut, daemonOnline: seasonScan.perSeason.LOW.daemonOnline }
             : null,
           HIGH: seasonScan.perSeason.HIGH
-            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: false }
+            ? { checkIn: seasonScan.perSeason.HIGH.snapshotCheckIn, checkOut: seasonScan.perSeason.HIGH.snapshotCheckOut, daemonOnline: seasonScan.perSeason.HIGH.daemonOnline }
             : null,
           HOLIDAY: seasonScan.perSeason.HOLIDAY
-            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: false }
+            ? { checkIn: seasonScan.perSeason.HOLIDAY.snapshotCheckIn, checkOut: seasonScan.perSeason.HOLIDAY.snapshotCheckOut, daemonOnline: seasonScan.perSeason.HOLIDAY.daemonOnline }
             : null,
         },
         region: seasonScan.region,
