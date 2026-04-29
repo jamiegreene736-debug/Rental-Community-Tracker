@@ -250,9 +250,17 @@ export function getBuyInRate(
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
   if (typeof rate === "number") {
-    // Static table is calibrated as the LOW basis; apply multiplier
-    // when caller asked for HIGH/HOLIDAY.
-    if (season && season !== "LOW") {
+    // Static-table values are an annual BASELINE (not pre-calibrated
+    // to any specific season). Legacy callers pre-PR #282 always
+    // applied SEASON_MULTIPLIERS on top, including the 0.80 LOW
+    // multiplier. PR #283 accidentally skipped the LOW multiplier
+    // when a season was explicitly passed, inflating LOW-month
+    // totals for properties relying on the static fallback (3BR
+    // Kaha Lani: was $615 raw, should be $615 × 0.80 = $492).
+    // Restore: apply multiplier for ALL seasons including LOW when
+    // a season is supplied. Legacy seasonless callers still get
+    // the raw baseline back.
+    if (season) {
       const region = entry?.region ?? getCommunityRegion(community);
       const multiplier = SEASON_MULTIPLIERS[region][season];
       return Math.round(rate * multiplier);
@@ -265,7 +273,7 @@ export function getBuyInRate(
   // the table at all, getCommunityRegion defaults to hawaii.
   const region = entry?.region ?? getCommunityRegion(community);
   const fallback = FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
-  if (season && season !== "LOW") {
+  if (season) {
     const multiplier = SEASON_MULTIPLIERS[region][season];
     return Math.round(fallback * multiplier);
   }
