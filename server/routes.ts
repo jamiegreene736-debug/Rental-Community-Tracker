@@ -12444,7 +12444,17 @@ export async function registerRoutes(
       state: loc.state,
       streetAddress: loc.streetAddress,
       bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-      searchName: config.community,
+      // PR #297: align the sidecar's Vrbo/Booking destination with
+      // the engine's q= so all three channels search the same resort.
+      // Previously this passed `config.community` (the PROPERTY_UNIT_
+      // NEEDS key, e.g. "Kapaa Beachfront") which is a generic
+      // neighborhood name. Vrbo's autocomplete returns Kapaa-area
+      // listings (Lae Nani, Pono Kai, etc.), missing Kaha Lani Resort
+      // entirely. Operator screenshot 2026-04-29 showed Vrbo finds
+      // ~12 Kaha Lani Resort listings (including 3BR) when searched
+      // by resort name. Now sidecar uses the same resort-name as
+      // engine (loc.searchName = "Kaha Lani Resort").
+      searchName: loc.searchName,
       bedroomCounts: wantBedrooms,
       propertyId,
     });
