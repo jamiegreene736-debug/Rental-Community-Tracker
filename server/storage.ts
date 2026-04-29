@@ -743,6 +743,11 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(photoListingAlerts.detectedAt));
   }
 
+  async getPhotoListingAlertById(id: number): Promise<PhotoListingAlert | undefined> {
+    const [row] = await db.select().from(photoListingAlerts).where(eq(photoListingAlerts.id, id));
+    return row;
+  }
+
   async getRecentPhotoListingAlerts(limit: number): Promise<PhotoListingAlert[]> {
     return db.select().from(photoListingAlerts)
       .orderBy(desc(photoListingAlerts.detectedAt))

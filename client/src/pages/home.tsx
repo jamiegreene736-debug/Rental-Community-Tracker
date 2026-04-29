@@ -45,6 +45,7 @@ import {
   TrendingUp,
   MessageSquare,
   Camera,
+  RotateCw,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -587,6 +588,79 @@ export default function Home() {
     }
   };
 
+  // Per-alert "Replace & push" progress message. Null means idle.
+  // Reads the orchestrator's NDJSON stream and surfaces each phase as
+  // an inline button label so the operator can see what's happening
+  // (find candidate → scrape → push to Guesty per listing).
+  const [remediating, setRemediating] = useState<Record<number, string | null>>({});
+  const remediateAlert = async (id: number) => {
+    setRemediating((r) => ({ ...r, [id]: "Starting…" }));
+    try {
+      const resp = await fetch(`/api/photo-listing-alerts/${id}/remediate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `Server error ${resp.status}`);
+      }
+      if (!resp.body) throw new Error("No response body");
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let didFinish = false;
+      let lastError: string | null = null;
+      while (true) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop()!;
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const ev = JSON.parse(line) as any;
+            if (ev.type === "phase") {
+              setRemediating((r) => ({ ...r, [id]: ev.message ?? ev.name }));
+            } else if (ev.type === "candidate") {
+              setRemediating((r) => ({ ...r, [id]: `Found ${ev.unitLabel}` }));
+            } else if (ev.type === "swap") {
+              setRemediating((r) => ({ ...r, [id]: `Swapped ${ev.kept} photos` }));
+            } else if (ev.type === "push") {
+              setRemediating((r) => ({
+                ...r,
+                [id]: ev.success
+                  ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}`
+                  : `Push failed: ${ev.listing}`,
+              }));
+            } else if (ev.type === "done") {
+              didFinish = true;
+            } else if (ev.type === "error") {
+              lastError = ev.message ?? `${ev.phase} error`;
+            }
+          } catch { /* ignore malformed line */ }
+        }
+      }
+      if (didFinish) {
+        toast({
+          title: "Photos replaced and pushed",
+          description: "Guesty will sync new photos to Airbnb/VRBO/Booking over the next few minutes.",
+        });
+        refetchAlerts();
+      } else {
+        throw new Error(lastError ?? "Remediate did not finish");
+      }
+    } catch (e: any) {
+      toast({ title: "Couldn't remediate alert", description: e?.message, variant: "destructive" });
+    } finally {
+      setRemediating((r) => {
+        const next = { ...r };
+        delete next[id];
+        return next;
+      });
+    }
+  };
+
   const photoCheckByFolder = useMemo(() => {
     const map = new Map<string, PhotoCheckRow>();
     for (const r of photoCheckData?.checks ?? []) map.set(r.folder, r);
@@ -814,9 +888,21 @@ export default function Home() {
                     <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
                     <Button
                       size="sm"
+                      className="h-6 text-xs px-2"
+                      onClick={() => remediateAlert(a.id)}
+                      disabled={remediating[a.id] != null}
+                      data-testid={`button-remediate-alert-${a.id}`}
+                      title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
+                    >
+                      <RotateCw className={`h-3 w-3 mr-1 ${remediating[a.id] ? "animate-spin" : ""}`} />
+                      {remediating[a.id] ?? "Replace & push"}
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="outline"
                       className="h-6 text-xs px-2"
                       onClick={() => acknowledgeAlert(a.id)}
+                      disabled={remediating[a.id] != null}
                       data-testid={`button-acknowledge-alert-${a.id}`}
                     >
                       Dismiss
