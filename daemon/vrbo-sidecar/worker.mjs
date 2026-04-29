@@ -143,16 +143,49 @@ async function ensureBrowser() {
   // screenshot 2026-04-29 showed the visible window stuck on
   // about:blank while the daemon was scraping a hidden tab.
   //
-  // Earlier attempt to "close all stale tabs" then create one new
-  // page hung Chrome — closing the last tab quits Chrome on macOS,
-  // and the subsequent newPage call hangs waiting for Chrome that's
-  // gone. Safer pattern: create our own tab and ignore the others.
-  // Tabs accumulate slowly but Chrome handles 20-30 fine; operator
-  // can manually close the daemon Chrome window once a week.
-  const existingPagesCount = context.pages().length;
+  // PR #307: create the daemon-owned tab FIRST, then close all
+  // OTHER tabs in the context. The earlier "close everything then
+  // newPage" attempt hung Chrome because closing the last tab quits
+  // Chrome on macOS — but if we have ≥2 tabs (our new one + N stale
+  // ones), closing the stale set leaves Chrome alive and the daemon
+  // tab as the only one. Net result: each daemon start gives us a
+  // single fresh tab, no clutter, no stale state, no risk of
+  // accidentally scraping a leftover tab.
+  const stalePages = context.pages();
   page = await context.newPage();
   await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {});
-  log(`opened fresh daemon-owned tab (${existingPagesCount} stale tab(s) left as-is — close the Chrome window manually if cluttered)`);
+  let closedCount = 0;
+  for (const stale of stalePages) {
+    if (stale === page) continue; // defensive — shouldn't happen
+    if (stale.isClosed?.()) continue;
+    try {
+      await stale.close({ runBeforeUnload: false });
+      closedCount++;
+    } catch {
+      // Non-fatal — Chrome may have already closed the tab, or we
+      // hit a race. Leaving an extra tab is harmless.
+    }
+  }
+  log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
+}
+
+// Reset the daemon-owned page to a clean about:blank state. Called
+// between ops in the dispatcher so each scrape starts from a known
+// blank slate — no leftover modal dialogs, scroll position, JS
+// timers, intersection observers, or page-level event listeners
+// from the previous op. Cookies persist (context-level), which is
+// what we want for VRBO/Booking/Google session continuity.
+//
+// Cheap (~50ms) and idempotent. If `page` is closed for any reason,
+// ensureBrowser() in the next op will recreate it.
+async function resetPage() {
+  if (!page || page.isClosed?.()) return;
+  try {
+    await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+  } catch {
+    // about:blank should never fail, but if it does the next
+    // ensureBrowser/page.goto will recover.
+  }
 }
 
 async function teardownBrowser(reason) {
@@ -735,6 +768,18 @@ async function processRequest(req) {
     checkOut: req.checkOut,
     bedrooms: req.bedrooms,
   };
+
+  // PR #307: clear the daemon page between ops so each scrape starts
+  // from a known blank state — no carryover from the previous scrape's
+  // modals, observers, timers, or scroll position. The batch op
+  // (pm_url_check_batch) opens its own per-URL tabs and closes them
+  // in finally, so it's already isolated; skip the reset for it to
+  // avoid an extra navigation on the daemon-owned page that the
+  // batch isn't going to use.
+  if (opType !== "pm_url_check_batch") {
+    await resetPage();
+  }
+
   switch (opType) {
     case "vrbo_search": return processVrboSearch(req.id, params);
     case "booking_search": return processBookingSearch(req.id, params);
