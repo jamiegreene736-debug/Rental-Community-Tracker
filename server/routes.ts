@@ -13750,8 +13750,9 @@ export async function registerRoutes(
 
       // 2. Find a replacement candidate via the existing endpoint.
       // SearchAPI + the route's own platform filter will skip anything
-      // already on Airbnb/VRBO/Booking. We pass the offending listing
-      // URLs as skipUrls so the next pick can't loop back to them.
+      // already on the conflicting channel. We pass the offending
+      // listing URLs as skipUrls so the next pick can't loop back to
+      // them.
       const skipUrls = (() => {
         try {
           const m: any[] = alert.matchedUrls ? JSON.parse(alert.matchedUrls) : [];
@@ -13759,19 +13760,33 @@ export async function registerRoutes(
         } catch { return [] as string[]; }
       })();
       const lead = affected[0];
+      // PR #316: scope the qualification check to the alert's specific
+      // platform. The alert fires when our photos are detected on ONE
+      // channel (e.g. just Airbnb); we don't need to skip a candidate
+      // just because it's separately listed on Vrbo or Booking. The
+      // photo-conflict only exists on the channel we got the alert
+      // for. Operator example: a 3BR Poipu Kai unit clean on Airbnb
+      // (the alerted channel) but listed on Booking should qualify
+      // — we'll overwrite the Airbnb photos in Guesty regardless.
+      const alertedChannel: "airbnb" | "vrbo" | "booking" | null =
+        alert.platform === "airbnb" || alert.platform === "vrbo" || alert.platform === "booking"
+          ? alert.platform
+          : null;
       emit({
         type: "phase", name: "find-replacement",
-        message: `Searching for a clean ${lead.bedrooms}BR unit at ${lead.communityFolder}`,
+        message: `Searching for a ${lead.bedrooms}BR unit at ${lead.communityFolder} clean on ${alertedChannel ?? "all channels"}`,
       });
       const port = process.env.PORT || "5000";
       let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
       try {
         // `strict: true` rejects candidates with any UNKNOWN verdict on
-        // Airbnb/VRBO/Booking. We're about to overwrite a Guesty listing's
-        // photos with this candidate's images, so a SearchAPI hiccup that
-        // hides a real OTA listing would re-publish someone else's photos
-        // — much worse than failing the remediate and asking the operator
-        // to retry.
+        // the enforced channel(s). We're about to overwrite a Guesty
+        // listing's photos with this candidate's images, so a SearchAPI
+        // hiccup that hides a real listing would re-publish someone
+        // else's photos — much worse than failing the remediate and
+        // asking the operator to retry.
+        // `cleanChannel` narrows the qualification check to just the
+        // alerted channel (PR #316).
         const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -13780,6 +13795,7 @@ export async function registerRoutes(
             requiredBedrooms: lead.bedrooms,
             skipUrls,
             strict: true,
+            ...(alertedChannel ? { cleanChannel: alertedChannel } : {}),
           }),
         });
         const findBody = await findResp.json() as any;
