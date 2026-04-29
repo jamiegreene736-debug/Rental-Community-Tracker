@@ -501,6 +501,23 @@ export const photoLabels = pgTable("photo_labels", {
   userCategory: text("user_category"),       // human override of category — wins over `category`
   hidden: boolean("hidden").default(false).notNull(), // user soft-delete — skipped on push-photos
   model: text("model"),                      // claude model used, for auditing
+  // Perceptual hash (dHash, 64-bit → 16-char hex) computed by
+  // server/photo-hashing.ts. Lets the photo-listing scanner detect
+  // edited-photo theft (resized, recompressed, lightly cropped) and
+  // lets the Replace & push orchestrator filter candidate photos that
+  // are visually identical to the contaminated set. Nullable for
+  // legacy rows; backfilled lazily on the first scanner tick that
+  // touches the folder.
+  perceptualHash: text("perceptual_hash"),
+  // Per-channel usage state. JSON-encoded:
+  //   { airbnb:  { active: bool, lastPushedAt: ISO },
+  //     vrbo:    { active: bool, lastPushedAt: ISO },
+  //     booking: { active: bool, lastPushedAt: ISO } }
+  // `active=true` means this exact photo is currently in the channel's
+  // live picture set. Used by the channel-photo-independence smart
+  // selector to skip photos that already exist on the target channel.
+  // Nullable; absent means "unknown / not tracked yet".
+  channelUsage: text("channel_usage"),
   generatedAt: timestamp("generated_at").defaultNow().notNull(),
 });
 export type PhotoLabel = typeof photoLabels.$inferSelect;
