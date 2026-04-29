@@ -46,6 +46,7 @@ import {
   MessageSquare,
   Camera,
   RotateCw,
+  Check,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -588,18 +589,29 @@ export default function Home() {
     }
   };
 
-  // Per-alert "Replace & push" progress message. Null means idle.
-  // Reads the orchestrator's NDJSON stream and surfaces each phase as
-  // an inline button label so the operator can see what's happening
-  // (find candidate → scrape → push to Guesty per listing).
-  const [remediating, setRemediating] = useState<Record<number, string | null>>({});
+  // Per-alert "Replace & push" status. Idle when absent. The state is
+  //   { phase: "running" | "done" | "error", message }
+  // so the row can render a green "✓ Done!" pill for ~1.5s before the
+  // refetch removes it, and surface errors inline + sticky (not just in
+  // a transient toast that the operator can miss).
+  type RemediateState = { phase: "running" | "done" | "error"; message: string };
+  const [remediating, setRemediating] = useState<Record<number, RemediateState>>({});
+  const setStatus = (id: number, s: RemediateState) =>
+    setRemediating((r) => ({ ...r, [id]: s }));
+  const clearStatus = (id: number) =>
+    setRemediating((r) => { const n = { ...r }; delete n[id]; return n; });
+
   const remediateAlert = async (id: number) => {
-    setRemediating((r) => ({ ...r, [id]: "Starting…" }));
+    // Console breadcrumb so a silent client-side failure (network drop,
+    // adblocker, etc) is visible to anyone debugging via DevTools.
+    console.info(`[remediate] click → POST /api/photo-listing-alerts/${id}/remediate`);
+    setStatus(id, { phase: "running", message: "Starting…" });
     try {
       const resp = await fetch(`/api/photo-listing-alerts/${id}/remediate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
+      console.info(`[remediate] alert ${id} → HTTP ${resp.status} ${resp.ok ? "(streaming)" : "(error)"}`);
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.error || `Server error ${resp.status}`);
@@ -620,19 +632,18 @@ export default function Home() {
           if (!line.trim()) continue;
           try {
             const ev = JSON.parse(line) as any;
+            console.debug(`[remediate] alert ${id} event:`, ev);
             if (ev.type === "phase") {
-              setRemediating((r) => ({ ...r, [id]: ev.message ?? ev.name }));
+              setStatus(id, { phase: "running", message: ev.message ?? ev.name });
             } else if (ev.type === "candidate") {
-              setRemediating((r) => ({ ...r, [id]: `Found ${ev.unitLabel}` }));
+              setStatus(id, { phase: "running", message: `Found ${ev.unitLabel}` });
             } else if (ev.type === "swap") {
-              setRemediating((r) => ({ ...r, [id]: `Swapped ${ev.kept} photos` }));
+              setStatus(id, { phase: "running", message: `Swapped ${ev.kept} photos` });
             } else if (ev.type === "push") {
-              setRemediating((r) => ({
-                ...r,
-                [id]: ev.success
-                  ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}`
-                  : `Push failed: ${ev.listing}`,
-              }));
+              setStatus(id, {
+                phase: "running",
+                message: ev.success ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}` : `Push failed: ${ev.listing}`,
+              });
             } else if (ev.type === "done") {
               didFinish = true;
             } else if (ev.type === "error") {
@@ -642,22 +653,28 @@ export default function Home() {
         }
       }
       if (didFinish) {
+        console.info(`[remediate] alert ${id} → success`);
+        // Brief inline confirmation BEFORE the row disappears, so the
+        // operator sees the click "took". Toast also fires for context.
+        setStatus(id, { phase: "done", message: "✓ Done!" });
         toast({
           title: "Photos replaced and pushed",
           description: "Guesty will sync new photos to Airbnb/VRBO/Booking over the next few minutes.",
         });
+        await new Promise((r) => setTimeout(r, 1500));
+        clearStatus(id);
         refetchAlerts();
       } else {
         throw new Error(lastError ?? "Remediate did not finish");
       }
     } catch (e: any) {
-      toast({ title: "Couldn't remediate alert", description: e?.message, variant: "destructive" });
-    } finally {
-      setRemediating((r) => {
-        const next = { ...r };
-        delete next[id];
-        return next;
-      });
+      const msg = e?.message ?? String(e);
+      console.error(`[remediate] alert ${id} → error:`, msg);
+      // Sticky inline error (cleared after 8s) so the operator can read
+      // it even if they miss the toast. Toast still fires for emphasis.
+      setStatus(id, { phase: "error", message: `✗ ${msg}` });
+      toast({ title: "Couldn't remediate alert", description: msg, variant: "destructive" });
+      setTimeout(() => clearStatus(id), 8000);
     }
   };
 
@@ -886,23 +903,40 @@ export default function Home() {
                       </a>
                     )}
                     <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
-                    <Button
-                      size="sm"
-                      className="h-6 text-xs px-2"
-                      onClick={() => remediateAlert(a.id)}
-                      disabled={remediating[a.id] != null}
-                      data-testid={`button-remediate-alert-${a.id}`}
-                      title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
-                    >
-                      <RotateCw className={`h-3 w-3 mr-1 ${remediating[a.id] ? "animate-spin" : ""}`} />
-                      {remediating[a.id] ?? "Replace & push"}
-                    </Button>
+                    {(() => {
+                      const status = remediating[a.id];
+                      const isRunning = status?.phase === "running";
+                      const isDone = status?.phase === "done";
+                      const isError = status?.phase === "error";
+                      const colorClass = isDone
+                        ? "bg-green-600 hover:bg-green-600 text-white"
+                        : isError
+                        ? "bg-red-600 hover:bg-red-600 text-white"
+                        : "";
+                      return (
+                        <Button
+                          size="sm"
+                          className={`h-6 text-xs px-2 ${colorClass}`}
+                          onClick={() => remediateAlert(a.id)}
+                          disabled={isRunning || isDone}
+                          data-testid={`button-remediate-alert-${a.id}`}
+                          title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
+                        >
+                          {isDone ? (
+                            <Check className="h-3 w-3 mr-1" />
+                          ) : (
+                            <RotateCw className={`h-3 w-3 mr-1 ${isRunning ? "animate-spin" : ""}`} />
+                          )}
+                          {status?.message ?? "Replace & push"}
+                        </Button>
+                      );
+                    })()}
                     <Button
                       size="sm"
                       variant="outline"
                       className="h-6 text-xs px-2"
                       onClick={() => acknowledgeAlert(a.id)}
-                      disabled={remediating[a.id] != null}
+                      disabled={remediating[a.id]?.phase === "running"}
                       data-testid={`button-acknowledge-alert-${a.id}`}
                     >
                       Dismiss

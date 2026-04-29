@@ -13176,24 +13176,36 @@ export async function registerRoutes(
   //   { type: "error", phase, message }
   app.post("/api/photo-listing-alerts/:id/remediate", async (req, res) => {
     const id = Number(req.params.id);
+    console.log(`[remediate] received alert id=${id}`);
     if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
 
     // Pre-stream sanity checks. These return real HTTP statuses so the
     // client UI can show inline errors without parsing NDJSON.
     const alert = await storage.getPhotoListingAlertById(id);
-    if (!alert) return res.status(404).json({ error: "Alert not found" });
-    if (alert.acknowledgedAt) return res.status(409).json({ error: "Already acknowledged" });
+    if (!alert) {
+      console.log(`[remediate] alert ${id} not found`);
+      return res.status(404).json({ error: "Alert not found" });
+    }
+    if (alert.acknowledgedAt) {
+      console.log(`[remediate] alert ${id} already acknowledged at ${alert.acknowledgedAt.toISOString()}`);
+      return res.status(409).json({ error: "Already acknowledged" });
+    }
     if (alert.photoFolder.startsWith("community-")) {
+      console.log(`[remediate] alert ${id} is community-folder (${alert.photoFolder}) — rejected`);
       return res.status(400).json({
         error: "Community-folder alerts are Dismiss-only — only unit photos are remediated.",
       });
     }
+    console.log(`[remediate] alert ${id} folder=${alert.photoFolder} platform=${alert.platform} — starting orchestration`);
 
     res.setHeader("Content-Type", "application/x-ndjson");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
-    const emit = (o: Record<string, unknown>) => res.write(JSON.stringify(o) + "\n");
+    const emit = (o: Record<string, unknown>) => {
+      console.log(`[remediate] alert ${id} emit: ${JSON.stringify(o)}`);
+      res.write(JSON.stringify(o) + "\n");
+    };
 
     try {
       emit({ type: "phase", name: "lookup", message: `Resolving ${alert.photoFolder}` });
