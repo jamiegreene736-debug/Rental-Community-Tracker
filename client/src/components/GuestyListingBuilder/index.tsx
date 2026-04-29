@@ -1804,6 +1804,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // floor formula should be recomputed against the new median.
   const [marketRatesVersion, setMarketRatesVersion] = useState(0);
   const [marketRatesRefreshing, setMarketRatesRefreshing] = useState(false);
+  // Live per-channel cheapest snapshot from the most recent refresh.
+  // Ephemeral (not persisted on the server, not in property_market_rates)
+  // — refresh response carries it; we render a card showing "Cheapest
+  // right now: airbnb $620 · vrbo $580 · booking $605" so the operator
+  // can see when one channel diverges materially from the median basis.
+  const [liveSnapshot, setLiveSnapshot] = useState<{
+    checkIn: string;
+    checkOut: string;
+    daemonOnline: boolean;
+    perBR: Array<{
+      bedrooms: number;
+      airbnb: number | null;
+      vrbo: number | null;
+      booking: number | null;
+    }>;
+  } | null>(null);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -1835,6 +1851,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         const data = await r.json().catch(() => ({}));
         toast({ title: "Refresh failed", description: data?.error || `HTTP ${r.status}`, variant: "destructive" });
         return;
+      }
+      // Static-property endpoint returns the live channel snapshot
+      // (PR #276); draft endpoint doesn't yet, so we no-op for drafts.
+      const data = await r.json().catch(() => ({} as Record<string, unknown>));
+      const persisted = (data as any)?.persisted;
+      const snapshot = (data as any)?.snapshot;
+      if (Array.isArray(persisted) && snapshot && typeof snapshot === "object") {
+        setLiveSnapshot({
+          checkIn: String(snapshot.checkIn ?? ""),
+          checkOut: String(snapshot.checkOut ?? ""),
+          daemonOnline: !!snapshot.daemonOnline,
+          perBR: persisted.map((p: any) => ({
+            bedrooms: Number(p.bedrooms),
+            airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
+            vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
+            booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
+          })),
+        });
+      } else {
+        setLiveSnapshot(null);
       }
       await reloadMarketRates();
       toast({ title: "Market rates refreshed" });
@@ -3331,10 +3367,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Re-runs the SearchAPI Airbnb-engine lookup for this property and updates the per-bedroom median above. ~10s, one SearchAPI call per bedroom count."
+                                  title="Multi-channel scan: Airbnb engine + sidecar VRBO + sidecar Booking. Persists Airbnb median as the cost basis (pricing floor formula); shows per-channel cheapest snapshot below. ~30-90s when local sidecar online; ~10s when offline."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
+                              </div>
+                            )}
+                            {/* Live channel snapshot — what the operator
+                                could actually book TODAY (not the
+                                median basis). Surfaces from the most
+                                recent refresh; cleared when they
+                                navigate away. Renders one row per
+                                bedroom showing cheapest verified
+                                nightly per channel — when one channel
+                                undercuts the median basis, that's a
+                                buy-in opportunity. */}
+                            {liveSnapshot && liveSnapshot.perBR.length > 0 && (
+                              <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
+                                  <span style={{ fontWeight: 600 }}>
+                                    Live cheapest {liveSnapshot.checkIn} → {liveSnapshot.checkOut}
+                                  </span>
+                                  <span style={{ fontSize: 10, color: liveSnapshot.daemonOnline ? "#059669" : "#9ca3af" }}>
+                                    {liveSnapshot.daemonOnline ? "🟢 sidecar online (VRBO + Booking included)" : "○ sidecar offline (Airbnb only)"}
+                                  </span>
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  {liveSnapshot.perBR.map(({ bedrooms, airbnb, vrbo, booking }) => {
+                                    const presentRates = [airbnb, vrbo, booking].filter((n): n is number => typeof n === "number" && n > 0);
+                                    const minRate = presentRates.length > 0 ? Math.min(...presentRates) : null;
+                                    const fmt = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
+                                    const channelChip = (label: string, rate: number | null, color: string) => {
+                                      const isMin = rate != null && rate === minRate;
+                                      return (
+                                        <span
+                                          key={label}
+                                          style={{
+                                            display: "inline-flex",
+                                            alignItems: "center",
+                                            gap: 4,
+                                            padding: "2px 7px",
+                                            borderRadius: 4,
+                                            background: isMin ? color : "#f3f4f6",
+                                            color: isMin ? "#ffffff" : (rate != null ? "#374151" : "#9ca3af"),
+                                            fontWeight: isMin ? 600 : 400,
+                                          }}
+                                        >
+                                          <span style={{ fontSize: 10, opacity: isMin ? 0.85 : 0.7 }}>{label}</span>
+                                          <span>{fmt(rate)}</span>
+                                          {isMin && <span style={{ fontSize: 10 }}>★</span>}
+                                        </span>
+                                      );
+                                    };
+                                    return (
+                                      <div key={bedrooms} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                        <span style={{ fontWeight: 600, minWidth: 38 }}>{bedrooms}BR</span>
+                                        {channelChip("airbnb", airbnb, "#FF5A5F")}
+                                        {channelChip("vrbo", vrbo, "#2563eb")}
+                                        {channelChip("booking", booking, "#1e40af")}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
+                                  ★ = cheapest channel. The persisted cost basis above stays at the Airbnb-engine median (stable for the sell-price floor formula); this snapshot shows what's actually available right now across channels — useful when sourcing actual buy-ins.
+                                </div>
                               </div>
                             )}
                             {marketComps && (

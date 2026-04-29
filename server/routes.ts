@@ -12438,24 +12438,41 @@ export async function registerRoutes(
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
-    const { ratesByBR, drops } = await fetchAmortizedNightlyByBR(
-      loc.searchName,
-      loc.city,
-      loc.state,
-      loc.streetAddress,
-      { lat: loc.lat, lng: loc.lng },
-    );
+    // Multi-channel scan — Airbnb engine (cost basis, persisted) +
+    // sidecar VRBO + sidecar Booking (live snapshot, ephemeral).
+    // Replaces the legacy Airbnb-only `fetchAmortizedNightlyByBR`
+    // call in PR #276; the persisted-median behavior is unchanged
+    // (same 7-night, 30-day-out window, same Airbnb-engine samples)
+    // and the new helper just adds the per-channel cheapest snapshot
+    // alongside.
+    const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
+    const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
+    const scan = await fetchMultiChannelBuyInByBR({
+      community: loc.searchName,
+      city: loc.city,
+      state: loc.state,
+      streetAddress: loc.streetAddress,
+      bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+      searchName: config.community,
+      bedroomCounts: wantBedrooms,
+    });
+    const { ratesByBR, channelCheapestByBR, snapshotCheckIn, snapshotCheckOut, daemonOnline, durationMs } = scan;
 
     // Upsert one row per unique bedroom count this property's units
     // actually carry. Skipping bedroom counts not in the property's
     // unit set keeps the table tight — a 2BR+2BR Caribe Cove property
     // doesn't need a 4BR row even if the engine returned 4BR samples.
-    const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
-    const persisted: Array<{ bedrooms: number; median: number; samples: number }> = [];
+    const persisted: Array<{
+      bedrooms: number;
+      median: number;
+      samples: number;
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
+    }> = [];
     for (const br of wantBedrooms) {
       const samples = ratesByBR[br] ?? [];
+      const channels = channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
       if (samples.length === 0) {
-        persisted.push({ bedrooms: br, median: 0, samples: 0 });
+        persisted.push({ bedrooms: br, median: 0, samples: 0, channels });
         continue;
       }
       const sorted = [...samples].sort((a, b) => a - b);
@@ -12469,11 +12486,32 @@ export async function registerRoutes(
         sampleCount: samples.length,
         source: "airbnb",
       });
-      persisted.push({ bedrooms: br, median, samples: samples.length });
+      persisted.push({ bedrooms: br, median: median ?? 0, samples: samples.length, channels });
     }
 
-    console.log(`[refresh-market-rates] property ${propertyId} (${config.community}): ${persisted.map((p) => `${p.bedrooms}BR=$${p.median}/${p.samples}`).join(", ")}`);
-    res.json({ ok: true, propertyId, community: config.community, persisted, drops });
+    console.log(
+      `[refresh-market-rates] property ${propertyId} (${config.community}) ${durationMs}ms daemonOnline=${daemonOnline}: ` +
+      persisted.map((p) =>
+        `${p.bedrooms}BR=$${p.median}/${p.samples} (ab=${p.channels.airbnb ?? "—"} vr=${p.channels.vrbo ?? "—"} bk=${p.channels.booking ?? "—"})`
+      ).join(", "),
+    );
+    res.json({
+      ok: true,
+      propertyId,
+      community: config.community,
+      persisted,
+      // Live channel snapshot — non-persisted, returned for the UI to
+      // render "Cheapest right now: airbnb $X · vrbo $Y · booking $Z".
+      // Window is the same 7-night 30-day-out one used for the cost
+      // basis, so the snapshot rates are directly comparable to the
+      // persisted median.
+      snapshot: {
+        checkIn: snapshotCheckIn,
+        checkOut: snapshotCheckOut,
+        daemonOnline,
+        durationMs,
+      },
+    });
   });
 
   // POST /api/admin/refresh-all-market-rates
