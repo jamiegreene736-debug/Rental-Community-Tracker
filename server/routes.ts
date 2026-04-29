@@ -7774,6 +7774,60 @@ export async function registerRoutes(
     return res.json(getStatus());
   });
 
+  // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
+  //
+  // The Chrome extension at ~/Downloads/vrbo-sidecar-cookie-extension/
+  // POSTs the operator's vrbo.com / booking.com cookies whenever they
+  // change in the operator's real Chrome. The daemon polls for fresh
+  // cookies on each tick and reseeds its dedicated Chrome context if
+  // anything changed. Replaces the manual Cookie-Editor → pbpaste
+  // workflow with a continuous auto-sync.
+
+  // POST /api/admin/vrbo-sidecar/cookies — extension push endpoint.
+  // Body: { cookies: RawCookieRecord[], source?: string }
+  // Returns: { ok, stored, fingerprint, changed }
+  app.post("/api/admin/vrbo-sidecar/cookies", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { cookies?: unknown; source?: string };
+    if (!Array.isArray(body.cookies)) {
+      return res.status(400).json({ error: "cookies (array) required" });
+    }
+    try {
+      const { pushCookies } = await import("./sidecar-cookie-cache");
+      const result = pushCookies({
+        cookies: body.cookies as any[],
+        source: typeof body.source === "string" ? body.source : "unknown",
+      });
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // GET /api/admin/vrbo-sidecar/cookies — daemon poll endpoint.
+  // Returns the most recently pushed cookie set.
+  app.get("/api/admin/vrbo-sidecar/cookies", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    try {
+      const { getCookies } = await import("./sidecar-cookie-cache");
+      return res.json(getCookies());
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // GET /api/vrbo-sidecar/cookies/status — public stats for the UI
+  // (no cookie values, just counts + last-push time + per-domain
+  // breakdown). Lets the operator confirm the extension is pushing.
+  app.get("/api/vrbo-sidecar/cookies/status", async (_req, res) => {
+    try {
+      const { getCookiesStatus } = await import("./sidecar-cookie-cache");
+      return res.json(getCookiesStatus());
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/vrbo-sidecar/heartbeat — public health check for the UI.
   // Returns whether the operator's local Mac daemon has polled the
   // queue recently (within the 90s online window). The buy-in panel
