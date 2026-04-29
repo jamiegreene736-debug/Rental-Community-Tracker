@@ -4192,33 +4192,34 @@ export async function registerRoutes(
     "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
     "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
     "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
-    // Kaha Lani Resort sits in Wailua at 22.036, -159.337. PR #250
-    // moved the bbox there from Lihue, but the resulting 1.65km bbox
-    // returned 19 listings with NONE matching the 2BR/3BR units we
-    // need (Wailua/Lihue is dominated by 1BR studios + 4+BR estates).
-    // The operator's hand-curated `COMMUNITY_BOUNDS["Kapaa
-    // Beachfront"]` targets ~22.072, -159.320 (Kapaa proper) where
-    // condo comps like Lae Nani / Pono Kai live. Centering the bbox
-    // at the midpoint (22.050, -159.328) extends the 1.65km box from
-    // Kaha Lani's actual location north into Kapaa Beachfront proper,
-    // catching east-shore 2BR/3BR condos that price comparably to
-    // Kaha Lani's units. Same Kapaa Beachfront pricing tier the
-    // operator already uses for buy-in calculations, just with a
-    // richer sample set.
-    // PR #252's midpoint bbox (22.05, -159.328) returned 18/18
-    // outsideBbox — moving the bbox north of the engine's
-    // q="Kaha Lani Resort Wailua Hawaii" query area meant the engine
-    // kept surfacing Wailua-clustered listings the bbox then rejected.
-    // The engine's text query and the bbox need to align. Realign
-    // both to the operator's hand-curated COMMUNITY_BOUNDS["Kapaa
-    // Beachfront"] zone (center 22.072, -159.320 — Kapaa proper),
-    // which is also how the operator's BUY_IN_RATES["Kapaa
-    // Beachfront"] table is calibrated. The search now returns east-
-    // shore Kapaa condo comps (Lae Nani, Pono Kai, etc.) rather than
-    // Kaha Lani-specific listings — appropriate because the operator's
-    // entire pricing tier for this propertyId is keyed on the
-    // "Kapaa Beachfront" community label, not Kaha Lani specifically.
-    "Kapaa Beachfront":  { searchName: "Kapaa Beachfront",            city: "Kapaa",       state: "Hawaii",                                                lat: 22.0720, lng: -159.3200 },
+    // Kaha Lani Resort sits in Wailua at 22.036, -159.337.
+    //
+    // PR #295 (2026-04-29) moves the bbox back here after operator
+    // verification: Vrbo's "Kaha Lani Resort, Lihue, Hawaii" search
+    // returns ~12 listings clustered AT the resort, including multiple
+    // 3BR units ("Spacious 3 Bedroom Ocean Front W/Lanai-Kaha Lani",
+    // "#224 Oceanfront", etc.). The previous Kapaa-proper bbox at
+    // 22.072 was ~4km north and missed these entirely — every 3BR
+    // refresh came back empty.
+    //
+    // Why the previous Kapaa-proper compromise failed: PR #252's
+    // 22.05, -159.328 midpoint returned 18/18 outsideBbox because
+    // Airbnb's coordinate anonymization (±0.5–1km / ±0.005–0.010°)
+    // can shift a Kaha Lani listing from 22.036 → 22.026, which fell
+    // below the midpoint's sw_lat of 22.035. PR #252 reacted by
+    // moving the bbox + query both to Kapaa proper. That stopped the
+    // rejection but calibrated against Kapaa-proper inventory (Lae
+    // Nani, Pono Kai), not Kaha Lani's actual rooms.
+    //
+    // The right fix is to keep the bbox at Kaha Lani's actual coords
+    // and rely on the sparse-BR retry from PR #288 to widen to 2×
+    // (~0.030° half-width = ~3.3km radius) when a BR comes back
+    // empty on the initial pull. The widened range 22.006–22.066
+    // captures Kaha Lani's anonymized listings (22.026–22.046) with
+    // headroom to spare. Initial pull at 0.015° still works for 2BR
+    // in practice (operator-verified $256 LOW basis from a single
+    // Airbnb sample today).
+    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii",                                                lat: 22.0360, lng: -159.3370 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
@@ -4233,7 +4234,10 @@ export async function registerRoutes(
     "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
     "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
     "Princeville":      { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
-    "Kapaa Beachfront": { sw_lat: 22.060, sw_lng: -159.333, ne_lat: 22.085, ne_lng: -159.308 },
+    // PR #295: realigned to Kaha Lani Resort area (Wailua) — center
+    // 22.036, -159.337 with a 0.015° half-width to match the multi-
+    // channel scanner's COMMUNITY_LOCATION_BY_KEY override above.
+    "Kapaa Beachfront": { sw_lat: 22.021, sw_lng: -159.352, ne_lat: 22.051, ne_lng: -159.322 },
     "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
     "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
   };
