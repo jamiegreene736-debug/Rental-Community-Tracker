@@ -11,7 +11,7 @@
 //   - Spawns the user's Google Chrome.app with
 //     --remote-debugging-port=9222 + a dedicated user-data-dir.
 //   - Connects via Playwright's chromium.connectOverCDP.
-//   - Polls Railway every 60s; dispatches by opType; posts results.
+//   - Polls Railway every ~10s when idle; dispatches by opType; posts results.
 //   - Heartbeats happen automatically — every /next call stamps the
 //     server's lastWorkerPollAt for the UI's "Local sidecar online"
 //     badge.
@@ -35,11 +35,12 @@ const CDP_PORT = 9222;
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 
-const POLL_IDLE_MS = 60_000;
-const POLL_BUSY_MS = 5_000;
+const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 10_000);
+const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
-const PAGE_SETTLE_MS = 5_500;
+const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
 const PER_REQUEST_BUDGET_MS = 90_000;
+const VIEWPORT = { width: 1280, height: 820 };
 
 let browser = null;
 let context = null;
@@ -49,6 +50,13 @@ function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
   console.log(`[${ts}] [vrbo-sidecar]`, msg, ...rest);
+}
+
+function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
+  ]);
 }
 
 function authHeaders() {
@@ -124,6 +132,8 @@ async function ensureChromeRunning() {
     [
       `--remote-debugging-port=${CDP_PORT}`,
       `--user-data-dir=${CHROME_DATA_DIR}`,
+      `--window-size=${VIEWPORT.width},${VIEWPORT.height + 80}`,
+      "--force-device-scale-factor=1",
       "--no-first-run",
       "--no-default-browser-check",
       "about:blank",
@@ -139,6 +149,19 @@ async function ensureChromeRunning() {
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error("Chrome spawned but CDP did not become ready within 20s");
+}
+
+async function normalizePageDisplay(targetPage = page) {
+  if (!targetPage || targetPage.isClosed?.()) return;
+  await withSoftTimeout(targetPage.setViewportSize(VIEWPORT), 1_500);
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (session) {
+    await withSoftTimeout(session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 }), 1_500);
+    await withSoftTimeout(session.detach(), 500);
+  }
+  // Chrome profile zoom can persist per-origin. Reset the visible tab
+  // so the sidecar window doesn't stay accidentally zoomed out.
+  await withSoftTimeout(targetPage.keyboard.press(process.platform === "darwin" ? "Meta+0" : "Control+0"), 1_000);
 }
 
 async function ensureBrowser() {
@@ -167,21 +190,22 @@ async function ensureBrowser() {
   // single fresh tab, no clutter, no stale state, no risk of
   // accidentally scraping a leftover tab.
   const stalePages = context.pages().filter((p) => !p.isClosed?.());
-  page = stalePages[0] ?? null;
-  if (!page) {
-    page = await Promise.race([
-      context.newPage(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
-    ]);
-  }
-  await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {});
+  page = await Promise.race([
+    context.newPage(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
+  ]);
+  await normalizePageDisplay(page);
   let closedCount = 0;
   for (const stale of stalePages) {
     if (stale === page) continue; // defensive — shouldn't happen
     if (stale.isClosed?.()) continue;
     try {
-      await stale.close({ runBeforeUnload: false });
-      closedCount++;
+      const closed = await withSoftTimeout(
+        stale.close({ runBeforeUnload: false }).then(() => true),
+        1_500,
+        false,
+      );
+      if (closed) closedCount++;
     } catch {
       // Non-fatal — Chrome may have already closed the tab, or we
       // hit a race. Leaving an extra tab is harmless.
@@ -203,6 +227,7 @@ async function resetPage() {
   if (!page || page.isClosed?.()) return;
   try {
     await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+    await normalizePageDisplay(page);
   } catch {
     // about:blank should never fail, but if it does the next
     // ensureBrowser/page.goto will recover.
@@ -304,7 +329,7 @@ async function dumpPageState(label, requestForLog) {
     // listing grid (Vrbo's narrow viewport falls back to mobile layout
     // which renders fewer cards). Resize idempotent — Playwright
     // tracks the current size.
-    await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {});
+    await normalizePageDisplay(page);
     const state = await page.evaluate(() => ({
       url: location.href,
       title: document.title,
@@ -757,6 +782,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
   const finalUrl = withDateParams(url, checkIn, checkOut);
   await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
+  await normalizePageDisplay(targetPage);
   return await targetPage.evaluate(() => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
     const NO_PATTERNS = [
@@ -945,12 +971,12 @@ async function main() {
   process.on("SIGTERM", async () => { await teardownBrowser("SIGTERM"); process.exit(0); });
   while (true) {
     const wasBusy = await tick();
-    // After a busy tick, only wait POLL_BUSY_MS (default 5s) before
+    // After a busy tick, only wait POLL_BUSY_MS (default 2s) before
     // polling again — find-buy-in often fires several requests in
     // close succession (e.g. pre-verifying 3-6 PM URLs) and the
     // operator's wallet budget can't absorb 60s × N idle waits.
     // After an idle tick (queue empty), wait the full POLL_IDLE_MS
-    // (60s) so we don't pound the server.
+    // (default 10s) so the operator isn't waiting on a full-minute poll.
     await new Promise((r) => setTimeout(r, wasBusy ? POLL_BUSY_MS : POLL_IDLE_MS));
   }
 }
