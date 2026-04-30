@@ -285,9 +285,20 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
     }
   };
   const remediateAirbnbAlert = async (alertId: number) => {
+    // PR #331: aggressive console-logging + immediate toast so a
+    // silent failure can't hide. Operator hit "I clicked Replace
+    // photos and nothing happened" — without these breadcrumbs we
+    // can't tell whether the click registered, the request fired,
+    // or the response stream malformed.
+    console.info(`[airbnb-remediate] click → POST /api/photo-listing-alerts/${alertId}/remediate`);
     setAirbnbStatus(alertId, { phase: "running", message: "Starting…", percent: 5 });
+    toast({
+      title: "Replacing Airbnb photos",
+      description: `Finding a clean replacement unit for alert ${alertId}…`,
+    });
     try {
       const resp = await fetch(`/api/photo-listing-alerts/${alertId}/remediate`, { method: "POST" });
+      console.info(`[airbnb-remediate] alert ${alertId} → HTTP ${resp.status} ${resp.ok ? "(streaming)" : "(error)"}`);
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.error || `HTTP ${resp.status}`);
@@ -309,6 +320,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
           if (!line.trim()) continue;
           try {
             const ev = JSON.parse(line) as any;
+            console.debug(`[airbnb-remediate] alert ${alertId} event:`, ev);
             if (ev.type === "phase") {
               percent = phasePercent(ev.name, percent);
               setAirbnbStatus(alertId, { phase: "running", message: ev.message ?? ev.name, percent });
@@ -330,10 +342,13 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
             } else if (ev.type === "error") {
               lastError = ev.message ?? `${ev.phase} error`;
             }
-          } catch { /* ignore malformed line */ }
+          } catch (parseErr) {
+            console.warn(`[airbnb-remediate] malformed event line:`, line.slice(0, 200), parseErr);
+          }
         }
       }
       if (didFinish) {
+        console.info(`[airbnb-remediate] alert ${alertId} → success`);
         setAirbnbStatus(alertId, { phase: "done", message: "✓ Done!", percent: 100 });
         toast({
           title: "Airbnb photos replaced and pushed",
@@ -347,9 +362,20 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
+      console.error(`[airbnb-remediate] alert ${alertId} → error:`, msg, e);
+      // PR #331: persistent error toast (duration: Infinity) so the
+      // operator sees what went wrong even if the inline status pill
+      // is dismissed/scrolled past. Click X to dismiss.
       setAirbnbStatus(alertId, { phase: "error", message: `✗ ${msg}`, percent: 100 });
-      toast({ title: "Couldn't remediate alert", description: msg, variant: "destructive" });
-      setTimeout(() => clearAirbnbStatus(alertId), 8000);
+      toast({
+        duration: Infinity,
+        title: "Couldn't replace Airbnb photos",
+        description: msg,
+        variant: "destructive",
+      });
+      // Keep the inline error pill for 30s instead of 8s — gives
+      // operator time to read the diagnostic without rushing.
+      setTimeout(() => clearAirbnbStatus(alertId), 30_000);
     }
   };
 
