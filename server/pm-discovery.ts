@@ -141,6 +141,13 @@ function coveredHostnames(): Map<string, string> {
   // stripped, calendar rendered server-side) — bespoke scraper at
   // server/pm-scraper-gather-vacations.ts (PR #332).
   map.set("gathervacations.com", "Gather Vacations");
+  // Streamline VRS — generic JSON-API scraper at
+  // server/pm-scraper-streamline.ts handles every tenant via the same
+  // streamlinecore-api-request gateway (PR #333). Add new Streamline
+  // hosts to STREAMLINE_SITES (and to this map) as auto-discovery
+  // surfaces them.
+  map.set("alekonakauai.com", "Alekona Kauai");
+  map.set("princevillevacationrentals.com", "Princeville Vacation Rentals");
   return map;
 }
 
