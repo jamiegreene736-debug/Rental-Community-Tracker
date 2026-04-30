@@ -49,6 +49,17 @@ launchctl kickstart -k "gui/$UID/com.vrbosidecar.worker"
 tail ~/Downloads/vrbo-sidecar/worker.log
 ```
 
+## Chrome visibility
+
+The daemon launches a dedicated Google Chrome profile hidden/offscreen
+by default. This keeps the real local browser signal that Vrbo/Booking
+need without taking over the operator's desktop. If you need to watch
+or manually unblock the sidecar browser, restart the daemon with:
+
+```sh
+SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/worker.mjs
+```
+
 If the daemon's Chrome session is stuck (rare — manifests as
 "Browser context management is not supported" on connect), kill
 the Chrome process and restart:

@@ -31,6 +31,8 @@ const CHROME_DATA_DIR = path.join(
 );
 const CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9222;
+const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
+const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -126,18 +128,27 @@ async function ensureChromeRunning() {
     throw new Error(`Google Chrome not found at ${CHROME_BINARY}`);
   }
   fs.mkdirSync(CHROME_DATA_DIR, { recursive: true });
-  log(`spawning Chrome (port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`);
+  const chromeArgs = [
+    `--remote-debugging-port=${CDP_PORT}`,
+    `--user-data-dir=${CHROME_DATA_DIR}`,
+    `--window-size=${VIEWPORT.width},${VIEWPORT.height + 80}`,
+    `--window-position=${SIDE_CAR_CHROME_VISIBLE ? "120,80" : HIDDEN_WINDOW_POSITION}`,
+    "--force-device-scale-factor=1",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "about:blank",
+  ];
+  const launchHiddenOnMac = process.platform === "darwin" && !SIDE_CAR_CHROME_VISIBLE;
+  const command = launchHiddenOnMac ? "/usr/bin/open" : CHROME_BINARY;
+  const args = launchHiddenOnMac
+    ? ["-g", "-j", "-n", "-a", "Google Chrome", "--args", ...chromeArgs]
+    : chromeArgs;
+  log(
+    `spawning Chrome ${launchHiddenOnMac ? "hidden/offscreen " : ""}(port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`,
+  );
   const proc = spawn(
-    CHROME_BINARY,
-    [
-      `--remote-debugging-port=${CDP_PORT}`,
-      `--user-data-dir=${CHROME_DATA_DIR}`,
-      `--window-size=${VIEWPORT.width},${VIEWPORT.height + 80}`,
-      "--force-device-scale-factor=1",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "about:blank",
-    ],
+    command,
+    args,
     { detached: true, stdio: "ignore" },
   );
   proc.unref();
