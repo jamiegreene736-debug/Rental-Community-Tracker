@@ -608,7 +608,16 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                     <>Master Sync active{row.reEnabledAt ? ` (re-enabled ${new Date(row.reEnabledAt).toLocaleDateString()})` : ""}</>
                   )}
                 </span>
-                {supportsFullFlow && !isIsolated && (
+                {/* PR #320: hide the row-level Isolate+Replace+Disconnect
+                    button when this channel has any alerts. Each alert
+                    sub-row already shows its own per-alert button with
+                    the right unit-specific bedroom count pre-filled —
+                    surfacing both was redundant and confusing
+                    (operator screenshot showed two identical buttons
+                    on the same row). The row-level button still
+                    appears when there are NO alerts (operator-initiated
+                    migration, no specific unit to fix). */}
+                {supportsFullFlow && !isIsolated && !hasAlerts && (
                   <Button
                     size="sm"
                     className="h-6 text-xs px-2"
