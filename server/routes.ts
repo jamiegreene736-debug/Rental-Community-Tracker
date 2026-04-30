@@ -14175,13 +14175,57 @@ export async function registerRoutes(
   // Returns per-channel state for the UI panel. Channels with no row
   // are reported as "synced" (default state — Guesty's pictures[] is
   // fanning out as usual).
+  //
+  // PR #318: each channel now carries any active photo-listing alerts
+  // for folders belonging to this listing. Moves alert remediation
+  // into the per-channel rows in the listing builder so:
+  //   - Airbnb alerts trigger a master-sync replace (Airbnb stays on
+  //     Guesty's master sync per operator policy)
+  //   - VRBO/Booking alerts trigger Isolate + Replace + Disconnect via
+  //     sidecar (channel-specific photos, then disconnect from Guesty)
+  // The dashboard banner that previously showed all alerts globally
+  // has been removed in favor of this in-builder per-channel UX.
   app.get("/api/listings/:id/photo-sync-status", async (req, res) => {
     const guestyListingId = String(req.params.id);
     try {
       const rows = await storage.getPhotoSyncByListing(guestyListingId);
       const byChannel = new Map(rows.map((r) => [r.channel, r]));
+
+      // Resolve which folders belong to this listing so we can pick
+      // the right alerts. Each builder maps a Guesty listing id to a
+      // set of (community + per-unit) folders; intersect with the
+      // unacknowledged alerts.
+      const builder = await (async () => {
+        for (const b of unitBuilderData) {
+          const gid = await storage.getGuestyListingId(b.propertyId);
+          if (gid === guestyListingId) return b;
+        }
+        return null;
+      })();
+      const folderSet = new Set<string>();
+      if (builder) {
+        if (builder.communityPhotoFolder) folderSet.add(builder.communityPhotoFolder);
+        for (const u of builder.units) {
+          if (u.photoFolder) folderSet.add(u.photoFolder);
+        }
+      }
+      const allAlerts = folderSet.size > 0
+        ? await storage.getUnacknowledgedPhotoListingAlerts()
+        : [];
+      const matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder));
+
       const channels = Array.from(ISOLATION_CHANNELS).map((channel) => {
         const r = byChannel.get(channel);
+        const channelAlerts = matchingAlerts.filter((a) => a.platform === channel).map((a) => ({
+          id: a.id,
+          folder: a.photoFolder,
+          priorStatus: a.priorStatus,
+          newStatus: a.newStatus,
+          matchedUrls: a.matchedUrls ? (() => {
+            try { return JSON.parse(a.matchedUrls) as Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>; } catch { return []; }
+          })() : [],
+          detectedAt: a.detectedAt,
+        }));
         return {
           channel,
           status: r?.status ?? "synced",
@@ -14193,6 +14237,7 @@ export async function registerRoutes(
           hashCount: r?.previousBadHashes ? (() => {
             try { return (JSON.parse(r.previousBadHashes) as string[]).length; } catch { return 0; }
           })() : 0,
+          alerts: channelAlerts,
         };
       });
       res.json({ guestyListingId, channels });
