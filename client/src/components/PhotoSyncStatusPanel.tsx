@@ -56,6 +56,12 @@ type AlertEntry = {
   newStatus: string;
   matchedUrls: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
   detectedAt: string;
+  // PR #319: bedroom count of the specific UNIT this alert is for
+  // (e.g. unit-423 → 3BR). Used to pre-fill the
+  // Isolate+Replace+Disconnect modal so the replacement search
+  // looks for a 3BR Zillow unit, not the listing's 6BR total
+  // (which would never match for multi-unit aggregates).
+  unitBedrooms: number | null;
 };
 
 type ChannelStatus = {
@@ -85,7 +91,15 @@ type Props = {
   // optional; if not supplied, the full-flow buttons are disabled
   // with a tooltip explaining why.
   communityFolder?: string;
+  // PR #319: kept for backward compat but now defaults to
+  // `Math.max(...unitBedroomCounts)` when populated. Pili Mai's
+  // 5BR Townhomes listing aggregates two 3BR units — total = 6,
+  // but the resort has no 6BR units, so a 6BR search returns
+  // nothing. Use the LARGEST unit's bedroom count as the row-
+  // level default; per-alert remediation overrides with the
+  // alerted unit's actual bedrooms via `alert.unitBedrooms`.
   bedrooms?: number;
+  unitBedroomCounts?: number[];
   // Auto-fill source for partnerListingRef when the operator hasn't
   // saved one yet. Guesty stores the VRBO `advertiserId` (= partner
   // portal listing id) under channels.homeaway2 and the Booking
@@ -97,7 +111,17 @@ type Props = {
   };
 };
 
-export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedrooms, channelIds }: Props) {
+export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedrooms, unitBedroomCounts, channelIds }: Props) {
+  // PR #319: row-level default = MAX unit bedroom count when we know
+  // the per-unit list, else fall back to the bedrooms prop (legacy
+  // sum). Picks a value that's actually findable in the community.
+  const defaultBedrooms = (() => {
+    if (unitBedroomCounts && unitBedroomCounts.length > 0) {
+      const max = Math.max(...unitBedroomCounts);
+      if (max > 0) return max;
+    }
+    return bedrooms ?? 0;
+  })();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isolating, setIsolating] = useState<{ channel: string; label: string } | null>(null);
@@ -598,7 +622,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                       partnerListingRef: row.partnerListingRef
                         ?? channelIds?.[key]
                         ?? "",
-                      bedrooms: bedrooms ?? 0,
+                      bedrooms: defaultBedrooms,
                       reason: "",
                     })}
                     disabled={!communityFolder || !!fullFlowRun}
@@ -687,12 +711,37 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                               {remediateState?.message ?? "Replace photos"}
                             </Button>
                           ) : (
-                            <span
-                              className="text-[10px] text-muted-foreground italic"
-                              title={`Use the row's "Isolate + Replace + Disconnect" button above to resolve this alert.`}
-                            >
-                              ↑ use Isolate + Replace + Disconnect
-                            </span>
+                            // PR #319: per-alert Isolate+Replace+Disconnect
+                            // button. Pre-fills the modal with this UNIT's
+                            // bedroom count (from server's unitBedrooms
+                            // lookup) so the replacement search matches
+                            // the alerted unit, not the listing total.
+                            // Falls back to row default if unitBedrooms
+                            // is null (community-folder alert).
+                            isFullFlowChannel(key) && (
+                              <Button
+                                size="sm"
+                                className="h-6 text-[11px] px-2"
+                                onClick={() => setFullFlow({
+                                  channel: key,
+                                  label,
+                                  partnerListingRef: row.partnerListingRef ?? channelIds?.[key] ?? "",
+                                  bedrooms: alert.unitBedrooms ?? defaultBedrooms,
+                                  reason: `Alerted: ${alert.folder} found on ${label} listing`,
+                                })}
+                                disabled={!communityFolder || !!fullFlowRun}
+                                title={
+                                  !communityFolder
+                                    ? "communityFolder not provided — full flow needs the resort's community folder."
+                                    : `Find a ${alert.unitBedrooms ?? "?"}BR unit clean on ${label}, push its photos via the sidecar, and disconnect ${label} from Guesty.`
+                                }
+                                data-testid={`btn-fullflow-alert-${alert.id}`}
+                              >
+                                <Zap className="h-3 w-3 mr-1" />
+                                Isolate + Replace + Disconnect
+                                {alert.unitBedrooms ? <span className="opacity-75 ml-1">({alert.unitBedrooms}BR)</span> : null}
+                              </Button>
+                            )
                           )}
                           <Button
                             size="sm"
