@@ -12,6 +12,7 @@ import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-ava
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
+import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -2074,6 +2075,12 @@ export async function registerRoutes(
     gvCalls: 0,           // PR #332 — Gather Vacations (customised vrp_main fork)
     gvHits: 0,
     gvUnitsTotal: 0,
+    slAlekonaCalls: 0,    // PR #333 — Streamline (Alekona Kauai)
+    slAlekonaHits: 0,
+    slAlekonaUnitsTotal: 0,
+    slPrincevilleCalls: 0,// PR #333 — Streamline (Princeville Vacation Rentals)
+    slPrincevilleHits: 0,
+    slPrincevilleUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -2093,6 +2100,8 @@ export async function registerRoutes(
       pikoHitRate: rate(pmDiscoveryStats.pikoHits, pmDiscoveryStats.pikoCalls),
       evrhiHitRate: rate(pmDiscoveryStats.evrhiHits, pmDiscoveryStats.evrhiCalls),
       gvHitRate: rate(pmDiscoveryStats.gvHits, pmDiscoveryStats.gvCalls),
+      slAlekonaHitRate: rate(pmDiscoveryStats.slAlekonaHits, pmDiscoveryStats.slAlekonaCalls),
+      slPrincevilleHitRate: rate(pmDiscoveryStats.slPrincevilleHits, pmDiscoveryStats.slPrincevilleCalls),
       googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
       spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
       pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
@@ -2100,6 +2109,8 @@ export async function registerRoutes(
       pikoAvgUnits: avg(pmDiscoveryStats.pikoUnitsTotal, pmDiscoveryStats.pikoCalls),
       evrhiAvgUnits: avg(pmDiscoveryStats.evrhiUnitsTotal, pmDiscoveryStats.evrhiCalls),
       gvAvgUnits: avg(pmDiscoveryStats.gvUnitsTotal, pmDiscoveryStats.gvCalls),
+      slAlekonaAvgUnits: avg(pmDiscoveryStats.slAlekonaUnitsTotal, pmDiscoveryStats.slAlekonaCalls),
+      slPrincevilleAvgUnits: avg(pmDiscoveryStats.slPrincevilleUnitsTotal, pmDiscoveryStats.slPrincevilleCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
   });
@@ -3586,6 +3597,58 @@ export async function registerRoutes(
         })()
       : Promise.resolve([]);
 
+    // ── Streamline VRS sites (PR #333) ────────────────────────────────────
+    // Streamline is a major commercial PM platform — its
+    // streamlinecore-api-request gateway is the same JSON shape on
+    // every tenant, so one scraper handles every Streamline-powered
+    // site. Generic factory below mirrors the vrpDiscoveryPromise
+    // pattern; each STREAMLINE_SITES entry gets its own promise +
+    // stats counter pair. Total per-night, taxes, AND fees come back
+    // in one AJAX call — this scraper is more accurate than the
+    // others because it returns the real bookable total, not a
+    // calendar-summed base rate.
+    const streamlineDiscoveryPromise = (
+      siteKey: keyof typeof STREAMLINE_SITES,
+      callsKey: "slAlekonaCalls" | "slPrincevilleCalls",
+    ): Promise<Candidate[]> => {
+      if (!isHawaii) return Promise.resolve([]);
+      const site = STREAMLINE_SITES[siteKey];
+      const hitsKey = callsKey.replace("Calls", "Hits") as "slAlekonaHits" | "slPrincevilleHits";
+      const totalKey = callsKey.replace("Calls", "UnitsTotal") as "slAlekonaUnitsTotal" | "slPrincevilleUnitsTotal";
+      return (async () => {
+        pmDiscoveryStats[callsKey]++;
+        try {
+          const units = await findAvailableStreamlineUnits({
+            site,
+            bedrooms,
+            checkIn,
+            checkOut,
+            resortName: resortName ?? community,
+          });
+          if (units.length > 0) pmDiscoveryStats[hitsKey]++;
+          pmDiscoveryStats[totalKey] += units.length;
+          return units.map((u): Candidate => ({
+            source: "pm" as const,
+            sourceLabel: site.label,
+            title: u.title,
+            url: withStayDates("pm", u.url),
+            nightlyPrice: u.nightlyPrice,
+            totalPrice: u.totalPrice,
+            bedrooms: u.bedrooms,
+            snippet: `${site.label} · ${u.bedrooms}BR · Streamline API quote (incl. taxes & fees)`,
+            verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
+            verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+            verifiedReason: u.nightlyPrice > 0 ? `${site.label} Streamline API returned a date-specific quote (total includes taxes + required fees)` : undefined,
+          }));
+        } catch (e: any) {
+          console.error(`[find-buy-in] streamline:${site.label} error:`, e.message);
+          return [];
+        }
+      })();
+    };
+    const slAlekonaDiscoveryPromise = streamlineDiscoveryPromise("alekonaKauai", "slAlekonaCalls");
+    const slPrincevilleDiscoveryPromise = streamlineDiscoveryPromise("princevilleVacationRentals", "slPrincevilleCalls");
+
     // Per-source wall-budget. Without this, a single hanging source
     // (Stagehand Vrbo agent stuck on a CAPTCHA, an Apify actor that
     // doesn't return, etc.) blocks the entire find-buy-in until
@@ -3608,7 +3671,7 @@ export async function registerRoutes(
         ),
       ]);
     };
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered] = await Promise.all([
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
       withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
       withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
@@ -3619,6 +3682,8 @@ export async function registerRoutes(
       withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
       withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
       withTimeout(gvDiscoveryPromise, 30_000, [] as Candidate[], "gv-sitemap"),
+      withTimeout(slAlekonaDiscoveryPromise, 30_000, [] as Candidate[], "sl-alekona"),
+      withTimeout(slPrincevilleDiscoveryPromise, 30_000, [] as Candidate[], "sl-princeville"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -3630,6 +3695,8 @@ export async function registerRoutes(
       ...pikoDiscovered.map((c) => c.url),
       ...evrhiDiscovered.map((c) => c.url),
       ...gvDiscovered.map((c) => c.url),
+      ...slAlekonaDiscovered.map((c) => c.url),
+      ...slPrincevilleDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
       ...spDiscovered,
@@ -3638,6 +3705,8 @@ export async function registerRoutes(
       ...pikoDiscovered,
       ...evrhiDiscovered,
       ...gvDiscovered,
+      ...slAlekonaDiscovered,
+      ...slPrincevilleDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
