@@ -12447,8 +12447,8 @@ export async function registerRoutes(
     const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
-    // Step 1 — Google search for real-estate listing URLs at this
-    // community address. We pull from THREE sources now (PR #326):
+    // Step 1 — Google search for replacement listing URLs at this
+    // community address. We pull from real-estate sources first:
     //
     //   - Zillow      — long-tail rental & for-sale inventory; high
     //                   photo coverage but heavily duplicated on VRBO
@@ -12461,12 +12461,20 @@ export async function registerRoutes(
     //                   15-30+ photos. Backup when Zillow + Realtor
     //                   both come up empty / saturated.
     //
+    // For channel-scoped searches, we can also use an OTA listing as a
+    // photo source when that OTA is NOT the channel being remediated.
+    // Operator example: Airbnb alert for Poipu Kai. A replacement unit
+    // listed on VRBO is acceptable as long as the platform check says
+    // it is clean on Airbnb. This matters at OTA-saturated resorts
+    // where the clean-on-Airbnb units often have 0 photos on
+    // Zillow/Realtor/Redfin but rich galleries on VRBO.
+    //
     // Each source has its own URL pattern (`/homedetails/` for Zillow,
     // `/realestateandhomes-detail/` for Realtor, `/home/<id>` for
-    // Redfin). The candidate `source` field lets downstream stages
-    // log which path produced each lead and helps triage if any
-    // single source's photo extraction breaks.
-    type CandidateSource = "zillow" | "realtor" | "redfin";
+    // Redfin, numeric/cottage URLs for VRBO). The candidate `source`
+    // field lets downstream stages log which path produced each lead
+    // and helps triage if any single source's photo extraction breaks.
+    type CandidateSource = "zillow" | "realtor" | "redfin" | "vrbo";
     interface Candidate {
       sourceUrl: string;
       source: CandidateSource;
@@ -12483,16 +12491,39 @@ export async function registerRoutes(
       if (/zillow\.com\/homedetails\//i.test(url)) return "zillow";
       if (/realtor\.com\/realestateandhomes-detail\//i.test(url)) return "realtor";
       if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
+      if (
+        /vrbo\.com\/\d{5,}/i.test(url) ||
+        /vrbo\.com\/(?:[a-z]{2}(?:-[a-z]{2})\/)?cottage-rental\/p\d+[a-z0-9]*/i.test(url)
+      ) return "vrbo";
       return null;
     };
 
-    // Generalized unit-number extraction across all three sources.
+    const extractUnitNumberFromText = (text: string): string => {
+      const haystack = text.replace(/&[#a-z0-9]+;/gi, " ");
+      const patterns = [
+        /\b(?:unit|apt|apartment|condo|villa|suite)\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
+        /#\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
+        /\bRegency(?:\s+at\s+Poipu\s+Kai)?\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
+        /\bPoipu\s+Kai\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
+      ];
+      for (const pattern of patterns) {
+        const match = haystack.match(pattern);
+        const raw = match?.[1]?.toUpperCase();
+        if (!raw) continue;
+        const numeric = raw.match(/\d+/)?.[0] ?? "";
+        if (numeric.length === 5) continue; // zip codes are never unit ids here.
+        return raw;
+      }
+      return "";
+    };
+
+    // Generalized unit-number extraction across listing sources.
     // Strategy: try explicit prefix matches first (apt/unit/bldg/#),
     // then per-source slug heuristics. Falls back to "" — downstream
     // platform check returns "unknown" for blank units, so a missing
     // extraction degrades gracefully rather than producing false
     // positives.
-    const extractUnitNumber = (url: string, source: CandidateSource): string => {
+    const extractUnitNumber = (url: string, source: CandidateSource, contextText = ""): string => {
       // Cross-source: explicit /unit-X/, /apt-X/, /bldg-X/, "Unit-X"
       // segment. Most reliable when present.
       const explicit = url.match(/(?:^|[/_-])(?:apt|unit|bldg)[-_/]?([a-z0-9]+)/i);
@@ -12534,6 +12565,9 @@ export async function registerRoutes(
           }
         }
       }
+      if (source === "vrbo") {
+        return extractUnitNumberFromText(contextText);
+      }
       return "";
     };
 
@@ -12558,6 +12592,15 @@ export async function registerRoutes(
       `site:redfin.com "${communityName}" "for sale"`,
       `site:redfin.com "${communityName}" condo`,
     ];
+    if (cleanChannel && cleanChannel !== "vrbo") {
+      const bedroomPhrase = requiredBedrooms ? ` "${requiredBedrooms} bedroom"` : "";
+      const brPhrase = requiredBedrooms ? ` "${requiredBedrooms}BR"` : "";
+      searchQueries.push(
+        `site:vrbo.com "${communityName}"${bedroomPhrase}`,
+        `site:vrbo.com "${communityName}"${brPhrase}`,
+        `site:vrbo.com "${communityAddress}"${bedroomPhrase}`,
+      );
+    }
 
     for (const siteQuery of searchQueries) {
       try {
@@ -12582,7 +12625,8 @@ export async function registerRoutes(
           // multiple queries.
           if (candidates.some((c) => c.sourceUrl === link)) continue;
 
-          let unitNumber = extractUnitNumber(link, source);
+          let unitNumber = extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
+          if (!unitNumber) unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
           // Zillow's old fall-through: no parts.split logic below
           // gets inlined into the per-source branches above.
           // Fall through to legacy slug scan if nothing matched.
@@ -12608,7 +12652,9 @@ export async function registerRoutes(
           } else if (source === "redfin") {
             addrSlug = link.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
           }
-          const addrDisplay = decodeURIComponent(addrSlug)
+          const addrDisplay = source === "vrbo"
+            ? String(r.title || communityName).replace(/\s*[-|].*Vrbo.*$/i, "").trim()
+            : decodeURIComponent(addrSlug)
             .replace(/-/g, " ")
             .replace(/\b\w/g, (c: string) => c.toUpperCase())
             .replace(/\d{5}$/, "").trim();
@@ -12641,13 +12687,17 @@ export async function registerRoutes(
     // Redfin hit before walking the (more likely VRBO-saturated)
     // Zillow set — same outcome on success, faster wall when both
     // sources have viable units.
-    const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, zillow: 2 };
+    const sourcePriority: Record<CandidateSource, number> = cleanChannel && cleanChannel !== "vrbo"
+      ? { realtor: 0, redfin: 1, vrbo: 2, zillow: 3 }
+      : { realtor: 0, redfin: 1, zillow: 2, vrbo: 3 };
     candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
 
-    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted: realtor → redfin → zillow)`);
+    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by source priority)`);
 
-    // Step 2 — Per-candidate platform check across Airbnb, VRBO, and
-    // Booking.com. Two complementary queries per platform:
+    // Step 2 — Per-candidate platform check across the enforced
+    // platform(s): all three for default replacement, or only
+    // `cleanChannel` for channel-scoped remediation. Two complementary
+    // queries per enforced platform:
     //   (a) address + unit number — catches listings that include the
     //       street address in their title/snippet (most common case)
     //   (b) community/resort name + unit number — catches listings that
@@ -12661,9 +12711,10 @@ export async function registerRoutes(
     //             could slip through. We now surface UNKNOWN to the UI
     //             so the user can decide whether to trust the result.
     //
-    // Candidates with any FOUND verdict are skipped. Candidates with
-    // all CLEAN or a mix of CLEAN/UNKNOWN fall through to the photo
-    // and vision gates and are surfaced to the UI with the verdict.
+    // Candidates with any FOUND verdict on an enforced platform are
+    // skipped. Candidates with all CLEAN or a mix of CLEAN/UNKNOWN
+    // fall through to the photo and vision gates and are surfaced to
+    // the UI with the verdict.
     type PlatformStatus = "clean" | "found" | "unknown";
     type PlatformCheck = { airbnb: PlatformStatus; vrbo: PlatformStatus; bookingCom: PlatformStatus };
 
@@ -12672,6 +12723,15 @@ export async function registerRoutes(
       { key: "vrbo",       host: "vrbo.com" },
       { key: "bookingCom", host: "booking.com" },
     ];
+    const channelToKey: Record<"airbnb" | "vrbo" | "booking", keyof PlatformCheck> = {
+      airbnb: "airbnb",
+      vrbo: "vrbo",
+      booking: "bookingCom",
+    };
+    const enforcedKeys: Array<keyof PlatformCheck> = cleanChannel
+      ? [channelToKey[cleanChannel]]
+      : platformHosts.map((p) => p.key);
+    const enforcedHosts = platformHosts.filter((p) => enforcedKeys.includes(p.key));
 
     async function runSearch(q: string): Promise<any[] | null> {
       try {
@@ -12729,19 +12789,17 @@ export async function registerRoutes(
         // UI surface that to the user.
         return { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
       }
+      const platformCheck: PlatformCheck = { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
       const results = await Promise.all(
-        platformHosts.map((p) =>
+        enforcedHosts.map((p) =>
           checkOnePlatform(p.host, [
             `site:${p.host} "${address}" "${unit}"`,
             `site:${p.host} "${resort}" "${unit}"`,
           ]),
         ),
       );
-      return {
-        airbnb:     results[0],
-        vrbo:       results[1],
-        bookingCom: results[2],
-      };
+      enforcedHosts.forEach((p, i) => { platformCheck[p.key] = results[i]; });
+      return platformCheck;
     }
 
     // PR #322: track per-candidate verdicts so the failure message
@@ -12762,7 +12820,8 @@ export async function registerRoutes(
 
     // Source-friendly display label so logs + return values reflect
     // which site each candidate came from (PR #326).
-    const sourceLabel = (s: CandidateSource): string => s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : "Redfin";
+    const sourceLabel = (s: CandidateSource): string =>
+      s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : s === "redfin" ? "Redfin" : "VRBO";
 
     for (const candidate of candidates) {
       try {
@@ -12776,14 +12835,6 @@ export async function registerRoutes(
         // cleanChannel set: just that one. The platformCheck object
         // uses "bookingCom" while the API request uses "booking" —
         // map here so the body convention stays simple.
-        const channelToKey: Record<"airbnb" | "vrbo" | "booking", keyof PlatformCheck> = {
-          airbnb: "airbnb",
-          vrbo: "vrbo",
-          booking: "bookingCom",
-        };
-        const enforcedKeys: Array<keyof PlatformCheck> = cleanChannel
-          ? [channelToKey[cleanChannel]]
-          : platformHosts.map((p) => p.key);
         const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
         if (foundOn) {
           console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
@@ -12916,20 +12967,19 @@ export async function registerRoutes(
     } as Record<AttemptRow["verdict"], number>;
     for (const a of attempts) breakdown[a.verdict]++;
 
-    // PR #326: source breakdown shows which sites contributed (Zillow
-    // vs Realtor.com vs Redfin). Helps the operator see at a glance
-    // if one source is failing to surface candidates and where to
-    // tweak queries.
-    const sourceBreakdown: Record<CandidateSource, number> = { zillow: 0, realtor: 0, redfin: 0 };
+    // PR #326: source breakdown shows which sites contributed. Helps
+    // the operator see at a glance if one source is failing to surface
+    // candidates and where to tweak queries.
+    const sourceBreakdown: Record<CandidateSource, number> = { zillow: 0, realtor: 0, redfin: 0, vrbo: 0 };
     for (const c of candidates) sourceBreakdown[c.source]++;
 
     let diagnostic: string;
     if (totalCandidates === 0) {
-      diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
+      diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
     } else {
       const parts: string[] = [];
       if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
-      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (Google + sidecar both inconclusive — strict mode rejects)`);
+      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
       if (breakdown.error > 0) parts.push(`${breakdown.error} errored`);
@@ -12937,6 +12987,7 @@ export async function registerRoutes(
       if (sourceBreakdown.zillow > 0) sourceParts.push(`${sourceBreakdown.zillow} Zillow`);
       if (sourceBreakdown.realtor > 0) sourceParts.push(`${sourceBreakdown.realtor} Realtor.com`);
       if (sourceBreakdown.redfin > 0) sourceParts.push(`${sourceBreakdown.redfin} Redfin`);
+      if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
       diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")}) — ${parts.join(", ")}.`;
     }
 
