@@ -172,33 +172,20 @@ async function fetchOrganicViaSidecarOrApi(
   pages: number,
   apiKey: string,
 ): Promise<{ hits: Array<{ link: string }>; source: "sidecar" | "searchapi"; durationMs: number }> {
-  // Try sidecar first. One call returns `pages * 10` organic results
-  // — sidecar's google_serp doesn't paginate but `maxResults` lets
-  // us widen the scrape per call. Note: Playwright's evaluator scans
-  // a single SERP, so we get whatever Google fits onto the first
-  // page of results for that `num=` value (Google itself caps at 10
-  // per page, so for 20 we'd need pagination — sidecar caps at 20
-  // for now which matches the existing find-buy-in usage).
-  const sidecarStart = Date.now();
-  try {
-    const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
-    const r = await googleSerpViaSidecar({
-      query,
-      maxResults: Math.min(20, pages * 10),
-      walletBudgetMs: 60_000,
-    });
-    if (r.workerOnline && r.hits.length > 0) {
-      return {
-        hits: r.hits.map((h) => ({ link: h.url })),
-        source: "sidecar",
-        durationMs: Date.now() - sidecarStart,
-      };
-    }
-  } catch {
-    // Fall through to SearchAPI.
-  }
+  // PR #327 (operator directive 2026-04-30): sidecar Google SERP
+  // path REMOVED. Driving Google search through Playwright kept
+  // tripping Google's bot detection — Chrome would zoom in/out and
+  // exhibit unusual scroll behavior that flagged the session, then
+  // every subsequent VRBO/Booking partner-portal scrape inherited
+  // the polluted session. Architecture is now:
+  //   1. SearchAPI handles Google queries (server-to-server, no
+  //      browser, no bot detection at our end).
+  //   2. Sidecar handles direct-URL browsing only (VRBO/Booking
+  //      partner portals via cookies + residential IP).
+  // Sidecar never visits google.com — keeps the daemon's session
+  // clean for the scrapers that actually need a real browser.
 
-  // SearchAPI fallback — paginate as before.
+  // SearchAPI — paginate as before.
   const apiStart = Date.now();
   const all: Array<{ link: string }> = [];
   for (let page = 1; page <= pages; page++) {
