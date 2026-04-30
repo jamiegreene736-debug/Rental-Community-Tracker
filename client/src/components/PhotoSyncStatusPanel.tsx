@@ -40,7 +40,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { ShieldOff, Shield, RotateCw, Zap, Check, X, Circle } from "lucide-react";
+import { ShieldOff, Shield, RotateCw, Zap, Check, X, Circle, Copy, ClipboardCheck, AlertTriangle } from "lucide-react";
 
 const CHANNELS = [
   { key: "airbnb", label: "Airbnb" },
@@ -270,6 +270,125 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
   // multiple channels have alerts.
   type AirbnbRemediateState = { phase: "running" | "done" | "error"; message: string; percent: number };
   const [airbnbRemediating, setAirbnbRemediating] = useState<Record<number, AirbnbRemediateState>>({});
+
+  // PR #334: structured diagnostic report opened in a dialog when
+  // any of the channel-remediation actions fails. Captures every
+  // observable signal (HTTP status, NDJSON event timeline, server
+  // diagnostic blob, browser/timestamp metadata) so the operator
+  // can one-click copy a markdown-formatted blob to share with
+  // Claude in chat — no DevTools spelunking required.
+  type DiagnosticReport = {
+    open: boolean;
+    action: string;          // human-readable action label
+    listingId: string;
+    alertId?: number;
+    channel?: string;
+    httpStatus?: number;
+    httpOk?: boolean;
+    error?: string;
+    serverDiagnostic?: unknown;
+    events: Array<{ at: number; raw: string; parsed: unknown }>;
+    finalState?: "running-then-disconnected" | "errored" | "completed-without-done";
+    startedAt: number;
+    endedAt?: number;
+  };
+  const emptyReport: DiagnosticReport = {
+    open: false,
+    action: "",
+    listingId: guestyListingId,
+    events: [],
+    startedAt: Date.now(),
+  };
+  const [diagnostic, setDiagnostic] = useState<DiagnosticReport>(emptyReport);
+  const [copied, setCopied] = useState(false);
+
+  // Format the diagnostic report as a markdown blob the operator
+  // can paste into chat verbatim. Includes a banner explaining
+  // what's needed so the recipient (me) can act on it without
+  // asking follow-up questions.
+  const formatDiagnostic = (r: DiagnosticReport): string => {
+    const lines: string[] = [];
+    lines.push("# NexStay action failed — diagnostic report");
+    lines.push("");
+    lines.push(`**Action:** ${r.action}`);
+    lines.push(`**Listing ID:** \`${r.listingId}\``);
+    if (r.alertId != null) lines.push(`**Alert ID:** ${r.alertId}`);
+    if (r.channel) lines.push(`**Channel:** ${r.channel}`);
+    lines.push(`**Started:** ${new Date(r.startedAt).toISOString()}`);
+    if (r.endedAt) lines.push(`**Ended:** ${new Date(r.endedAt).toISOString()} (${((r.endedAt - r.startedAt) / 1000).toFixed(1)}s)`);
+    lines.push(`**User agent:** ${typeof navigator !== "undefined" ? navigator.userAgent : "n/a"}`);
+    lines.push(`**Page URL:** ${typeof window !== "undefined" ? window.location.href : "n/a"}`);
+    lines.push("");
+    lines.push("## Outcome");
+    if (r.httpStatus != null) lines.push(`- HTTP ${r.httpStatus} ${r.httpOk ? "(stream opened)" : "(error response)"}`);
+    if (r.finalState) lines.push(`- Final state: \`${r.finalState}\``);
+    if (r.error) {
+      lines.push("- **Error:**");
+      lines.push("");
+      lines.push("  ```");
+      lines.push("  " + r.error.split("\n").join("\n  "));
+      lines.push("  ```");
+    }
+    lines.push("");
+    lines.push(`## Server events received (${r.events.length})`);
+    if (r.events.length === 0) {
+      lines.push("");
+      lines.push("_(none — request didn't produce any NDJSON events before failure)_");
+    } else {
+      lines.push("");
+      lines.push("```");
+      const startedAt = r.startedAt;
+      for (const ev of r.events) {
+        const t = ((ev.at - startedAt) / 1000).toFixed(2).padStart(6, " ");
+        const summary = (() => {
+          const p = ev.parsed as any;
+          if (!p || typeof p !== "object") return ev.raw.slice(0, 200);
+          if (p.type === "phase") return `phase ${p.name}: ${p.message ?? ""}`;
+          if (p.type === "candidate") return `candidate ${p.unitLabel} (${p.bedrooms}BR) ${p.url}`;
+          if (p.type === "swap") return `swap ${p.kept} kept`;
+          if (p.type === "push") return `push ${p.success ? "ok" : "FAIL"} → ${p.listing}`;
+          if (p.type === "done") return "done";
+          if (p.type === "error") {
+            const r = p.routing ? ` [routing=${JSON.stringify(p.routing)}]` : "";
+            return `error in phase=${p.phase}: ${p.message}${r}`;
+          }
+          return ev.raw.slice(0, 200);
+        })();
+        lines.push(`+${t}s  ${summary}`);
+      }
+      lines.push("```");
+    }
+    if (r.serverDiagnostic !== undefined) {
+      lines.push("");
+      lines.push("## Server diagnostic");
+      lines.push("");
+      lines.push("```json");
+      try { lines.push(JSON.stringify(r.serverDiagnostic, null, 2).slice(0, 8000)); }
+      catch { lines.push(String(r.serverDiagnostic)); }
+      lines.push("```");
+    }
+    return lines.join("\n");
+  };
+
+  const copyDiagnostic = async () => {
+    const text = formatDiagnostic(diagnostic);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Clipboard API can fail (insecure context, permission denied);
+      // fall back to a manual textarea copy.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 2500); } catch {}
+      document.body.removeChild(ta);
+    }
+  };
   const setAirbnbStatus = (alertId: number, s: AirbnbRemediateState) =>
     setAirbnbRemediating((prev) => ({ ...prev, [alertId]: s }));
   const clearAirbnbStatus = (alertId: number) =>
@@ -285,11 +404,23 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
     }
   };
   const remediateAirbnbAlert = async (alertId: number) => {
-    // PR #331: aggressive console-logging + immediate toast so a
-    // silent failure can't hide. Operator hit "I clicked Replace
-    // photos and nothing happened" — without these breadcrumbs we
-    // can't tell whether the click registered, the request fired,
-    // or the response stream malformed.
+    // PR #334: capture every observable signal as we go. On any
+    // failure path, open the diagnostic dialog with a one-click
+    // "Copy" button so the operator can paste a markdown-formatted
+    // report into chat without opening DevTools.
+    const report: DiagnosticReport = {
+      open: false,
+      action: `Replace photos (Airbnb master sync)`,
+      listingId: guestyListingId,
+      alertId,
+      channel: "airbnb",
+      events: [],
+      startedAt: Date.now(),
+    };
+    const recordEvent = (raw: string, parsed: unknown) => {
+      report.events.push({ at: Date.now(), raw, parsed });
+    };
+
     console.info(`[airbnb-remediate] click → POST /api/photo-listing-alerts/${alertId}/remediate`);
     setAirbnbStatus(alertId, { phase: "running", message: "Starting…", percent: 5 });
     toast({
@@ -298,10 +429,15 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
     });
     try {
       const resp = await fetch(`/api/photo-listing-alerts/${alertId}/remediate`, { method: "POST" });
+      report.httpStatus = resp.status;
+      report.httpOk = resp.ok;
       console.info(`[airbnb-remediate] alert ${alertId} → HTTP ${resp.status} ${resp.ok ? "(streaming)" : "(error)"}`);
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${resp.status}`);
+        if (err && typeof err === "object" && "diagnostic" in err) {
+          report.serverDiagnostic = (err as any).diagnostic;
+        }
+        throw new Error((err as any)?.error || `HTTP ${resp.status}`);
       }
       if (!resp.body) throw new Error("No response body");
       const reader = resp.body.getReader();
@@ -309,6 +445,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
       let buf = "";
       let didFinish = false;
       let lastError: string | null = null;
+      let lastServerDiagnostic: unknown = undefined;
       let percent = 5;
       while (true) {
         const { done: streamDone, value } = await reader.read();
@@ -318,32 +455,39 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
         buf = lines.pop()!;
         for (const line of lines) {
           if (!line.trim()) continue;
-          try {
-            const ev = JSON.parse(line) as any;
-            console.debug(`[airbnb-remediate] alert ${alertId} event:`, ev);
-            if (ev.type === "phase") {
-              percent = phasePercent(ev.name, percent);
-              setAirbnbStatus(alertId, { phase: "running", message: ev.message ?? ev.name, percent });
-            } else if (ev.type === "candidate") {
-              percent = Math.max(percent, 40);
-              setAirbnbStatus(alertId, { phase: "running", message: `Found ${ev.unitLabel}`, percent });
-            } else if (ev.type === "swap") {
-              percent = Math.max(percent, 80);
-              setAirbnbStatus(alertId, { phase: "running", message: `Swapped ${ev.kept} photos`, percent });
-            } else if (ev.type === "push") {
-              percent = Math.max(percent, 90);
-              setAirbnbStatus(alertId, {
-                phase: "running",
-                message: ev.success ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}` : `Push failed: ${ev.listing}`,
-                percent,
-              });
-            } else if (ev.type === "done") {
-              didFinish = true;
-            } else if (ev.type === "error") {
-              lastError = ev.message ?? `${ev.phase} error`;
-            }
-          } catch (parseErr) {
+          let ev: any = null;
+          try { ev = JSON.parse(line); }
+          catch (parseErr) {
             console.warn(`[airbnb-remediate] malformed event line:`, line.slice(0, 200), parseErr);
+            recordEvent(line, null);
+            continue;
+          }
+          recordEvent(line, ev);
+          console.debug(`[airbnb-remediate] alert ${alertId} event:`, ev);
+          if (ev.type === "phase") {
+            percent = phasePercent(ev.name, percent);
+            setAirbnbStatus(alertId, { phase: "running", message: ev.message ?? ev.name, percent });
+          } else if (ev.type === "candidate") {
+            percent = Math.max(percent, 40);
+            setAirbnbStatus(alertId, { phase: "running", message: `Found ${ev.unitLabel}`, percent });
+          } else if (ev.type === "swap") {
+            percent = Math.max(percent, 80);
+            setAirbnbStatus(alertId, { phase: "running", message: `Swapped ${ev.kept} photos`, percent });
+          } else if (ev.type === "push") {
+            percent = Math.max(percent, 90);
+            setAirbnbStatus(alertId, {
+              phase: "running",
+              message: ev.success ? `Pushed ${ev.savedOnGuesty} to ${ev.listing}` : `Push failed: ${ev.listing}`,
+              percent,
+            });
+          } else if (ev.type === "done") {
+            didFinish = true;
+          } else if (ev.type === "error") {
+            lastError = ev.message ?? `${ev.phase} error`;
+            // Some error events carry a `diagnostic` payload (find-unit
+            // attaches per-candidate verdicts); preserve it for the
+            // copy-to-clipboard report.
+            if (ev.diagnostic !== undefined) lastServerDiagnostic = ev.diagnostic;
           }
         }
       }
@@ -358,23 +502,21 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
         clearAirbnbStatus(alertId);
         queryClient.invalidateQueries({ queryKey });
       } else {
+        report.serverDiagnostic = lastServerDiagnostic ?? report.serverDiagnostic;
+        report.finalState = lastError ? "errored" : "completed-without-done";
         throw new Error(lastError ?? "Remediate did not finish");
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
+      report.error = msg;
+      report.endedAt = Date.now();
+      if (!report.finalState) report.finalState = "errored";
       console.error(`[airbnb-remediate] alert ${alertId} → error:`, msg, e);
-      // PR #331: persistent error toast (duration: Infinity) so the
-      // operator sees what went wrong even if the inline status pill
-      // is dismissed/scrolled past. Click X to dismiss.
       setAirbnbStatus(alertId, { phase: "error", message: `✗ ${msg}`, percent: 100 });
-      toast({
-        duration: Infinity,
-        title: "Couldn't replace Airbnb photos",
-        description: msg,
-        variant: "destructive",
-      });
-      // Keep the inline error pill for 30s instead of 8s — gives
-      // operator time to read the diagnostic without rushing.
+      // PR #334: open the diagnostic dialog directly. Operator clicks
+      // Copy → pastes the blob in chat → I have everything I need to
+      // diagnose without asking follow-up questions.
+      setDiagnostic({ ...report, open: true });
       setTimeout(() => clearAirbnbStatus(alertId), 30_000);
     }
   };
@@ -396,6 +538,20 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
       toast({ title: "Can't run full flow", description: "communityFolder missing — pass it as a prop from the builder.", variant: "destructive" });
       return;
     }
+    // PR #334: capture every event for the diagnostic dialog. On any
+    // failure we open the dialog with a one-click Copy button so the
+    // operator can paste the markdown blob into chat.
+    const report: DiagnosticReport = {
+      open: false,
+      action: `Isolate + Replace + Disconnect (${prettyChannel(params.channel)})`,
+      listingId: guestyListingId,
+      channel: params.channel,
+      events: [],
+      startedAt: Date.now(),
+    };
+    const recordEvent = (raw: string, parsed: unknown) => {
+      report.events.push({ at: Date.now(), raw, parsed });
+    };
     setFullFlowRun({
       channel: params.channel,
       steps: initialSteps(params.channel),
@@ -415,9 +571,14 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
           reason: params.reason || null,
         }),
       });
+      report.httpStatus = resp.status;
+      report.httpOk = resp.ok;
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${resp.status}`);
+        if (err && typeof err === "object" && "diagnostic" in err) {
+          report.serverDiagnostic = (err as any).diagnostic;
+        }
+        throw new Error((err as any)?.error || `HTTP ${resp.status}`);
       }
       if (!resp.body) throw new Error("No response body");
       const reader = resp.body.getReader();
@@ -426,6 +587,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
       let didFinish = false;
       let lastError: string | null = null;
       let lastErrorPhase: string | null = null;
+      let lastServerDiagnostic: unknown = undefined;
       while (true) {
         const { done: streamDone, value } = await reader.read();
         if (streamDone) break;
@@ -434,9 +596,16 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
         buf = lines.pop()!;
         for (const line of lines) {
           if (!line.trim()) continue;
-          try {
-            const ev = JSON.parse(line) as any;
-            console.debug("[isolate-replace-disconnect] event:", ev);
+          let ev: any = null;
+          try { ev = JSON.parse(line); }
+          catch (parseErr) {
+            console.warn(`[isolate-replace-disconnect] malformed event line:`, line.slice(0, 200), parseErr);
+            recordEvent(line, null);
+            continue;
+          }
+          recordEvent(line, ev);
+          console.debug("[isolate-replace-disconnect] event:", ev);
+          {
             if (ev.type === "phase") {
               const stepKey = phaseToStep(ev.name);
               if (stepKey) updateStep(stepKey, { state: "running", detail: ev.message ?? null });
@@ -489,8 +658,9 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                 updateStep(stepKey, { state: "error", detail: lastError });
                 skipPendingAfter(stepKey);
               }
+              if (ev.diagnostic !== undefined) lastServerDiagnostic = ev.diagnostic;
             }
-          } catch { /* ignore malformed line */ }
+          }
         }
       }
       if (didFinish) {
@@ -505,13 +675,20 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
           queryClient.invalidateQueries({ queryKey });
         }, 2200);
       } else {
+        report.serverDiagnostic = lastServerDiagnostic ?? report.serverDiagnostic;
+        report.finalState = lastError ? "errored" : "completed-without-done";
         throw new Error(lastError ?? "Flow ended without a done event");
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
+      report.error = msg;
+      report.endedAt = Date.now();
+      if (!report.finalState) report.finalState = "errored";
       console.error(`[isolate-replace-disconnect] error:`, msg);
       setFullFlowRun((s) => s ? { ...s, error: msg, done: false } : s);
-      toast({ title: "Migration failed", description: msg, variant: "destructive" });
+      // PR #334: open the diagnostic dialog directly. Operator clicks
+      // Copy → pastes the blob in chat.
+      setDiagnostic({ ...report, open: true });
     }
   };
 
@@ -849,6 +1026,68 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
               data-testid="btn-isolate-confirm"
             >
               {isolateMutation.isPending ? "Isolating…" : `Isolate ${isolating?.label}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* PR #334: failure diagnostic dialog. Opens automatically when
+          a channel-remediation action fails. Operator clicks "Copy
+          diagnostic" to grab a markdown-formatted report (HTTP
+          status, NDJSON event timeline, server diagnostic, browser
+          metadata) and pastes it into chat — no DevTools spelunking
+          needed for me to triage. */}
+      <Dialog open={diagnostic.open} onOpenChange={(open) => { if (!open) setDiagnostic({ ...diagnostic, open: false }); }}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-red-600" />
+              {diagnostic.action} failed
+            </DialogTitle>
+            <DialogDescription>
+              Click <strong>Copy diagnostic</strong> below and paste the blob into chat with Claude. It contains
+              everything Claude needs to triage without asking follow-up questions: HTTP status, every server
+              event, the failure reason, and your browser/page context.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="text-xs">
+              <div className="font-semibold text-red-700 dark:text-red-300 mb-1">What went wrong</div>
+              <pre className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded p-2 whitespace-pre-wrap break-words text-[11px] max-h-32 overflow-auto">
+                {diagnostic.error || "(no error message captured)"}
+              </pre>
+            </div>
+            <div className="text-xs">
+              <div className="font-semibold mb-1">Quick summary</div>
+              <ul className="text-[11px] space-y-0.5 text-muted-foreground">
+                <li>• Action: <span className="font-mono">{diagnostic.action}</span></li>
+                {diagnostic.alertId != null && <li>• Alert ID: <span className="font-mono">{diagnostic.alertId}</span></li>}
+                {diagnostic.channel && <li>• Channel: <span className="font-mono">{diagnostic.channel}</span></li>}
+                {diagnostic.httpStatus != null && (
+                  <li>• HTTP: <span className="font-mono">{diagnostic.httpStatus}</span> {diagnostic.httpOk ? "(stream opened)" : "(error response)"}</li>
+                )}
+                <li>• Events received: <span className="font-mono">{diagnostic.events.length}</span></li>
+                {diagnostic.endedAt && (
+                  <li>• Wall: <span className="font-mono">{((diagnostic.endedAt - diagnostic.startedAt) / 1000).toFixed(1)}s</span></li>
+                )}
+              </ul>
+            </div>
+            <div className="text-xs">
+              <details>
+                <summary className="cursor-pointer font-semibold mb-1">Preview the full report ({formatDiagnostic(diagnostic).length} chars)</summary>
+                <pre className="mt-2 bg-gray-50 dark:bg-gray-900 border rounded p-2 whitespace-pre-wrap break-words text-[10px] font-mono max-h-64 overflow-auto">
+                  {formatDiagnostic(diagnostic)}
+                </pre>
+              </details>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDiagnostic({ ...diagnostic, open: false })} data-testid="btn-diagnostic-close">
+              Close
+            </Button>
+            <Button onClick={copyDiagnostic} data-testid="btn-diagnostic-copy" className={copied ? "bg-green-600 hover:bg-green-600" : ""}>
+              {copied ? <ClipboardCheck className="h-4 w-4 mr-1" /> : <Copy className="h-4 w-4 mr-1" />}
+              {copied ? "Copied! Paste into chat" : "Copy diagnostic"}
             </Button>
           </DialogFooter>
         </DialogContent>
