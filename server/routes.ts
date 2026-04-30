@@ -2515,9 +2515,23 @@ export async function registerRoutes(
     // Normalize a string for inclusion checks — lowercase + collapse punctuation
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const resortTokens = resortName ? norm(resortName).split(" ").filter(t => t.length >= 3) : [];
+    const normalizedResortName = resortName ? norm(resortName) : "";
+    const mentionsPoipuKai = (haystack: string): boolean => {
+      const n = norm(haystack);
+      if (/\bpoipu kai\b/.test(n)) return true;
+      // Poipu Kai has named condo sub-communities whose PM pages often
+      // omit the exact parent-resort phrase. Require a Poipu/Koloa/Kauai
+      // locality token plus the sub-community name so "Mele Kai at Poipu"
+      // does not pass just because it contains the separated words.
+      const hasLocality = /\b(poipu|koloa|kauai)\b/.test(n);
+      return hasLocality && (
+        /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n)
+      );
+    };
     // True if the haystack mentions every significant token of the resort name
     const mentionsResort = (haystack: string): boolean => {
       if (!resortName || resortTokens.length === 0) return true; // no filter
+      if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
       const n = norm(haystack);
       return resortTokens.every(t => n.includes(t));
     };
@@ -2535,6 +2549,7 @@ export async function registerRoutes(
     const significantResortTokens = resortTokens.filter((t) => t.length >= 4);
     const mentionsResortLoose = (haystack: string): boolean => {
       if (!resortName || significantResortTokens.length === 0) return true;
+      if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
       const n = norm(haystack);
       return significantResortTokens.some((t) => n.includes(t));
     };
@@ -2544,8 +2559,10 @@ export async function registerRoutes(
     const bedroomFromText = (text: string): number | null => {
       const t = text.toLowerCase();
       if (/\bstudio\b|\befficiency\b/.test(t)) return 0;
-      const m = t.match(/(\d+)\s*(?:br|bd|bed|bedroom|bdr)/);
+      const m = t.match(/(\d+)\s*(?:br|bd|bdr|bedrooms?)\b/);
       if (m) return parseInt(m[1], 10);
+      const slash = t.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
+      if (slash) return parseInt(slash[1], 10);
       const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
       for (const [w, n] of Object.entries(words)) {
         if (new RegExp(`\\b${w}[\\s-]bedroom\\b`).test(t)) return n;
@@ -2557,7 +2574,7 @@ export async function registerRoutes(
     const bedroomOk = (text: string): boolean => {
       const b = bedroomFromText(text);
       if (b === null) return true; // unknown — keep for manual review
-      return b >= bedrooms;
+      return b === bedrooms;
     };
 
     console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
@@ -2693,6 +2710,21 @@ export async function registerRoutes(
         if (!hasUnitIdentifier) return true;
       }
       return false;
+    };
+
+    const candidateHaystack = (c: Candidate): string =>
+      `${c.title} ${c.snippet ?? ""} ${c.url}`;
+    const candidateBedroomSignal = (c: Candidate): number | null => {
+      if (typeof c.bedrooms === "number") return c.bedrooms;
+      return bedroomFromText(candidateHaystack(c));
+    };
+    const candidateFitsTarget = (c: Candidate): boolean => {
+      const hay = candidateHaystack(c);
+      if (!mentionsResort(hay)) return false;
+      const inferredBedrooms = candidateBedroomSignal(c);
+      if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
+      if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
+      return true;
     };
 
     // Append the reservation's check-in/out to the URL so the landing page
@@ -4057,8 +4089,7 @@ export async function registerRoutes(
           try { host = new URL(hit.url).hostname.replace(/^www\./, ""); } catch { continue; }
           if (otaDomains.test(host)) continue;
           if (existingPmUrls.has(hit.url)) continue;
-          existingPmUrls.add(hit.url);
-          pmSidecarFinderCandidates.push({
+          const candidate: Candidate = {
             source: "pm",
             sourceLabel: host,
             title: hit.title.slice(0, 100),
@@ -4067,7 +4098,10 @@ export async function registerRoutes(
             totalPrice: 0,
             bedrooms: undefined,
             snippet: hit.snippet?.slice(0, 160),
-          });
+          };
+          if (!candidateFitsTarget(candidate)) continue;
+          existingPmUrls.add(hit.url);
+          pmSidecarFinderCandidates.push(candidate);
         }
         console.log(
           `[find-buy-in] sidecar-google-serp added ${pmSidecarFinderCandidates.length} PM URLs (worker online, query="${target}" ${bedrooms}BR)`,
@@ -4103,6 +4137,7 @@ export async function registerRoutes(
       ...pmSidecarFinderCandidates,
     ]) {
       if (!c.url || c.verified || sidecarVerifySeen.has(c.url)) continue;
+      if (!candidateFitsTarget(c)) continue;
       sidecarVerifySeen.add(c.url);
       sidecarVerifyTargets.push(c);
       // Three 5-tab batches keeps the route under Railway's request
@@ -4172,6 +4207,16 @@ export async function registerRoutes(
       ...pmSidecarFinderCandidates,
       ...pmFinderCandidates,
     ];
+    const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
+    const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
+      const kept = items.filter(candidateFitsTarget);
+      targetFilterDropped[key] += items.length - kept.length;
+      return kept;
+    };
+    const airbnbTarget = filterTargetCandidates(airbnbWithMatches, "airbnb");
+    const vrboTarget = filterTargetCandidates(vrbo, "vrbo");
+    const bookingTarget = filterTargetCandidates(booking, "booking");
+    const pmTarget = filterTargetCandidates(pmAugmented, "pm");
 
     // Combined priced pool across all bookable sources.
     //
@@ -4194,7 +4239,7 @@ export async function registerRoutes(
     //
     // Booking.com — google_hotels engine + sidecar; both date-specific.
     // PM — verified via the sidecar batch-verify pass above.
-    const priced: Candidate[] = [...airbnbWithMatches, ...booking, ...vrbo, ...pmAugmented]
+    const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
@@ -4330,12 +4375,12 @@ export async function registerRoutes(
       { anchor: Candidate; members: Candidate[] }
     >();
     const allKnown: Candidate[] = [
-      ...airbnbWithMatches,
-      ...vrbo,
-      ...booking,
-      ...pmAugmented,
+      ...airbnbTarget,
+      ...vrboTarget,
+      ...bookingTarget,
+      ...pmTarget,
     ];
-    const airbnbUrlSet = new Set(airbnbWithMatches.map((c) => c.url));
+    const airbnbUrlSet = new Set(airbnbTarget.map((c) => c.url));
     for (const c of allKnown) {
       let anchorKey: string;
       let anchor: Candidate;
@@ -4343,7 +4388,7 @@ export async function registerRoutes(
         anchorKey = c.airbnbAnchorUrl;
         // anchor is the Airbnb candidate; will be set/updated when we
         // hit it in the loop. If not yet hit, defer by using c temporarily.
-        anchor = airbnbWithMatches.find((a) => a.url === c.airbnbAnchorUrl) ?? c;
+        anchor = airbnbTarget.find((a) => a.url === c.airbnbAnchorUrl) ?? c;
       } else {
         anchorKey = c.url;
         anchor = c;
@@ -4397,6 +4442,7 @@ export async function registerRoutes(
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSidecarFinderCandidates.length}+${pmFinderCandidates.length} (google+photoMatches+knownPMs+sidecarFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
     );
@@ -4410,10 +4456,10 @@ export async function registerRoutes(
       checkIn,
       checkOut,
       sources: {
-        airbnb: airbnbWithMatches.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        vrbo: vrbo.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        booking: booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
-        pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        airbnb: airbnbTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        vrbo: vrboTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        booking: bookingTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        pm: pmTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       // PR #337: pmSourceBreakdown — every PM scraper we attempted,
       // with its result count and whether the discovery promise
@@ -4443,6 +4489,7 @@ export async function registerRoutes(
           booking: bookingDropped,
           photoMatchBedroomMismatch: photoMatchBedroomMismatchDropped,
           photoMatchLanding: photoMatchLandingDropped,
+          targetFilter: targetFilterDropped,
         },
         verification: {
           attempted: preVerifyAttempted,
