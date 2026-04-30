@@ -2959,7 +2959,19 @@ export async function registerRoutes(
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const targetDestination = resortName ?? community;
+      // PR #321: use the curated COMMUNITY_VRBO_DESTINATIONS map so
+      // sidecar searches encompass the WHOLE community area, not just
+      // the resortName extracted from Guesty's listing title. The
+      // previous `resortName ?? community` resolved to bare "Poipu
+      // Kai" for Regency listings, which Vrbo autocomplete narrowed
+      // to a region returning 1BR/2BR units only (daemon log:
+      // BRs=[1,1,1,1,1,1,1,?,1,2,2,1,2,?,1,1,2,1,2] — 0 of 19 cards
+      // were 3BR). The map's broader area-level strings (e.g.
+      // "Poipu, Koloa, Kauai, Hawaii") give Vrbo's autocomplete the
+      // island anchor it needs to surface the full inventory.
+      const targetDestination =
+        COMMUNITY_VRBO_DESTINATIONS[community]
+        ?? `${resortName ?? community}, Hawaii`;
       const [googleResults, sidecarResults] = await Promise.all([
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
@@ -4689,15 +4701,24 @@ export async function registerRoutes(
 
   // ========== VRBO DIRECT SCRAPER ==========
 
+  // PR #321: aligned with COMMUNITY_SEARCH_LOCATIONS (Booking's map)
+  // — added "Kauai" island anchor on the four Kauai entries that
+  // were missing it, and used the broader "Poipu, Koloa, Kauai,
+  // Hawaii" form for resorts inside the Poipu area so Vrbo's
+  // autocomplete matches an area covering all units in that
+  // community rather than the narrower resort-specific token (which
+  // for "Poipu Kai" was returning 0 of 19 cards as 3BR — daemon log
+  // 2026-04-30). Operator directive: "encompass all the potential
+  // units in that community."
   const COMMUNITY_VRBO_DESTINATIONS: Record<string, string> = {
-    "Poipu Kai": "Regency at Poipu Kai, Koloa, Hawaii",
-    "Kekaha Beachfront": "Kekaha, Hawaii",
-    "Keauhou": "Keauhou, Kailua-Kona, Hawaii",
+    "Poipu Kai": "Poipu, Koloa, Kauai, Hawaii",
+    "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
+    "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
     "Princeville": "Princeville, Kauai, Hawaii",
     "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
-    "Poipu Oceanfront": "Poipu Beach, Koloa, Hawaii",
-    "Poipu Brenneckes": "Poipu Beach, Koloa, Hawaii",
-    "Pili Mai": "Pili Mai at Poipu, Koloa, Hawaii",
+    "Poipu Oceanfront": "Poipu, Koloa, Kauai, Hawaii",
+    "Poipu Brenneckes": "Poipu, Koloa, Kauai, Hawaii",
+    "Pili Mai": "Poipu, Koloa, Kauai, Hawaii",
   };
 
   const COMMUNITY_SP_SLUGS: Record<string, string> = {
