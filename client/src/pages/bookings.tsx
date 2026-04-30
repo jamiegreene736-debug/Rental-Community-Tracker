@@ -444,10 +444,34 @@ export default function Bookings() {
         skippedReasons: string[];
         visionVerified: boolean;
         airbnbLastResort: boolean;
+        searchSummary: {
+          bedrooms: number;
+          scanned: number;
+          priced: number;
+          sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
+        };
       }> = [];
       for (const slot of emptySlots) {
         const slotResult = await (async () => {
           const data = await getFindBuyInForBedrooms(slot.bedrooms);
+          const sourceCounts = {
+            airbnb: data.sources?.airbnb?.length ?? 0,
+            vrbo: data.sources?.vrbo?.length ?? 0,
+            booking: data.sources?.booking?.length ?? 0,
+            pm: data.sources?.pm?.length ?? 0,
+          };
+          const allSourceCandidates = [
+            ...(data.sources?.airbnb ?? []),
+            ...(data.sources?.vrbo ?? []),
+            ...(data.sources?.booking ?? []),
+            ...(data.sources?.pm ?? []),
+          ];
+          const searchSummary = {
+            bedrooms: slot.bedrooms,
+            scanned: allSourceCandidates.length,
+            priced: allSourceCandidates.filter((c) => c.totalPrice > 0).length,
+            sourceCounts,
+          };
 
           // Pre-flight: walk cheapest-first and verify availability before
           // picking. Two-tier verification, mirroring the dialog UI's
@@ -696,7 +720,7 @@ export default function Bookings() {
             if (fallbackVrbo) pick = fallbackVrbo;
           }
 
-          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false };
+          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false, searchSummary };
 
           const finalCost = verifiedPrice ?? pick.totalPrice;
           const propertyName =
@@ -750,10 +774,10 @@ export default function Bookings() {
               buyInId: created.id,
             }).then((r) => r.json());
 
-            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified, airbnbLastResort };
+            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified, airbnbLastResort, searchSummary };
           } catch (e: any) {
             skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
-            return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false };
+            return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false, searchSummary };
           }
         })();
         // Reserve the picked URL so subsequent slots in this same
@@ -794,11 +818,26 @@ export default function Bookings() {
       // Operator updates the cost after contacting the PM.
       const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
       if (filled.length === 0) {
+        const uniqueSummaries = Array.from(
+          new Map(results.map((r) => [r.searchSummary.bedrooms, r.searchSummary])).values(),
+        );
+        const scanned = uniqueSummaries.reduce((sum, s) => sum + s.scanned, 0);
+        const priced = uniqueSummaries.reduce((sum, s) => sum + s.priced, 0);
+        const sourceCounts = uniqueSummaries.reduce(
+          (acc, r) => ({
+            airbnb: acc.airbnb + r.sourceCounts.airbnb,
+            vrbo: acc.vrbo + r.sourceCounts.vrbo,
+            booking: acc.booking + r.sourceCounts.booking,
+            pm: acc.pm + r.sourceCounts.pm,
+          }),
+          { airbnb: 0, vrbo: 0, booking: 0, pm: 0 },
+        );
+        const sourceSummary = `Airbnb ${sourceCounts.airbnb}, Vrbo ${sourceCounts.vrbo}, Booking.com ${sourceCounts.booking}, PM ${sourceCounts.pm}`;
         toast({
-          title: "No auto-fill candidates",
-          description:
-            "Booking.com, PM Companies, Vrbo, and Airbnb all returned nothing for these dates. Click 'Find buy-in' on any slot to retry the search manually (and to see reverse-image PM matches under each Airbnb row that you can click through to book direct).",
-          variant: "destructive",
+          title: "No verified priced candidates",
+          description: scanned > 0
+            ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates. The scanned-options table is open below.`
+            : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the search manually.",
         });
       } else if (zeroCostFills.length === filled.length) {
         // All picks are unpriced. Detect whether at least one slot
@@ -1796,7 +1835,7 @@ function LiveSearchSection({
           </p>
           <p className="text-[11px] text-amber-700/90">
             {data?.debug?.verification?.available === false
-              ? "Verification path is unavailable on this deploy (BROWSERBASE_API_KEY / ANTHROPIC_API_KEY not set). All scanned options are listed below — verify each manually before recording."
+              ? "No source returned a live priced, verified option during this scan. All scanned options are listed below for manual review."
               : data?.debug?.verification?.attempted
                 ? `Tried to verify ${data.debug.verification.attempted} top-priced candidates: ${data.debug.verification.yes} bookable, ${data.debug.verification.no} unavailable, ${data.debug.verification.unclear} unclear. Browse all scanned options below.`
                 : "No priced PM/Booking candidates surfaced for these dates and bedrooms. Browse all scanned options below or click 'Refresh'."}
@@ -2103,6 +2142,19 @@ function ScannedOptionsTable({
     return autoPickUrl;
   }, [sorted, verifyByUrl, autoPickUrl]);
 
+  const pricedCount = all.filter((c) => c.totalPrice > 0).length;
+  const verifiedYesCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "yes").length;
+  const verifyingCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "loading").length;
+  const hiddenCount = sorted.length - visible.length;
+
+  useEffect(() => {
+    if (autoVerifyState !== "done") return;
+    if (!verifiedOnly) return;
+    if (all.length === 0) return;
+    if (verifiedYesCount > 0 || verifyingCount > 0) return;
+    setVerifiedOnly(false);
+  }, [all.length, autoVerifyState, verifiedOnly, verifiedYesCount, verifyingCount]);
+
   if (all.length === 0) return null;
 
   const toggleSort = (key: SortKey) => {
@@ -2120,11 +2172,6 @@ function ScannedOptionsTable({
       ? <ArrowUp className="h-3 w-3 inline" />
       : <ArrowDown className="h-3 w-3 inline" />;
   };
-
-  const pricedCount = all.filter((c) => c.totalPrice > 0).length;
-  const verifiedYesCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "yes").length;
-  const verifyingCount = sorted.filter((c) => verifyByUrl[c.url]?.status === "loading").length;
-  const hiddenCount = sorted.length - visible.length;
 
   return (
     <div className="border rounded-lg overflow-hidden">
