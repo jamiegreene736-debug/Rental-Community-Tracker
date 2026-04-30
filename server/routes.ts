@@ -3127,16 +3127,33 @@ export async function registerRoutes(
             walletBudgetMs: 75_000,
           });
           if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
-          // PR #319 (operator directive 2026-04-30): same exact-
-          // bedroom filter as booking sidecar above. Vrbo's destination
-          // search ("Poipu Kai") sometimes surfaces 1BR/2BR units in
-          // adjacent areas — operator's screenshot showed 12× 1BR + 5×
-          // 2BR in a 3BR Amy search. Drop anything that's not exactly
-          // the requested count.
-          const acceptedVrbo = r.candidates.filter((c) => c.bedrooms === bedrooms);
+          // PR #319 (operator directive 2026-04-30): exact-bedroom
+          // filter on Vrbo's destination search results. Vrbo
+          // sometimes surfaces 1BR/2BR units in adjacent areas
+          // (operator's earlier screenshot showed 12× 1BR + 5× 2BR
+          // in a 3BR Amy search), so drop anything that's not
+          // exactly the requested count.
+          //
+          // PR #340: relax to also accept candidates where bedroom
+          // extraction failed (`undefined`). Operator screenshot
+          // 2026-04-30 showed 8 VRBO listings surfaced as "manual
+          // quote" with no auto-prices — root cause was that the
+          // sidecar's bedroom regex missed cards like "Regency at
+          // Poipu Kai #821" (no "X bedroom" mention in the visible
+          // card text), so they came back with bedrooms=undefined
+          // and got dropped here, leaving only the price-less
+          // Google site:search fallback to surface. The sidecar's
+          // extraction was hardened in worker.mjs (PR #340) to try
+          // 5 patterns + the title; this filter now accepts unknown-
+          // bedroom cards too, since they passed the destination
+          // and date filter at search time. False positives (a 1BR
+          // slipping through with undefined beds) are rare and
+          // surface clearly in the UI's per-card bedroom badge.
+          const acceptedVrbo = r.candidates.filter((c) => c.bedrooms === bedrooms || c.bedrooms === undefined);
           const droppedVrbo = r.candidates.length - acceptedVrbo.length;
-          if (droppedVrbo > 0) {
-            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR candidates`);
+          const acceptedUnknown = acceptedVrbo.filter((c) => c.bedrooms === undefined).length;
+          if (droppedVrbo > 0 || acceptedUnknown > 0) {
+            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} wrong-BR candidates; ${acceptedUnknown} accepted with unknown beds`);
           }
           return {
             // Sidecar VRBO scrape runs the operator's real Chrome

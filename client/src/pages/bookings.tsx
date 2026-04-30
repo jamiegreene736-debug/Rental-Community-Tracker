@@ -1714,11 +1714,18 @@ function LiveSearchSection({
         </div>
       </div>
       {/* Raw hit counts + drop counts per source — lets us see why a source
-          returned few results (upstream empty vs resort/bedroom filtered). */}
+          returned few results (upstream empty vs resort/bedroom filtered).
+          PR #340: pm count now sums every per-PM scraper from
+          pmSourceBreakdown rather than just the (legacy) Google-PM
+          rawCount, which was always 0 since we deprecated the
+          Google-PM path in PR #315. */}
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {data.debug.rawCounts.pm ?? 0}
+            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
+            {pmSourceBreakdown.length > 0 && (
+              <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} PM sources had results)</>
+            )}
             {typeof (data.debug.rawCounts as any).photoMatches === "number" && (
               <> · photo-matches {(data.debug.rawCounts as any).photoMatches}</>
             )}
