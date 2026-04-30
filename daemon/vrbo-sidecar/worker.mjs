@@ -794,7 +794,180 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
   await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
   await normalizePageDisplay(targetPage);
-  return await targetPage.evaluate(() => {
+  const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut }) => {
+    const nightsBetween = (a, b) => Math.max(
+      1,
+      Math.round((new Date(`${b}T12:00:00Z`).getTime() - new Date(`${a}T12:00:00Z`).getTime()) / 86400000),
+    );
+    const nights = nightsBetween(checkIn, checkOut);
+    const isoNights = [];
+    for (
+      let t = new Date(`${checkIn}T12:00:00Z`).getTime(), end = new Date(`${checkOut}T12:00:00Z`).getTime();
+      t < end;
+      t += 86400000
+    ) {
+      const d = new Date(t);
+      isoNights.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`);
+    }
+    const toMdY = (iso) => {
+      const [y, m, d] = iso.split("-").map((p) => parseInt(p, 10));
+      return `${m}-${d}-${y}`;
+    };
+    const toMdYY = (iso) => {
+      const [y, m, d] = iso.split("-");
+      return `${m}/${d}/${y}`;
+    };
+    const host = window.location.hostname.replace(/^www\./, "");
+
+    async function trySuiteParadise() {
+      if (!/suite-paradise\.com$/i.test(host)) return null;
+      const html = document.documentElement?.innerHTML ?? "";
+      const eidMatch = html.match(/"eid"\s*:\s*"(\d+)"/) || html.match(/(?:^|[^a-zA-Z0-9_])eid\s*:\s*"?(\d+)"?/);
+      const eid = eidMatch ? eidMatch[1] : null;
+      if (!eid) return null;
+      const params = new URLSearchParams({
+        "rcav[begin]": toMdYY(checkIn),
+        "rcav[end]": toMdYY(checkOut),
+        "rcav[adult]": "2",
+        "rcav[child]": "0",
+        "rcav[eid]": eid,
+        "rcav[flex_type]": "d",
+      });
+      const resp = await fetch(`/rescms/ajax/item/pricing/simple?${params.toString()}`, {
+        headers: {
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+      const raw = await resp.text();
+      if (!resp.ok) return null;
+      let json = {};
+      try { json = JSON.parse(raw); } catch { return null; }
+      const content = json?.content ?? "";
+      if (/class=["'][^"']*\brc-na\b/i.test(content) || /not available/i.test(content)) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `Suite Paradise rcapi: not available for ${checkIn} → ${checkOut} (eid=${eid})`,
+        };
+      }
+      const exact = content.match(/(?:&quot;|")price(?:&quot;|")\s*:\s*([\d.]+)/);
+      const rendered = content.match(/class=["'][^"']*\brc-price\b[^>]*>\s*\$\s*([\d,]+(?:\.\d+)?)/);
+      const total = exact
+        ? parseFloat(exact[1])
+        : rendered
+        ? parseFloat(rendered[1].replace(/,/g, ""))
+        : 0;
+      if (Number.isFinite(total) && total > 0) {
+        return {
+          available: "yes",
+          nightlyPrice: Math.round(total / nights),
+          totalPrice: Math.round(total),
+          reason: `Suite Paradise rcapi: $${Math.round(total).toLocaleString()} total for ${nights} nights (eid=${eid})`,
+        };
+      }
+      return null;
+    }
+
+    async function tryVrpMain() {
+      const dataEl = document.querySelector("[data-unit-id][data-unit-slug]") || document.querySelector("#unit-data");
+      const unitId = dataEl?.getAttribute("data-unit-id") || dataEl?.dataset?.unitId || null;
+      const slug = dataEl?.getAttribute("data-unit-slug") || dataEl?.dataset?.unitSlug || null;
+      if (!unitId || !slug) return null;
+      const [ratesResp, bookedResp] = await Promise.all([
+        fetch(`/?vrpjax=1&act=getUnitRates&unitId=${encodeURIComponent(unitId)}`, { headers: { Accept: "application/json, text/javascript, */*; q=0.01" } }),
+        fetch(`/?vrpjax=1&act=getUnitBookedDates&par=${encodeURIComponent(slug)}`, { headers: { Accept: "application/json, text/javascript, */*; q=0.01" } }),
+      ]);
+      if (!ratesResp.ok || !bookedResp.ok) return null;
+      let rates = null;
+      let booked = {};
+      try { rates = await ratesResp.json(); } catch { return null; }
+      try { booked = await bookedResp.json(); } catch { booked = {}; }
+      if (!rates || typeof rates !== "object") return null;
+
+      const bookedSet = new Set(booked.bookedDates || []);
+      for (const iso of isoNights) {
+        if (bookedSet.has(toMdY(iso))) {
+          return {
+            available: "no",
+            nightlyPrice: null,
+            totalPrice: null,
+            reason: `VRP calendar: booked night ${iso} for ${checkIn} → ${checkOut}`,
+          };
+        }
+      }
+      const checkInMd = toMdY(checkIn);
+      if (new Set(booked.noCheckin || []).has(checkInMd)) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `VRP calendar: no check-in allowed on ${checkIn}`,
+        };
+      }
+      let requiredMinLOS = Number(booked.minLOS || 1);
+      if (Array.isArray(booked.minNights)) {
+        for (const rule of booked.minNights) {
+          if (rule?.start && rule?.end && checkIn >= rule.start && checkIn <= rule.end) {
+            requiredMinLOS = Math.max(requiredMinLOS, Number(rule.minLOS || 1));
+          }
+        }
+      }
+      if (nights < requiredMinLOS) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `VRP calendar: ${requiredMinLOS}-night minimum for ${checkIn}`,
+        };
+      }
+      let total = 0;
+      let pricedNights = 0;
+      for (const iso of isoNights) {
+        const amount = parseFloat(String(rates?.[iso]?.amount ?? "0"));
+        if (Number.isFinite(amount) && amount > 0) {
+          total += amount;
+          pricedNights++;
+        }
+      }
+      if (pricedNights >= Math.ceil(nights * 0.8) && total > 0) {
+        return {
+          available: "yes",
+          nightlyPrice: Math.round(total / nights),
+          totalPrice: Math.round(total),
+          reason: `VRP vrpjax: $${Math.round(total).toLocaleString()} total for ${nights} nights (unitId=${unitId})`,
+        };
+      }
+      return null;
+    }
+
+    try {
+      const sp = await trySuiteParadise();
+      if (sp) return sp;
+    } catch (e) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: `Suite Paradise rcapi error: ${String(e?.message || e).slice(0, 120)}`,
+      };
+    }
+    try {
+      const vrp = await tryVrpMain();
+      if (vrp) return vrp;
+    } catch (e) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: `VRP vrpjax error: ${String(e?.message || e).slice(0, 120)}`,
+      };
+    }
+    return null;
+  }, { checkIn, checkOut }).catch(() => null);
+  if (platformResult) return platformResult;
+  return await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
     const NO_PATTERNS = [
       /not available for these dates/i,
@@ -814,21 +987,58 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
         };
       }
     }
-    const reserveBtn = document.querySelector(
-      'button[id*="book" i], button[name*="book" i], button:has-text("Reserve"), button:has-text("Book Now"), a:has-text("Reserve"), a:has-text("Book Now")',
-    );
+    const nativeReserveSelector =
+      'button[id*="book" i], button[name*="book" i], button[class*="book" i], a[href*="book" i], input[type="submit"], input[type="button"], [role="button"]';
+    const textReserveRe = /\b(reserve|book now|book direct|book online|check availability|check rates|view rates|select dates)\b/i;
+    const isDisabled = (el) =>
+      el.disabled ||
+      el.getAttribute("aria-disabled") === "true" ||
+      /\bdisabled\b/i.test(el.getAttribute("class") || "");
+    const reserveBtn = Array.from(document.querySelectorAll(nativeReserveSelector))
+      .find((el) => {
+        if (isDisabled(el)) return false;
+        const label = [
+          el.textContent,
+          el.getAttribute("aria-label"),
+          el.getAttribute("title"),
+          el.getAttribute("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        return textReserveRe.test(label);
+      });
     const perNight = text.match(/\$\s*([\d,]+)\s*(?:\/|per|a\s+)?\s*(?:night|nightly)/i);
     const totalPrice = text.match(/\$\s*([\d,]+)\s*total/i) || text.match(/total\s*\$\s*([\d,]+)/i);
     const nightlyN = perNight ? parseInt(perNight[1].replace(/,/g, ""), 10) : null;
     const totalN = totalPrice ? parseInt(totalPrice[1].replace(/,/g, ""), 10) : null;
-    if (reserveBtn || nightlyN || totalN) {
+    const dateHints = [checkIn, checkOut];
+    for (const iso of [checkIn, checkOut]) {
+      const d = new Date(`${iso}T12:00:00Z`);
+      if (Number.isFinite(d.getTime())) {
+        const monthShort = d.toLocaleString("en-US", { timeZone: "UTC", month: "short" });
+        const monthLong = d.toLocaleString("en-US", { timeZone: "UTC", month: "long" });
+        dateHints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`);
+        dateHints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${String(d.getUTCFullYear()).slice(-2)}`);
+        dateHints.push(`${monthShort} ${d.getUTCDate()}`);
+        dateHints.push(`${monthLong} ${d.getUTCDate()}`);
+      }
+    }
+    const hasDateSignal = dateHints.some((hint) => text.toLowerCase().includes(String(hint).toLowerCase()));
+    const hasDateSpecificPrice = totalN || (reserveBtn && nightlyN && hasDateSignal);
+    if (hasDateSpecificPrice) {
       return {
         available: "yes",
         nightlyPrice: nightlyN,
-        totalPrice: totalN,
+        totalPrice: totalN ?? (nightlyN ? Math.round(nightlyN * nights) : null),
         reason: reserveBtn
           ? `Reserve/Book button present${nightlyN ? ` ($${nightlyN}/night)` : ""}${totalN ? ` ($${totalN} total)` : ""}`
           : `Visible price${nightlyN ? ` $${nightlyN}/night` : ""}${totalN ? ` $${totalN} total` : ""}`,
+      };
+    }
+    if (reserveBtn || nightlyN || totalN) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: "Page showed a generic book/price signal but no date-specific total for the requested stay",
       };
     }
     return {
@@ -837,7 +1047,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
       totalPrice: null,
       reason: "Page didn't show a clear availability/price signal — possibly login wall or non-standard PM layout",
     };
-  });
+  }, { checkIn, checkOut, nights: Math.max(1, Math.round((new Date(`${checkOut}T12:00:00Z`).getTime() - new Date(`${checkIn}T12:00:00Z`).getTime()) / 86400000)) });
 }
 
 async function processPmUrlCheck(id, params) {

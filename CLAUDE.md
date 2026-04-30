@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-04-30: Codex diagnosed Steve Kuykendall / Unit 721 showing a
+  `$0` Parrish fallback even though PM rows were scanned. Root cause was
+  the local sidecar `pm_url_check_batch` verifier throwing a DOM
+  `SyntaxError`: `scrapePmUrl()` used Playwright selectors
+  (`button:has-text("Reserve")`) inside `page.evaluate()` with native
+  `document.querySelector()`. Every checked PM URL became
+  `verified="unclear"` with `verifiedReason="tab error..."`, so
+  find-buy-in had `2 priced · 0 verified` and Auto-fill attached the
+  unpriced fallback. Follow-up issue: generic PM verification then trusted
+  category-page text like `$200/night`, which is not a date-specific quote.
+  Fix: sidecar now detects reserve/book affordances with native CSS plus
+  text matching, uses Suite Paradise `rcapi` and VRP/Parrish `vrpjax`
+  endpoints when those platforms are detected, requires a date-specific
+  total (or reserve + nightly + visible requested dates) for generic PM
+  success, and `/api/operations/find-buy-in` no longer returns unpriced
+  `$0` manual-quote fallbacks in `cheapest` because Auto-fill consumes that
+  list directly. The live worker at
+  `~/Downloads/vrbo-sidecar/worker.mjs` was copied and restarted.
+  Relevant commit: `fix(sidecar): verify PM rates with date-specific signals`.
 - 2026-04-30: Codex fixed find-buy-in result quality/pricing issues and
   the local Chrome sidecar ergonomics. Key points: stale empty live-search
   cache is short-lived and manual refresh adds `nocache=1`; Poipu Kai

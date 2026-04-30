@@ -4313,19 +4313,12 @@ export async function registerRoutes(
     //               verification path unavailable.
     // - undefined → out (defensive — should never happen in production).
     const verifiedCheapest = priced.filter((c) => c.verified === "yes");
-    // If pre-verify produced ZERO yes results (e.g. peak season — every
-    // top-priced PM is genuinely booked), fall back to the unpriced PM
-    // URL list so the operator still has SOMETHING to click. Buy-in
-    // record gets created at $0; operator updates after calling the PM.
-    // Better than empty when the search did surface candidates.
-    const unpricedFallback: Candidate[] = verifiedCheapest.length === 0
-      ? pmAugmented.filter((c) => c.url && c.nightlyPrice === 0).slice(0, 1)
-      : [];
     // Cap at 20 — multi-slot reservations need enough variety to fill
-    // distinct units per slot.
-    const cheapest = verifiedCheapest.length > 0
-      ? verifiedCheapest.slice(0, 20)
-      : unpricedFallback;
+    // distinct units per slot. Do not fall back to unpriced PM rows here:
+    // Auto-fill consumes this list directly, so a manual quote fallback
+    // creates a $0 attached buy-in. Unverified/manual PM rows stay visible
+    // below in the scanned-options table for human review.
+    const cheapest = verifiedCheapest.slice(0, 20);
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
 
     // ── Unit clustering ─────────────────────────────────────────────
