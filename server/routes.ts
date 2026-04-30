@@ -2852,9 +2852,23 @@ export async function registerRoutes(
             });
             bookingSidecarCount = r.candidates.length;
             bookingSidecarOnline = r.workerOnline;
+            // PR #319 (operator directive 2026-04-30): drop cards
+            // whose detected bedroom count doesn't EXACTLY equal the
+            // requested count. Booking's URL filter (entire_place_
+            // bedroom_count) gets stripped on redirect, so client-
+            // side filtering is the only authority. Worker.mjs's
+            // post-PR-318 parser requires bedrooms detected and >=
+            // minBd — this tightens that to ===, so a 3BR search
+            // never surfaces 4BR alternatives unless we explicitly
+            // change the contract.
+            const accepted = r.candidates.filter((c) => c.bedrooms === bedrooms);
+            const dropped = r.candidates.length - accepted.length;
+            if (dropped > 0) {
+              console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} non-${bedrooms}BR candidates`);
+            }
             // Booking sidecar returns total without per-night; fill it in
             // using our known nights count.
-            return r.candidates.map((c): Candidate => ({
+            return accepted.map((c): Candidate => ({
               source: "booking",
               sourceLabel: "Booking.com",
               title: c.title.slice(0, 100),
@@ -2961,6 +2975,17 @@ export async function registerRoutes(
             walletBudgetMs: 75_000,
           });
           if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
+          // PR #319 (operator directive 2026-04-30): same exact-
+          // bedroom filter as booking sidecar above. Vrbo's destination
+          // search ("Poipu Kai") sometimes surfaces 1BR/2BR units in
+          // adjacent areas — operator's screenshot showed 12× 1BR + 5×
+          // 2BR in a 3BR Amy search. Drop anything that's not exactly
+          // the requested count.
+          const acceptedVrbo = r.candidates.filter((c) => c.bedrooms === bedrooms);
+          const droppedVrbo = r.candidates.length - acceptedVrbo.length;
+          if (droppedVrbo > 0) {
+            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR candidates`);
+          }
           return {
             // Sidecar VRBO scrape runs the operator's real Chrome
             // against vrbo.com search with the date filter applied,
@@ -2969,7 +2994,7 @@ export async function registerRoutes(
             // so the cheapest-pool gate (`verified === "yes"`) admits
             // them — operator wants Vrbo eligible to be the auto-pick
             // when it's the cheapest option (PR #306).
-            candidates: r.candidates.map((c): Candidate => ({
+            candidates: acceptedVrbo.map((c): Candidate => ({
               source: "vrbo" as const,
               sourceLabel: "Vrbo",
               title: c.title,
