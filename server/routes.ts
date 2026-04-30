@@ -12444,19 +12444,34 @@ export async function registerRoutes(
 
           candidates.push({ sourceUrl: link, source, address: addrDisplay || communityName, unitNumber, thumbnail });
         }
-        // PR #324: cap raised 6 → 15 to widen the candidate pool when
-        // the resort is heavily VRBO-saturated. Each candidate still
-        // gates on platform check + photo count + vision before
-        // accepted, so over-capping just means we exhaust Google's
-        // index — the early-return fires the moment we find a viable
-        // unit.
-        if (candidates.length >= 15) break;
+        // PR #329: removed the per-query break-out cap. The previous
+        // cap of 15 caused a real bug: with 9 queries (5 Zillow + 2
+        // Realtor + 2 Redfin), Zillow's first 1.5 queries filled the
+        // cap before the Realtor/Redfin queries ever ran. Operator
+        // saw "15 candidates (15 Zillow)" with 0 Realtor + 0 Redfin
+        // even though Path A's whole point was to source from those.
+        //
+        // Without the cap, all 9 queries fire (max ~90 candidates,
+        // realistically 30-50 after dedupe). The candidate-processing
+        // loop below early-returns the moment a viable unit is found,
+        // and we sort by source priority next so for-sale (Realtor +
+        // Redfin) candidates get checked first.
       } catch (e: any) {
         console.error(`[find-unit] Search error: ${e?.message}`);
       }
     }
 
-    console.error(`[find-unit] Found ${candidates.length} candidate URLs`);
+    // PR #329: sort candidates by source priority before processing.
+    // Realtor + Redfin are for-sale-focused and far less likely to be
+    // on VRBO than Zillow's mixed pool. Putting them first means the
+    // candidate-processing loop's early-return fires on a Realtor or
+    // Redfin hit before walking the (more likely VRBO-saturated)
+    // Zillow set — same outcome on success, faster wall when both
+    // sources have viable units.
+    const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, zillow: 2 };
+    candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
+
+    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted: realtor → redfin → zillow)`);
 
     // Step 2 — Per-candidate platform check across Airbnb, VRBO, and
     // Booking.com. Two complementary queries per platform:
@@ -12502,24 +12517,20 @@ export async function registerRoutes(
       }
     }
 
-    // PR #322: sidecar fallback for the platform check. When
-    // SearchAPI returns errors / inconclusive results, re-run the
-    // same Google query through the operator's real Chrome (home-
-    // IP, signed-in Google session). Different IP + cookies often
-    // get past datacenter-IP rate-limits that hit SearchAPI. Returns
-    // the same shape so checkOnePlatform's union logic works unchanged.
-    async function runSearchViaSidecar(q: string): Promise<any[] | null> {
-      try {
-        const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
-        const r = await googleSerpViaSidecar({ query: q, maxResults: 5, walletBudgetMs: 45_000 });
-        if (!r.workerOnline) return null;
-        return r.hits.map((h) => ({ link: h.url, title: h.title, snippet: h.snippet }));
-      } catch (e: any) {
-        console.error(`[find-unit] sidecar SERP error for "${q}": ${e?.message}`);
-        return null;
-      }
-    }
-
+    // PR #322 added a sidecar Google fallback here when SearchAPI
+    // came up inconclusive. PR #327 (operator directive) removed the
+    // sidecar Google path globally — driving Google through Playwright
+    // kept tripping bot detection and polluting the daemon's session
+    // for VRBO/Booking partner-portal scrapes (cookies, fingerprint).
+    // Architecture:
+    //   - SearchAPI handles ALL Google queries (server-to-server, no
+    //     browser, no risk of contaminating the daemon).
+    //   - Sidecar handles direct-URL browsing only (vrbo.com,
+    //     booking.com partner portals).
+    // So: when SearchAPI is inconclusive on a platform check we
+    // genuinely can't tell. Strict mode rejects, loose mode lets it
+    // through. The error message in the failure response now reflects
+    // this honestly.
     async function checkOnePlatform(host: string, queries: string[]): Promise<PlatformStatus> {
       // Fire both queries in parallel; combine verdicts.
       const hitLists = await Promise.all(queries.map((q) => runSearch(q)));
@@ -12530,22 +12541,7 @@ export async function registerRoutes(
         const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
         if (matches.length > 0) return "found";
       }
-      // PR #322: when SearchAPI is inconclusive (every query errored),
-      // try the sidecar before giving up with "unknown". Sidecar runs
-      // off the operator's home IP + signed-in Google session, which
-      // often gets past datacenter-IP rate-limits that hit SearchAPI.
-      // Only fires when SearchAPI couldn't help — adds ~3-6s wall
-      // when triggered, free when SearchAPI works.
-      if (!anyResponded) {
-        const sidecarHitLists = await Promise.all(queries.map((q) => runSearchViaSidecar(q)));
-        for (const hits of sidecarHitLists) {
-          if (hits === null) continue;
-          anyResponded = true;
-          const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
-          if (matches.length > 0) return "found";
-        }
-      }
-      // All queries errored on both paths → we genuinely don't know.
+      // All queries errored → we genuinely don't know.
       return anyResponded ? "clean" : "unknown";
     }
 
@@ -12633,7 +12629,7 @@ export async function registerRoutes(
             attempts.push({
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-unknown-strict",
-              reason: `${unknownOn.host} verification inconclusive (Google returned no answer; sidecar fallback also empty). Strict mode rejects unknowns.`,
+              reason: `${unknownOn.host} verification inconclusive (SearchAPI's Google returned no clear answer). Strict mode rejects unknowns.`,
               platformCheck,
             });
             continue;
