@@ -706,21 +706,12 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
     alerts: [],
   }));
 
+  // PR #340: ordering-hint computation removed — every channel uses
+  // the same master-sync Replace photos flow now, so there's no
+  // tradeoff to communicate. isFullFlowChannel kept because the
+  // legacy fullFlow modal (still rendered for backward compat with
+  // any in-flight runs) typeguards against it.
   const isFullFlowChannel = (key: string): key is FullFlowChannel => key === "vrbo" || key === "booking";
-
-  // Cross-channel ordering hint: when ≥1 of VRBO/Booking has an alert
-  // AND Airbnb also has an alert, surface a banner reminding the
-  // operator to resolve the isolatable channels first. Updating
-  // Airbnb pushes to Guesty master, which fans out to every still-
-  // synced channel — so we want VRBO/Booking already isolated by
-  // the time Airbnb's master push happens.
-  const airbnbRow = channels.find((c) => c.channel === "airbnb");
-  const vrboRow = channels.find((c) => c.channel === "vrbo");
-  const bookingRow = channels.find((c) => c.channel === "booking");
-  const airbnbAlertCount = airbnbRow?.alerts?.length ?? 0;
-  const otherUnsynced = ((vrboRow?.alerts?.length ?? 0) > 0 && vrboRow?.status === "synced")
-    || ((bookingRow?.alerts?.length ?? 0) > 0 && bookingRow?.status === "synced");
-  const showOrderingHint = airbnbAlertCount > 0 && otherUnsynced;
 
   return (
     <Card className="p-4 my-4" data-testid="photo-sync-status-panel">
@@ -735,16 +726,10 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
         {isLoading && <RotateCw className="h-3 w-3 animate-spin text-muted-foreground" />}
       </div>
 
-      {showOrderingHint && (
-        <div
-          className="mb-2 text-xs px-3 py-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 dark:bg-amber-900/30 dark:border-amber-700 dark:text-amber-200"
-          data-testid="photo-sync-ordering-hint"
-        >
-          <strong>Order matters:</strong> resolve VRBO/Booking alerts first (they isolate &
-          disconnect from Guesty). Then run Airbnb's "Replace photos" — it pushes via Guesty
-          master sync, which fans out to every still-synced channel.
-        </div>
-      )}
+      {/* PR #340: order-matters banner removed alongside the
+          isolate/disconnect machinery. Every channel now uses the
+          same master-sync Replace photos flow, so there's no
+          ordering tradeoff to communicate. */}
 
       <div className="space-y-2">
         {CHANNELS.map(({ key, label }) => {
@@ -754,13 +739,8 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
             alerts: [] as AlertEntry[],
           };
           const isIsolated = row.status === "isolated";
-          const supportsFullFlow = isFullFlowChannel(key);
           const alerts = row.alerts ?? [];
           const hasAlerts = alerts.length > 0;
-          // Hint to resolve VRBO/Booking before Airbnb. We don't hard-
-          // disable the Airbnb remediate button — operator may have a
-          // reason — but we surface a tooltip and visual cue.
-          const isAirbnbBlocked = key === "airbnb" && otherUnsynced;
           return (
             <div
               key={key}
@@ -811,45 +791,14 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                     <>Master Sync active{row.reEnabledAt ? ` (re-enabled ${new Date(row.reEnabledAt).toLocaleDateString()})` : ""}</>
                   )}
                 </span>
-                {/* PR #320: hide the row-level Isolate+Replace+Disconnect
-                    button when this channel has any alerts. Each alert
-                    sub-row already shows its own per-alert button with
-                    the right unit-specific bedroom count pre-filled —
-                    surfacing both was redundant and confusing
-                    (operator screenshot showed two identical buttons
-                    on the same row). The row-level button still
-                    appears when there are NO alerts (operator-initiated
-                    migration, no specific unit to fix). */}
-                {supportsFullFlow && !isIsolated && !hasAlerts && (
-                  <Button
-                    size="sm"
-                    className="h-6 text-xs px-2"
-                    onClick={() => setFullFlow({
-                      channel: key,
-                      label,
-                      // Persisted server value wins over channelIds (operator
-                      // override survives). channelIds is the auto-derived
-                      // fallback from Guesty's advertiserId / hotelId on
-                      // first-ever click for this channel.
-                      partnerListingRef: row.partnerListingRef
-                        ?? channelIds?.[key]
-                        ?? "",
-                      bedrooms: defaultBedrooms,
-                      reason: "",
-                    })}
-                    disabled={!communityFolder || !!fullFlowRun}
-                    title={
-                      !communityFolder
-                        ? "communityFolder not provided — full flow needs the resort's community folder."
-                        : `Find a clean ${key.toUpperCase()} unit, push its photos to your ${label} listing via the sidecar, and disconnect ${label} from Guesty admin.`
-                    }
-                    data-testid={`btn-photo-sync-fullflow-${key}`}
-                  >
-                    <Zap className="h-3 w-3 mr-1" />
-                    Isolate + Replace + Disconnect
-                  </Button>
-                )}
-                {isIsolated ? (
+                {/* PR #340: row-level "Isolate + Replace + Disconnect"
+                    + "Isolate (record only)" buttons removed (operator
+                    directive — every channel uses the simpler master-
+                    sync Replace photos flow now). The only row-level
+                    action that survived is "Re-enable Master Sync"
+                    for any rows still in the legacy "isolated" state
+                    so the operator can flip them back. */}
+                {isIsolated && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -860,28 +809,16 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                   >
                     Re-enable Master Sync
                   </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-6 text-xs px-2"
-                    onClick={() => { setIsolating({ channel: key, label }); setReason(""); }}
-                    disabled={isolateMutation.isPending}
-                    data-testid={`btn-photo-sync-isolate-${key}`}
-                    title={supportsFullFlow ? "Just record isolation intent (no upload, no disconnect)." : "Mark this channel as isolated. Operator handles photo and integration changes manually."}
-                  >
-                    Isolate (record only)
-                  </Button>
                 )}
               </div>
 
-              {/* PR #318: per-alert sub-rows. Each alerted unit gets
-                  its own remediation button + dismiss. Channel-specific
-                  buttons:
-                    Airbnb  → "Replace photos" (master-sync remediate)
-                    VRBO/Booking → reuses parent row's
-                                   "Isolate + Replace + Disconnect" — we
-                                   surface a hint instead of a dup button. */}
+              {/* PR #340: per-alert sub-rows now use the same Replace
+                  photos button on EVERY channel. The remediate flow
+                  passes `cleanChannel: alert.platform`, so find-unit
+                  picks a Zillow/Realtor/Redfin candidate that's not
+                  on whichever channel fired the alert, then pushes
+                  via Guesty master sync to all still-synced channels.
+                  No more isolate/disconnect complexity. */}
               {hasAlerts && (
                 <div className="border-t border-red-200 dark:border-red-800 px-2 py-2 space-y-1.5">
                   {alerts.map((alert) => {
@@ -906,55 +843,17 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                             </a>
                           )}
                           <span className="text-muted-foreground ml-auto">{new Date(alert.detectedAt).toLocaleString()}</span>
-                          {key === "airbnb" ? (
-                            <Button
-                              size="sm"
-                              className={`h-6 text-[11px] px-2 ${isDone ? "bg-green-600 hover:bg-green-600 text-white" : isError ? "bg-red-600 hover:bg-red-600 text-white" : ""}`}
-                              onClick={() => remediateAirbnbAlert(alert.id)}
-                              disabled={isRunning || isDone}
-                              data-testid={`btn-replace-airbnb-${alert.id}`}
-                              title={
-                                isAirbnbBlocked
-                                  ? "Tip: resolve VRBO/Booking alerts first. Master sync would otherwise fan out to those channels too."
-                                  : "Find a Zillow unit clean on Airbnb, swap this folder's photos, and push to Guesty (Guesty fans out to Airbnb + still-synced channels)."
-                              }
-                            >
-                              {isDone ? <Check className="h-3 w-3 mr-1" /> : <RotateCw className={`h-3 w-3 mr-1 ${isRunning ? "animate-spin" : ""}`} />}
-                              {remediateState?.message ?? "Replace photos"}
-                            </Button>
-                          ) : (
-                            // PR #319: per-alert Isolate+Replace+Disconnect
-                            // button. Pre-fills the modal with this UNIT's
-                            // bedroom count (from server's unitBedrooms
-                            // lookup) so the replacement search matches
-                            // the alerted unit, not the listing total.
-                            // Falls back to row default if unitBedrooms
-                            // is null (community-folder alert).
-                            isFullFlowChannel(key) && (
-                              <Button
-                                size="sm"
-                                className="h-6 text-[11px] px-2"
-                                onClick={() => setFullFlow({
-                                  channel: key,
-                                  label,
-                                  partnerListingRef: row.partnerListingRef ?? channelIds?.[key] ?? "",
-                                  bedrooms: alert.unitBedrooms ?? defaultBedrooms,
-                                  reason: `Alerted: ${alert.folder} found on ${label} listing`,
-                                })}
-                                disabled={!communityFolder || !!fullFlowRun}
-                                title={
-                                  !communityFolder
-                                    ? "communityFolder not provided — full flow needs the resort's community folder."
-                                    : `Find a ${alert.unitBedrooms ?? "?"}BR unit clean on ${label}, push its photos via the sidecar, and disconnect ${label} from Guesty.`
-                                }
-                                data-testid={`btn-fullflow-alert-${alert.id}`}
-                              >
-                                <Zap className="h-3 w-3 mr-1" />
-                                Isolate + Replace + Disconnect
-                                {alert.unitBedrooms ? <span className="opacity-75 ml-1">({alert.unitBedrooms}BR)</span> : null}
-                              </Button>
-                            )
-                          )}
+                          <Button
+                            size="sm"
+                            className={`h-6 text-[11px] px-2 ${isDone ? "bg-green-600 hover:bg-green-600 text-white" : isError ? "bg-red-600 hover:bg-red-600 text-white" : ""}`}
+                            onClick={() => remediateAirbnbAlert(alert.id)}
+                            disabled={isRunning || isDone}
+                            data-testid={`btn-replace-${key}-${alert.id}`}
+                            title={`Find a unit not on ${label}, swap this folder's photos, and push to Guesty (Guesty fans out to ${label} + still-synced channels).`}
+                          >
+                            {isDone ? <Check className="h-3 w-3 mr-1" /> : <RotateCw className={`h-3 w-3 mr-1 ${isRunning ? "animate-spin" : ""}`} />}
+                            {remediateState?.message ?? "Replace photos"}
+                          </Button>
                           <Button
                             size="sm"
                             variant="outline"
@@ -966,8 +865,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
                             Dismiss
                           </Button>
                         </div>
-                        {/* Progress bar for the Airbnb master-sync remediate. */}
-                        {key === "airbnb" && (isRunning || isDone) && (
+                        {(isRunning || isDone) && (
                           <div className="flex items-center gap-2 pl-1 pr-1">
                             <div
                               className="h-1.5 flex-1 rounded-full bg-red-200 dark:bg-red-900/40 overflow-hidden"
