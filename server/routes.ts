@@ -1977,6 +1977,29 @@ export async function registerRoutes(
   // count. Returns unified, price-sorted candidates so the host can pick the
   // cheapest option to buy in at.
   //
+  // PR #323: server-side result cache for /api/operations/find-buy-in.
+  // The pipeline can run 60-180s on cold cache (sidecar VRBO + Booking
+  // serialize through one Chrome, plus Airbnb engine + lens matches +
+  // PM URL verify), and Railway's edge timeout is 5 min — cold-cache
+  // hits during a multi-slot Auto-fill cheapest can 502 the SECOND
+  // request when the daemon is busy with the first. Caching by
+  // (propertyId, bedrooms, checkIn, checkOut) means subsequent
+  // requests within TTL return immediately, and the operator's "click
+  // again to retry" hint becomes literally instant on the cache-hit
+  // path.
+  type FindBuyInCacheEntry = { value: any; expiresAt: number };
+  const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
+  const FIND_BUY_IN_TTL_MS = 5 * 60_000;
+  // Lazy LRU-ish eviction — runs on every set, drops expired entries
+  // to keep the map bounded. With ~12 properties × ~30 active windows
+  // = ~360 entries max in steady state, well within memory budget.
+  function evictExpiredFindBuyIn(): void {
+    const now = Date.now();
+    const expired: string[] = [];
+    findBuyInCache.forEach((v, k) => { if (v.expiresAt <= now) expired.push(k); });
+    for (const k of expired) findBuyInCache.delete(k);
+  }
+
   // GET /api/operations/find-buy-in?propertyId=X&bedrooms=N&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD
   // Response:
   //   {
@@ -2338,6 +2361,20 @@ export async function registerRoutes(
     if (!bedrooms || isNaN(bedrooms)) return res.status(400).json({ error: "bedrooms required" });
     if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
       return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+
+    // Result-cache fast path. Honors a `?nocache=1` query for the
+    // rare case the operator wants a forced refresh (e.g. they know
+    // a unit's pricing changed since the last scan).
+    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}`;
+    const noCache = req.query.nocache === "1";
+    if (!noCache) {
+      const cached = findBuyInCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        const ageSec = Math.round((Date.now() - (cached.expiresAt - FIND_BUY_IN_TTL_MS)) / 1000);
+        console.log(`[find-buy-in] cache hit ${cacheKey} (age ${ageSec}s)`);
+        return res.json({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
+      }
     }
 
     const config = PROPERTY_UNIT_NEEDS[propertyId];
@@ -4034,7 +4071,7 @@ export async function registerRoutes(
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
     );
 
-    return res.json({
+    const responseBody = {
       community,
       resortName,
       listingTitle,
@@ -4073,7 +4110,17 @@ export async function registerRoutes(
       cheapest,
       cheapestUnits,
       totalPricedResults: priced.length,
+    };
+    // Populate the result cache so the next click within 5 min for
+    // the exact same (propertyId, bedrooms, checkIn, checkOut) tuple
+    // returns instantly. Eviction runs lazily on each set.
+    evictExpiredFindBuyIn();
+    findBuyInCache.set(cacheKey, {
+      value: responseBody,
+      expiresAt: Date.now() + FIND_BUY_IN_TTL_MS,
     });
+    console.log(`[find-buy-in] cached ${cacheKey} (TTL ${FIND_BUY_IN_TTL_MS / 1000}s; cache size now ${findBuyInCache.size})`);
+    return res.json(responseBody);
   });
 
   // ─── Availability verification ─────────────────────────────────────────
