@@ -708,7 +708,17 @@ async function scrapeListingPhotos(
     const currentUrl = page.url();
     const isZillow = currentUrl.includes("zillow.com");
     const isHomes = currentUrl.includes("homes.com");
-    const sourceName = isZillow ? "Zillow" : isHomes ? "Homes.com" : new URL(currentUrl).hostname;
+    const isRealtor = currentUrl.includes("realtor.com");
+    const isRedfin = currentUrl.includes("redfin.com");
+    // PR #326: recognise Realtor + Redfin so the photo records carry
+    // a proper source label. Both fall through to the JSON-LD + img
+    // tag generic extractor below — both sites publish JSON-LD with
+    // `image` arrays so the existing fallback covers them.
+    const sourceName = isZillow ? "Zillow"
+      : isHomes ? "Homes.com"
+      : isRealtor ? "Realtor.com"
+      : isRedfin ? "Redfin"
+      : new URL(currentUrl).hostname;
 
     let photoUrls: string[] = [];
 
@@ -12264,36 +12274,119 @@ export async function registerRoutes(
     const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
-    // Step 1 — Google search for Zillow listing URLs at this community address
-    // Google results also include a thumbnail we can use for display (no Zillow scraping needed)
+    // Step 1 — Google search for real-estate listing URLs at this
+    // community address. We pull from THREE sources now (PR #326):
+    //
+    //   - Zillow      — long-tail rental & for-sale inventory; high
+    //                   photo coverage but heavily duplicated on VRBO
+    //                   for popular vacation-rental communities.
+    //   - Realtor.com — for-sale focused; LOW VRBO overlap (sellers
+    //                   aren't usually renting). 20-40+ photos. Per
+    //                   Grok consult (PR #325), this is the highest-
+    //                   value addition for VRBO-saturated resorts.
+    //   - Redfin      — for-sale focused; structured JSON-LD with
+    //                   15-30+ photos. Backup when Zillow + Realtor
+    //                   both come up empty / saturated.
+    //
+    // Each source has its own URL pattern (`/homedetails/` for Zillow,
+    // `/realestateandhomes-detail/` for Realtor, `/home/<id>` for
+    // Redfin). The candidate `source` field lets downstream stages
+    // log which path produced each lead and helps triage if any
+    // single source's photo extraction breaks.
+    type CandidateSource = "zillow" | "realtor" | "redfin";
     interface Candidate {
-      zillowUrl: string;
+      sourceUrl: string;
+      source: CandidateSource;
       address: string;
-      unitNumber: string;  // e.g. "122", "339"
+      unitNumber: string;  // e.g. "122", "339" — best-effort across sources
       thumbnail: string;   // Google-provided thumbnail for the result card
     }
     const candidates: Candidate[] = [];
 
-    // PR #324: widened query pool. Operator hit "7 of 9 candidates
-    // on VRBO" for Poipu Kai — popular vacation-rental communities
-    // saturate VRBO, so the original 2 queries returned a mostly-
-    // already-listed set. New variants:
-    //   - "for sale" bias    — for-sale listings are far less likely
-    //                           to be on VRBO (owner selling, not
-    //                           renting). High-value source.
-    //   - condo qualifier    — surfaces different Zillow listing types
-    //                           (rental vs sale vs MLS) than the bare
-    //                           name query.
-    //   - city qualifier     — broadens the geographic match. Picks up
-    //                           Koloa/Princeville-area Zillow listings
-    //                           the resort name alone might miss.
-    for (const siteQuery of [
+    // Detect which source a Google-result URL belongs to. URL must
+    // be a per-listing detail page, not a search-results or category
+    // page (those have no unit-level info to extract).
+    const detectSource = (url: string): CandidateSource | null => {
+      if (/zillow\.com\/homedetails\//i.test(url)) return "zillow";
+      if (/realtor\.com\/realestateandhomes-detail\//i.test(url)) return "realtor";
+      if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
+      return null;
+    };
+
+    // Generalized unit-number extraction across all three sources.
+    // Strategy: try explicit prefix matches first (apt/unit/bldg/#),
+    // then per-source slug heuristics. Falls back to "" — downstream
+    // platform check returns "unknown" for blank units, so a missing
+    // extraction degrades gracefully rather than producing false
+    // positives.
+    const extractUnitNumber = (url: string, source: CandidateSource): string => {
+      // Cross-source: explicit /unit-X/, /apt-X/, /bldg-X/, "Unit-X"
+      // segment. Most reliable when present.
+      const explicit = url.match(/(?:^|[/_-])(?:apt|unit|bldg)[-_/]?([a-z0-9]+)/i);
+      if (explicit) return explicit[1].toUpperCase();
+
+      if (source === "zillow") {
+        // Existing logic: scan slug parts backwards for a 2-4 digit
+        // segment that isn't a house number (index 0) or zip (5+).
+        const slug = url.match(/homedetails\/([^/]+)\//)?.[1] || "";
+        const parts = slug.split("-");
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
+            return parts[i];
+          }
+        }
+      }
+      if (source === "realtor") {
+        // Realtor URL: /realestateandhomes-detail/<address-slug>_<city>_<state>_<zip>_M<mls>-<id>
+        // Address slug often has unit info — e.g. "Bldg-12_Koloa_HI_..."
+        const slug = url.match(/realestateandhomes-detail\/([^/?]+)/)?.[1] || "";
+        // Try numeric tokens in the address slug (before first "_").
+        const addrSlug = slug.split("_")[0] || "";
+        const parts = addrSlug.split("-");
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (/^[A-Z]?\d{1,4}$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
+            return parts[i].toUpperCase();
+          }
+        }
+      }
+      if (source === "redfin") {
+        // Redfin URL: /HI/Koloa/<address-slug>/unit-K221/home/<id>
+        // The /unit-X/ segment is captured by the explicit matcher
+        // above; this branch is for addresses without that segment.
+        const slug = url.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
+        const parts = slug.split("-");
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (/^[A-Z]?\d{1,4}$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
+            return parts[i].toUpperCase();
+          }
+        }
+      }
+      return "";
+    };
+
+    // Search-query pool. Per-source queries combined.
+    //   "for sale" bias        — for-sale listings far less likely
+    //                            on VRBO. Highest-value variant.
+    //   condo / koloa context  — surfaces different listing types &
+    //                            broader geographic matches.
+    // Realtor + Redfin biased toward "for sale" since they're
+    // primarily real-estate sites; Zillow gets the wider mix.
+    const searchQueries: string[] = [
+      // Zillow — broad coverage
       `site:zillow.com "${communityAddress}"`,
       `site:zillow.com "${communityName}"`,
       `site:zillow.com "${communityName}" "for sale"`,
       `site:zillow.com "${communityName}" condo`,
       `site:zillow.com "${communityName}" Koloa`,
-    ]) {
+      // Realtor.com — for-sale, low VRBO overlap
+      `site:realtor.com "${communityName}" "for sale"`,
+      `site:realtor.com "${communityName}" condo`,
+      // Redfin — for-sale, structured JSON-LD
+      `site:redfin.com "${communityName}" "for sale"`,
+      `site:redfin.com "${communityName}" condo`,
+    ];
+
+    for (const siteQuery of searchQueries) {
       try {
         console.error(`[find-unit] Searching: ${siteQuery}`);
         const searchResp = await fetch(
@@ -12309,18 +12402,20 @@ export async function registerRoutes(
 
         for (const r of results) {
           const link: string = r.link || "";
-          if (!link.includes("zillow.com/homedetails")) continue;
+          const source = detectSource(link);
+          if (!source) continue;
           if (skipUrls.includes(link)) continue;
+          // Dedupe: don't add the same URL twice if it surfaces in
+          // multiple queries.
+          if (candidates.some((c) => c.sourceUrl === link)) continue;
 
-          // Extract unit number from URL slug — patterns: "Nehe-Rd-122-", "APT-122-", "Unit-122-"
-          const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
-          const parts = slug.split("-");
-          // First try explicit apt/unit prefix (most reliable)
-          const aptMatch = slug.match(/(?:apt|unit)-([a-z0-9]+)/i);
-          let unitNumber = aptMatch ? aptMatch[1].toUpperCase() : "";
-          if (!unitNumber) {
-            // Scan parts backwards, skip index 0 (house number like "4460") and skip zip codes (5+ digits)
-            // Unit numbers are 2-4 digits and appear after the street name segments
+          let unitNumber = extractUnitNumber(link, source);
+          // Zillow's old fall-through: no parts.split logic below
+          // gets inlined into the per-source branches above.
+          // Fall through to legacy slug scan if nothing matched.
+          if (!unitNumber && source === "zillow") {
+            const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
+            const parts = slug.split("-");
             for (let i = parts.length - 1; i >= 1; i--) {
               if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
                 unitNumber = parts[i];
@@ -12329,14 +12424,25 @@ export async function registerRoutes(
             }
           }
 
-          const addrDisplay = decodeURIComponent(slug)
+          // Per-source slug → human-readable address heuristic.
+          // Used purely for display in the candidate response;
+          // platform check still runs against communityAddress.
+          let addrSlug = "";
+          if (source === "zillow") {
+            addrSlug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
+          } else if (source === "realtor") {
+            addrSlug = (link.match(/realestateandhomes-detail\/([^/?]+)/)?.[1] || "").split("_")[0];
+          } else if (source === "redfin") {
+            addrSlug = link.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
+          }
+          const addrDisplay = decodeURIComponent(addrSlug)
             .replace(/-/g, " ")
             .replace(/\b\w/g, (c: string) => c.toUpperCase())
             .replace(/\d{5}$/, "").trim();
 
           const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
 
-          candidates.push({ zillowUrl: link, address: addrDisplay || communityName, unitNumber, thumbnail });
+          candidates.push({ sourceUrl: link, source, address: addrDisplay || communityName, unitNumber, thumbnail });
         }
         // PR #324: cap raised 6 → 15 to widen the candidate pool when
         // the resort is heavily VRBO-saturated. Each candidate still
@@ -12475,7 +12581,8 @@ export async function registerRoutes(
     // candidate either passes (early-return above) or appends an
     // `{url, address, unit, verdict, reason}` row to this array.
     type AttemptRow = {
-      zillowUrl: string;
+      sourceUrl: string;
+      source: CandidateSource;
       address: string;
       unit: string;
       verdict: "skipped-found" | "skipped-unknown-strict" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
@@ -12484,13 +12591,17 @@ export async function registerRoutes(
     };
     const attempts: AttemptRow[] = [];
 
+    // Source-friendly display label so logs + return values reflect
+    // which site each candidate came from (PR #326).
+    const sourceLabel = (s: CandidateSource): string => s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : "Redfin";
+
     for (const candidate of candidates) {
       try {
-        const { zillowUrl, address, unitNumber, thumbnail } = candidate;
+        const { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
 
         const platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
         console.error(
-          `[find-unit] ${zillowUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
+          `[find-unit] [${source}] ${sourceUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );
         // Pick which platforms to enforce. Default: all three. With
         // cleanChannel set: just that one. The platformCheck object
@@ -12506,9 +12617,9 @@ export async function registerRoutes(
           : platformHosts.map((p) => p.key);
         const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
         if (foundOn) {
-          console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
+          console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
           attempts.push({
-            zillowUrl, address, unit: unitNumber || "?",
+            sourceUrl, source, address, unit: unitNumber || "?",
             verdict: "skipped-found",
             reason: `Found on ${foundOn.host}`,
             platformCheck,
@@ -12518,9 +12629,9 @@ export async function registerRoutes(
         if (strict) {
           const unknownOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "unknown");
           if (unknownOn) {
-            console.error(`[find-unit] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode, cleanChannel=${cleanChannel ?? "all"}) — skipping`);
+            console.error(`[find-unit] [${source}] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode, cleanChannel=${cleanChannel ?? "all"}) — skipping`);
             attempts.push({
-              zillowUrl, address, unit: unitNumber || "?",
+              sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-unknown-strict",
               reason: `${unknownOn.host} verification inconclusive (Google returned no answer; sidecar fallback also empty). Strict mode rejects unknowns.`,
               platformCheck,
@@ -12554,15 +12665,15 @@ export async function registerRoutes(
           const MIN_PHOTOS = 8;
           let scrapedPhotoUrls: string[] = [];
           try {
-            const scraped = await scrapeListingPhotos(zillowUrl);
+            const scraped = await scrapeListingPhotos(sourceUrl);
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
           const photoCount = scrapedPhotoUrls.length;
-          console.error(`[find-unit] ${zillowUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
+          console.error(`[find-unit] [${source}] ${sourceUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
           if (photoCount < MIN_PHOTOS) {
-            console.error(`[find-unit] Too few photos — skipping to next candidate`);
+            console.error(`[find-unit] [${source}] Too few photos — skipping to next candidate`);
             attempts.push({
-              zillowUrl, address, unit: unitNumber || "?",
+              sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-too-few-photos",
               reason: `Only ${photoCount} photos (need ≥${MIN_PHOTOS}).`,
               platformCheck,
@@ -12574,11 +12685,11 @@ export async function registerRoutes(
           let sampledCategories: string[] = [];
           if (anthropicKey) {
             const probe = await probeInteriorCoverage(scrapedPhotoUrls, anthropicKey);
-            console.error(`[find-unit] interior probe verdict=${probe.verdict} categories=[${probe.categories.join(", ")}]`);
+            console.error(`[find-unit] [${source}] interior probe verdict=${probe.verdict} categories=[${probe.categories.join(", ")}]`);
             if (probe.verdict === "reject") {
-              console.error(`[find-unit] No bedroom/bathroom samples found — skipping to next candidate`);
+              console.error(`[find-unit] [${source}] No bedroom/bathroom samples found — skipping to next candidate`);
               attempts.push({
-                zillowUrl, address, unit: unitNumber || "?",
+                sourceUrl, source, address, unit: unitNumber || "?",
                 verdict: "skipped-vision-rejected",
                 reason: "Vision probe found no bedroom/bathroom photos in the listing's set.",
                 platformCheck,
@@ -12589,17 +12700,17 @@ export async function registerRoutes(
             // "unknown" (no key) or "pass" → fall through to confirm.
           }
 
-          console.error(`[find-unit] Clean unit found: ${zillowUrl}`);
+          console.error(`[find-unit] [${source}] Clean unit found: ${sourceUrl}`);
           const photos = thumbnail
-            ? [{ url: thumbnail, label: `Unit ${unitNumber || "—"} on Zillow` }]
+            ? [{ url: thumbnail, label: `Unit ${unitNumber || "—"} on ${sourceLabel(source)}` }]
             : [];
           return res.json({
             unit: {
-              url: zillowUrl,
+              url: sourceUrl,
               address,
               unitLabel: unitNumber ? `Unit #${unitNumber}` : "New unit",
               bedrooms: requiredBedrooms ?? null,
-              source: "Zillow",
+              source: sourceLabel(source),
               photos,
               photoCount,
               sampledCategories,
@@ -12608,9 +12719,10 @@ export async function registerRoutes(
           });
         }
       } catch (err: any) {
-        console.error(`[find-unit] Candidate error: ${err?.message}`);
+        console.error(`[find-unit] [${candidate.source}] Candidate error: ${err?.message}`);
         attempts.push({
-          zillowUrl: candidate.zillowUrl,
+          sourceUrl: candidate.sourceUrl,
+          source: candidate.source,
           address: candidate.address,
           unit: candidate.unitNumber || "?",
           verdict: "error",
@@ -12635,9 +12747,16 @@ export async function registerRoutes(
     } as Record<AttemptRow["verdict"], number>;
     for (const a of attempts) breakdown[a.verdict]++;
 
+    // PR #326: source breakdown shows which sites contributed (Zillow
+    // vs Realtor.com vs Redfin). Helps the operator see at a glance
+    // if one source is failing to surface candidates and where to
+    // tweak queries.
+    const sourceBreakdown: Record<CandidateSource, number> = { zillow: 0, realtor: 0, redfin: 0 };
+    for (const c of candidates) sourceBreakdown[c.source]++;
+
     let diagnostic: string;
     if (totalCandidates === 0) {
-      diagnostic = `Google's site:zillow.com search returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
+      diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
     } else {
       const parts: string[] = [];
       if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
@@ -12645,7 +12764,11 @@ export async function registerRoutes(
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
       if (breakdown.error > 0) parts.push(`${breakdown.error} errored`);
-      diagnostic = `Checked ${totalCandidates} Zillow ${totalCandidates === 1 ? "candidate" : "candidates"} — ${parts.join(", ")}.`;
+      const sourceParts: string[] = [];
+      if (sourceBreakdown.zillow > 0) sourceParts.push(`${sourceBreakdown.zillow} Zillow`);
+      if (sourceBreakdown.realtor > 0) sourceParts.push(`${sourceBreakdown.realtor} Realtor.com`);
+      if (sourceBreakdown.redfin > 0) sourceParts.push(`${sourceBreakdown.redfin} Redfin`);
+      diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")}) — ${parts.join(", ")}.`;
     }
 
     return res.json({
@@ -12657,6 +12780,7 @@ export async function registerRoutes(
         cleanChannel: cleanChannel ?? null,
         strict,
         totalCandidates,
+        sourceBreakdown,
         breakdown,
         attempts,
       },
