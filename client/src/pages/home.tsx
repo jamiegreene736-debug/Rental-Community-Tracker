@@ -47,6 +47,7 @@ import {
   Camera,
   RotateCw,
   Check,
+  Zap,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -553,6 +554,11 @@ export default function Home() {
   // Unacknowledged photo-theft alerts. Each alert is one platform
   // transitioning from clean/unknown → found. Dismissed from the
   // banner below via POST /api/photo-listing-alerts/:id/acknowledge.
+  // PR #317: server enriches each alert with the alerted channel's
+  // photo-sync state so the dashboard can route to the right
+  // remediation flow. propertyId + guestyListingId let the client
+  // deep-link to /builder/:propertyId/photos when the channel is
+  // already isolated (master sync wouldn't reach it).
   type PhotoAlert = {
     id: number;
     folder: string;
@@ -561,6 +567,10 @@ export default function Home() {
     newStatus: PhotoStatus;
     matchedUrls: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
     detectedAt: string;
+    propertyId: number | null;
+    guestyListingId: string | null;
+    channelSyncStatus: "synced" | "isolated" | null;
+    partnerListingRef: string | null;
   };
   const { data: photoAlertsData, refetch: refetchAlerts } = useQuery<{ alerts: PhotoAlert[] }>({
     queryKey: ["/api/photo-listing-alerts?unacknowledged=1"],
@@ -921,12 +931,34 @@ export default function Home() {
                 const isRunning = status?.phase === "running";
                 const isDone = status?.phase === "done";
                 const isError = status?.phase === "error";
+                // PR #317: when the alerted channel is isolated, master
+                // sync (Replace & push) won't reach it — route the
+                // operator to the per-channel builder button instead.
+                const isChannelIsolated = a.channelSyncStatus === "isolated";
+                const canDeepLinkToBuilder = isChannelIsolated && a.propertyId != null;
                 return (
                   <div key={a.id} className="flex flex-col gap-1" data-testid={`photo-alert-${a.id}`}>
                     <div className="flex items-center gap-2 text-xs">
                       <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 font-medium">
                         {platformLabel}
                       </span>
+                      {a.channelSyncStatus && (
+                        <span
+                          className={
+                            a.channelSyncStatus === "isolated"
+                              ? "inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-orange-100 text-orange-800 border border-orange-300 dark:bg-orange-900/40 dark:text-orange-200 text-[10px] font-medium"
+                              : "inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-green-100 text-green-800 border border-green-300 dark:bg-green-900/40 dark:text-green-200 text-[10px] font-medium"
+                          }
+                          title={
+                            a.channelSyncStatus === "isolated"
+                              ? "This channel is already isolated — master sync won't reach it. Use the per-channel button in the listing builder."
+                              : "This channel is on Guesty's master sync — Replace & push will propagate the new photos."
+                          }
+                          data-testid={`channel-sync-badge-${a.id}`}
+                        >
+                          {a.channelSyncStatus === "isolated" ? "Isolated" : "Master Sync"}
+                        </span>
+                      )}
                       <span className="font-mono text-[11px]">{a.folder}</span>
                       <span className="text-muted-foreground">{a.priorStatus} → {a.newStatus}</span>
                       {firstUrl && (
@@ -940,7 +972,20 @@ export default function Home() {
                         </a>
                       )}
                       <span className="text-muted-foreground ml-auto">{new Date(a.detectedAt).toLocaleString()}</span>
-                      {(() => {
+                      {canDeepLinkToBuilder ? (
+                        <Link href={`/builder/${a.propertyId}/photos`}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6 text-xs px-2 bg-orange-50 hover:bg-orange-100 border-orange-300 text-orange-900 dark:bg-orange-900/30 dark:hover:bg-orange-900/50 dark:border-orange-700 dark:text-orange-200"
+                            data-testid={`button-migrate-via-builder-${a.id}`}
+                            title={`${platformLabel} is isolated for this listing — open the listing builder to run Isolate + Replace + Disconnect via the sidecar.`}
+                          >
+                            <Zap className="h-3 w-3 mr-1" />
+                            Migrate via builder →
+                          </Button>
+                        </Link>
+                      ) : (() => {
                         const colorClass = isDone
                           ? "bg-green-600 hover:bg-green-600 text-white"
                           : isError
@@ -953,7 +998,7 @@ export default function Home() {
                             onClick={() => remediateAlert(a.id)}
                             disabled={isRunning || isDone}
                             data-testid={`button-remediate-alert-${a.id}`}
-                            title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to Airbnb/VRBO/Booking)."
+                            title="Find a clean replacement unit on Zillow, swap the photos in this folder, and re-push to Guesty (which fans out to every still-synced channel)."
                           >
                             {isDone ? (
                               <Check className="h-3 w-3 mr-1" />

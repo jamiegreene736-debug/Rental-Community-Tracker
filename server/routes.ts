@@ -13623,8 +13623,46 @@ export async function registerRoutes(
       const rows = onlyUnacked
         ? await storage.getUnacknowledgedPhotoListingAlerts()
         : await storage.getRecentPhotoListingAlerts(50);
-      res.json({
-        alerts: rows.map((r) => ({
+      // PR #317: enrich each alert with the alerted channel's
+      // photo-sync state so the dashboard can route the operator to
+      // the right remediation flow:
+      //   synced   → "Replace & push" (master sync via Guesty —
+      //              propagates to every still-synced channel)
+      //   isolated → "Migrate via builder →" (the channel was
+      //              already cut over to per-channel sync, so master
+      //              sync would silently no-op for this channel —
+      //              the operator needs the Isolate + Replace +
+      //              Disconnect button on the listing builder)
+      // Both ids (propertyId + guestyListingId) are surfaced so the
+      // client can deep-link to /builder/:propertyId without an
+      // extra round-trip.
+      const enriched = await Promise.all(rows.map(async (r) => {
+        let propertyId: number | null = null;
+        let guestyListingId: string | null = null;
+        let channelSyncStatus: "synced" | "isolated" | null = null;
+        let partnerListingRef: string | null = null;
+        // Find the builder that owns this folder (community folder
+        // OR any unit folder).
+        const builder = unitBuilderData.find((b) =>
+          b.communityPhotoFolder === r.photoFolder ||
+          b.units.some((u) => u.photoFolder === r.photoFolder),
+        );
+        if (builder) {
+          propertyId = builder.propertyId;
+          try {
+            const gid = await storage.getGuestyListingId(builder.propertyId);
+            if (gid) {
+              guestyListingId = gid;
+              const platform = r.platform === "airbnb" || r.platform === "vrbo" || r.platform === "booking" ? r.platform : null;
+              if (platform) {
+                const sync = await storage.getPhotoSync(gid, platform);
+                channelSyncStatus = sync?.status === "isolated" ? "isolated" : "synced";
+                partnerListingRef = sync?.partnerListingRef ?? null;
+              }
+            }
+          } catch { /* leave as null — UI degrades gracefully */ }
+        }
+        return {
           id: r.id,
           folder: r.photoFolder,
           platform: r.platform,
@@ -13633,8 +13671,13 @@ export async function registerRoutes(
           matchedUrls: r.matchedUrls ? tryParseJson(r.matchedUrls) : [],
           detectedAt: r.detectedAt,
           acknowledgedAt: r.acknowledgedAt,
-        })),
-      });
+          propertyId,
+          guestyListingId,
+          channelSyncStatus,
+          partnerListingRef,
+        };
+      }));
+      res.json({ alerts: enriched });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to load alerts" });
     }
@@ -13746,6 +13789,40 @@ export async function registerRoutes(
       if (affected.length === 0) {
         emit({ type: "error", phase: "lookup", message: "No Guesty-mapped property uses this folder." });
         return res.end();
+      }
+
+      // PR #317: refuse if the alerted channel is already isolated for
+      // the lead listing. Master-sync flow pushes photos to Guesty,
+      // but Guesty no longer fans out to an isolated channel — the
+      // operator's photos would silently fail to reach the channel
+      // that the alert is about. Direct them to the per-channel
+      // builder button (Isolate + Replace + Disconnect) which uploads
+      // to the partner portal directly via the sidecar.
+      const guardChannel = alert.platform === "airbnb" || alert.platform === "vrbo" || alert.platform === "booking" ? alert.platform : null;
+      if (guardChannel) {
+        const lead = affected[0];
+        try {
+          const sync = await storage.getPhotoSync(lead.guestyListingId, guardChannel);
+          if (sync?.status === "isolated") {
+            emit({
+              type: "error",
+              phase: "lookup",
+              message: `${guardChannel.toUpperCase()} is isolated for this listing — master sync won't reach it. Use Isolate + Replace + Disconnect in the listing builder.`,
+              routing: {
+                reason: "channel-isolated",
+                propertyId: lead.propertyId,
+                guestyListingId: lead.guestyListingId,
+                channel: guardChannel,
+                partnerListingRef: sync.partnerListingRef ?? null,
+              },
+            });
+            return res.end();
+          }
+        } catch (e: any) {
+          // Non-fatal — fall through to master-sync path. The dashboard
+          // will report whatever the master-sync attempt reveals.
+          console.warn(`[remediate] alert ${id} isolation check failed (proceeding):`, e?.message ?? e);
+        }
       }
 
       // 2. Find a replacement candidate via the existing endpoint.
