@@ -12289,6 +12289,24 @@ export async function registerRoutes(
       }
     }
 
+    // PR #322: sidecar fallback for the platform check. When
+    // SearchAPI returns errors / inconclusive results, re-run the
+    // same Google query through the operator's real Chrome (home-
+    // IP, signed-in Google session). Different IP + cookies often
+    // get past datacenter-IP rate-limits that hit SearchAPI. Returns
+    // the same shape so checkOnePlatform's union logic works unchanged.
+    async function runSearchViaSidecar(q: string): Promise<any[] | null> {
+      try {
+        const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
+        const r = await googleSerpViaSidecar({ query: q, maxResults: 5, walletBudgetMs: 45_000 });
+        if (!r.workerOnline) return null;
+        return r.hits.map((h) => ({ link: h.url, title: h.title, snippet: h.snippet }));
+      } catch (e: any) {
+        console.error(`[find-unit] sidecar SERP error for "${q}": ${e?.message}`);
+        return null;
+      }
+    }
+
     async function checkOnePlatform(host: string, queries: string[]): Promise<PlatformStatus> {
       // Fire both queries in parallel; combine verdicts.
       const hitLists = await Promise.all(queries.map((q) => runSearch(q)));
@@ -12299,7 +12317,22 @@ export async function registerRoutes(
         const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
         if (matches.length > 0) return "found";
       }
-      // All queries errored → we genuinely don't know.
+      // PR #322: when SearchAPI is inconclusive (every query errored),
+      // try the sidecar before giving up with "unknown". Sidecar runs
+      // off the operator's home IP + signed-in Google session, which
+      // often gets past datacenter-IP rate-limits that hit SearchAPI.
+      // Only fires when SearchAPI couldn't help — adds ~3-6s wall
+      // when triggered, free when SearchAPI works.
+      if (!anyResponded) {
+        const sidecarHitLists = await Promise.all(queries.map((q) => runSearchViaSidecar(q)));
+        for (const hits of sidecarHitLists) {
+          if (hits === null) continue;
+          anyResponded = true;
+          const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
+          if (matches.length > 0) return "found";
+        }
+      }
+      // All queries errored on both paths → we genuinely don't know.
       return anyResponded ? "clean" : "unknown";
     }
 
@@ -12329,6 +12362,21 @@ export async function registerRoutes(
       };
     }
 
+    // PR #322: track per-candidate verdicts so the failure message
+    // can tell the operator EXACTLY why no unit qualified, instead
+    // of the opaque "No eligible replacement units found." Every
+    // candidate either passes (early-return above) or appends an
+    // `{url, address, unit, verdict, reason}` row to this array.
+    type AttemptRow = {
+      zillowUrl: string;
+      address: string;
+      unit: string;
+      verdict: "skipped-found" | "skipped-unknown-strict" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
+      reason: string;
+      platformCheck?: PlatformCheck;
+    };
+    const attempts: AttemptRow[] = [];
+
     for (const candidate of candidates) {
       try {
         const { zillowUrl, address, unitNumber, thumbnail } = candidate;
@@ -12352,12 +12400,24 @@ export async function registerRoutes(
         const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
         if (foundOn) {
           console.error(`[find-unit] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
+          attempts.push({
+            zillowUrl, address, unit: unitNumber || "?",
+            verdict: "skipped-found",
+            reason: `Found on ${foundOn.host}`,
+            platformCheck,
+          });
           continue;
         }
         if (strict) {
           const unknownOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "unknown");
           if (unknownOn) {
             console.error(`[find-unit] Unit ${unitNumber} unknown on ${unknownOn.host} (strict mode, cleanChannel=${cleanChannel ?? "all"}) — skipping`);
+            attempts.push({
+              zillowUrl, address, unit: unitNumber || "?",
+              verdict: "skipped-unknown-strict",
+              reason: `${unknownOn.host} verification inconclusive (Google returned no answer; sidecar fallback also empty). Strict mode rejects unknowns.`,
+              platformCheck,
+            });
             continue;
           }
         }
@@ -12389,6 +12449,12 @@ export async function registerRoutes(
           console.error(`[find-unit] ${zillowUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
           if (photoCount < MIN_PHOTOS) {
             console.error(`[find-unit] Too few photos — skipping to next candidate`);
+            attempts.push({
+              zillowUrl, address, unit: unitNumber || "?",
+              verdict: "skipped-too-few-photos",
+              reason: `Only ${photoCount} photos (need ≥${MIN_PHOTOS}).`,
+              platformCheck,
+            });
             continue;
           }
 
@@ -12399,6 +12465,12 @@ export async function registerRoutes(
             console.error(`[find-unit] interior probe verdict=${probe.verdict} categories=[${probe.categories.join(", ")}]`);
             if (probe.verdict === "reject") {
               console.error(`[find-unit] No bedroom/bathroom samples found — skipping to next candidate`);
+              attempts.push({
+                zillowUrl, address, unit: unitNumber || "?",
+                verdict: "skipped-vision-rejected",
+                reason: "Vision probe found no bedroom/bathroom photos in the listing's set.",
+                platformCheck,
+              });
               continue;
             }
             sampledCategories = probe.categories;
@@ -12425,11 +12497,57 @@ export async function registerRoutes(
         }
       } catch (err: any) {
         console.error(`[find-unit] Candidate error: ${err?.message}`);
+        attempts.push({
+          zillowUrl: candidate.zillowUrl,
+          address: candidate.address,
+          unit: candidate.unitNumber || "?",
+          verdict: "error",
+          reason: err?.message ?? "Unknown error",
+        });
       }
     }
 
+    // PR #322: build a diagnostic-rich failure message that tells
+    // the operator EXACTLY what was tried and why each candidate
+    // failed. Without this, the previous "No eligible replacement
+    // units found" was opaque — operator couldn't tell whether
+    // Zillow had no candidates, the platform check was inconclusive,
+    // or the photo-count gate kept rejecting.
+    const totalCandidates = candidates.length;
+    const breakdown = {
+      "skipped-found": 0,
+      "skipped-unknown-strict": 0,
+      "skipped-too-few-photos": 0,
+      "skipped-vision-rejected": 0,
+      error: 0,
+    } as Record<AttemptRow["verdict"], number>;
+    for (const a of attempts) breakdown[a.verdict]++;
+
+    let diagnostic: string;
+    if (totalCandidates === 0) {
+      diagnostic = `Google's site:zillow.com search returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
+    } else {
+      const parts: string[] = [];
+      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
+      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (Google + sidecar both inconclusive — strict mode rejects)`);
+      if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
+      if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
+      if (breakdown.error > 0) parts.push(`${breakdown.error} errored`);
+      diagnostic = `Checked ${totalCandidates} Zillow ${totalCandidates === 1 ? "candidate" : "candidates"} — ${parts.join(", ")}.`;
+    }
+
     return res.json({
-      error: "No eligible replacement units found. Please try again later or adjust your search criteria.",
+      error: `No eligible replacement units found. ${diagnostic}`,
+      diagnostic: {
+        communityAddress,
+        communityName,
+        requiredBedrooms: requiredBedrooms ?? null,
+        cleanChannel: cleanChannel ?? null,
+        strict,
+        totalCandidates,
+        breakdown,
+        attempts,
+      },
     });
   });
 
