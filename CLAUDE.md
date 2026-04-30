@@ -43,6 +43,16 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-04-30: Codex fixed find-buy-in result quality/pricing issues and
+  the local Chrome sidecar ergonomics. Key points: stale empty live-search
+  cache is short-lived and manual refresh adds `nocache=1`; Poipu Kai
+  filters now require condo-like 3BR candidates; sidecar Chrome is not
+  intentionally zoomed out, so the worker now launches at `1280x900`,
+  resets page scale/zoom best-effort, creates a fresh daemon tab on
+  startup, times stale-tab cleanup, polls every ~10s idle / ~2s busy,
+  and the live worker at `~/Downloads/vrbo-sidecar/worker.mjs` was copied
+  + restarted. Relevant commits: `55aba79`, `4dc74f6`, `b89cdeb`,
+  `aab4366`, `cde689c`, `d5eff1f`, `87e6ccb`.
 - 2026-04-30: Codex fixed Airbnb "Replace photos" replacement discovery
   so channel-scoped Airbnb replacements may use clean Poipu Kai units
   found on VRBO, provided the unit is not listed on Airbnb. VRBO listing
