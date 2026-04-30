@@ -12445,6 +12445,8 @@ export async function registerRoutes(
     if (!communityName) return res.status(400).json({ error: "Unknown community folder" });
 
     const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
+    const channelScopedSourceAliases = safeFolder === "community-regency-poipu-kai" ? ["Poipu Kai"] : [];
+    const channelScopedSourceNames = Array.from(new Set([communityName, ...channelScopedSourceAliases]));
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
     // Step 1 — Google search for replacement listing URLs at this
@@ -12595,11 +12597,13 @@ export async function registerRoutes(
     if (cleanChannel && cleanChannel !== "vrbo") {
       const bedroomPhrase = requiredBedrooms ? ` "${requiredBedrooms} bedroom"` : "";
       const brPhrase = requiredBedrooms ? ` "${requiredBedrooms}BR"` : "";
-      searchQueries.push(
-        `site:vrbo.com "${communityName}"${bedroomPhrase}`,
-        `site:vrbo.com "${communityName}"${brPhrase}`,
-        `site:vrbo.com "${communityAddress}"${bedroomPhrase}`,
-      );
+      for (const sourceName of channelScopedSourceNames) {
+        searchQueries.push(
+          `site:vrbo.com "${sourceName}"${bedroomPhrase}`,
+          `site:vrbo.com "${sourceName}"${brPhrase}`,
+        );
+      }
+      searchQueries.push(`site:vrbo.com "${communityAddress}"${bedroomPhrase}`);
     }
 
     for (const siteQuery of searchQueries) {
@@ -12621,6 +12625,15 @@ export async function registerRoutes(
           const source = detectSource(link);
           if (!source) continue;
           if (skipUrls.includes(link)) continue;
+          const resultText = `${r.title || ""} ${r.snippet || ""} ${link}`;
+          if (source === "vrbo") {
+            const normalizedText = resultText.toLowerCase();
+            const inSearchArea = channelScopedSourceNames.some((name) => normalizedText.includes(name.toLowerCase()))
+              || /\b(poipu|koloa)\b/i.test(resultText);
+            if (!inSearchArea) continue;
+            const bedMatch = resultText.match(/\b(\d+)\s*(?:br|bed(?:room)?s?)\b/i);
+            if (requiredBedrooms && bedMatch && Number(bedMatch[1]) !== requiredBedrooms) continue;
+          }
           // Dedupe: don't add the same URL twice if it surfaces in
           // multiple queries.
           if (candidates.some((c) => c.sourceUrl === link)) continue;
@@ -12782,21 +12795,31 @@ export async function registerRoutes(
       address: string,
       resort: string,
       unit: string,
+      allowTitleOnly = false,
     ): Promise<PlatformCheck> {
-      if (!unit) {
+      if (!unit && !allowTitleOnly) {
         // Without a unit number there's no way to run a meaningfully
         // specific query — mark every platform as unknown and let the
         // UI surface that to the user.
         return { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
       }
+      if (!unit && !address.trim() && !resort.trim()) {
+        return { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
+      }
       const platformCheck: PlatformCheck = { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
       const results = await Promise.all(
-        enforcedHosts.map((p) =>
-          checkOnePlatform(p.host, [
-            `site:${p.host} "${address}" "${unit}"`,
-            `site:${p.host} "${resort}" "${unit}"`,
-          ]),
-        ),
+        enforcedHosts.map((p) => {
+          const queries = unit
+            ? [
+                `site:${p.host} "${address}" "${unit}"`,
+                `site:${p.host} "${resort}" "${unit}"`,
+              ]
+            : [
+                `site:${p.host} "${address}"`,
+                `site:${p.host} "${resort}"`,
+              ];
+          return checkOnePlatform(p.host, queries);
+        }),
       );
       enforcedHosts.forEach((p, i) => { platformCheck[p.key] = results[i]; });
       return platformCheck;
@@ -12827,7 +12850,11 @@ export async function registerRoutes(
       try {
         const { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
 
-        const platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
+        const platformAddress = source === "vrbo" ? address : communityAddress;
+        const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
+          ? channelScopedSourceAliases[0]
+          : communityName;
+        const platformCheck = await checkAllPlatforms(platformAddress, platformResort, unitNumber, source === "vrbo");
         console.error(
           `[find-unit] [${source}] ${sourceUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );
