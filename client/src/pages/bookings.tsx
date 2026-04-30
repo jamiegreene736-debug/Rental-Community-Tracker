@@ -1667,6 +1667,12 @@ function LiveSearchSection({
   const pm      = data?.sources.pm      ?? [];
   const cheapest = data?.cheapest       ?? [];
   const cheapestUnits = data?.cheapestUnits ?? [];
+  // PR #337: per-PM-source breakdown so the operator can see at a glance
+  // which scrapers contributed and which came up empty (vs. wondering
+  // whether we even searched them). Server populates one entry per
+  // PM scraper attempted, regardless of result count.
+  const pmSourceBreakdown: Array<{ label: string; count: number }> =
+    (data as any)?.pmSourceBreakdown ?? [];
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
@@ -1817,13 +1823,29 @@ function LiveSearchSection({
         { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
         { key: "vrbo",    label: "Vrbo (awareness — direct-with-owner outreach)", items: vrbo, defaultOpen: vrbo.length > 0 },
         { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
-        { key: "pm",      label: "PM Companies (Google)", items: pm, defaultOpen: true },
+        { key: "pm",      label: "PM Companies", items: pm, defaultOpen: true },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
             <Badge className={`text-[10px] ${sourceBadgeClass(s.key)}`}>{s.label}</Badge>
             <span>{s.items.length} results</span>
           </summary>
+          {/* PR #337: PM-source coverage panel. Lists every PM scraper
+              we tried plus its count, so the operator can see we DID
+              search Suite Paradise / Parrish Kauai / Alekona / etc.
+              even when a particular community/window has no available
+              units in that PM's inventory. Only renders for the PM
+              section. */}
+          {s.key === "pm" && pmSourceBreakdown.length > 0 && (
+            <div className="text-[11px] text-muted-foreground pl-2 pt-1 pb-2 flex flex-wrap gap-x-3 gap-y-0.5">
+              <span className="font-medium">Searched:</span>
+              {pmSourceBreakdown.map((src) => (
+                <span key={src.label} className={src.count > 0 ? "text-foreground" : "opacity-60"}>
+                  {src.label}: <span className={src.count > 0 ? "font-semibold" : ""}>{src.count}</span>
+                </span>
+              ))}
+            </div>
+          )}
           {s.items.length === 0 ? (
             <p className="text-xs text-muted-foreground pl-2 py-2">
               No results.
