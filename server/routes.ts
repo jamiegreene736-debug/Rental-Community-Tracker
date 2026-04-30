@@ -14216,16 +14216,29 @@ export async function registerRoutes(
 
       const channels = Array.from(ISOLATION_CHANNELS).map((channel) => {
         const r = byChannel.get(channel);
-        const channelAlerts = matchingAlerts.filter((a) => a.platform === channel).map((a) => ({
-          id: a.id,
-          folder: a.photoFolder,
-          priorStatus: a.priorStatus,
-          newStatus: a.newStatus,
-          matchedUrls: a.matchedUrls ? (() => {
-            try { return JSON.parse(a.matchedUrls) as Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>; } catch { return []; }
-          })() : [],
-          detectedAt: a.detectedAt,
-        }));
+        const channelAlerts = matchingAlerts.filter((a) => a.platform === channel).map((a) => {
+          // PR #319: include the UNIT's bedroom count (not the
+          // listing total). The replacement search uses this to find
+          // a Zillow unit clean on the channel that matches the
+          // ALERTED unit specifically — important for multi-unit
+          // listings (e.g. Pili Mai 5BR Townhomes = two 3BR units;
+          // searching for "6BR Pili Mai" returns nothing because the
+          // resort doesn't have 6BR units, only 2BR/3BR). Falls back
+          // to null when the folder is the community folder rather
+          // than a per-unit folder.
+          const unit = builder?.units.find((u) => u.photoFolder === a.photoFolder);
+          return {
+            id: a.id,
+            folder: a.photoFolder,
+            priorStatus: a.priorStatus,
+            newStatus: a.newStatus,
+            matchedUrls: a.matchedUrls ? (() => {
+              try { return JSON.parse(a.matchedUrls) as Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>; } catch { return []; }
+            })() : [],
+            detectedAt: a.detectedAt,
+            unitBedrooms: unit?.bedrooms ?? null,
+          };
+        });
         return {
           channel,
           status: r?.status ?? "synced",

@@ -2945,11 +2945,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           // listing id; Booking's hotelId is the extranet id.
           // channelStatus is already loaded by the existing channel-
           // info effect.
+          // PR #319: pass per-unit bedroom counts so the panel can
+          // default the row-level Isolate+Replace+Disconnect modal
+          // to the largest unit (likely findable in the community)
+          // instead of the listing total (Pili Mai 5BR Townhomes
+          // = 6 listing total, but the resort has no 6BR units).
+          const unitBedroomCounts = (builder?.units ?? []).map((u) => u.bedrooms ?? 0).filter((n) => n > 0);
           return (
             <PhotoSyncStatusPanel
               guestyListingId={selectedId}
               communityFolder={builder?.communityPhotoFolder}
               bedrooms={totalBedrooms && totalBedrooms > 0 ? totalBedrooms : undefined}
+              unitBedroomCounts={unitBedroomCounts}
               channelIds={{
                 vrbo: channelStatus?.vrbo?.id ?? null,
                 booking: channelStatus?.bookingCom?.id ?? null,
