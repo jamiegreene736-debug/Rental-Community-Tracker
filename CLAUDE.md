@@ -61,7 +61,15 @@ Before making any changes:
   `$0` manual-quote fallbacks in `cheapest` because Auto-fill consumes that
   list directly. The live worker at
   `~/Downloads/vrbo-sidecar/worker.mjs` was copied and restarted.
-  Relevant commit: `fix(sidecar): verify PM rates with date-specific signals`.
+  Post-deploy smoke on Railway deployment
+  `db1f98de-d145-460b-a509-05e961439736` for property `4`, `3BR`,
+  `2026-06-13 → 2026-06-20` returned `cheapest=[]` and no `$0`
+  fallback; sidecar checked 15 PM URLs (`12` booked/unavailable, `3`
+  unclear). The stale bad `$0` attachment for Steve Kuykendall / Unit
+  721 (`buy_ins.id=84`) was detached via
+  `POST /api/bookings/detach-buy-in/84`; the row remains in buy-ins but
+  is no longer attached to the reservation. Relevant commit:
+  `fix(sidecar): verify PM rates with date-specific signals`.
 - 2026-04-30: Codex fixed find-buy-in result quality/pricing issues and
   the local Chrome sidecar ergonomics. Key points: stale empty live-search
   cache is short-lived and manual refresh adds `nocache=1`; Poipu Kai
