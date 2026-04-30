@@ -3783,10 +3783,13 @@ export async function registerRoutes(
     // + photo-match phase 5s + PM finder 60s = ~245s total handler
     // time — comfortably under Railway's 5-min timeout.
     const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
-        p,
+        p.finally(() => {
+          if (timeout) clearTimeout(timeout);
+        }),
         new Promise<T>((resolve) =>
-          setTimeout(() => {
+          timeout = setTimeout(() => {
             console.warn(`[find-buy-in] ${label} timed out after ${ms}ms — using fallback`);
             resolve(fallback);
           }, ms),
@@ -4522,11 +4525,12 @@ export async function registerRoutes(
     // the exact same (propertyId, bedrooms, checkIn, checkOut) tuple
     // returns instantly. Eviction runs lazily on each set.
     evictExpiredFindBuyIn();
+    const cacheTtlMs = priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000;
     findBuyInCache.set(cacheKey, {
       value: responseBody,
-      expiresAt: Date.now() + FIND_BUY_IN_TTL_MS,
+      expiresAt: Date.now() + cacheTtlMs,
     });
-    console.log(`[find-buy-in] cached ${cacheKey} (TTL ${FIND_BUY_IN_TTL_MS / 1000}s; cache size now ${findBuyInCache.size})`);
+    console.log(`[find-buy-in] cached ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
     return res.json(responseBody);
   });
 

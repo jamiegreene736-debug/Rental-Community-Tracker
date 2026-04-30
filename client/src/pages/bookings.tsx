@@ -1635,6 +1635,7 @@ function LiveSearchSection({
   slot: SlotInfo;
 }) {
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -1650,15 +1651,18 @@ function LiveSearchSection({
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
-  const { data, isLoading, isError, error, refetch } = useQuery<FindBuyInResponse>({
-    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd],
-    queryFn: () =>
-      apiRequest(
+  const { data, isLoading, isError, error } = useQuery<FindBuyInResponse>({
+    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, refreshNonce],
+    queryFn: () => {
+      const noCache = refreshNonce > 0 ? "&nocache=1" : "";
+      return apiRequest(
         "GET",
-        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}`,
-      ).then((r) => r.json()),
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${noCache}`,
+      ).then((r) => r.json());
+    },
     enabled: !!checkInYmd && !!checkOutYmd,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   // Dead-code preserved for reference — used to gate on a button click
@@ -1696,7 +1700,7 @@ function LiveSearchSection({
     return (
       <div className="border rounded-lg p-4 text-sm text-destructive">
         <AlertCircle className="h-4 w-4 inline mr-1" /> Search failed: {(error as Error).message}
-        <Button size="sm" variant="outline" className="ml-2" onClick={() => refetch()}>Retry</Button>
+        <Button size="sm" variant="outline" className="ml-2" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
       </div>
     );
   }
@@ -1748,7 +1752,7 @@ function LiveSearchSection({
         </div>
         <div className="flex items-center gap-2">
           <SidecarStatusBadge />
-          <Button size="sm" variant="ghost" onClick={() => refetch()}>
+          <Button size="sm" variant="ghost" onClick={() => setRefreshNonce((n) => n + 1)}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
           </Button>
         </div>
