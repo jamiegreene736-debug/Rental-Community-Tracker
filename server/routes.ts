@@ -12503,6 +12503,7 @@ export async function registerRoutes(
     const extractUnitNumberFromText = (text: string): string => {
       const haystack = text.replace(/&[#a-z0-9]+;/gi, " ");
       const patterns = [
+        /\b(?:regency\s+villas?|manualoha|makahuena|pili\s+mai|kai\s+nui|poipu\s+kai)\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
         /\b(?:unit|apt|apartment|condo|villa|suite)\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
         /#\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
         /\bRegency(?:\s+at\s+Poipu\s+Kai)?\s*#?\s*([A-Z]?\d{2,4}[A-Z]?)\b/i,
@@ -12638,8 +12639,10 @@ export async function registerRoutes(
           // multiple queries.
           if (candidates.some((c) => c.sourceUrl === link)) continue;
 
-          let unitNumber = extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
-          if (!unitNumber) unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
+          let unitNumber = source === "vrbo"
+            ? extractUnitNumber(link, source, r.title || "") || extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`)
+            : extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
+          if (!unitNumber && source !== "vrbo") unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
           // Zillow's old fall-through: no parts.split logic below
           // gets inlined into the per-source branches above.
           // Fall through to legacy slug scan if nothing matched.
@@ -12811,6 +12814,9 @@ export async function registerRoutes(
       return terms.slice(0, 6);
     };
 
+    const escapeRegExp = (value: string): string =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
     const hitMatchesDistinctiveTerms = (hit: any, terms: string[]): boolean => {
       if (terms.length === 0) return true;
       const text = normalizeSearchText(`${hit.title || ""} ${hit.snippet || ""} ${hit.link || ""}`);
@@ -12818,10 +12824,29 @@ export async function registerRoutes(
       return matched >= Math.min(2, terms.length);
     };
 
+    const hitMatchesUnit = (hit: any, unit: string): boolean => {
+      const normalizedUnit = normalizeSearchText(unit).replace(/\s+/g, "");
+      if (!normalizedUnit) return true;
+
+      const text = normalizeSearchText(`${hit.title || ""} ${hit.snippet || ""} ${hit.link || ""}`);
+      const unitPattern = escapeRegExp(normalizedUnit);
+
+      if (!/^\d+$/.test(normalizedUnit)) {
+        return new RegExp(`\\b${unitPattern}\\b`).test(text);
+      }
+
+      return new RegExp(
+        `\\b(?:unit|apt|apartment|condo|villa|villas|suite|regency|manualoha|makahuena|pili\\s+mai|kai\\s+nui|poipu\\s+kai|building)\\s+${unitPattern}\\b`,
+      ).test(text) || new RegExp(
+        `\\b${unitPattern}\\s+(?:unit|apt|apartment|condo|villa|villas|suite)\\b`,
+      ).test(text);
+    };
+
     async function checkOnePlatform(
       host: string,
       queries: string[],
       distinctiveTerms: string[] = [],
+      unit = "",
     ): Promise<PlatformStatus> {
       // Fire both queries in parallel; combine verdicts.
       const hitLists = await Promise.all(queries.map((q) => runSearch(q)));
@@ -12830,7 +12855,9 @@ export async function registerRoutes(
         if (hits === null) continue;
         anyResponded = true;
         const matches = hits.filter((h: any) =>
-          (h.link || "").toLowerCase().includes(host) && hitMatchesDistinctiveTerms(h, distinctiveTerms)
+          (h.link || "").toLowerCase().includes(host)
+          && hitMatchesUnit(h, unit)
+          && hitMatchesDistinctiveTerms(h, distinctiveTerms)
         );
         if (matches.length > 0) return "found";
       }
@@ -12866,7 +12893,7 @@ export async function registerRoutes(
             : [
                 `site:${p.host} "${address}"`,
               ];
-          return checkOnePlatform(p.host, queries, titleOnlyTerms);
+          return checkOnePlatform(p.host, queries, titleOnlyTerms, unit);
         }),
       );
       enforcedHosts.forEach((p, i) => { platformCheck[p.key] = results[i]; });
