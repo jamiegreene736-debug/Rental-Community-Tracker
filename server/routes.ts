@@ -13046,6 +13046,49 @@ export async function registerRoutes(
       });
     }
     const draft = await storage.createCommunityDraft(result.data);
+
+    // PR #328 (operator directive 2026-04-30): kick off PM auto-
+    // discovery for the new community in the background. Find-buy-in
+    // already walks VRP_SITES (compile-time list of vrp_main PMs);
+    // discovery surfaces additional PMs that match the same
+    // fingerprint so the operator can decide whether to add them
+    // permanently. Fire-and-forget so the save response stays fast.
+    //
+    // Routes through SearchAPI only (PR #327 removed the sidecar
+    // Google path), so no daemon dependency and no bot-detection
+    // risk. Worst-case ~30s for the SearchAPI multi-query + per-host
+    // vrp_main fingerprint probe; well under any background timeout.
+    if (process.env.SEARCHAPI_API_KEY) {
+      const community = result.data.name;
+      const location = `${result.data.city}, ${result.data.state}`;
+      void (async () => {
+        try {
+          console.log(`[community-save] kicking off PM discovery for "${community}" / "${location}"`);
+          const discovery = await discoverPmDomains({
+            community,
+            location,
+            apiKey: process.env.SEARCHAPI_API_KEY!,
+            pages: 2,
+            probeForVrp: true,
+          });
+          const vrpHits = discovery.domains.filter((d) => d.cmsDetected === "vrp_main");
+          if (vrpHits.length > 0) {
+            console.log(
+              `[community-save] PM discovery for "${community}": ${vrpHits.length} vrp_main host(s) found — `
+              + vrpHits.map((d) => `${d.hostname} (${d.vrpUnitCount ?? "?"} units)`).join(", ")
+              + ` — review and add to VRP_SITES if relevant.`,
+            );
+          } else {
+            console.log(
+              `[community-save] PM discovery for "${community}": ${discovery.domains.length} candidate host(s), 0 vrp_main matches.`,
+            );
+          }
+        } catch (e: any) {
+          console.error(`[community-save] PM discovery failed for "${community}":`, e?.message ?? e);
+        }
+      })();
+    }
+
     res.json(draft);
   });
 
