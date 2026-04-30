@@ -3684,19 +3684,19 @@ export async function registerRoutes(
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
       withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
       withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
-      // PR #337: bumped vrp-walk timeouts 30s → 75s. Parrish Kauai
-      // and CB Island walk 300+ unit pages on cold cache. Combined
-      // with the concurrency=24 bump in pm-scraper-vrp.ts, this lets
-      // those scrapers complete on cold caches (~30-40s) instead of
-      // tripping the wall budget and silently surfacing 0 candidates.
-      // Subsequent same-process calls hit the 7d meta cache and
-      // resolve in <1s, so the higher ceiling only matters on the
-      // first request after a Railway restart. Other scrapers keep
-      // their original 30s budget — they're either small inventories
-      // (Streamline, Gather) or already JSON-backed (Streamline).
-      withTimeout(spDiscoveryPromise, 75_000, [] as Candidate[], "sp-sitemap"),
-      withTimeout(pkDiscoveryPromise, 75_000, [] as Candidate[], "pk-sitemap"),
-      withTimeout(cbDiscoveryPromise, 75_000, [] as Candidate[], "cb-sitemap"),
+      // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
+      // Parrish Kauai's cold-cache walk consistently lands in the
+      // 80-95s range even at concurrency=24 (their WP front
+      // controller appears to throttle per-IP — page response time
+      // averages ~270ms rather than the ~80ms a CDN-cached page
+      // would give). 120s covers the 95th-percentile cold call;
+      // warm caches still resolve in <1s, so the higher ceiling
+      // only fires on the first request after a Railway restart.
+      // Other scrapers keep their original 30s budget — they're
+      // either small inventories or already JSON-backed.
+      withTimeout(spDiscoveryPromise, 120_000, [] as Candidate[], "sp-sitemap"),
+      withTimeout(pkDiscoveryPromise, 120_000, [] as Candidate[], "pk-sitemap"),
+      withTimeout(cbDiscoveryPromise, 120_000, [] as Candidate[], "cb-sitemap"),
       withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
       withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
       withTimeout(gvDiscoveryPromise, 30_000, [] as Candidate[], "gv-sitemap"),
@@ -16852,6 +16852,44 @@ Do not include a subject line.`;
       res.status(500).json({ error: "AI draft failed", message: err.message });
     }
   });
+
+  // PR #338: PM cache warm-up. Parrish Kauai's metadata walk runs
+  // ~80-95s on cold cache (326 unit pages, throttled by their WP
+  // front controller). The first find-buy-in after a Railway restart
+  // would hit that cold path inside the per-source wall budget and
+  // surface 0 candidates even when units WERE available. By kicking
+  // off the walk 10s after boot — when the server is settled but
+  // before the operator typically issues their first search — the
+  // 7d meta cache is populated proactively.
+  //
+  // Each scraper guards its own concurrency + cache write, so
+  // running the walks in parallel is safe. We deliberately use a
+  // fire-and-forget pattern: errors are logged but don't block boot,
+  // and a partial warm-up (e.g. one PM 502s) doesn't poison the
+  // others.
+  setTimeout(() => {
+    void (async () => {
+      console.log("[pm-warm] kicking off background PM cache warm-up (Parrish, CB Island, Suite Paradise)");
+      const startedAt = Date.now();
+      const dummy = {
+        bedrooms: 3,
+        checkIn: "2026-12-01",
+        checkOut: "2026-12-08",
+        resortName: "Poipu",
+      };
+      // Independent — Promise.allSettled so a single 502 doesn't
+      // block the others.
+      const results = await Promise.allSettled([
+        findAvailableVrpUnits({ site: VRP_SITES.parrishKauai, ...dummy }).catch((e) => { throw new Error(`parrish: ${e?.message}`); }),
+        findAvailableVrpUnits({ site: VRP_SITES.cbIslandVacations, ...dummy }).catch((e) => { throw new Error(`cb: ${e?.message}`); }),
+        findAvailableSuiteParadiseUnits({ ...dummy, resortName: "Poipu" }).catch((e) => { throw new Error(`sp: ${e?.message}`); }),
+      ]);
+      for (const r of results) {
+        if (r.status === "rejected") console.warn(`[pm-warm] one warm-up failed: ${r.reason?.message ?? r.reason}`);
+      }
+      console.log(`[pm-warm] background warm-up complete in ${Math.round((Date.now() - startedAt) / 1000)}s — caches warm for 7d`);
+    })();
+  }, 10_000);
 
   return httpServer;
 }
