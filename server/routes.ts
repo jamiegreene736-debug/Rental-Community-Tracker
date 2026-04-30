@@ -12694,14 +12694,12 @@ export async function registerRoutes(
     }
 
     // PR #329: sort candidates by source priority before processing.
-    // Realtor + Redfin are for-sale-focused and far less likely to be
-    // on VRBO than Zillow's mixed pool. Putting them first means the
-    // candidate-processing loop's early-return fires on a Realtor or
-    // Redfin hit before walking the (more likely VRBO-saturated)
-    // Zillow set — same outcome on success, faster wall when both
-    // sources have viable units.
+    // Default replacement favors for-sale sources first because they
+    // are less likely to be OTA-saturated. Channel-scoped replacement
+    // can safely prioritize a different OTA as the photo source as
+    // long as the enforced channel stays clean.
     const sourcePriority: Record<CandidateSource, number> = cleanChannel && cleanChannel !== "vrbo"
-      ? { realtor: 0, redfin: 1, vrbo: 2, zillow: 3 }
+      ? { vrbo: 0, realtor: 1, redfin: 2, zillow: 3 }
       : { realtor: 0, redfin: 1, zillow: 2, vrbo: 3 };
     candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
 
@@ -12777,14 +12775,63 @@ export async function registerRoutes(
     // genuinely can't tell. Strict mode rejects, loose mode lets it
     // through. The error message in the failure response now reflects
     // this honestly.
-    async function checkOnePlatform(host: string, queries: string[]): Promise<PlatformStatus> {
+    const normalizeSearchText = (text: string): string =>
+      text
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/&[#a-z0-9]+;/gi, " ")
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const genericListingTerms = new Set([
+      "air", "and", "apartment", "apartments", "bath", "baths", "bathroom", "bathrooms",
+      "beach", "beautiful", "bed", "beds", "bedroom", "bedrooms", "central", "classic",
+      "club", "condo", "condominium", "cottage", "designer", "entire", "estate", "for",
+      "from", "golf", "guest", "hale", "hawaii", "hawaiian", "home", "homes", "house",
+      "island", "islands", "kauai", "kai", "koloa", "luxurious", "luxury", "near",
+      "ocean", "oceanfront", "pool", "poipu", "property", "regency", "rental", "rentals",
+      "residence", "residences", "resort", "retreat", "room", "rooms", "shopping",
+      "stay", "suite", "unit", "vacation", "villa", "villas", "view", "views", "with",
+    ]);
+
+    const distinctiveListingTerms = (text: string): string[] => {
+      const seen = new Set<string>();
+      const terms: string[] = [];
+      for (const term of normalizeSearchText(text).split(" ")) {
+        if (!term || seen.has(term)) continue;
+        if (genericListingTerms.has(term)) continue;
+        if (/^\d{5,}$/.test(term)) continue;
+        if (/^\d+$/.test(term) && (term.length < 2 || term.length > 4)) continue;
+        if (!/^\d+$/.test(term) && term.length < 3) continue;
+        seen.add(term);
+        terms.push(term);
+      }
+      return terms.slice(0, 6);
+    };
+
+    const hitMatchesDistinctiveTerms = (hit: any, terms: string[]): boolean => {
+      if (terms.length === 0) return true;
+      const text = normalizeSearchText(`${hit.title || ""} ${hit.snippet || ""} ${hit.link || ""}`);
+      const matched = terms.filter((term) => text.includes(term)).length;
+      return matched >= Math.min(2, terms.length);
+    };
+
+    async function checkOnePlatform(
+      host: string,
+      queries: string[],
+      distinctiveTerms: string[] = [],
+    ): Promise<PlatformStatus> {
       // Fire both queries in parallel; combine verdicts.
       const hitLists = await Promise.all(queries.map((q) => runSearch(q)));
       let anyResponded = false;
       for (const hits of hitLists) {
         if (hits === null) continue;
         anyResponded = true;
-        const matches = hits.filter((h: any) => (h.link || "").toLowerCase().includes(host));
+        const matches = hits.filter((h: any) =>
+          (h.link || "").toLowerCase().includes(host) && hitMatchesDistinctiveTerms(h, distinctiveTerms)
+        );
         if (matches.length > 0) return "found";
       }
       // All queries errored → we genuinely don't know.
@@ -12809,6 +12856,8 @@ export async function registerRoutes(
       const platformCheck: PlatformCheck = { airbnb: "unknown", vrbo: "unknown", bookingCom: "unknown" };
       const results = await Promise.all(
         enforcedHosts.map((p) => {
+          const titleOnlyTerms = unit ? [] : distinctiveListingTerms(address);
+          if (!unit && titleOnlyTerms.length === 0) return Promise.resolve("unknown" as PlatformStatus);
           const queries = unit
             ? [
                 `site:${p.host} "${address}" "${unit}"`,
@@ -12816,9 +12865,8 @@ export async function registerRoutes(
               ]
             : [
                 `site:${p.host} "${address}"`,
-                `site:${p.host} "${resort}"`,
               ];
-          return checkOnePlatform(p.host, queries);
+          return checkOnePlatform(p.host, queries, titleOnlyTerms);
         }),
       );
       enforcedHosts.forEach((p, i) => { platformCheck[p.key] = results[i]; });
