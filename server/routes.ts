@@ -3378,6 +3378,13 @@ export async function registerRoutes(
             });
             if (units.length > 0) pmDiscoveryStats.spHits++;
             pmDiscoveryStats.spUnitsTotal += units.length;
+            // PR #325: mark verified=yes when the rcapi call returned
+            // a real per-night price. Suite Paradise's rcapi endpoint
+            // is the PM's own booking API — when it quotes a price it
+            // means the unit is bookable for the requested window. The
+            // cheapest-pool gate (verified === "yes") was excluding
+            // these candidates, leaving operator-cheaper PM units out
+            // of the auto-pick set.
             return units.map((u): Candidate => ({
               source: "pm" as const,
               sourceLabel: "Suite Paradise",
@@ -3387,6 +3394,9 @@ export async function registerRoutes(
               totalPrice: u.totalPrice,
               bedrooms: u.bedrooms,
               snippet: `Suite Paradise · ${u.bedrooms}BR · sitemap-discovered, rcapi-priced`,
+              verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
+              verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+              verifiedReason: u.nightlyPrice > 0 ? "Suite Paradise rcapi returned a date-specific quote" : undefined,
             }));
           } catch (e: any) {
             console.error("[find-buy-in] sp-discovery error:", e.message);
@@ -3432,6 +3442,15 @@ export async function registerRoutes(
           });
           if (units.length > 0) pmDiscoveryStats[hitsKey]++;
           pmDiscoveryStats[totalKey] += units.length;
+          // PR #325: mark verified=yes when the vrp_main API returned
+          // a real per-night price. The vrpjax endpoint is the PM's
+          // own booking API; a quoted nightly means the unit is
+          // bookable for the requested window. Without this, sitemap-
+          // discovered PM units (Keleka Hale at Piko Properties,
+          // Parrish Kauai listings, etc.) failed the cheapest-pool
+          // gate (`c.verified === "yes"`) and didn't surface as
+          // auto-pick candidates even when they were cheaper than the
+          // Airbnb/Vrbo alternatives.
           return units.map((u): Candidate => ({
             source: "pm" as const,
             sourceLabel: site.label,
@@ -3441,6 +3460,9 @@ export async function registerRoutes(
             totalPrice: u.totalPrice,
             bedrooms: u.bedrooms,
             snippet: `${site.label} · ${u.bedrooms}BR · sitemap-discovered, vrp-priced`,
+            verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
+            verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+            verifiedReason: u.nightlyPrice > 0 ? `${site.label} vrpjax returned a date-specific quote` : undefined,
           }));
         } catch (e: any) {
           console.error(`[find-buy-in] vrp-discovery:${site.label} error:`, e.message);
