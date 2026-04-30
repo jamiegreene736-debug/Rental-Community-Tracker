@@ -41,6 +41,7 @@
 // on `opType`.
 export type SidecarOpType =
   | "vrbo_search"
+  | "vrbo_photo_scrape"
   | "booking_search"
   | "google_serp"
   | "pm_url_check"
@@ -54,6 +55,11 @@ export type SidecarVrboParams = {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+};
+
+export type SidecarVrboPhotoScrapeParams = {
+  url: string;
+  maxPhotos?: number;
 };
 
 export type SidecarBookingParams = {
@@ -147,6 +153,7 @@ export type SidecarGuestyDisconnectResult = {
 
 export type SidecarParamsByOp = {
   vrbo_search: SidecarVrboParams;
+  vrbo_photo_scrape: SidecarVrboPhotoScrapeParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
   pm_url_check: SidecarPmUrlCheckParams;
@@ -180,6 +187,10 @@ export type SidecarSerpHit = {
   snippet?: string;
 };
 
+export type SidecarVrboPhotoScrapeResult = {
+  photos: string[];
+};
+
 export type SidecarPmUrlCheckResult = {
   available: "yes" | "no" | "unclear";
   nightlyPrice: number | null;
@@ -193,6 +204,7 @@ export type SidecarRequest = {
   opType: SidecarOpType;
   params:
     | SidecarVrboParams
+    | SidecarVrboPhotoScrapeParams
     | SidecarBookingParams
     | SidecarGoogleSerpParams
     | SidecarPmUrlCheckParams
@@ -202,6 +214,7 @@ export type SidecarRequest = {
   requestKey: string;
   results?:
     | SidecarPropertyCandidate[]
+    | SidecarVrboPhotoScrapeResult
     | SidecarSerpHit[]
     | SidecarPmUrlCheckResult
     | SidecarPmUrlCheckBatchResult
@@ -278,6 +291,10 @@ function makeRequestKey(
       const p = params as SidecarVrboParams | SidecarBookingParams;
       return `${opType}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
     }
+    case "vrbo_photo_scrape": {
+      const p = params as SidecarVrboPhotoScrapeParams;
+      return `vrbo_photo_scrape|${p.url}|${p.maxPhotos ?? 40}`;
+    }
     case "google_serp": {
       const p = params as SidecarGoogleSerpParams;
       return `google_serp|${p.query.toLowerCase().trim()}|${p.maxResults ?? 20}`;
@@ -326,6 +343,7 @@ function makeId(): string {
 export function enqueueOp(
   req:
     | { opType: "vrbo_search"; params: SidecarVrboParams }
+    | { opType: "vrbo_photo_scrape"; params: SidecarVrboPhotoScrapeParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
     | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams }
@@ -441,6 +459,7 @@ export function getStatus(): {
   let newestAt = 0;
   const byOpType: Record<SidecarOpType, number> = {
     vrbo_search: 0,
+    vrbo_photo_scrape: 0,
     booking_search: 0,
     google_serp: 0,
     pm_url_check: 0,
@@ -532,6 +551,41 @@ export async function searchVrboViaSidecar(opts: {
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+export async function scrapeVrboPhotosViaSidecar(opts: {
+  url: string;
+  maxPhotos?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  photos: string[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.url || !/^https?:\/\//.test(opts.url)) {
+    return {
+      photos: [],
+      workerOnline: false,
+      durationMs: 0,
+      reason: "valid url required",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "vrbo_photo_scrape",
+      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40 },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 90_000,
+  });
+  return {
+    photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,

@@ -1,8 +1,8 @@
 // VRBO sidecar worker — drives real Chrome via CDP.
 //
 // v3 (2026-04-29): generalized to dispatch on op type. Each request
-// from the queue carries `opType` ∈ { vrbo_search, booking_search,
-// google_serp, pm_url_check } plus a `params` blob; this worker
+// from the queue carries `opType` ∈ { vrbo_search, vrbo_photo_scrape,
+// booking_search, google_serp, pm_url_check } plus a `params` blob; this worker
 // dispatches to the right scrape function based on opType. Each
 // processor reuses the same Chrome instance — same dedicated
 // user-data-dir, same cookies, same accumulated trust.
@@ -522,6 +522,78 @@ async function processVrboSearch(id, params) {
   await postResult(id, cards);
 }
 
+// ─────────────────────── VRBO listing photo scrape ─────────────────
+async function processVrboPhotoScrape(id, params) {
+  const { url, maxPhotos = 50 } = params;
+  log(`vrbo_photo_scrape ${id}: ${url}`);
+  await ensureBrowser();
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  const state = await dumpPageState("vrbo-photo", { id, ...params });
+  if (state && /show us your human side|we can.?t tell if you.?re a human|bot or not/i.test(state.bodyExcerpt)) {
+    throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
+  }
+
+  await page
+    .click('button:has-text("View all photos"), button:has-text("Show all photos"), button:has-text("Photo gallery")', { timeout: 2500 })
+    .catch(() => {});
+  await page.waitForTimeout(1500);
+
+  const photos = await page.evaluate(({ maxPhotos }) => {
+    const out = [];
+    const seen = new Set();
+
+    function normalize(raw) {
+      if (!raw) return "";
+      let url = String(raw)
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/g, "&")
+        .trim();
+      if (url.startsWith("//")) url = `https:${url}`;
+      return url;
+    }
+
+    function push(raw) {
+      const url = normalize(raw);
+      if (!/^https?:\/\//i.test(url)) return;
+      const lower = url.toLowerCase();
+      const isVrboImageHost = /(?:images\.trvl-media\.com|mediaim\.expedia\.com|odis\.homeaway\.com|vrbo\.com|homeaway\.com)/i.test(lower);
+      const hasImageExtension = /\.(?:jpe?g|webp|png)(?:[?#]|$)/i.test(lower);
+      if (!isVrboImageHost && !hasImageExtension) return;
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent|map/.test(lower)) return;
+      const key = lower.replace(/[?#].*$/, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(url);
+    }
+
+    function pushSrcset(srcset) {
+      String(srcset || "").split(",").forEach((part) => {
+        const first = part.trim().split(/\s+/)[0];
+        push(first);
+      });
+    }
+
+    document.querySelectorAll("img").forEach((img) => {
+      push(img.currentSrc || img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src"));
+      pushSrcset(img.getAttribute("srcset"));
+    });
+    document.querySelectorAll("source[srcset]").forEach((source) => pushSrcset(source.getAttribute("srcset")));
+
+    document.querySelectorAll("script").forEach((script) => {
+      const text = normalize(script.textContent || "");
+      const matches = text.match(/https?:\/\/[^"' <>()]+?(?:jpe?g|webp|png)(?:\?[^"' <>()]*)?/gi) || [];
+      matches.forEach(push);
+    });
+
+    return out.slice(0, Math.max(1, Math.min(100, Number(maxPhotos) || 50)));
+  }, { maxPhotos });
+
+  log(`vrbo_photo_scrape ${id}: ${photos.length} photos`);
+  await postResult(id, { photos });
+}
+
 // ─────────────────────── Booking.com search ─────────────────────────
 async function processBookingSearch(id, params) {
   const { destination, checkIn, checkOut, bedrooms } = params;
@@ -782,6 +854,7 @@ async function processRequest(req) {
 
   switch (opType) {
     case "vrbo_search": return processVrboSearch(req.id, params);
+    case "vrbo_photo_scrape": return processVrboPhotoScrape(req.id, params);
     case "booking_search": return processBookingSearch(req.id, params);
     case "google_serp": return processGoogleSerp(req.id, params);
     case "pm_url_check": return processPmUrlCheck(req.id, params);

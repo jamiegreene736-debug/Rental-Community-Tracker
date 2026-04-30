@@ -637,11 +637,35 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 // with the scraper-extracted bed/bath counts. Existing callers that don't
 // pass one are unaffected. New callers (notably the rescrape handler) use
 // these counts as ground truth over photo-based inference.
+let vrboPhotoSidecarBackoffUntil = 0;
 async function scrapeListingPhotos(
   primaryUrl: string,
   fallbackUrl?: string,
   listingFacts?: ListingFacts,
 ): Promise<ScrapedPhoto[]> {
+  if (/vrbo\.com/i.test(primaryUrl) && Date.now() >= vrboPhotoSidecarBackoffUntil) {
+    try {
+      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+      const sidecar = await scrapeVrboPhotosViaSidecar({
+        url: primaryUrl,
+        maxPhotos: 50,
+        walletBudgetMs: 90_000,
+      });
+      console.log(`[scrapeVrbo:sidecar] ${primaryUrl} → ${sidecar.photos.length} photos (${sidecar.reason})`);
+      if (!sidecar.workerOnline) vrboPhotoSidecarBackoffUntil = Date.now() + 60_000;
+      if (sidecar.photos.length > 0) {
+        return sidecar.photos.map((url) => ({
+          url,
+          title: "VRBO listing photo",
+          source: "VRBO",
+          sourceLink: primaryUrl,
+        }));
+      }
+    } catch (e: any) {
+      console.warn(`[scrapeVrbo:sidecar] ${primaryUrl}: ${e?.message ?? e}`);
+    }
+  }
+
   // Zillow URLs: run Apify and ScrapingBee in PARALLEL and union the
   // results. Each scraper sometimes returns an incomplete photo set for a
   // listing (different Zillow page variants, Apify actor quirks, cache
@@ -8004,6 +8028,7 @@ export async function registerRoutes(
     if (typeof body.opType === "string") {
       const opType = body.opType as
         | "vrbo_search"
+        | "vrbo_photo_scrape"
         | "booking_search"
         | "google_serp"
         | "pm_url_check"
@@ -8034,6 +8059,18 @@ export async function registerRoutes(
               checkIn: String(params.checkIn),
               checkOut: String(params.checkOut),
               bedrooms,
+            },
+          });
+        } else if (opType === "vrbo_photo_scrape") {
+          if (typeof params.url !== "string" || !/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(params.url)) {
+            return res.status(400).json({ error: "vrbo_photo_scrape: vrbo.com url required" });
+          }
+          const maxPhotos = Number(params.maxPhotos ?? 40);
+          result = enqueueOp({
+            opType: "vrbo_photo_scrape",
+            params: {
+              url: String(params.url),
+              maxPhotos: Number.isFinite(maxPhotos) ? Math.max(1, Math.min(100, Math.round(maxPhotos))) : 40,
             },
           });
         } else if (opType === "google_serp") {
