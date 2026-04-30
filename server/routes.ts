@@ -17,6 +17,7 @@ import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
+import { consultGrokAboutFindUnit } from "./grok-find-unit-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -2141,6 +2142,21 @@ export async function registerRoutes(
   app.get("/api/operations/grok-channel-independence-consult", async (_req, res) => {
     try {
       const text = await consultGrokAboutChannelIndependence();
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(text);
+    } catch (e: any) {
+      res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
+  });
+
+  // PR #324: consult Grok about find-unit candidate sourcing.
+  // Operator can hit this when the replacement search keeps coming
+  // up empty (e.g. "7 of 9 candidates already on VRBO" for popular
+  // resorts). Brief in server/grok-find-unit-consult.ts. Plain-text
+  // response for readability.
+  app.get("/api/operations/grok-find-unit-consult", async (_req, res) => {
+    try {
+      const text = await consultGrokAboutFindUnit();
       res.set("Content-Type", "text/plain; charset=utf-8");
       res.send(text);
     } catch (e: any) {
@@ -12236,9 +12252,25 @@ export async function registerRoutes(
     }
     const candidates: Candidate[] = [];
 
+    // PR #324: widened query pool. Operator hit "7 of 9 candidates
+    // on VRBO" for Poipu Kai — popular vacation-rental communities
+    // saturate VRBO, so the original 2 queries returned a mostly-
+    // already-listed set. New variants:
+    //   - "for sale" bias    — for-sale listings are far less likely
+    //                           to be on VRBO (owner selling, not
+    //                           renting). High-value source.
+    //   - condo qualifier    — surfaces different Zillow listing types
+    //                           (rental vs sale vs MLS) than the bare
+    //                           name query.
+    //   - city qualifier     — broadens the geographic match. Picks up
+    //                           Koloa/Princeville-area Zillow listings
+    //                           the resort name alone might miss.
     for (const siteQuery of [
       `site:zillow.com "${communityAddress}"`,
       `site:zillow.com "${communityName}"`,
+      `site:zillow.com "${communityName}" "for sale"`,
+      `site:zillow.com "${communityName}" condo`,
+      `site:zillow.com "${communityName}" Koloa`,
     ]) {
       try {
         console.error(`[find-unit] Searching: ${siteQuery}`);
@@ -12284,7 +12316,13 @@ export async function registerRoutes(
 
           candidates.push({ zillowUrl: link, address: addrDisplay || communityName, unitNumber, thumbnail });
         }
-        if (candidates.length >= 6) break;
+        // PR #324: cap raised 6 → 15 to widen the candidate pool when
+        // the resort is heavily VRBO-saturated. Each candidate still
+        // gates on platform check + photo count + vision before
+        // accepted, so over-capping just means we exhaust Google's
+        // index — the early-return fires the moment we find a viable
+        // unit.
+        if (candidates.length >= 15) break;
       } catch (e: any) {
         console.error(`[find-unit] Search error: ${e?.message}`);
       }
@@ -12486,7 +12524,12 @@ export async function registerRoutes(
           //   bedrooms, so this cuts false-negatives on single-bedroom
           //   listings where our samples might miss the sole bedroom
           //   photo). ~$0.004 per candidate. See probeInteriorCoverage.
-          const MIN_PHOTOS = 12;
+          //
+          // PR #324: lowered 12 → 8. Operator hit a case where 1
+          // candidate had 8-11 photos and got rejected; vision probe
+          // accepts on bedroom-OR-bathroom evidence which works fine
+          // with 8 photos (we'd just sample 8/8 instead of 8/12+).
+          const MIN_PHOTOS = 8;
           let scrapedPhotoUrls: string[] = [];
           try {
             const scraped = await scrapeListingPhotos(zillowUrl);
