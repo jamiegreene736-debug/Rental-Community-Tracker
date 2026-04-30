@@ -1819,16 +1819,14 @@ function LiveSearchSection({
       />
 
       {/* By-source sections.
-          Airbnb + Vrbo are AWARENESS-ONLY — both have TOS bars on
-          guest-side subletting, so neither feeds the cheapest pool nor
-          auto-fill. Airbnb stays as telemetry + photo source (the
-          reverse-image PM matches under each row are bookable). Vrbo
-          is here because the operator wants to see Vrbo-listed inventory
-          for direct-with-owner outreach. Booking.com + PM Companies are
-          the actually-bookable channels — both ALWAYS open. */}
+          Airbnb stays as telemetry + photo source (the reverse-image PM
+          matches under each row are bookable). Vrbo rows are now
+          sidecar-priced only — raw Google/manual-quote rows are filtered
+          server-side. Booking.com + PM Companies are the direct-bookable
+          channels — both ALWAYS open. */}
       {[
         { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (awareness — direct-with-owner outreach)", items: vrbo, defaultOpen: vrbo.length > 0 },
+        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: vrbo, defaultOpen: vrbo.length > 0 },
         { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
         { key: "pm",      label: "PM Companies", items: pm, defaultOpen: true },
       ].map((s) => (
@@ -1955,31 +1953,31 @@ function ScannedOptionsTable({
   // Auto-verify on load.
   //
   // Cost-discipline rules:
-  //   - Trust-by-source: AIRBNB ONLY. Airbnb's engine filters by
-  //     availability for the requested dates so its results are
-  //     reliable. Vrbo and Booking, by contrast, return listings
-  //     that "match" the search but aren't always actually bookable
-  //     for the requested window (Jamie hit this: a Vrbo URL with
-  //     dates pre-filled landed on a "not available" page). So
-  //     Vrbo and Booking now go through the verifier.
-  //   - Verify queue: PM + Vrbo + Booking rows. Cap at 15 to bound
-  //     cost (~$0.075 worst case at $0.005/Haiku call + $0.005
-  //     session). Selection: top 10 cheapest priced, then top 5
-  //     unpriced Vrbo (Vrbo "manual quote" rows are exactly the
-  //     ones the operator will click on; verifying them tells us
-  //     whether the URL lands on an available unit before they do).
-  //   - Airbnb skipped from verify queue (trust-by-source).
+  //   - Trust server-side `verified=yes` rows from any source. The
+  //     server already asked the source-specific engine/sidecar for a
+  //     date-specific quote, so these rows should render as rated
+  //     immediately instead of showing a manual verify/check button.
+  //   - Airbnb engine rows are also trusted for backwards-compatible
+  //     deploys that predate the `verified` field.
+  //   - Verify queue only includes rows that the server did not already
+  //     verify. Selection: top 10 cheapest priced unknowns.
   useEffect(() => {
     if (all.length === 0) return;
     if (autoVerifyState !== "idle") return;
     if (!checkIn || !checkOut) return;
 
-    // Trust-by-source pre-mark — Airbnb only. Synchronous, free.
+    // Trust pre-verified server rows. Synchronous, free.
     setVerifyByUrl((prev) => {
       const next = { ...prev };
       for (const c of all) {
         if (next[c.url]) continue; // don't clobber existing state
-        if (c.source === "airbnb" && c.totalPrice > 0) {
+        if (c.verified === "yes" && c.totalPrice > 0) {
+          next[c.url] = {
+            status: "yes",
+            reason: c.verifiedReason ?? "Server returned this listing verified and priced for these dates",
+            nightlyPriceUsd: c.verifiedNightlyPrice ?? c.nightlyPrice ?? null,
+          };
+        } else if (c.source === "airbnb" && c.totalPrice > 0) {
           next[c.url] = {
             status: "yes",
             reason: "Airbnb engine returned this listing priced for these dates",
@@ -1991,20 +1989,13 @@ function ScannedOptionsTable({
     });
 
     // Build verify queue.
-    const nonAirbnb = all.filter((c) => c.source !== "airbnb");
+    const nonAirbnb = all.filter((c) => c.source !== "airbnb" && c.verified !== "yes");
     const pricedToVerify = nonAirbnb
       .filter((c) => c.totalPrice > 0)
       .sort((a, b) => a.totalPrice - b.totalPrice)
       .slice(0, 10)
       .map((c) => c.url);
-    // Plus top 5 unpriced Vrbo — these are "manual quote" rows the
-    // operator clicks on directly. Knowing whether the URL lands on
-    // an available unit is exactly the gap Jamie hit.
-    const unpricedVrboToVerify = nonAirbnb
-      .filter((c) => c.source === "vrbo" && c.totalPrice === 0)
-      .slice(0, 5)
-      .map((c) => c.url);
-    const toVerify = Array.from(new Set([...pricedToVerify, ...unpricedVrboToVerify]));
+    const toVerify = Array.from(new Set(pricedToVerify));
 
     if (toVerify.length === 0) {
       setAutoVerifyState("done");

@@ -2043,7 +2043,8 @@ export async function registerRoutes(
   //                          PM URLs that share photos with the top
   //                          Airbnb candidates (PR #225-era)
   //
-  // Until Google unblocks, the cheapest pool draws ONLY from:
+  // When this flag is disabled during a Google-side outage, the
+  // cheapest pool still draws from:
   //   - Airbnb engine (SearchAPI engine=airbnb — not Google)
   //   - Booking sidecar + google_hotels engine (different API surface)
   //   - Vrbo sidecar (operator's home-IP Chrome)
@@ -2051,10 +2052,10 @@ export async function registerRoutes(
   //   - VRP_SITES sitemap walks (no Google) — Parrish, CB Island,
   //     Piko, EVR Hawaii (PR #313)
   //
-  // To re-enable when Google unblocks: set PM_GOOGLE_DISCOVERY_ENABLED
-  // to true. Code is gated, not removed — flip the flag and the three
-  // paths come back online.
-  const PM_GOOGLE_DISCOVERY_ENABLED = false;
+  // Enabled by default again (2026-04-30): the operator wants the
+  // long-tail PM discovery paths active. Keep an emergency kill-switch
+  // for Google-side outages without another deploy.
+  const PM_GOOGLE_DISCOVERY_ENABLED = process.env.PM_GOOGLE_DISCOVERY_ENABLED !== "false";
 
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
   // Tracks how often each PM-discovery path returns priced+available units
@@ -3071,9 +3072,10 @@ export async function registerRoutes(
     //      candidates" entirely.
     //
     // Merge order: Apify-priced FIRST (operator sees rates upfront when
-    // available), then Google-unpriced URLs that aren't already in the
-    // priced list. Auto-fill still treats Vrbo as awareness-only (same
-    // Vrbo TOS sublet restriction as Airbnb).
+    // available), then Google-discovered detail URLs get checked by
+    // the same sidecar before they are allowed into the result set.
+    // Raw Google organic rows never reach the UI because they have no
+    // date-specific quote and were rendering as "manual quote".
     // Vrbo: simplified to two paths after PR #275.
     //
     // Old shape: 9 parallel paths (Apify direct, Browserbase, ScrapingBee,
@@ -3083,18 +3085,18 @@ export async function registerRoutes(
     // Chrome (sidecar, path 9) consistently returned priced cards. The
     // other 7 priced paths returned empty 95%+ of the time, costing money
     // and producing duplicate noise on the rare occasion something leaked
-    // through. Per operator directive 2026-04-29: sidecar is the primary,
-    // Google site:search is the cheap unpriced fallback.
+    // through. Per operator directive 2026-04-30: sidecar is the primary,
+    // and Google site:search is only a detail-URL seed list that must be
+    // sidecar-priced before display.
     //
     // Daemon online  → priced cards from the operator's home-IP Chrome.
-    // Daemon offline → unpriced URLs from Google site:search (operator
-    //                  clicks through to confirm). No cheapest-pool entry
-    //                  for VRBO when offline; sources.vrbo still populates
-    //                  for awareness.
+    // Daemon offline → no VRBO rows. Showing unpriced "manual quote"
+    //                  VRBO rows was misleading in the buy-in workflow.
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
     let vrboGoogleCount = 0;
     let vrboSidecarCount = 0;
+    let vrboDetailPricedCount = 0;
     let vrboSidecarOnline = false;
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
@@ -3127,33 +3129,23 @@ export async function registerRoutes(
             walletBudgetMs: 75_000,
           });
           if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
-          // PR #319 (operator directive 2026-04-30): exact-bedroom
-          // filter on Vrbo's destination search results. Vrbo
-          // sometimes surfaces 1BR/2BR units in adjacent areas
-          // (operator's earlier screenshot showed 12× 1BR + 5× 2BR
-          // in a 3BR Amy search), so drop anything that's not
-          // exactly the requested count.
-          //
-          // PR #340: relax to also accept candidates where bedroom
-          // extraction failed (`undefined`). Operator screenshot
-          // 2026-04-30 showed 8 VRBO listings surfaced as "manual
-          // quote" with no auto-prices — root cause was that the
-          // sidecar's bedroom regex missed cards like "Regency at
-          // Poipu Kai #821" (no "X bedroom" mention in the visible
-          // card text), so they came back with bedrooms=undefined
-          // and got dropped here, leaving only the price-less
-          // Google site:search fallback to surface. The sidecar's
-          // extraction was hardened in worker.mjs (PR #340) to try
-          // 5 patterns + the title; this filter now accepts unknown-
-          // bedroom cards too, since they passed the destination
-          // and date filter at search time. False positives (a 1BR
-          // slipping through with undefined beds) are rare and
-          // surface clearly in the UI's per-card bedroom badge.
-          const acceptedVrbo = r.candidates.filter((c) => c.bedrooms === bedrooms || c.bedrooms === undefined);
+          // PR #319 (operator directive 2026-04-30): same exact-
+          // bedroom filter as booking sidecar above. Vrbo's destination
+          // search ("Poipu Kai") sometimes surfaces 1BR/2BR units in
+          // adjacent areas — operator's screenshot showed 12× 1BR + 5×
+          // 2BR in a 3BR Amy search. Drop anything that's not exactly
+          // the requested count. Unknown-bedroom cards are also dropped:
+          // live smoke showed Vrbo can still label cheap studio/1BR
+          // cards as unknown after its own "Minimum bedrooms" filter.
+          const acceptedVrbo = r.candidates.filter((c) => {
+            const inferred = typeof c.bedrooms === "number"
+              ? c.bedrooms
+              : bedroomFromText(`${c.title} ${c.snippet ?? ""}`);
+            return inferred === bedrooms;
+          });
           const droppedVrbo = r.candidates.length - acceptedVrbo.length;
-          const acceptedUnknown = acceptedVrbo.filter((c) => c.bedrooms === undefined).length;
-          if (droppedVrbo > 0 || acceptedUnknown > 0) {
-            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} wrong-BR candidates; ${acceptedUnknown} accepted with unknown beds`);
+          if (droppedVrbo > 0) {
+            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR or unknown-BR candidates`);
           }
           return {
             // Sidecar VRBO scrape runs the operator's real Chrome
@@ -3163,20 +3155,25 @@ export async function registerRoutes(
             // so the cheapest-pool gate (`verified === "yes"`) admits
             // them — operator wants Vrbo eligible to be the auto-pick
             // when it's the cheapest option (PR #306).
-            candidates: acceptedVrbo.map((c): Candidate => ({
-              source: "vrbo" as const,
-              sourceLabel: "Vrbo",
-              title: c.title,
-              url: withStayDates("vrbo", c.url),
-              nightlyPrice: c.nightlyPrice,
-              totalPrice: c.totalPrice,
-              bedrooms: c.bedrooms,
-              image: c.image,
-              snippet: c.snippet,
-              verified: "yes",
-              verifiedNightlyPrice: c.nightlyPrice,
-              verifiedReason: "Vrbo sidecar (operator's real Chrome) returned a date-specific quote",
-            })),
+            candidates: acceptedVrbo.map((c): Candidate => {
+              const inferred = typeof c.bedrooms === "number"
+                ? c.bedrooms
+                : bedroomFromText(`${c.title} ${c.snippet ?? ""}`) ?? undefined;
+              return {
+                source: "vrbo" as const,
+                sourceLabel: "Vrbo",
+                title: c.title,
+                url: withStayDates("vrbo", c.url),
+                nightlyPrice: c.nightlyPrice,
+                totalPrice: c.totalPrice,
+                bedrooms: inferred,
+                image: c.image,
+                snippet: c.snippet,
+                verified: "yes",
+                verifiedNightlyPrice: c.nightlyPrice,
+                verifiedReason: "Vrbo sidecar (operator's real Chrome) returned a date-specific quote",
+              };
+            }),
             workerOnline: r.workerOnline,
             durationMs: r.durationMs,
             reason: r.reason,
@@ -3195,9 +3192,66 @@ export async function registerRoutes(
       vrboDropped = googleResults.dropped;
       vrboRawCount = googleResults.raw + vrboSidecarCount;
 
+      const priceGoogleVrboDetails = async (): Promise<Candidate[]> => {
+        if (!sidecarResults.workerOnline || googleResults.candidates.length === 0) return [];
+        try {
+          const { checkPmUrlsBatchViaSidecar } = await import("./vrbo-sidecar-queue");
+          const byUrl = new Map(googleResults.candidates.map((c) => [c.url, c] as const));
+          const urls = googleResults.candidates
+            .map((c) => c.url)
+            .filter((url, idx, arr) => arr.indexOf(url) === idx)
+            .slice(0, 10);
+          const pricedDetails: Candidate[] = [];
+          for (let i = 0; i < urls.length; i += 5) {
+            const batch = urls.slice(i, i + 5);
+            const batchRes = await checkPmUrlsBatchViaSidecar({
+              urls: batch,
+              checkIn,
+              checkOut,
+              bedrooms,
+              walletBudgetMs: 55_000,
+            });
+            if (!batchRes.workerOnline) {
+              console.log(`[find-buy-in] vrbo detail sidecar skipped/offline: ${batchRes.reason}`);
+              break;
+            }
+            for (const r of batchRes.results) {
+              const seed = byUrl.get(r.url);
+              if (!seed || r.available !== "yes") continue;
+              const total = typeof r.totalPrice === "number" && r.totalPrice > 0
+                ? r.totalPrice
+                : typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
+                  ? r.nightlyPrice * nights
+                  : 0;
+              if (!(total > 0)) continue;
+              const nightly = typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
+                ? r.nightlyPrice
+                : Math.round(total / Math.max(1, nights));
+              pricedDetails.push({
+                ...seed,
+                nightlyPrice: Math.round(nightly),
+                totalPrice: Math.round(total),
+                verified: "yes",
+                verifiedNightlyPrice: Math.round(nightly),
+                verifiedReason: `Vrbo detail sidecar returned a date-specific quote: ${r.reason}`,
+              });
+            }
+          }
+          if (pricedDetails.length > 0) {
+            console.log(`[find-buy-in] vrbo detail sidecar priced ${pricedDetails.length}/${urls.length} Google-discovered VRBO URLs`);
+          }
+          return pricedDetails;
+        } catch (e: any) {
+          console.error("[find-buy-in] vrbo detail sidecar error:", e?.message ?? e);
+          return [];
+        }
+      };
+      const detailPriced = await priceGoogleVrboDetails();
+      vrboDetailPricedCount = detailPriced.length;
+
       // Dedupe by Vrbo listing id (e.g. /3208123) — sidecar ranks first
-      // because it carries real prices; Google fills in when the daemon
-      // is offline or returned only a subset.
+      // because it carries real prices. Google-discovered detail URLs
+      // are included only after sidecar pricing succeeds.
       const listingIdOf = (url: string): string | null => {
         const m = url.match(/vrbo\.com\/(\d+)/);
         return m ? m[1] : null;
@@ -3211,7 +3265,7 @@ export async function registerRoutes(
         out.push(c);
       };
       for (const c of sidecarResults.candidates) pushIfNew(c);
-      for (const c of googleResults.candidates) pushIfNew(c);
+      for (const c of detailPriced) pushIfNew(c);
       return out;
     })();
 
@@ -3682,8 +3736,9 @@ export async function registerRoutes(
     // the slowest source caps at its own timeout and we send back
     // whatever the fast sources produced.
     //
-    // Worst-case combined: vrbo 120s (dominates the parallel block)
-    // + photo-match phase 5s + PM finder 60s = ~185s total handler
+    // Worst-case combined: vrbo 180s (sidecar search plus sidecar
+    // detail-rate checks dominates the parallel block)
+    // + photo-match phase 5s + PM finder 60s = ~245s total handler
     // time — comfortably under Railway's 5-min timeout.
     const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
       return Promise.race([
@@ -3699,7 +3754,7 @@ export async function registerRoutes(
     const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
       withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
-      withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
+      withTimeout(vrboPromise, 180_000, [] as Candidate[], "vrbo"),
       withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
@@ -4026,62 +4081,81 @@ export async function registerRoutes(
     }
 
     // ── Sidecar batch PM URL verify (operator's real Chrome) ─────────
-    // Take the top-5 sidecar-Google PM URLs (unpriced) and ask the
-    // daemon to fan out 5 parallel Chrome tabs to scrape availability
-    // + price for the requested window. Total wall ≈ 15-25s (paid
-    // once for the slowest tab, not summed). Yields:
+    // Take the unverified PM URLs from every PM discovery path
+    // (Google deep-dive, reverse-image PM matches, sidecar-Google PM
+    // finder) and ask the daemon to fan out 5 parallel Chrome tabs per
+    // batch to scrape availability + price for the requested window.
+    // Total wall ≈ one slow tab per 5 URLs. Yields:
     //   - verified=yes with real per-night price → joins priced pool
     //     correctly ranked by cost.
     //   - verified=no               → stays unpriced, excluded from
     //                                  priced pool by the > 0 filter.
     //   - verified=unclear          → unpriced, excluded from priced
     //                                  pool but visible in sources.pm.
-    // Skipped entirely when the daemon is offline (sidecarSerp above
-    // already logged that). Tracked in `sidecarBatchVerifiedUrls` so
-    // the Browserbase pre-verify pass below doesn't double-charge on
-    // the same URLs.
+    // Tracked in `sidecarBatchVerifiedUrls` so pre-verify accounting
+    // and cheapest gating know which dynamic PM rows were checked.
     const sidecarBatchVerifiedUrls = new Set<string>();
-    if (pmSidecarFinderCandidates.length > 0) {
+    const sidecarVerifyTargets: Candidate[] = [];
+    const sidecarVerifySeen = new Set<string>();
+    for (const c of [
+      ...pmGoogle,
+      ...photoMatchPmCandidates,
+      ...pmSidecarFinderCandidates,
+    ]) {
+      if (!c.url || c.verified || sidecarVerifySeen.has(c.url)) continue;
+      sidecarVerifySeen.add(c.url);
+      sidecarVerifyTargets.push(c);
+      // Three 5-tab batches keeps the route under Railway's request
+      // budget while still covering the full first page of dynamic
+      // PM discovery.
+      if (sidecarVerifyTargets.length >= 15) break;
+    }
+    if (sidecarVerifyTargets.length > 0) {
       try {
         const { checkPmUrlsBatchViaSidecar } = await import("./vrbo-sidecar-queue");
-        const top5 = pmSidecarFinderCandidates.slice(0, 5);
-        const batchRes = await checkPmUrlsBatchViaSidecar({
-          urls: top5.map((c) => c.url),
-          checkIn,
-          checkOut,
-          bedrooms,
-          walletBudgetMs: 60_000,
-        });
-        if (batchRes.workerOnline && batchRes.results.length > 0) {
-          const byUrl = new Map(batchRes.results.map((r) => [r.url, r] as const));
-          for (const c of top5) {
-            const r = byUrl.get(c.url);
-            if (!r) continue;
-            sidecarBatchVerifiedUrls.add(c.url);
-            c.verified = r.available;
-            c.verifiedReason = r.reason;
-            c.verifiedNightlyPrice = r.nightlyPrice ?? null;
-            // Promote the page-quoted price onto the candidate so the
-            // priced filter `nightlyPrice > 0` admits it.
-            if (r.available === "yes") {
-              if (typeof r.nightlyPrice === "number" && r.nightlyPrice > 0) {
-                c.nightlyPrice = Math.round(r.nightlyPrice);
-                c.totalPrice = Math.round(r.nightlyPrice * nights);
-              } else if (typeof r.totalPrice === "number" && r.totalPrice > 0) {
-                c.totalPrice = Math.round(r.totalPrice);
-                c.nightlyPrice = Math.round(r.totalPrice / nights);
+        let sidecarVerifyMs = 0;
+        for (let i = 0; i < sidecarVerifyTargets.length; i += 5) {
+          const batchTargets = sidecarVerifyTargets.slice(i, i + 5);
+          const batchRes = await checkPmUrlsBatchViaSidecar({
+            urls: batchTargets.map((c) => c.url),
+            checkIn,
+            checkOut,
+            bedrooms,
+            walletBudgetMs: 60_000,
+          });
+          sidecarVerifyMs += batchRes.durationMs;
+          if (batchRes.workerOnline && batchRes.results.length > 0) {
+            const byUrl = new Map(batchRes.results.map((r) => [r.url, r] as const));
+            for (const c of batchTargets) {
+              const r = byUrl.get(c.url);
+              if (!r) continue;
+              sidecarBatchVerifiedUrls.add(c.url);
+              c.verified = r.available;
+              c.verifiedReason = r.reason;
+              c.verifiedNightlyPrice = r.nightlyPrice ?? null;
+              // Promote the page-quoted price onto the candidate so the
+              // priced filter `nightlyPrice > 0` admits it.
+              if (r.available === "yes") {
+                if (typeof r.nightlyPrice === "number" && r.nightlyPrice > 0) {
+                  c.nightlyPrice = Math.round(r.nightlyPrice);
+                  c.totalPrice = Math.round(r.nightlyPrice * nights);
+                } else if (typeof r.totalPrice === "number" && r.totalPrice > 0) {
+                  c.totalPrice = Math.round(r.totalPrice);
+                  c.nightlyPrice = Math.round(r.totalPrice / nights);
+                }
               }
             }
+          } else if (!batchRes.workerOnline) {
+            console.log(`[find-buy-in] sidecar-batch-verify skipped (worker offline): ${batchRes.reason}`);
+            break;
           }
-          const yes = top5.filter((c) => c.verified === "yes").length;
-          const no = top5.filter((c) => c.verified === "no").length;
-          const unclear = top5.filter((c) => c.verified === "unclear").length;
-          console.log(
-            `[find-buy-in] sidecar-batch-verify yes=${yes} no=${no} unclear=${unclear} (${batchRes.durationMs}ms)`,
-          );
-        } else if (!batchRes.workerOnline) {
-          console.log(`[find-buy-in] sidecar-batch-verify skipped (worker offline): ${batchRes.reason}`);
         }
+        const yes = sidecarVerifyTargets.filter((c) => c.verified === "yes").length;
+        const no = sidecarVerifyTargets.filter((c) => c.verified === "no").length;
+        const unclear = sidecarVerifyTargets.filter((c) => c.verified === "unclear").length;
+        console.log(
+          `[find-buy-in] sidecar-batch-verify checked=${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length} yes=${yes} no=${no} unclear=${unclear} (${sidecarVerifyMs}ms)`,
+        );
       } catch (e: any) {
         console.error(`[find-buy-in] sidecar-batch-verify error:`, e?.message ?? e);
       }
@@ -4320,9 +4394,9 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} `
       + `airbnbEngine=${airbnbPricedCount} raw · `
-      + `vrbo=${vrbo.length} (sidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, google=${vrboGoogleCount} — TOS awareness-only${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
+      + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (priced=via google_hotels engine) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pmFinderCandidates.length} (google+photoMatches+sp+pk+cb+finder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSidecarFinderCandidates.length}+${pmFinderCandidates.length} (google+photoMatches+knownPMs+sidecarFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
     );
@@ -4358,9 +4432,11 @@ export async function registerRoutes(
         { label: "Alekona Kauai",                 count: slAlekonaDiscovered.length },
         { label: "Princeville Vacation Rentals",  count: slPrincevilleDiscovered.length },
         { label: "Google site-search (other PMs)",count: pmGoogle.filter((c) => !seenPmUrls.has(c.url)).length },
+        { label: "Sidecar Google PM finder",       count: pmSidecarFinderCandidates.length },
+        { label: "Sidecar PM rate checks",         count: sidecarBatchVerifiedUrls.size },
       ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSidecarFinder: pmSidecarFinderCandidates.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
