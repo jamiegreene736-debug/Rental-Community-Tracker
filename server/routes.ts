@@ -4671,8 +4671,32 @@ export async function registerRoutes(
     if (validUrls.length === 0) return res.status(400).json({ error: "no valid urls" });
 
     try {
-      const results = await verifyPmAvailabilityBatch({
-        urls: validUrls, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId, maxUrls: 15,
+      const timeoutMs = 100_000;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutResults = new Promise<Record<string, any>>((resolve) => {
+        timeout = setTimeout(() => {
+          console.warn(
+            `[verify-availability-batch] timed out after ${timeoutMs}ms; returning unclear for ${validUrls.length} urls`,
+          );
+          resolve(Object.fromEntries(validUrls.map((url) => [
+            url,
+            {
+              available: "unclear",
+              nightlyPriceUsd: null,
+              reason: `batch verifier timed out after ${Math.round(timeoutMs / 1000)}s`,
+              finalUrl: url,
+              ms: timeoutMs,
+            },
+          ])));
+        }, timeoutMs);
+      });
+      const results = await Promise.race([
+        verifyPmAvailabilityBatch({
+          urls: validUrls, checkIn, checkOut, anthropicKey, bbApiKey, bbProjectId, maxUrls: 15,
+        }),
+        timeoutResults,
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
       });
       return res.json({ results });
     } catch (e: any) {

@@ -33,7 +33,8 @@ import { chromium } from "playwright";
 const VERIFIER_MODEL = "anthropic/claude-haiku-4-5-20251001";
 const NAV_TIMEOUT_MS = 30_000;
 const SETTLE_DELAY_MS = 3_500;
-const TOTAL_WALL_BUDGET_MS = 60_000;
+const STAGEHAND_URL_BUDGET_MS = 45_000;
+const STAGEHAND_BATCH_WALL_BUDGET_MS = 90_000;
 
 export type VerifyAvailabilityResult = {
   available: "yes" | "no" | "unclear";
@@ -63,6 +64,27 @@ const ResultSchema = z.object({
 // same row.
 const cache = new Map<string, { value: VerifyAvailabilityResult; expiresAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function withTimeoutValue<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<{ value: T; timedOut: boolean }> {
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      resolve(fallback);
+    }, ms);
+  });
+  try {
+    const value = await Promise.race([promise, timeoutPromise]);
+    return { value, timedOut };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function isVrboUrl(url: string): boolean {
   return /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
@@ -516,15 +538,15 @@ export async function verifyPmAvailabilityBatch(opts: {
     const batchStartedAt = Date.now();
     try {
       await stagehand.init();
-      for (const url of stagehandUrls) {
-        // Hard wall budget across the whole batch — if we're past it,
-        // mark remaining URLs as unclear/timeout rather than hanging.
-        if (
-          Date.now() - batchStartedAt >
-          TOTAL_WALL_BUDGET_MS * Math.min(stagehandUrls.length, 6)
-        ) {
+      for (let i = 0; i < stagehandUrls.length; i++) {
+        const url = stagehandUrls[i];
+        const elapsed = Date.now() - batchStartedAt;
+        // Hard wall budget across the whole generic-PM batch — if we're
+        // past it, mark remaining URLs as unclear/timeout rather than
+        // leaving the auto-fill UI waiting on a Browserbase session.
+        if (elapsed > STAGEHAND_BATCH_WALL_BUDGET_MS) {
           console.warn(`[verify-availability] batch wall budget exceeded; remaining urls return unclear`);
-          for (const remaining of stagehandUrls.slice(stagehandUrls.indexOf(url))) {
+          for (const remaining of stagehandUrls.slice(i)) {
             out[remaining] = {
               available: "unclear",
               nightlyPriceUsd: null,
@@ -535,12 +557,40 @@ export async function verifyPmAvailabilityBatch(opts: {
           }
           break;
         }
-        const result = await verifyOneAgainst(stagehand, url, checkIn, checkOut);
+        const budget = Math.max(
+          1_000,
+          Math.min(STAGEHAND_URL_BUDGET_MS, STAGEHAND_BATCH_WALL_BUDGET_MS - elapsed),
+        );
+        const timeoutResult: VerifyAvailabilityResult = {
+          available: "unclear",
+          nightlyPriceUsd: null,
+          reason: `generic PM verifier timed out after ${Math.round(budget / 1000)}s`,
+          finalUrl: url,
+          ms: budget,
+        };
+        const { value: result, timedOut } = await withTimeoutValue(
+          verifyOneAgainst(stagehand, url, checkIn, checkOut),
+          budget,
+          timeoutResult,
+        );
         out[url] = result;
         cache.set(`${url}|${checkIn}|${checkOut}`, {
           value: result,
           expiresAt: Date.now() + CACHE_TTL_MS,
         });
+        if (timedOut) {
+          console.warn(`[verify-availability] ${url} exceeded per-url budget; remaining urls return unclear`);
+          for (const remaining of stagehandUrls.slice(i + 1)) {
+            out[remaining] = {
+              available: "unclear",
+              nightlyPriceUsd: null,
+              reason: "batch stopped after a previous generic PM verifier timed out",
+              finalUrl: remaining,
+              ms: 0,
+            };
+          }
+          break;
+        }
       }
     } finally {
       try {

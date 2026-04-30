@@ -479,20 +479,21 @@ export default function Bookings() {
           let verifiedPrice: number | null = null;
           let skippedReasons: string[] = [];
 
-          // Build verified-yes AND verified-no sets from the Haiku
-          // batch. Airbnb anchors are trusted-by-source (engine
-          // filters by availability for the requested dates).
-          // Everything else (PM + Vrbo + Booking) goes through the
-          // Haiku verifier — dropping Vrbo's trust-by-source closes
-          // the "Vrbo URL pre-filled dates but unit wasn't bookable"
-          // gap Jamie hit.
+          // Build verified-yes AND verified-no sets. Trust the server's
+          // source-specific verification first: find-buy-in already uses
+          // deterministic sidecar/scraper checks for Booking, Vrbo, and
+          // PM rows before putting them in `cheapest`. Re-running those
+          // rows through the generic Browserbase verifier is both slower
+          // and less reliable on PM landing pages.
           const verifiedYesUrls = new Set<string>();
           const verifiedNoUrls = new Set<string>();
           for (const c of pricedCandidates) {
-            if (c.source === "airbnb") verifiedYesUrls.add(c.url);
+            if (c.verified === "yes") verifiedYesUrls.add(c.url);
+            else if (c.verified === "no") verifiedNoUrls.add(c.url);
+            else if (c.source === "airbnb") verifiedYesUrls.add(c.url);
           }
           const toVerify = pricedCandidates
-            .filter((c) => c.source !== "airbnb")
+            .filter((c) => c.source !== "airbnb" && c.verified !== "yes" && c.verified !== "no")
             .slice(0, 15)
             .map((c) => c.url);
           if (toVerify.length > 0) {
