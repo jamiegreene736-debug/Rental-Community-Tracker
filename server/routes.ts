@@ -14467,6 +14467,27 @@ export async function registerRoutes(
       });
       const port = process.env.PORT || "5000";
       let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
+      // PR #335: heartbeat ticker.
+      //
+      // find-unit is a synchronous request/response (not streaming)
+      // and can take 30-90s on heavy candidate pools. Operator hit
+      // this on Poipu Kai: 76.6s wall, only 2 events received before
+      // the stream closed silently. Root cause: Railway/Fastly's edge
+      // idle timeout (~60s) was killing the NDJSON connection because
+      // no bytes were being written while find-unit ran.
+      //
+      // Fix: emit a `phase` event every 12s during the wait. Bytes on
+      // the wire reset the edge idle timer. Side benefit: operator
+      // sees "Still searching… (24s elapsed)" so they know it's not
+      // hung. Cleared as soon as find-unit returns (success or error).
+      const findStartedAt = Date.now();
+      const heartbeatInterval = setInterval(() => {
+        const elapsed = Math.round((Date.now() - findStartedAt) / 1000);
+        emit({
+          type: "phase", name: "find-replacement",
+          message: `Still searching… (${elapsed}s elapsed)`,
+        });
+      }, 12_000);
       try {
         // `strict: true` rejects candidates with any UNKNOWN verdict on
         // the enforced channel(s). We're about to overwrite a Guesty
@@ -14476,30 +14497,55 @@ export async function registerRoutes(
         // asking the operator to retry.
         // `cleanChannel` narrows the qualification check to just the
         // alerted channel (PR #316).
-        const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            communityFolder: lead.communityFolder,
-            requiredBedrooms: lead.bedrooms,
-            skipUrls,
-            strict: true,
-            ...(alertedChannel ? { cleanChannel: alertedChannel } : {}),
-          }),
-        });
+        //
+        // Explicit AbortController timeout (PR #335). Internal localhost
+        // fetch had no timeout — if find-unit hung on a stuck Apify
+        // call or a hanging Anthropic vision probe, the remediate
+        // would wait forever and the operator would see only the edge
+        // timeout. 4-min cap is generous (find-unit's worst case is
+        // ~3min on 30 candidates × ~6s each); past that we fail fast.
+        const findController = new AbortController();
+        const findTimeout = setTimeout(() => findController.abort(), 4 * 60 * 1000);
+        let findResp: Response;
+        try {
+          findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              communityFolder: lead.communityFolder,
+              requiredBedrooms: lead.bedrooms,
+              skipUrls,
+              strict: true,
+              ...(alertedChannel ? { cleanChannel: alertedChannel } : {}),
+            }),
+            signal: findController.signal,
+          });
+        } finally {
+          clearTimeout(findTimeout);
+        }
         const findBody = await findResp.json() as any;
         if (!findResp.ok || findBody.error || !findBody.unit) {
+          clearInterval(heartbeatInterval);
           emit({
             type: "error", phase: "find-replacement",
             message: findBody?.error ?? `find-unit HTTP ${findResp.status}`,
+            ...(findBody?.diagnostic ? { diagnostic: findBody.diagnostic } : {}),
           });
           return res.end();
         }
         candidate = findBody.unit;
       } catch (e: any) {
-        emit({ type: "error", phase: "find-replacement", message: e?.message ?? String(e) });
+        clearInterval(heartbeatInterval);
+        const isAbort = e?.name === "AbortError";
+        emit({
+          type: "error", phase: "find-replacement",
+          message: isAbort
+            ? "find-unit took longer than 4 minutes — aborted to keep the stream from edge-timeout. Try again or narrow the search criteria."
+            : (e?.message ?? String(e)),
+        });
         return res.end();
       }
+      clearInterval(heartbeatInterval);
       emit({
         type: "candidate",
         url: candidate.url,
@@ -15123,31 +15169,62 @@ export async function registerRoutes(
       emit({ type: "phase", name: "find-replacement", message: `Searching for a ${bedrooms}BR unit clean on ${channel}` });
       const port = process.env.PORT || "5000";
       let candidate: { url: string; address: string; unitLabel: string; bedrooms: number | null };
+      // PR #335: heartbeat ticker (same fix as remediate endpoint).
+      // find-unit can take 30-90s; without periodic bytes on the
+      // wire, Railway/Fastly's edge idle timeout (~60s) closes the
+      // NDJSON stream before we can emit a result. Heartbeat every
+      // 12s + 4-min hard cap on the internal call.
+      const findStartedAt = Date.now();
+      const heartbeatInterval = setInterval(() => {
+        const elapsed = Math.round((Date.now() - findStartedAt) / 1000);
+        emit({ type: "phase", name: "find-replacement", message: `Still searching… (${elapsed}s elapsed)` });
+      }, 12_000);
       try {
-        const findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            communityFolder,
-            requiredBedrooms: bedrooms,
-            cleanChannel: channel,
-            // Strict mode here treats `unknown` SearchAPI verdicts as
-            // a reject so a flake can't slip a contaminated listing
-            // through and surface our (or the thief's) photos as the
-            // "replacement".
-            strict: true,
-          }),
-        });
+        const findController = new AbortController();
+        const findTimeout = setTimeout(() => findController.abort(), 4 * 60 * 1000);
+        let findResp: Response;
+        try {
+          findResp = await fetch(`http://127.0.0.1:${port}/api/replacement/find-unit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              communityFolder,
+              requiredBedrooms: bedrooms,
+              cleanChannel: channel,
+              // Strict mode here treats `unknown` SearchAPI verdicts as
+              // a reject so a flake can't slip a contaminated listing
+              // through and surface our (or the thief's) photos as the
+              // "replacement".
+              strict: true,
+            }),
+            signal: findController.signal,
+          });
+        } finally {
+          clearTimeout(findTimeout);
+        }
         const findBody = await findResp.json() as any;
         if (!findResp.ok || findBody.error || !findBody.unit) {
-          emit({ type: "error", phase: "find-replacement", message: findBody?.error ?? `find-unit HTTP ${findResp.status}` });
+          clearInterval(heartbeatInterval);
+          emit({
+            type: "error", phase: "find-replacement",
+            message: findBody?.error ?? `find-unit HTTP ${findResp.status}`,
+            ...(findBody?.diagnostic ? { diagnostic: findBody.diagnostic } : {}),
+          });
           return res.end();
         }
         candidate = findBody.unit;
       } catch (e: any) {
-        emit({ type: "error", phase: "find-replacement", message: e?.message ?? String(e) });
+        clearInterval(heartbeatInterval);
+        const isAbort = e?.name === "AbortError";
+        emit({
+          type: "error", phase: "find-replacement",
+          message: isAbort
+            ? "find-unit took longer than 4 minutes — aborted to keep the stream from edge-timeout."
+            : (e?.message ?? String(e)),
+        });
         return res.end();
       }
+      clearInterval(heartbeatInterval);
       emit({ type: "candidate", url: candidate.url, address: candidate.address, unitLabel: candidate.unitLabel, bedrooms: candidate.bedrooms });
 
       // ── Step 2: scrape the candidate's photo URLs. We don't
