@@ -137,6 +137,10 @@ function coveredHostnames(): Map<string, string> {
   // Suite Paradise has its own dedicated scraper (server/pm-scraper-suite-paradise.ts),
   // not a vrp_main config.
   map.set("suite-paradise.com", "Suite Paradise");
+  // Gather Vacations runs a customised vrp_main fork (rate-quote AJAX
+  // stripped, calendar rendered server-side) — bespoke scraper at
+  // server/pm-scraper-gather-vacations.ts (PR #332).
+  map.set("gathervacations.com", "Gather Vacations");
   return map;
 }
 

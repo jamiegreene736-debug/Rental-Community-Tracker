@@ -11,6 +11,7 @@ import { verifyPmRate } from "./pm-rate-agent";
 import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
+import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -2070,6 +2071,9 @@ export async function registerRoutes(
     evrhiCalls: 0,        // PR #310
     evrhiHits: 0,
     evrhiUnitsTotal: 0,
+    gvCalls: 0,           // PR #332 — Gather Vacations (customised vrp_main fork)
+    gvHits: 0,
+    gvUnitsTotal: 0,
     googleCalls: 0,
     googleHits: 0,        // call returned ≥1 priced unit
     googleUnitsTotal: 0,  // sum across all calls (priced only)
@@ -2088,12 +2092,14 @@ export async function registerRoutes(
       cbHitRate: rate(pmDiscoveryStats.cbHits, pmDiscoveryStats.cbCalls),
       pikoHitRate: rate(pmDiscoveryStats.pikoHits, pmDiscoveryStats.pikoCalls),
       evrhiHitRate: rate(pmDiscoveryStats.evrhiHits, pmDiscoveryStats.evrhiCalls),
+      gvHitRate: rate(pmDiscoveryStats.gvHits, pmDiscoveryStats.gvCalls),
       googleHitRate: rate(pmDiscoveryStats.googleHits, pmDiscoveryStats.googleCalls),
       spAvgUnits: avg(pmDiscoveryStats.spUnitsTotal, pmDiscoveryStats.spCalls),
       pkAvgUnits: avg(pmDiscoveryStats.pkUnitsTotal, pmDiscoveryStats.pkCalls),
       cbAvgUnits: avg(pmDiscoveryStats.cbUnitsTotal, pmDiscoveryStats.cbCalls),
       pikoAvgUnits: avg(pmDiscoveryStats.pikoUnitsTotal, pmDiscoveryStats.pikoCalls),
       evrhiAvgUnits: avg(pmDiscoveryStats.evrhiUnitsTotal, pmDiscoveryStats.evrhiCalls),
+      gvAvgUnits: avg(pmDiscoveryStats.gvUnitsTotal, pmDiscoveryStats.gvCalls),
       googleAvgUnits: avg(pmDiscoveryStats.googleUnitsTotal, pmDiscoveryStats.googleCalls),
     });
   });
@@ -3537,6 +3543,49 @@ export async function registerRoutes(
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
     const evrhiDiscoveryPromise = vrpDiscoveryPromise("evrhi", "evrhiCalls");
 
+    // ── Gather Vacations inventory (PR #332) ──────────────────────────────
+    // gathervacations.com runs a customised vrp_main fork — the plugin's
+    // standard rate-quote AJAX is stripped, but every unit page server-
+    // renders a 12-month inline calendar we can parse directly. Surfaced
+    // by the auto-discovery batch endpoint as covering Poipu Kai,
+    // Princeville, and Pili Mai. Same Hawaii-only gate as the other
+    // vrp scrapers — out-of-market searches return early via the resort
+    // filter so this isn't gated on community match.
+    const gvDiscoveryPromise: Promise<Candidate[]> = isHawaii
+      ? (async () => {
+          pmDiscoveryStats.gvCalls++;
+          try {
+            const units = await findAvailableGatherVacationsUnits({
+              bedrooms,
+              checkIn,
+              checkOut,
+              resortName: resortName ?? community,
+            });
+            if (units.length > 0) pmDiscoveryStats.gvHits++;
+            pmDiscoveryStats.gvUnitsTotal += units.length;
+            // Same `verified=yes` treatment as the other PM scrapers
+            // (PR #325/#326): a priced calendar quote IS the PM's own
+            // booking signal — no agent verification needed.
+            return units.map((u): Candidate => ({
+              source: "pm" as const,
+              sourceLabel: "Gather Vacations",
+              title: u.title,
+              url: withStayDates("pm", u.url),
+              nightlyPrice: u.nightlyPrice,
+              totalPrice: u.totalPrice,
+              bedrooms: u.bedrooms,
+              snippet: `Gather Vacations · ${u.bedrooms}BR · sitemap-discovered, calendar-priced`,
+              verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
+              verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+              verifiedReason: u.nightlyPrice > 0 ? "Gather Vacations inline calendar quoted every night in the window" : undefined,
+            }));
+          } catch (e: any) {
+            console.error("[find-buy-in] gv-discovery error:", e.message);
+            return [];
+          }
+        })()
+      : Promise.resolve([]);
+
     // Per-source wall-budget. Without this, a single hanging source
     // (Stagehand Vrbo agent stuck on a CAPTCHA, an Apify actor that
     // doesn't return, etc.) blocks the entire find-buy-in until
@@ -3559,7 +3608,7 @@ export async function registerRoutes(
         ),
       ]);
     };
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered] = await Promise.all([
+    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered] = await Promise.all([
       withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
       withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
@@ -3569,6 +3618,7 @@ export async function registerRoutes(
       withTimeout(cbDiscoveryPromise, 30_000, [] as Candidate[], "cb-sitemap"),
       withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
       withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
+      withTimeout(gvDiscoveryPromise, 30_000, [] as Candidate[], "gv-sitemap"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -3579,6 +3629,7 @@ export async function registerRoutes(
       ...cbDiscovered.map((c) => c.url),
       ...pikoDiscovered.map((c) => c.url),
       ...evrhiDiscovered.map((c) => c.url),
+      ...gvDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
       ...spDiscovered,
@@ -3586,6 +3637,7 @@ export async function registerRoutes(
       ...cbDiscovered,
       ...pikoDiscovered,
       ...evrhiDiscovered,
+      ...gvDiscovered,
       ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
     ];
 
