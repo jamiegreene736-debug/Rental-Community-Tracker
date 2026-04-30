@@ -15070,9 +15070,18 @@ export async function registerRoutes(
         }
         return null;
       })();
+      // PR #340: skip community-* folders entirely. Community photos
+      // (pool, lobby, exterior shared spaces) legitimately appear on
+      // many listings — that's not photo theft, it's just shared
+      // amenity imagery. The scanner's "match found" verdict against
+      // a community folder is noise; surfacing it as an alert clutters
+      // the panel and prompts operator action that has no real
+      // remediation (we can't "replace" community photos with photos
+      // from a different community — they are intrinsic to the
+      // resort). Filter out at the folder set so neither real alerts
+      // nor synthesized ones reach the response.
       const folderSet = new Set<string>();
       if (builder) {
-        if (builder.communityPhotoFolder) folderSet.add(builder.communityPhotoFolder);
         for (const u of builder.units) {
           if (u.photoFolder) folderSet.add(u.photoFolder);
         }
@@ -15080,7 +15089,7 @@ export async function registerRoutes(
       let allAlerts = folderSet.size > 0
         ? await storage.getUnacknowledgedPhotoListingAlerts()
         : [];
-      let matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder));
+      let matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder) && !a.photoFolder.startsWith("community-"));
 
       // PR #339: synthesize alerts from CURRENT photoListingChecks
       // when the latest scan shows status="found" but no
@@ -15110,6 +15119,10 @@ export async function registerRoutes(
         };
         let writtenSyntheticAlerts = 0;
         for (const folder of Array.from(folderSet)) {
+          // PR #340: defensive — community-* folders were already
+          // excluded from folderSet above, but be explicit so a future
+          // refactor doesn't accidentally re-introduce them.
+          if (folder.startsWith("community-")) continue;
           let check;
           try { check = await storage.getPhotoListingCheckByFolder(folder); }
           catch { continue; }
