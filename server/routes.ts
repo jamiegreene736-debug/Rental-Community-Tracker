@@ -15077,10 +15077,70 @@ export async function registerRoutes(
           if (u.photoFolder) folderSet.add(u.photoFolder);
         }
       }
-      const allAlerts = folderSet.size > 0
+      let allAlerts = folderSet.size > 0
         ? await storage.getUnacknowledgedPhotoListingAlerts()
         : [];
-      const matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder));
+      let matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder));
+
+      // PR #339: synthesize alerts from CURRENT photoListingChecks
+      // when the latest scan shows status="found" but no
+      // unacknowledged alert row exists. The dashboard reads from
+      // photoListingChecks (current state) but the builder was
+      // reading from photoListingAlerts (transition events) — so
+      // when a previous alert was dismissed without resolving the
+      // photos, the builder showed "no alerts" while the dashboard
+      // still showed matches. Operator couldn't act on it.
+      //
+      // Fix: for each (folder, platform) pair where the check shows
+      // "found" and no unacked alert exists, write a fresh alert
+      // row driven by the current check state. Idempotent — we
+      // skip if any unacked alert already exists for that pair.
+      // Result: the builder's per-channel rows reflect what the
+      // dashboard already shows.
+      if (folderSet.size > 0) {
+        const platformToCheckKey: Record<string, "airbnbStatus" | "vrboStatus" | "bookingStatus"> = {
+          airbnb: "airbnbStatus",
+          vrbo: "vrboStatus",
+          booking: "bookingStatus",
+        };
+        const platformToMatchesKey: Record<string, "airbnbMatches" | "vrboMatches" | "bookingMatches"> = {
+          airbnb: "airbnbMatches",
+          vrbo: "vrboMatches",
+          booking: "bookingMatches",
+        };
+        let writtenSyntheticAlerts = 0;
+        for (const folder of Array.from(folderSet)) {
+          let check;
+          try { check = await storage.getPhotoListingCheckByFolder(folder); }
+          catch { continue; }
+          if (!check) continue;
+          for (const platform of ["airbnb", "vrbo", "booking"] as const) {
+            const status = check[platformToCheckKey[platform]];
+            if (status !== "found") continue;
+            // Skip when any unacked alert already exists for this pair.
+            const existingAlert = matchingAlerts.find((a) => a.photoFolder === folder && a.platform === platform);
+            if (existingAlert) continue;
+            const matchesRaw = check[platformToMatchesKey[platform]];
+            try {
+              await storage.createPhotoListingAlert({
+                photoFolder: folder,
+                platform,
+                priorStatus: "unknown",
+                newStatus: "found",
+                matchedUrls: matchesRaw ?? null,
+              });
+              writtenSyntheticAlerts++;
+            } catch (e: any) {
+              console.warn(`[photo-sync-status] failed to synthesize alert for ${folder}/${platform}: ${e?.message ?? e}`);
+            }
+          }
+        }
+        if (writtenSyntheticAlerts > 0) {
+          console.log(`[photo-sync-status] synthesized ${writtenSyntheticAlerts} alert(s) from current check state for ${guestyListingId}`);
+          allAlerts = await storage.getUnacknowledgedPhotoListingAlerts();
+          matchingAlerts = allAlerts.filter((a) => folderSet.has(a.photoFolder));
+        }
+      }
 
       const channels = Array.from(ISOLATION_CHANNELS).map((channel) => {
         const r = byChannel.get(channel);
