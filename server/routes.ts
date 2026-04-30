@@ -637,35 +637,19 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 // with the scraper-extracted bed/bath counts. Existing callers that don't
 // pass one are unaffected. New callers (notably the rescrape handler) use
 // these counts as ground truth over photo-based inference.
-let vrboPhotoSidecarBackoffUntil = 0;
+//
+// PR #338: VRBO photo scrape via sidecar removed. find-unit no
+// longer accepts VRBO as a candidate source (operator directive —
+// OTA photos create a feedback loop with the photo-listing scanner),
+// so the special-case branch that drove the daemon's Chrome to
+// scrape vrbo.com property pages is dead code. Real-estate sources
+// (Zillow / Realtor / Redfin) all use the Apify+Playwright path
+// below.
 async function scrapeListingPhotos(
   primaryUrl: string,
   fallbackUrl?: string,
   listingFacts?: ListingFacts,
 ): Promise<ScrapedPhoto[]> {
-  if (/vrbo\.com/i.test(primaryUrl) && Date.now() >= vrboPhotoSidecarBackoffUntil) {
-    try {
-      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
-      const sidecar = await scrapeVrboPhotosViaSidecar({
-        url: primaryUrl,
-        maxPhotos: 50,
-        walletBudgetMs: 90_000,
-      });
-      console.log(`[scrapeVrbo:sidecar] ${primaryUrl} → ${sidecar.photos.length} photos (${sidecar.reason})`);
-      if (!sidecar.workerOnline) vrboPhotoSidecarBackoffUntil = Date.now() + 60_000;
-      if (sidecar.photos.length > 0) {
-        return sidecar.photos.map((url) => ({
-          url,
-          title: "VRBO listing photo",
-          source: "VRBO",
-          sourceLink: primaryUrl,
-        }));
-      }
-    } catch (e: any) {
-      console.warn(`[scrapeVrbo:sidecar] ${primaryUrl}: ${e?.message ?? e}`);
-    }
-  }
-
   // Zillow URLs: run Apify and ScrapingBee in PARALLEL and union the
   // results. Each scraper sometimes returns an incomplete photo set for a
   // listing (different Zillow page variants, Apify actor quirks, cache
@@ -12510,12 +12494,17 @@ export async function registerRoutes(
     if (!communityName) return res.status(400).json({ error: "Unknown community folder" });
 
     const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
-    const channelScopedSourceAliases = safeFolder === "community-regency-poipu-kai" ? ["Poipu Kai"] : [];
-    const channelScopedSourceNames = Array.from(new Set([communityName, ...channelScopedSourceAliases]));
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
-    // Step 1 — Google search for replacement listing URLs at this
-    // community address. We pull from real-estate sources first:
+    // Step 1 — Google search for replacement REAL-ESTATE listing URLs.
+    // PR #338 (operator directive 2026-04-30): VRBO removed as a
+    // candidate source. Using OTA photos as the replacement creates
+    // a feedback loop with the photo-listing scanner (those photos
+    // already exist on VRBO → scanner re-fires the alert), and it's
+    // not a defensible "clean source" anyway since OTA gallery
+    // photos are owned by the listing host. Stick to real-estate
+    // sources where the photos belong to the seller/agent and aren't
+    // reused on OTA platforms:
     //
     //   - Zillow      — long-tail rental & for-sale inventory; high
     //                   photo coverage but heavily duplicated on VRBO
@@ -12528,20 +12517,12 @@ export async function registerRoutes(
     //                   15-30+ photos. Backup when Zillow + Realtor
     //                   both come up empty / saturated.
     //
-    // For channel-scoped searches, we can also use an OTA listing as a
-    // photo source when that OTA is NOT the channel being remediated.
-    // Operator example: Airbnb alert for Poipu Kai. A replacement unit
-    // listed on VRBO is acceptable as long as the platform check says
-    // it is clean on Airbnb. This matters at OTA-saturated resorts
-    // where the clean-on-Airbnb units often have 0 photos on
-    // Zillow/Realtor/Redfin but rich galleries on VRBO.
-    //
     // Each source has its own URL pattern (`/homedetails/` for Zillow,
     // `/realestateandhomes-detail/` for Realtor, `/home/<id>` for
-    // Redfin, numeric/cottage URLs for VRBO). The candidate `source`
-    // field lets downstream stages log which path produced each lead
-    // and helps triage if any single source's photo extraction breaks.
-    type CandidateSource = "zillow" | "realtor" | "redfin" | "vrbo";
+    // Redfin). The candidate `source` field lets downstream stages
+    // log which path produced each lead and helps triage if any
+    // single source's photo extraction breaks.
+    type CandidateSource = "zillow" | "realtor" | "redfin";
     interface Candidate {
       sourceUrl: string;
       source: CandidateSource;
@@ -12558,10 +12539,7 @@ export async function registerRoutes(
       if (/zillow\.com\/homedetails\//i.test(url)) return "zillow";
       if (/realtor\.com\/realestateandhomes-detail\//i.test(url)) return "realtor";
       if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
-      if (
-        /vrbo\.com\/\d{5,}/i.test(url) ||
-        /vrbo\.com\/(?:[a-z]{2}(?:-[a-z]{2})\/)?cottage-rental\/p\d+[a-z0-9]*/i.test(url)
-      ) return "vrbo";
+      // PR #338: VRBO explicitly excluded — see header comment.
       return null;
     };
 
@@ -12633,9 +12611,6 @@ export async function registerRoutes(
           }
         }
       }
-      if (source === "vrbo") {
-        return extractUnitNumberFromText(contextText);
-      }
       return "";
     };
 
@@ -12660,17 +12635,10 @@ export async function registerRoutes(
       `site:redfin.com "${communityName}" "for sale"`,
       `site:redfin.com "${communityName}" condo`,
     ];
-    if (cleanChannel && cleanChannel !== "vrbo") {
-      const bedroomPhrase = requiredBedrooms ? ` "${requiredBedrooms} bedroom"` : "";
-      const brPhrase = requiredBedrooms ? ` "${requiredBedrooms}BR"` : "";
-      for (const sourceName of channelScopedSourceNames) {
-        searchQueries.push(
-          `site:vrbo.com "${sourceName}"${bedroomPhrase}`,
-          `site:vrbo.com "${sourceName}"${brPhrase}`,
-        );
-      }
-      searchQueries.push(`site:vrbo.com "${communityAddress}"${bedroomPhrase}`);
-    }
+    // PR #338: VRBO query branch removed (operator directive).
+    // Replacement photos must come from real-estate sources only —
+    // OTA photos create a feedback loop with the photo-listing
+    // scanner.
 
     for (const siteQuery of searchQueries) {
       try {
@@ -12691,23 +12659,12 @@ export async function registerRoutes(
           const source = detectSource(link);
           if (!source) continue;
           if (skipUrls.includes(link)) continue;
-          const resultText = `${r.title || ""} ${r.snippet || ""} ${link}`;
-          if (source === "vrbo") {
-            const normalizedText = resultText.toLowerCase();
-            const inSearchArea = channelScopedSourceNames.some((name) => normalizedText.includes(name.toLowerCase()))
-              || /\b(poipu|koloa)\b/i.test(resultText);
-            if (!inSearchArea) continue;
-            const bedMatch = resultText.match(/\b(\d+)\s*(?:br|bed(?:room)?s?)\b/i);
-            if (requiredBedrooms && bedMatch && Number(bedMatch[1]) !== requiredBedrooms) continue;
-          }
           // Dedupe: don't add the same URL twice if it surfaces in
           // multiple queries.
           if (candidates.some((c) => c.sourceUrl === link)) continue;
 
-          let unitNumber = source === "vrbo"
-            ? extractUnitNumber(link, source, r.title || "") || extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`)
-            : extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
-          if (!unitNumber && source !== "vrbo") unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
+          let unitNumber = extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
+          if (!unitNumber) unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
           // Zillow's old fall-through: no parts.split logic below
           // gets inlined into the per-source branches above.
           // Fall through to legacy slug scan if nothing matched.
@@ -12733,9 +12690,7 @@ export async function registerRoutes(
           } else if (source === "redfin") {
             addrSlug = link.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
           }
-          const addrDisplay = source === "vrbo"
-            ? String(r.title || communityName).replace(/\s*[-|].*Vrbo.*$/i, "").trim()
-            : decodeURIComponent(addrSlug)
+          const addrDisplay = decodeURIComponent(addrSlug)
             .replace(/-/g, " ")
             .replace(/\b\w/g, (c: string) => c.toUpperCase())
             .replace(/\d{5}$/, "").trim();
@@ -12761,14 +12716,13 @@ export async function registerRoutes(
       }
     }
 
-    // PR #329: sort candidates by source priority before processing.
-    // Default replacement favors for-sale sources first because they
-    // are less likely to be OTA-saturated. Channel-scoped replacement
-    // can safely prioritize a different OTA as the photo source as
-    // long as the enforced channel stays clean.
-    const sourcePriority: Record<CandidateSource, number> = cleanChannel && cleanChannel !== "vrbo"
-      ? { vrbo: 0, realtor: 1, redfin: 2, zillow: 3 }
-      : { realtor: 0, redfin: 1, zillow: 2, vrbo: 3 };
+    // PR #329 / #338: sort candidates by source priority before
+    // processing. Realtor first (for-sale → low VRBO overlap),
+    // Redfin second (for-sale + structured JSON-LD), Zillow last
+    // (mixed rental/sale, more likely to be already on VRBO). The
+    // candidate-processing loop's early-return fires on the first
+    // viable hit, so for-sale sources get checked first.
+    const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, zillow: 2 };
     candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
 
     console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by source priority)`);
@@ -14857,6 +14811,24 @@ export async function registerRoutes(
           });
           continue;
         }
+        // PR #338: heartbeat ticker for the push phase. Operator hit
+        // "Load failed" at 285s on a Poipu Kai migration — push-photos
+        // takes 60-180s for a full 30-50 photo upload to Guesty
+        // (Guesty's PUT for picture URLs is rate-limited at the
+        // tenant level, plus we upscale each photo before sending).
+        // Without periodic events, Railway/Fastly's edge idle timer
+        // (~60s) closes the outer NDJSON stream and the operator
+        // sees "Load failed" instead of a real error or success.
+        // Heartbeat every 12s keeps the connection alive AND tells
+        // the operator how long they've waited.
+        const pushStartedAt = Date.now();
+        const pushHeartbeat = setInterval(() => {
+          const elapsed = Math.round((Date.now() - pushStartedAt) / 1000);
+          emit({
+            type: "phase", name: "push",
+            message: `Still pushing to ${a.propertyName}… (${elapsed}s elapsed, ${photos.length} photos)`,
+          });
+        }, 12_000);
         let savedOnGuesty = 0;
         try {
           const pushResp = await fetch(`http://127.0.0.1:${port}/api/builder/push-photos`, {
@@ -14865,6 +14837,7 @@ export async function registerRoutes(
             body: JSON.stringify({ guestyListingId: a.guestyListingId, photos, upscale: true }),
           });
           if (!pushResp.ok || !pushResp.body) {
+            clearInterval(pushHeartbeat);
             emit({
               type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
               success: false, savedOnGuesty: 0,
@@ -14890,7 +14863,9 @@ export async function registerRoutes(
               } catch { /* malformed line — ignore */ }
             }
           }
+          clearInterval(pushHeartbeat);
         } catch (e: any) {
+          clearInterval(pushHeartbeat);
           emit({
             type: "push", listing: a.propertyName, guestyListingId: a.guestyListingId,
             success: false, savedOnGuesty: 0, error: e?.message,
