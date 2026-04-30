@@ -45,9 +45,26 @@ export interface DiscoveredDomain {
   /** Number of /vrp/unit/ paths in the sitemap (vrp_main only). */
   vrpUnitCount?: number;
   /**
+   * Which fingerprint path matched. `"sitemap"` is the canonical
+   * route — a one-line VRP_SITES config will work. `"html-fallback"`
+   * means the plugin markers were detected on the homepage but the
+   * sitemap was non-XML; the host has likely customised vrp_main
+   * (e.g. stripped the rate-quote AJAX) and a bespoke scraper is
+   * required. PR #330.
+   */
+  cmsDetectionPath?: "sitemap" | "html-fallback";
+  /**
+   * True when `cmsDetectionPath === "html-fallback"`. Distinguishes
+   * "drop into VRP_SITES" candidates from "needs investigation"
+   * candidates in the operator's report.
+   */
+  cmsCustomized?: boolean;
+  /**
    * Convenience flag: true iff this is `unknown`-classified AND the
-   * CMS probe identified a fingerprint we already have a scraper for.
-   * Operator can auto-add by adding one block to VRP_SITES.
+   * CMS probe identified the canonical sitemap fingerprint
+   * (`detectionPath === "sitemap"`). HTML-fallback hits are NOT
+   * auto-addable — they need a custom scraper. Operator can add
+   * sitemap-detected hosts by appending one block to VRP_SITES.
    */
   autoAddable?: boolean;
 }
@@ -298,7 +315,18 @@ export async function discoverPmDomains(opts: {
         d.cmsProbeMs = p.durationMs;
         if (p.isVrpMain) {
           d.vrpUnitCount = p.unitCount;
-          d.autoAddable = true;
+          d.cmsDetectionPath = p.detectionPath;
+          d.cmsCustomized = p.customized ?? false;
+          // Only canonical-sitemap matches are auto-addable to
+          // VRP_SITES — HTML-fallback hits (PR #330) need a
+          // bespoke scraper. We surface the detection result in
+          // the report regardless so the operator can see them.
+          d.autoAddable = p.detectionPath === "sitemap";
+          // Carry the why-we-fell-back hint through to the
+          // report when the html-fallback path triggered.
+          if (p.detectionPath === "html-fallback" && p.reason) {
+            d.cmsProbeReason = p.reason;
+          }
         } else {
           d.cmsProbeReason = p.reason;
           d.autoAddable = false;

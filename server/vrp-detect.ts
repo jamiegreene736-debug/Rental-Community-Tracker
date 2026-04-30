@@ -7,22 +7,34 @@
 // because every vrp_main site exposes the same sitemap + JSON
 // endpoints (see server/pm-scraper-vrp.ts header for the contract).
 //
-// Detection works by hitting `${baseUrl}/?vrpsitemap=1` and checking
-// for the canonical XML shape: `<urlset>` containing `<loc>` entries
-// that match `${baseUrl}/vrp/unit/<slug>-<id>-<id>`.
+// Detection has two paths:
 //
-// Auth: anonymous. The sitemap is public on every vrp_main site I've
-// looked at. Failure modes:
-//   - Domain doesn't resolve / TCP-rejects → not vrp_main
-//   - 200 OK but body is HTML (WordPress 404 page) → not vrp_main
-//   - 200 OK with valid XML but no `/vrp/unit/` paths → not vrp_main
-//     (some WordPress sites have generic ?sitemap=1 routes that 200
-//     with unrelated content)
-//   - 200 OK with valid XML and ≥1 `/vrp/unit/` path → IS vrp_main
+//   1. Canonical sitemap probe — `${baseUrl}/?vrpsitemap=1` returns
+//      XML with `<loc>` entries matching the
+//      `${baseUrl}/vrp/unit/<slug>-<id>-<id>` shape. This is the
+//      preferred path because the sitemap also enumerates every unit
+//      on the site, which `pm-scraper-vrp.ts` then walks.
 //
-// Cost: one HTTP GET per probe, ~1-3s wall. Cached in-memory by
-// hostname for 7 days because the answer doesn't change unless the
-// PM rebuilds their site, which is a once-per-multi-year event.
+//   2. HTML-fingerprint fallback (PR #330) — when the sitemap probe
+//      returns non-XML or 4xx, fall back to fetching the homepage and
+//      looking for the `vrp_main` plugin's tell-tale markers
+//      (`vrpjax` JS reference, `wp-content/plugins/vrp_main/` script
+//      src, or hrefs into `/vrp/unit/...`). Some PMs (e.g.
+//      gathervacations.com) run a customised vrp_main fork that 200s
+//      the sitemap path with HTML or has its rate-quote AJAX
+//      stripped, so the canonical path mis-classifies them. The
+//      fallback flags them as `vrp_main` so the operator sees them in
+//      the discovery report, but sets `customized: true` to signal
+//      that a one-line VRP_SITES config probably will NOT yield live
+//      rates and a bespoke scraper is needed.
+//
+// Auth: anonymous. The sitemap and homepages are public on every
+// vrp_main site I've looked at.
+//
+// Cost: one HTTP GET per probe in the happy path, two when the
+// fallback fires (~1-3s wall each). Cached in-memory by hostname for
+// 7 days because the answer doesn't change unless the PM rebuilds
+// their site, which is a once-per-multi-year event.
 
 const FINGERPRINT_TIMEOUT_MS = 8_000;
 const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7d
@@ -36,10 +48,25 @@ export type VrpDetectResult = {
   baseUrl: string;
   /** Canonical hostname, lower-cased, www. stripped. */
   hostname: string;
-  /** True iff the sitemap returned the vrp_main fingerprint. */
+  /** True iff the sitemap or the HTML-fallback returned the vrp_main fingerprint. */
   isVrpMain: boolean;
-  /** When `isVrpMain`, the count of `/vrp/unit/` paths in the sitemap. */
+  /** When `isVrpMain`, the count of `/vrp/unit/` paths discovered. */
   unitCount?: number;
+  /**
+   * Which path matched. `"sitemap"` is the canonical XML route; the
+   * rate-quote AJAX (`?vrpjax=1&act=getUnitRates&unitId=N`) is
+   * reliably present and a one-line VRP_SITES config will work.
+   * `"html-fallback"` means the plugin markers were detected on the
+   * homepage but the sitemap was non-XML — a customized fork; rates
+   * may need a bespoke scraper. `undefined` when not vrp_main.
+   */
+  detectionPath?: "sitemap" | "html-fallback";
+  /**
+   * Set when `detectionPath === "html-fallback"`. Hints to the
+   * operator that the standard `?vrpjax=1&act=getUnitRates` endpoint
+   * may not be available; check before adding to VRP_SITES.
+   */
+  customized?: boolean;
   /** When detection failed (network, parse, 404), short reason. */
   reason?: string;
   /** ms wall to probe (excluding cache hits). */
@@ -100,27 +127,19 @@ export async function detectVrpSite(input: string): Promise<VrpDetectResult> {
       redirect: "follow",
     });
     if (!r.ok) {
-      result = {
-        input,
-        baseUrl: norm.baseUrl,
-        hostname: norm.hostname,
-        isVrpMain: false,
-        reason: `sitemap HTTP ${r.status}`,
-        durationMs: Date.now() - startedAt,
-      };
+      // Try the HTML fallback before giving up — some hosts 403 the
+      // sitemap path entirely (Cloudflare bot rules) but still serve
+      // the homepage with vrp_main markers.
+      const fb = await tryHtmlFallback(norm, startedAt, `sitemap HTTP ${r.status}`);
+      result = fb;
     } else {
       const body = await r.text();
-      // Quick reject — vrp_main always responds with XML; HTML 404
-      // pages sometimes 200 OK on misconfigured WordPress sites.
+      // Quick reject — canonical vrp_main always responds with XML;
+      // HTML 404 pages or customised forks (e.g. gathervacations.com)
+      // 200 OK with HTML, so try the HTML fallback before giving up.
       if (!/<urlset[\s>]/i.test(body) && !/<\?xml/i.test(body)) {
-        result = {
-          input,
-          baseUrl: norm.baseUrl,
-          hostname: norm.hostname,
-          isVrpMain: false,
-          reason: "sitemap response was not XML",
-          durationMs: Date.now() - startedAt,
-        };
+        const fb = await tryHtmlFallback(norm, startedAt, "sitemap response was not XML");
+        result = fb;
       } else {
         // Match the canonical /vrp/unit/<slug>-<id>-<id> pattern. The
         // pm-scraper-vrp.ts walker uses this same shape; if these
@@ -143,6 +162,7 @@ export async function detectVrpSite(input: string): Promise<VrpDetectResult> {
             baseUrl: norm.baseUrl,
             hostname: norm.hostname,
             isVrpMain: true,
+            detectionPath: "sitemap",
             unitCount,
             durationMs: Date.now() - startedAt,
           };
@@ -150,6 +170,8 @@ export async function detectVrpSite(input: string): Promise<VrpDetectResult> {
       }
     }
   } catch (e: any) {
+    // Network/timeout errors on the sitemap path don't justify a
+    // homepage fallback — the host is unreachable.
     result = {
       input,
       baseUrl: norm.baseUrl,
@@ -166,6 +188,90 @@ export async function detectVrpSite(input: string): Promise<VrpDetectResult> {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * HTML-fingerprint fallback. Fetch the homepage and look for the
+ * vrp_main plugin's tell-tale markers:
+ *   - `wp-content/plugins/vrp_main/` script src or asset URL
+ *   - `vrpjax` JS reference (the plugin's AJAX namespace)
+ *   - hrefs to `/vrp/unit/...` paths (the plugin's listing routes)
+ *
+ * Returns `isVrpMain: true, detectionPath: "html-fallback",
+ * customized: true` when at least one strong marker plus at least
+ * one `/vrp/unit/` href is present. The `customized` flag warns the
+ * operator that this PM may have stripped or renamed the standard
+ * rate-quote AJAX (gathervacations.com is the canonical example —
+ * the plugin loads but `?vrpjax=1&act=getUnitRates&unitId=N` returns
+ * 0 bytes; rates are rendered server-side into the unit page HTML).
+ */
+async function tryHtmlFallback(
+  norm: { baseUrl: string; hostname: string },
+  startedAt: number,
+  primaryReason: string,
+): Promise<VrpDetectResult> {
+  try {
+    const r = await fetch(norm.baseUrl + "/", {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        Accept: "text/html, */*",
+      },
+      signal: AbortSignal.timeout(FINGERPRINT_TIMEOUT_MS),
+      redirect: "follow",
+    });
+    if (!r.ok) {
+      return {
+        input: norm.baseUrl,
+        baseUrl: norm.baseUrl,
+        hostname: norm.hostname,
+        isVrpMain: false,
+        reason: `${primaryReason}; homepage HTTP ${r.status}`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    const html = await r.text();
+    const hasPluginAsset = /wp-content\/plugins\/vrp[_-]?main\b/i.test(html);
+    const hasVrpjax = /\bvrpjax\b/i.test(html);
+    const unitHrefRe = /\/vrp\/unit\/[A-Za-z0-9_-]+\/?/gi;
+    const unitHrefMatches = html.match(unitHrefRe);
+    const distinctUnitPaths = new Set(unitHrefMatches?.map((s) => s.replace(/\/+$/, "")) ?? []);
+    // Strong marker: plugin asset OR vrpjax reference. /vrp/unit/
+    // hrefs alone aren't enough — a generic blog could link to a
+    // /vrp/unit/ URL on a different vrp_main site.
+    const strongMarker = hasPluginAsset || hasVrpjax;
+    if (strongMarker && distinctUnitPaths.size > 0) {
+      return {
+        input: norm.baseUrl,
+        baseUrl: norm.baseUrl,
+        hostname: norm.hostname,
+        isVrpMain: true,
+        detectionPath: "html-fallback",
+        customized: true,
+        unitCount: distinctUnitPaths.size,
+        reason: primaryReason, // keep the why-we-fell-back hint
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    return {
+      input: norm.baseUrl,
+      baseUrl: norm.baseUrl,
+      hostname: norm.hostname,
+      isVrpMain: false,
+      reason: `${primaryReason}; no vrp_main markers in homepage`,
+      durationMs: Date.now() - startedAt,
+    };
+  } catch (e: any) {
+    return {
+      input: norm.baseUrl,
+      baseUrl: norm.baseUrl,
+      hostname: norm.hostname,
+      isVrpMain: false,
+      reason: `${primaryReason}; homepage probe error: ${e?.message ?? String(e)}`.slice(0, 200),
+      durationMs: Date.now() - startedAt,
+    };
+  }
 }
 
 /**

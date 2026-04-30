@@ -2221,15 +2221,24 @@ export async function registerRoutes(
   //       { hostname, hits, communities: [...], vrpUnitCount, sampleUrls, suggestedConfig: {...} },
   //       ...
   //     ],
-  //     unknownNonVrp: [...],   // unknown CMS — needs manual scraper
-  //     coveredHosts: [...],    // already have a scraper
+  //     customizedVrpMain: [...],  // PR #330: vrp_main detected via
+  //                                // homepage HTML (sitemap was non-XML
+  //                                // or rate-quote AJAX stripped).
+  //                                // Needs a bespoke scraper, NOT a
+  //                                // one-line VRP_SITES config.
+  //     unknownNonVrp: [...],      // unknown CMS — needs manual scraper
+  //     coveredHosts: [...],       // already have a scraper
   //     perCommunity: { [community]: PmDiscoveryResult }
   //   }
   //
   // `proposedAdditions` is the actionable bucket — these are
   // already-vrp_main-detected sites the operator can add to
   // VRP_SITES with a single config block (the suggestedConfig is
-  // pre-filled).
+  // pre-filled). `customizedVrpMain` is the second-tier bucket: the
+  // plugin loads but the standard rate API doesn't, so a custom
+  // scraper is needed (gathervacations.com is the canonical
+  // example — its unit pages render rates inline rather than via
+  // `?vrpjax=1&act=getUnitRates`).
   //
   // ~10-25s wall depending on how many `unknown` PMs need probing
   // (5-wide concurrency, each probe ~1-3s, cached 7d so reruns are
@@ -2280,6 +2289,23 @@ export async function registerRoutes(
           vrpUnitCount?: number;
           sampleUrls: string[];
           suggestedConfig: { key: string; label: string; baseUrl: string };
+        }
+      >();
+      // PR #330: hosts where the canonical sitemap probe failed but
+      // the homepage HTML showed `vrp_main`/`vrpjax` markers — i.e.
+      // the plugin loads but the standard JSON rate-quote endpoint
+      // is likely customised away. These need a bespoke scraper, not
+      // a one-line VRP_SITES config. Surfaced separately so the
+      // operator can decide whether to invest in a custom scraper.
+      const customizedVrpByHost = new Map<
+        string,
+        {
+          hostname: string;
+          hits: number;
+          communities: string[];
+          vrpUnitCount?: number;
+          cmsProbeReason?: string;
+          sampleUrls: string[];
         }
       >();
       const unknownNonVrpByHost = new Map<
@@ -2333,6 +2359,28 @@ export async function registerRoutes(
                 },
               });
             }
+          } else if (d.classification === "unknown" && d.cmsDetected === "vrp_main" && d.cmsCustomized) {
+            // PR #330: customised vrp_main fork (e.g. gathervacations.com).
+            // Plugin markers detected on homepage but standard sitemap
+            // path was non-XML or the rate-quote AJAX is missing.
+            // Surfaces separately so the operator can decide whether a
+            // bespoke scraper is worth building.
+            const existing = customizedVrpByHost.get(d.hostname);
+            if (existing) {
+              existing.hits += d.hits;
+              if (!existing.communities.includes(community)) existing.communities.push(community);
+              existing.vrpUnitCount = Math.max(existing.vrpUnitCount ?? 0, d.vrpUnitCount ?? 0);
+              for (const u of d.sampleUrls) if (existing.sampleUrls.length < 3 && !existing.sampleUrls.includes(u)) existing.sampleUrls.push(u);
+            } else {
+              customizedVrpByHost.set(d.hostname, {
+                hostname: d.hostname,
+                hits: d.hits,
+                communities: [community],
+                vrpUnitCount: d.vrpUnitCount,
+                cmsProbeReason: d.cmsProbeReason,
+                sampleUrls: [...d.sampleUrls],
+              });
+            }
           } else if (d.classification === "unknown") {
             const existing = unknownNonVrpByHost.get(d.hostname);
             if (existing) {
@@ -2354,6 +2402,9 @@ export async function registerRoutes(
       const proposedAdditions = Array.from(proposedByHost.values()).sort(
         (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
       );
+      const customizedVrpMain = Array.from(customizedVrpByHost.values()).sort(
+        (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
+      );
       const unknownNonVrp = Array.from(unknownNonVrpByHost.values()).sort(
         (a, b) => b.communities.length - a.communities.length || b.hits - a.hits,
       );
@@ -2365,6 +2416,7 @@ export async function registerRoutes(
         communitiesScanned: communities.length,
         totalDurationMs: Date.now() - startedAt,
         proposedAdditions,
+        customizedVrpMain,
         unknownNonVrp,
         coveredHosts,
         perCommunity,
