@@ -244,7 +244,13 @@ export async function findAvailableVrpUnits(opts: {
     return [];
   }
 
-  const metas = await withConcurrency(urls, 8, (url) => fetchUnitMeta(site, url));
+  // PR #337: bumped concurrency 8 → 24. Parrish Kauai's sitemap walks
+  // ~370 unit pages on cold cache; at concurrency 8 that ran ~105s,
+  // tripping the 30s per-source wall budget in routes.ts and surfacing
+  // 0 candidates to the operator even when units WERE available. With
+  // concurrency 24 the cold-cache walk drops to ~30-40s; subsequent
+  // calls hit the 7d meta cache and complete in <1s.
+  const metas = await withConcurrency(urls, 24, (url) => fetchUnitMeta(site, url));
   const matchingBedrooms = metas.filter(
     (m): m is VrpUnitMeta => m !== null && m.bedrooms === bedrooms,
   );
@@ -331,7 +337,10 @@ export async function findAvailableVrpUnits(opts: {
     }
   };
 
-  const priced = await withConcurrency(matchingResort, 8, priceOne);
+  // PR #337: priced batch concurrency 8 → 16 (smaller pool than the
+  // metadata walk because each priceOne does 3 GETs to the rate API
+  // — too aggressive risks rate-limiting on the PM's hosting tier).
+  const priced = await withConcurrency(matchingResort, 16, priceOne);
   const available = priced
     .filter((u): u is VrpAvailableUnit => u !== null)
     .sort((a, b) => a.totalPrice - b.totalPrice)

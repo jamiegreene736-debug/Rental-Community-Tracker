@@ -3676,9 +3676,19 @@ export async function registerRoutes(
       withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
       withTimeout(vrboPromise, 120_000, [] as Candidate[], "vrbo"),
       withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
-      withTimeout(spDiscoveryPromise, 30_000, [] as Candidate[], "sp-sitemap"),
-      withTimeout(pkDiscoveryPromise, 30_000, [] as Candidate[], "pk-sitemap"),
-      withTimeout(cbDiscoveryPromise, 30_000, [] as Candidate[], "cb-sitemap"),
+      // PR #337: bumped vrp-walk timeouts 30s → 75s. Parrish Kauai
+      // and CB Island walk 300+ unit pages on cold cache. Combined
+      // with the concurrency=24 bump in pm-scraper-vrp.ts, this lets
+      // those scrapers complete on cold caches (~30-40s) instead of
+      // tripping the wall budget and silently surfacing 0 candidates.
+      // Subsequent same-process calls hit the 7d meta cache and
+      // resolve in <1s, so the higher ceiling only matters on the
+      // first request after a Railway restart. Other scrapers keep
+      // their original 30s budget — they're either small inventories
+      // (Streamline, Gather) or already JSON-backed (Streamline).
+      withTimeout(spDiscoveryPromise, 75_000, [] as Candidate[], "sp-sitemap"),
+      withTimeout(pkDiscoveryPromise, 75_000, [] as Candidate[], "pk-sitemap"),
+      withTimeout(cbDiscoveryPromise, 75_000, [] as Candidate[], "cb-sitemap"),
       withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
       withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
       withTimeout(gvDiscoveryPromise, 30_000, [] as Candidate[], "gv-sitemap"),
@@ -4306,8 +4316,26 @@ export async function registerRoutes(
         booking: booking.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         pm: pmAugmented.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
+      // PR #337: pmSourceBreakdown — every PM scraper we attempted,
+      // with its result count and whether the discovery promise
+      // resolved within its wall budget. Surfaced in the UI so the
+      // operator can see at a glance which sources contributed and
+      // which came up empty (vs. wondering whether we even searched
+      // them). Order roughly matches build/value priority so the
+      // panel reads top-to-bottom in newest→oldest order.
+      pmSourceBreakdown: [
+        { label: "Suite Paradise",                count: spDiscovered.length },
+        { label: "Parrish Kauai",                 count: pkDiscovered.length },
+        { label: "CB Island Vacations",           count: cbDiscovered.length },
+        { label: "Piko Properties",               count: pikoDiscovered.length },
+        { label: "EVR Hawaii",                    count: evrhiDiscovered.length },
+        { label: "Gather Vacations",              count: gvDiscovered.length },
+        { label: "Alekona Kauai",                 count: slAlekonaDiscovered.length },
+        { label: "Princeville Vacation Rentals",  count: slPrincevilleDiscovered.length },
+        { label: "Google site-search (other PMs)",count: pmGoogle.filter((c) => !seenPmUrls.has(c.url)).length },
+      ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
