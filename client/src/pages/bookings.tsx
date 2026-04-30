@@ -130,11 +130,11 @@ function manualOnlyPmForUrl(_url: string | null | undefined): ManualOnlyPm | nul
 }
 
 // Auto-fill progress bar — gives the operator visual confirmation that
-// the mutation is still running (the verify-pm-listing call can take
-// 30-90s per slot, which feels frozen without feedback). Indeterminate
-// in nature: ramps to 95% over the expected duration based on slot
-// count, snaps to 100% only when the mutation completes (parent
-// unmounts this component when autoFilling clears).
+// the mutation is still running while the server-side find-buy-in scan
+// collects and verifies candidates. Indeterminate in nature: ramps to
+// 95% over the expected cold-cache duration, snaps to 100% only when the
+// mutation completes (parent unmounts this component when autoFilling
+// clears).
 function AutoFillProgress({ slotCount }: { slotCount: number }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -144,18 +144,16 @@ function AutoFillProgress({ slotCount }: { slotCount: number }) {
     }, 500);
     return () => clearInterval(id);
   }, []);
-  // Slots run SEQUENTIALLY (each slot needs to know which URLs earlier
-  // slots picked, so it can choose a different unit). Budget ~70s per
-  // slot for the slowest verify, scaled by slotCount. Without this
-  // scaling the bar pegs at 95% halfway through a multi-slot run and
-  // looks frozen for ~60s while the remaining slots finish.
-  const expectedSeconds = Math.max(70, 70 * slotCount);
+  // find-buy-in is deduped per bedroom group, so a 2-slot booking should
+  // not pay two full scans. Cold cache can still be a couple minutes
+  // because VRBO + PM sidecar checks share one local worker.
+  const expectedSeconds = Math.max(180, 180 + Math.max(0, slotCount - 1) * 15);
   const value = Math.min(95, Math.round((elapsed / expectedSeconds) * 100));
   return (
     <div className="mt-2 space-y-1">
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>
-          Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"}, sequential — each slot waits for the previous to finish so they pick different units) — vision step can take up to 90s per slot
+          Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"}) — cold-cache scans can take a few minutes
         </span>
         <span className="tabular-nums">{elapsed}s</span>
       </div>
@@ -431,19 +429,16 @@ export default function Bookings() {
       // candidate list; without de-duplication, both would pick the
       // cheapest verified candidate and end up with the same URL.
       //
-      // Trade-off: we lose parallelism (slots process serially), so a
-      // 2-slot reservation takes ~2× the verify time of a 1-slot one.
-      // Accepted because (a) most reservations are 1-2 slots, (b) the
-      // verify loop already takes the bulk of the time and runs PMs
-      // sequentially within a single slot anyway.
+      // Trade-off: slots attach serially so a later slot can skip URLs
+      // already selected by an earlier slot. The expensive scan itself
+      // is cached per bedroom group by getFindBuyInForBedrooms above.
       const pickedUrls = new Set<string>();
       const results: Array<{
         slot: typeof emptySlots[number];
         picked: (LiveCandidate & { totalPrice: number }) | null;
         created: any;
         skippedReasons: string[];
-        visionVerified: boolean;
-        airbnbLastResort: boolean;
+        airbnbPick: boolean;
         searchSummary: {
           bedrooms: number;
           scanned: number;
@@ -473,264 +468,37 @@ export default function Bookings() {
             sourceCounts,
           };
 
-          // Pre-flight: walk cheapest-first and verify availability before
-          // picking. Two-tier verification, mirroring the dialog UI's
-          // ScannedOptionsTable auto-verify (PR #237):
-          //
-          //   1. Trust-by-source. Airbnb / Vrbo / Booking rows came from
-          //      engines that already vouched for priced inventory for
-          //      the requested dates. Treated as verified-yes for free.
-          //
-          //   2. PM rows are the gap (photo-matched price is anchored
-          //      from Airbnb; PM-side availability is not). Run the
-          //      Haiku batch verifier on the top 10 cheapest priced PM
-          //      candidates — same endpoint the dialog uses, same 5-min
-          //      cache. ~$0.05 worst case per slot; cache hits free.
-          //
-          //   3. Walk pricedCandidates cheapest-first, pick the first
-          //      verified-yes URL. This is what makes auto-fill stop
-          //      attaching units that the dialog's verifier already
-          //      flagged as unavailable.
-          //
+          // The server's `cheapest` array is already the verified,
+          // date-specific buyable set from find-buy-in. Do not run the
+          // expensive Browserbase/Sonnet PM verifier here: when Anthropic
+          // rate-limits, that client-side fallback can keep Auto-fill
+          // spinning for many minutes after the sidecar scan is done.
           // `pickedUrls` carries URLs already attached to earlier slots
-          // in this same auto-fill run; filter them out so each slot
-          // gets a distinct candidate.
+          // in this same auto-fill run so each slot gets a distinct unit.
           const notAlreadyPicked = (c: LiveCandidate) => !pickedUrls.has(c.url);
-          const allCheapest = data.cheapest ?? [];
-          const pricedCandidates = allCheapest.filter((c) => c.totalPrice > 0).filter(notAlreadyPicked);
-          const unpricedFallback = allCheapest.filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
-          let pick: LiveCandidate | null = null;
-          let verifiedPrice: number | null = null;
-          let skippedReasons: string[] = [];
+          const allCheapest = (data.cheapest ?? []).filter(notAlreadyPicked);
+          const pick =
+            allCheapest.find((c) => c.totalPrice > 0 && c.verified === "yes") ??
+            allCheapest.find((c) => c.totalPrice > 0) ??
+            allCheapest[0] ??
+            null;
+          const skippedReasons: string[] = [];
 
-          // Build verified-yes AND verified-no sets. Trust the server's
-          // source-specific verification first: find-buy-in already uses
-          // deterministic sidecar/scraper checks for Booking, Vrbo, and
-          // PM rows before putting them in `cheapest`. Re-running those
-          // rows through the generic Browserbase verifier is both slower
-          // and less reliable on PM landing pages.
-          const verifiedYesUrls = new Set<string>();
-          const verifiedNoUrls = new Set<string>();
-          for (const c of pricedCandidates) {
-            if (c.verified === "yes") verifiedYesUrls.add(c.url);
-            else if (c.verified === "no") verifiedNoUrls.add(c.url);
-            else if (c.source === "airbnb") verifiedYesUrls.add(c.url);
-          }
-          const toVerify = pricedCandidates
-            .filter((c) => c.source !== "airbnb" && c.verified !== "yes" && c.verified !== "no")
-            .slice(0, 15)
-            .map((c) => c.url);
-          if (toVerify.length > 0) {
-            try {
-              const batchResp = await apiRequest(
-                "POST",
-                "/api/buy-in-candidates/verify-availability-batch",
-                { urls: toVerify, checkIn: ci, checkOut: co },
-              ).then((r) => r.json());
-              const results = (batchResp?.results ?? {}) as Record<
-                string,
-                { available?: string; nightlyPriceUsd?: number | null; reason?: string }
-              >;
-              for (const [url, result] of Object.entries(results)) {
-                if (result?.available === "yes") verifiedYesUrls.add(url);
-                else if (result?.available === "no") verifiedNoUrls.add(url);
-              }
-            } catch (e: any) {
-              // Batch verifier failure is non-fatal — fall through to
-              // the per-row pre-flight loop below, which uses the
-              // older verify-listing endpoint as a backstop.
-              skippedReasons.push(`batch-verify-error: ${e?.message ?? "unknown"}`);
-            }
-          }
-
-          // Pass 1: pick cheapest verified-yes priced candidate.
-          for (const c of pricedCandidates) {
-            if (!verifiedYesUrls.has(c.url)) continue;
-            pick = c;
-            break;
-          }
-
-          // Pass 2: if Haiku found nothing verified-yes (peak season,
-          // batch errored, or everything came back unclear), fall back
-          // to the older SearchAPI pre-flight on the top 4 priced.
-          // CRITICAL: skip URLs that Haiku already flagged as
-          // verified-no — otherwise Pass 2 attaches a unit Haiku just
-          // told us is unavailable. SearchAPI returns "available: null"
-          // for most PM URLs (it can't decisively check them), so
-          // without this gate Pass 2 picks the cheapest unverified row
-          // even when Haiku said "no."
           if (!pick) {
-            for (const c of pricedCandidates.slice(0, 4)) {
-              if (verifiedNoUrls.has(c.url)) {
-                skippedReasons.push(`${c.sourceLabel}: Haiku flagged unavailable`);
-                continue;
-              }
-              const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
-              const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
-              if (v?.available === false) {
-                skippedReasons.push(`${c.sourceLabel}: ${v.reason ?? "unavailable"}`);
-                continue;
-              }
-              pick = c;
-              if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
-                verifiedPrice = v.currentTotalPrice;
-              }
-              break;
-            }
+            skippedReasons.push("find-buy-in returned no unused cheapest candidates");
+            return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
           }
 
-          // No priced candidate worked → walk multiple unpriced PM URLs
-          // and verify each. The dispatcher in pm-rate-agent picks the
-          // right path per URL: programmatic scrapers for PMs we've
-          // reverse-engineered (Suite Paradise via /rescms/ajax/...),
-          // Browserbase agent for unknown PMs.
-          //
-          // We prioritize known-fast-scraper PMs first: Suite Paradise
-          // returns in ~1s, while the agent path takes 60-180s. Sorting
-          // those URLs to the front means we usually finish in seconds.
-          //
-          // Stop on the first verified price (cheapest available will
-          // usually be one of the first few candidates anyway). If
-          // available:false comes back from a scraper, skip and try
-          // the next URL — the unit's just booked, not a permanent
-          // failure.
-          let visionVerified = false;
-          // Track the explicit-unavailable count from scrapers so we can
-          // pick a smarter fallback. When most fast-scraper hits came
-          // back available:false (peak season), the operator wants to
-          // see Vrbo URLs to do their own manual research — Vrbo isn't
-          // bookable for sublet but listings there are useful for
-          // cross-checking.
-          let unavailableCount = 0;
-          let allCheckedUrls: { sourceLabel: string; url: string; status: string }[] = [];
-          if (!pick) {
-            const allUnpricedPm = (data.sources?.pm ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
-            const allUnpricedVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked);
-            // Fast-scrape PMs (~1-10s): Suite Paradise direct rcapi,
-            // Vrbo via Browserbase + GraphQL calendar parse.
-            const isFastScrape = (u: string) =>
-              /(?:^|\.)(?:suite-paradise|vrbo)\.com/.test(u);
-            const ordered = [
-              // Suite Paradise URLs (rcapi, ~1s) → fastest
-              ...allUnpricedPm.filter((c) => /(?:^|\.)suite-paradise\.com/.test(c.url)),
-              // Vrbo URLs (Browserbase + GraphQL parse, ~6-10s)
-              ...allUnpricedVrbo,
-              // Other PM URLs that fall through to the agent (~60-180s)
-              ...allUnpricedPm.filter((c) => !isFastScrape(c.url)),
-            ].slice(0, 8); // cap at 8: covers ~3 SP + ~4 Vrbo + 1 PM, enough
-                           // to find availability in normal weeks; in peak
-                           // weeks we'd hit unavailable on all and fall
-                           // through to the alternative-fallback below.
-
-            for (const c of ordered) {
-              try {
-                // 30s timeout for fast-scrape PMs (Vrbo can be 10s+
-                // when Browserbase cold-starts); 95s for agent-path.
-                const timeoutMs = isFastScrape(c.url) ? 30000 : 95000;
-                const controller = new AbortController();
-                const t = setTimeout(() => controller.abort(), timeoutMs);
-                const resp = await fetch("/api/operations/verify-pm-listing", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  credentials: "include",
-                  body: JSON.stringify({ url: c.url, checkIn: ci, checkOut: co }),
-                  signal: controller.signal,
-                }).finally(() => clearTimeout(t));
-                const v = resp.ok ? await resp.json() : null;
-                const ex = v?.extracted;
-                if (
-                  v?.ok &&
-                  ex?.isUnitPage === true &&
-                  ex?.available !== false &&
-                  ex?.dateMatch !== false &&
-                  typeof ex?.totalPrice === "number" &&
-                  ex.totalPrice > 0
-                ) {
-                  pick = c;
-                  verifiedPrice = ex.totalPrice;
-                  visionVerified = true;
-                  break;
-                }
-                if (ex?.available === false) unavailableCount++;
-                const status = ex?.available === false ? "BOOKED" : (ex?.reason ? "no-price" : "verify-failed");
-                allCheckedUrls.push({ sourceLabel: c.sourceLabel, url: c.url, status });
-                skippedReasons.push(`${c.sourceLabel}: ${ex?.reason ?? v?.reason ?? "vision-no-price"}`);
-              } catch (e: any) {
-                allCheckedUrls.push({ sourceLabel: c.sourceLabel, url: c.url, status: "error" });
-                skippedReasons.push(`${c.sourceLabel}: verify-error ${e?.message ?? ""}`.trim());
-              }
-            }
-          }
-
-          // Fallback: if vision couldn't extract from any source, attach
-          // the most-useful unpriced URL we have. Two regimes:
-          //   1. Most candidates explicitly came back available:false
-          //      (peak season, everything's booked) → attach the top
-          //      Vrbo URL so the operator can see what's listed there
-          //      and do manual research. This addresses the "nothing for
-          //      VRBO popped up" complaint when the bookable PMs are
-          //      all confirmed booked.
-          //   2. Otherwise (mixed failures, errors, no-price) → attach
-          //      the server's PM unpriced fallback (Parrish Kauai et al)
-          //      because PM is the canonical bookable channel.
-          const peakSeasonAllBooked = unavailableCount >= 3;
-          if (!pick && peakSeasonAllBooked) {
-            const topVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked)[0];
-            if (topVrbo) pick = topVrbo;
-          }
-          if (!pick && unpricedFallback.length > 0) {
-            pick = unpricedFallback[0];
-          }
-          // Last-resort Airbnb walk. Operator opted Airbnb back into the
-          // bookable pool as a final safety net when no PM/Booking/Vrbo
-          // candidate produced a usable URL — better than leaving the
-          // slot empty. Walk priced Airbnb candidates (cheapest first)
-          // and verify each via verify-listing; take the first verified
-          // one. If verification fails for all (or returns unknown),
-          // attach the cheapest priced Airbnb URL anyway — the operator
-          // can confirm availability themselves.
-          //
-          // Airbnb's TOS prohibits sublet, so the buy-in record gets a
-          // TOS-warning suffix in its notes (added below). This is
-          // tracked separately so the toast and notes can flag it.
-          let airbnbLastResort = false;
-          if (!pick) {
-            const airbnbPriced = (data.sources?.airbnb ?? []).filter((c) => c.totalPrice > 0).filter(notAlreadyPicked);
-            for (const c of airbnbPriced.slice(0, 4)) {
-              const verifyUrl = `/api/operations/verify-listing?url=${encodeURIComponent(c.url)}&checkIn=${ci}&checkOut=${co}&q=${encodeURIComponent(data.resortName ?? data.community ?? "")}&bedrooms=${slot.bedrooms}`;
-              const v = await apiRequest("GET", verifyUrl).then((r) => r.json()).catch(() => ({ available: null as boolean | null }));
-              if (v?.available === false) {
-                skippedReasons.push(`Airbnb: ${v.reason ?? "unavailable"}`);
-                continue;
-              }
-              pick = c;
-              airbnbLastResort = true;
-              if (typeof v?.currentTotalPrice === "number" && v.currentTotalPrice > 0) {
-                verifiedPrice = v.currentTotalPrice;
-              }
-              break;
-            }
-            if (!pick && airbnbPriced.length > 0) {
-              pick = airbnbPriced[0];
-              airbnbLastResort = true;
-            }
-          }
-          if (!pick) {
-            const fallbackVrbo = (data.sources?.vrbo ?? []).filter((c) => c.totalPrice === 0).filter(notAlreadyPicked)[0];
-            if (fallbackVrbo) pick = fallbackVrbo;
-          }
-
-          if (!pick) return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false, searchSummary };
-
-          const finalCost = verifiedPrice ?? pick.totalPrice;
+          const finalCost = pick.totalPrice;
+          const airbnbPick = pick.source === "airbnb";
           const propertyName =
             (selectedListingId && listingNameById.get(selectedListingId)) ||
             `Property ${selectedPropertyId}`;
-          const noteSuffix = visionVerified
-            ? ` · Verified via screenshot analysis ($${finalCost} for ${slot.bedrooms}BR ${ci}→${co})`
+          const verifySuffix = pick.verified === "yes"
+            ? ` · Verified by find-buy-in for ${slot.bedrooms}BR ${ci}→${co}`
             : "";
-          const tosSuffix = airbnbLastResort
-            ? ` · ⚠️ Last-resort Airbnb pick — Airbnb TOS prohibits sublet. No PM/Booking/Vrbo candidate was available for these dates. Open Find buy-in on this slot for reverse-image PM matches you can book direct.`
+          const tosSuffix = airbnbPick
+            ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
             : "";
           // PM URL discovered via reverse-image-match against an Airbnb
           // listing — disclose the anchor + that the PM rate may differ
@@ -740,15 +508,6 @@ export default function Bookings() {
           // from over-relying on the inherited price.
           const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
             ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
-            : "";
-          // When we attached the URL because of the peak-season fallback
-          // (most/all candidates came back booked), record what was
-          // checked so the operator can see what's listed elsewhere
-          // without having to open Find buy-in. Top 6 entries to keep
-          // the notes field readable.
-          const attemptsNote = allCheckedUrls.length > 0
-            ? `\n\nChecked ${allCheckedUrls.length} alternative${allCheckedUrls.length === 1 ? "" : "s"} — ${unavailableCount} confirmed booked for ${ci} → ${co}:\n` +
-              allCheckedUrls.slice(0, 6).map((a) => `  • [${a.status}] ${a.sourceLabel} — ${a.url}`).join("\n")
             : "";
           // Wrap create+attach in a try/catch — if one slot fails (DB
           // hiccup, race in attachBuyIn's "same-slot already attached"
@@ -765,7 +524,7 @@ export default function Bookings() {
               costPaid: finalCost.toFixed(2),
               airbnbConfirmation: null,
               airbnbListingUrl: pick.url,
-              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${noteSuffix}${tosSuffix}${anchorSuffix}${attemptsNote}`,
+              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${tosSuffix}${anchorSuffix}`,
               status: "active",
             }).then((r) => r.json());
             if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -774,10 +533,10 @@ export default function Bookings() {
               buyInId: created.id,
             }).then((r) => r.json());
 
-            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, visionVerified, airbnbLastResort, searchSummary };
+            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
           } catch (e: any) {
             skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
-            return { slot, picked: null, created: null, skippedReasons, visionVerified: false, airbnbLastResort: false, searchSummary };
+            return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
           }
         })();
         // Reserve the picked URL so subsequent slots in this same
@@ -840,31 +599,26 @@ export default function Bookings() {
             : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the search manually.",
         });
       } else if (zeroCostFills.length === filled.length) {
-        // All picks are unpriced. Detect whether at least one slot
-        // attached a Vrbo URL (peak-season fallback when PM scrapers
-        // confirmed booked) so the toast acknowledges that.
         const hasVrboPick = filled.some((r) => /(?:^|\.)vrbo\.com/.test(r.picked?.url ?? ""));
         toast({
           title: hasVrboPick
-            ? `Attached ${filled.length} link${filled.length > 1 ? "s" : ""} — peak-season fallback`
+            ? `Attached ${filled.length} Vrbo link${filled.length > 1 ? "s" : ""} for review`
             : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
           description: hasVrboPick
-            ? `Most candidates were confirmed booked for these dates (peak season). Attached Vrbo URL${filled.length > 1 ? "s" : ""} for cross-check — click through to see what's listed there. The buy-in's Notes show every URL we checked and its booking status.`
+            ? `No priced verified candidate was available, so Auto-fill attached the best review link at $0. Update the cost after manual confirmation.`
             : `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Use the 🔍 Verify rate button on each slot to fetch a screenshot of the page and (when possible) extract the price.`
             + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
-        const visionVerifiedCount = filled.filter((r) => r.visionVerified).length;
-        const airbnbLastResortCount = filled.filter((r) => r.airbnbLastResort).length;
+        const airbnbPickCount = filled.filter((r) => r.airbnbPick).length;
         toast({
-          title: airbnbLastResortCount > 0
-            ? `Filled ${filled.length} / ${results.length} units — ${airbnbLastResortCount} via Airbnb last-resort`
+          title: airbnbPickCount > 0
+            ? `Filled ${filled.length} / ${results.length} units — ${airbnbPickCount} via Airbnb`
             : `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-            + (visionVerifiedCount > 0 ? ` · ${visionVerifiedCount} verified via screenshot analysis` : "")
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
-            + (airbnbLastResortCount > 0 ? ` · ⚠️ ${airbnbLastResortCount} Airbnb URL${airbnbLastResortCount > 1 ? "s" : ""} attached as last-resort (TOS prohibits sublet — see slot notes)` : "")
+            + (airbnbPickCount > 0 ? ` · ⚠️ ${airbnbPickCount} Airbnb URL${airbnbPickCount > 1 ? "s" : ""} attached (TOS prohibits sublet — see slot notes)` : "")
             + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
       }
@@ -1501,13 +1255,11 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
-  // Booking + PM are the preferred bookable channels and populate the
-  // server's `cheapest` array. Vrbo is surfaced for awareness/manual
-  // outreach. Airbnb is the CLIENT-SIDE last-resort: when nothing else
-  // returns a usable URL, auto-fill walks `sources.airbnb` and attaches
-  // the cheapest verified-priced one with a TOS-warning suffix in the
-  // buy-in notes (Airbnb TOS prohibits sublet — operator handles the
-  // booking channel manually).
+  // Server-side `cheapest` is the source of truth for Auto-fill. It is
+  // already filtered to the verified, date-specific candidates that are
+  // safe to attach without running another client-side PM verifier.
+  // Airbnb can appear there by operator directive; Auto-fill adds a TOS
+  // warning to the buy-in notes when it selects an Airbnb URL.
   sources: {
     airbnb: LiveCandidate[];
     vrbo: LiveCandidate[];
