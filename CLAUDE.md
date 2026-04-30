@@ -40,3 +40,14 @@ Before making any changes:
 
 - Architecture pointers are in `AGENTS.md` under "Architecture
   pointers". Don't duplicate them here.
+
+## Recent operational notes
+
+- 2026-04-30: Codex fixed Airbnb "Replace photos" replacement discovery
+  so channel-scoped Airbnb replacements may use clean Poipu Kai units
+  found on VRBO, provided the unit is not listed on Airbnb. VRBO listing
+  galleries must be scraped through the local sidecar because Railway
+  receives VRBO's bot wall directly. Relevant commits: `75f4874`,
+  `8afb0df`, `89d8d55`, `7a93161`, `47cfa5b`. Follow-up in this
+  session made non-array sidecar results valid (`{ photos: [...] }`)
+  and made CDP cookie seeding best-effort when Chrome refuses injection.

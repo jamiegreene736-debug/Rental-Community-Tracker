@@ -8258,7 +8258,7 @@ export async function registerRoutes(
   });
 
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
-  // Body: { id, results?: SidecarVrboCandidate[], error?: string }
+  // Body: { id, results?: unknown, error?: string }
   app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
     const body = (req.body ?? {}) as {
@@ -8272,7 +8272,7 @@ export async function registerRoutes(
     const { complete } = await import("./vrbo-sidecar-queue");
     const result = complete({
       id: body.id,
-      results: Array.isArray(body.results) ? (body.results as any[]) : undefined,
+      results: body.results === undefined ? undefined : (body.results as any),
       error: body.error,
     });
     return res.json(result);

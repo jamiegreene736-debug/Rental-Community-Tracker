@@ -86,6 +86,21 @@ function loadCookies() {
     }));
 }
 
+async function addCookiesBestEffort(cookies, label) {
+  if (!cookies?.length || !context) return false;
+  try {
+    await context.addCookies(cookies);
+    return true;
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    if (/Browser context management is not supported|Storage\.setCookies|Target page, context or browser has been closed/i.test(msg)) {
+      log(`${label}: cookie injection unavailable over CDP; continuing with Chrome profile cookies`);
+      return false;
+    }
+    throw e;
+  }
+}
+
 async function isCdpReady() {
   try {
     const r = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, {
@@ -133,8 +148,8 @@ async function ensureBrowser() {
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
   context = browser.contexts()[0] ?? (await browser.newContext());
   const cookies = loadCookies();
-  await context.addCookies(cookies);
-  log(`seeded ${cookies.length} cookies into Chrome context`);
+  const seeded = await addCookiesBestEffort(cookies, "startup cookie seed");
+  log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile cookies (${cookies.length} cookies available on disk)`);
 
   // PR #302 (revised): always create a NEW page rather than reusing
   // pages[0]. The daemon's Chrome accumulates tabs from prior sessions
@@ -151,8 +166,14 @@ async function ensureBrowser() {
   // tab as the only one. Net result: each daemon start gives us a
   // single fresh tab, no clutter, no stale state, no risk of
   // accidentally scraping a leftover tab.
-  const stalePages = context.pages();
-  page = await context.newPage();
+  const stalePages = context.pages().filter((p) => !p.isClosed?.());
+  page = stalePages[0] ?? null;
+  if (!page) {
+    page = await Promise.race([
+      context.newPage(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
+    ]);
+  }
   await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {});
   let closedCount = 0;
   for (const stale of stalePages) {
@@ -249,11 +270,13 @@ async function syncRemoteCookies() {
         secure: c.secure ?? true,
         sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax",
       }));
-    await context.addCookies(normalised);
+    const applied = await addCookiesBestEffort(normalised, "cookie sync");
+    if (!applied) {
+      if (fp) lastAppliedCookieFingerprint = fp;
+      return false;
+    }
     lastAppliedCookieFingerprint = fp;
-    log(
-      `cookie sync: applied ${normalised.length} cookies from extension (fp=${fp})`,
-    );
+    log(`cookie sync: applied ${normalised.length} cookies from extension (fp=${fp})`);
     return true;
   } catch (e) {
     // Cookie sync failure is non-fatal — the daemon keeps running with
