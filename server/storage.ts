@@ -26,6 +26,31 @@ import {
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
 
+function listingUrlKey(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    for (const key of [
+      "checkin",
+      "checkout",
+      "check_in",
+      "check_out",
+      "arrival",
+      "departure",
+      "startDate",
+      "endDate",
+      "adults",
+      "group_adults",
+    ]) {
+      u.searchParams.delete(key);
+    }
+    return `${u.hostname.replace(/^www\./, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return String(url).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+  }
+}
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -202,6 +227,22 @@ export class DatabaseStorage implements IStorage {
       throw new Error(
         `Reservation ${reservationId} already has buy-in ${sameSlot.id} attached for unit "${existing.unitId}" — detach it first`,
       );
+    }
+
+    // Refuse if another slot in the same reservation already points to
+    // the same listing URL. Multi-unit reservations need distinct
+    // physical units; attaching the same PM/OTA listing twice would make
+    // the P&L look filled while only one actual buy-in exists.
+    const existingListingKey = listingUrlKey(existing.airbnbListingUrl);
+    if (existingListingKey) {
+      const sameListing = currentAttachments.find(
+        (b) => b.id !== buyInId && listingUrlKey(b.airbnbListingUrl) === existingListingKey,
+      );
+      if (sameListing) {
+        throw new Error(
+          `Reservation ${reservationId} already has buy-in ${sameListing.id} attached for this listing URL on unit "${sameListing.unitId}" — choose a different physical unit`,
+        );
+      }
     }
 
     const [row] = await db

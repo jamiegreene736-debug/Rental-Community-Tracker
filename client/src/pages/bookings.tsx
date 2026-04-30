@@ -115,6 +115,36 @@ function sourceLabelForUrl(url: string | null | undefined): string {
   }
 }
 
+// Canonicalize listing URLs for de-duping across reservation slots.
+// Date/search params differ by scan, but the path identifies the same
+// physical listing page for Airbnb/VRBO/Booking/PM sites.
+function listingUrlKey(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    for (const key of [
+      "checkin",
+      "checkout",
+      "check_in",
+      "check_out",
+      "arrival",
+      "departure",
+      "startDate",
+      "endDate",
+      "adults",
+      "group_adults",
+    ]) {
+      u.searchParams.delete(key);
+    }
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    const path = u.pathname.replace(/\/+$/, "").toLowerCase();
+    return `${host}${path}`;
+  } catch {
+    return String(url).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+  }
+}
+
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
@@ -432,7 +462,11 @@ export default function Bookings() {
       // Trade-off: slots attach serially so a later slot can skip URLs
       // already selected by an earlier slot. The expensive scan itself
       // is cached per bedroom group by getFindBuyInForBedrooms above.
-      const pickedUrls = new Set<string>();
+      const pickedUrls = new Set<string>(
+        reservation.slots
+          .map((s) => listingUrlKey(s.buyIn?.airbnbListingUrl))
+          .filter(Boolean),
+      );
       const results: Array<{
         slot: typeof emptySlots[number];
         picked: (LiveCandidate & { totalPrice: number }) | null;
@@ -475,7 +509,7 @@ export default function Bookings() {
           // spinning for many minutes after the sidecar scan is done.
           // `pickedUrls` carries URLs already attached to earlier slots
           // in this same auto-fill run so each slot gets a distinct unit.
-          const notAlreadyPicked = (c: LiveCandidate) => !pickedUrls.has(c.url);
+          const notAlreadyPicked = (c: LiveCandidate) => !pickedUrls.has(listingUrlKey(c.url));
           const allCheapest = (data.cheapest ?? []).filter(notAlreadyPicked);
           const pick =
             allCheapest.find((c) => c.totalPrice > 0 && c.verified === "yes") ??
@@ -541,7 +575,7 @@ export default function Bookings() {
         })();
         // Reserve the picked URL so subsequent slots in this same
         // auto-fill run skip it and find a different unit.
-        if (slotResult.picked?.url) pickedUrls.add(slotResult.picked.url);
+        if (slotResult.picked?.url) pickedUrls.add(listingUrlKey(slotResult.picked.url));
         results.push(slotResult);
       }
       return { reservation, results };
@@ -569,12 +603,6 @@ export default function Bookings() {
       );
       const estProfit = payout - existingCost - totalCost;
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
-      // Some picks can come back at $0 — that's the unpriced-PM
-      // fallback (server-side, /api/operations/find-buy-in): when no
-      // priced PM/Booking candidate exists, auto-fill grabs a top PM
-      // URL and attaches it with totalPrice=0 so the slot at least
-      // points at a clickable PM company instead of staying empty.
-      // Operator updates the cost after contacting the PM.
       const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
       if (filled.length === 0) {
         const uniqueSummaries = Array.from(
@@ -605,8 +633,8 @@ export default function Bookings() {
             ? `Attached ${filled.length} Vrbo link${filled.length > 1 ? "s" : ""} for review`
             : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
           description: hasVrboPick
-            ? `No priced verified candidate was available, so Auto-fill attached the best review link at $0. Update the cost after manual confirmation.`
-            : `No priced PM/Booking candidate had live pricing, so we attached the top PM URL${filled.length > 1 ? "s" : ""} at $0. Use the 🔍 Verify rate button on each slot to fetch a screenshot of the page and (when possible) extract the price.`
+            ? `A source returned a review link without a usable price. Verify the cost manually before confirming with the guest.`
+            : `A PM source returned a link without a usable price. Use Verify rate on each slot before confirming with the guest.`
             + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
@@ -617,7 +645,7 @@ export default function Bookings() {
             : `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-            + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached at $0 (PM URL — update cost after PM contact)` : "")
+            + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached without live price — review manually` : "")
             + (airbnbPickCount > 0 ? ` · ⚠️ ${airbnbPickCount} Airbnb URL${airbnbPickCount > 1 ? "s" : ""} attached (TOS prohibits sublet — see slot notes)` : "")
             + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
@@ -1403,7 +1431,7 @@ function LiveSearchSection({
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
-  const { data, isLoading, isError, error } = useQuery<FindBuyInResponse>({
+  const { data, isLoading, isFetching, isError, error } = useQuery<FindBuyInResponse>({
     queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, refreshNonce],
     queryFn: () => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
@@ -1415,7 +1443,20 @@ function LiveSearchSection({
     enabled: !!checkInYmd && !!checkOutYmd,
     staleTime: 0,
     refetchOnMount: "always",
+    placeholderData: (previousData) => previousData,
   });
+
+  const attachedElsewhereKeys = useMemo(() => new Set(
+    reservation.slots
+      .filter((s) => s.unitId !== slot.unitId)
+      .map((s) => listingUrlKey(s.buyIn?.airbnbListingUrl))
+      .filter(Boolean),
+  ), [reservation.slots, slot.unitId]);
+
+  const isAttachedElsewhere = (url: string | null | undefined): boolean => {
+    const key = listingUrlKey(url);
+    return !!key && attachedElsewhereKeys.has(key);
+  };
 
   // Dead-code preserved for reference — used to gate on a button click
   if (false as boolean) {
@@ -1439,7 +1480,7 @@ function LiveSearchSection({
     );
   }
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="border rounded-lg p-6 text-center text-sm text-muted-foreground">
         <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
@@ -1448,7 +1489,7 @@ function LiveSearchSection({
     );
   }
 
-  if (isError) {
+  if (isError && !data) {
     return (
       <div className="border rounded-lg p-4 text-sm text-destructive">
         <AlertCircle className="h-4 w-4 inline mr-1" /> Search failed: {(error as Error).message}
@@ -1457,12 +1498,26 @@ function LiveSearchSection({
     );
   }
 
-  const airbnb  = data?.sources.airbnb  ?? [];
-  const vrbo    = data?.sources.vrbo    ?? [];
-  const booking = data?.sources.booking ?? [];
-  const pm      = data?.sources.pm      ?? [];
-  const cheapest = data?.cheapest       ?? [];
+  const airbnb  = data?.sources?.airbnb  ?? [];
+  const vrbo    = data?.sources?.vrbo    ?? [];
+  const booking = data?.sources?.booking ?? [];
+  const pm      = data?.sources?.pm      ?? [];
+  const cheapest = data?.cheapest        ?? [];
   const cheapestUnits = data?.cheapestUnits ?? [];
+  const availableAirbnb = airbnb.filter((c) => !isAttachedElsewhere(c.url));
+  const availableVrbo = vrbo.filter((c) => !isAttachedElsewhere(c.url));
+  const availableBooking = booking.filter((c) => !isAttachedElsewhere(c.url));
+  const availablePm = pm.filter((c) => !isAttachedElsewhere(c.url));
+  const availableCheapest = cheapest.filter((c) => !isAttachedElsewhere(c.url));
+  const availableCheapestUnits = cheapestUnits.filter((u) => {
+    if (isAttachedElsewhere(u.primaryUrl)) return false;
+    return !u.listings.some((l) => isAttachedElsewhere(l.url));
+  });
+  const hiddenAlreadyAttachedCount =
+    (airbnb.length - availableAirbnb.length)
+    + (vrbo.length - availableVrbo.length)
+    + (booking.length - availableBooking.length)
+    + (pm.length - availablePm.length);
   // PR #337: per-PM-source breakdown so the operator can see at a glance
   // which scrapers contributed and which came up empty (vs. wondering
   // whether we even searched them). Server populates one entry per
@@ -1509,6 +1564,25 @@ function LiveSearchSection({
           </Button>
         </div>
       </div>
+      {isFetching && data && (
+        <div className="border border-blue-200 bg-blue-50/70 text-blue-800 rounded-md px-3 py-2 text-[11px] inline-flex items-center gap-2">
+          <RefreshCw className="h-3 w-3 animate-spin" />
+          Refreshing live rates. Keeping the last completed results visible while the sidecar finishes.
+        </div>
+      )}
+      {isError && data && (
+        <div className="border border-amber-300 bg-amber-50/70 text-amber-800 rounded-md px-3 py-2 text-[11px] flex items-center justify-between gap-2">
+          <span>
+            Latest refresh failed: {(error as Error).message}. Showing the last completed scan.
+          </span>
+          <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
+        </div>
+      )}
+      {hiddenAlreadyAttachedCount > 0 && (
+        <div className="border border-amber-300 bg-amber-50/70 text-amber-800 rounded-md px-3 py-2 text-[11px]">
+          Hidden {hiddenAlreadyAttachedCount} option{hiddenAlreadyAttachedCount === 1 ? "" : "s"} already attached to another unit in this reservation.
+        </div>
+      )}
       {/* Raw hit counts + drop counts per source — lets us see why a source
           returned few results (upstream empty vs resort/bedroom filtered).
           PR #340: pm count now sums every per-PM scraper from
@@ -1542,11 +1616,11 @@ function LiveSearchSection({
           When the verify pass came back empty, show a clear "no
           verified options" state rather than promoting un-verified
           inherited-price rows. */}
-      {cheapestUnits.length > 0 ? (
+      {availableCheapestUnits.length > 0 ? (
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
           <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
             <TrendingDown className="h-3.5 w-3.5" />
-            Cheapest {cheapestUnits.length} {cheapestUnits.length === 1 ? "unit" : "units"} — buy these
+            Cheapest {availableCheapestUnits.length} {availableCheapestUnits.length === 1 ? "unit" : "units"} — buy these
             {data?.debug?.verification?.attempted ? (
               <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
                 · verified bookable for {checkInYmd} → {checkOutYmd}
@@ -1554,7 +1628,7 @@ function LiveSearchSection({
             ) : null}
           </p>
           <div className="space-y-2">
-            {cheapestUnits.map((u, i) => (
+            {availableCheapestUnits.map((u, i) => (
               <UnitRow
                 key={`unit-${i}-${u.primaryUrl}`}
                 unit={u}
@@ -1564,13 +1638,13 @@ function LiveSearchSection({
             ))}
           </div>
         </div>
-      ) : cheapest.length > 0 ? (
+      ) : availableCheapest.length > 0 ? (
         // Backwards-compat fallback for old deploys that don't return
         // cheapestUnits — render the flat list as before.
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
           <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
             <TrendingDown className="h-3.5 w-3.5" />
-            Cheapest {cheapest.length} — buy these
+            Cheapest {availableCheapest.length} — buy these
             {data?.debug?.verification?.attempted ? (
               <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
                 · {data.debug.verification.yes} verified bookable for {checkInYmd} → {checkOutYmd}
@@ -1578,7 +1652,7 @@ function LiveSearchSection({
             ) : null}
           </p>
           <div className="space-y-2">
-            {cheapest.map((c, i) => (
+            {availableCheapest.map((c, i) => (
               <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight />
             ))}
           </div>
@@ -1604,11 +1678,11 @@ function LiveSearchSection({
           audit trail so the operator can see what else was scanned and
           override with one click. */}
       <ScannedOptionsTable
-        airbnb={airbnb}
-        vrbo={vrbo}
-        booking={booking}
-        pm={pm}
-        autoPickUrl={cheapestUnits[0]?.primaryUrl ?? cheapest[0]?.url}
+        airbnb={availableAirbnb}
+        vrbo={availableVrbo}
+        booking={availableBooking}
+        pm={availablePm}
+        autoPickUrl={availableCheapestUnits[0]?.primaryUrl ?? availableCheapest[0]?.url}
         checkIn={checkInYmd}
         checkOut={checkOutYmd}
         onRecord={(c) => setRecordTarget(c)}
@@ -1621,10 +1695,10 @@ function LiveSearchSection({
           server-side. Booking.com + PM Companies are the direct-bookable
           channels — both ALWAYS open. */}
       {[
-        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: airbnb,  defaultOpen: airbnb.length > 0 && airbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: vrbo, defaultOpen: vrbo.length > 0 },
-        { key: "booking", label: "Booking.com",   items: booking, defaultOpen: true },
-        { key: "pm",      label: "PM Companies", items: pm, defaultOpen: true },
+        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
+        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: availableVrbo.length > 0 },
+        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: true },
+        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: true },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
@@ -2642,6 +2716,13 @@ function RecordBuyInDialog({
   const [confirmation, setConfirmation] = useState("");
   const [listingUrl, setListingUrl] = useState(candidate.url);
   const [notes, setNotes] = useState("");
+  const duplicateSlot = useMemo(() => {
+    const key = listingUrlKey(listingUrl);
+    if (!key) return null;
+    return reservation.slots.find(
+      (s) => s.unitId !== slot.unitId && listingUrlKey(s.buyIn?.airbnbListingUrl) === key,
+    ) ?? null;
+  }, [listingUrl, reservation.slots, slot.unitId]);
 
   const toDateOnly = (s: string | undefined): string => {
     if (!s) return "";
@@ -2727,6 +2808,11 @@ function RecordBuyInDialog({
               onChange={(e) => setListingUrl(e.target.value)}
               data-testid="input-listing-url"
             />
+            {duplicateSlot && (
+              <p className="text-[11px] text-destructive mt-1">
+                This listing is already attached to {duplicateSlot.unitLabel}. Pick a different physical unit for {slot.unitLabel}.
+              </p>
+            )}
           </div>
           <div>
             <Label htmlFor="notes" className="text-xs">Notes</Label>
@@ -2744,7 +2830,7 @@ function RecordBuyInDialog({
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button
             onClick={() => createAndAttach.mutate()}
-            disabled={!costPaid || createAndAttach.isPending}
+            disabled={!costPaid || !!duplicateSlot || createAndAttach.isPending}
             data-testid="button-save-buy-in"
           >
             {createAndAttach.isPending ? "Saving…" : "Save & attach"}

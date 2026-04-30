@@ -789,12 +789,12 @@ function withDateParams(url, checkIn, checkOut) {
 // Returns { available, nightlyPrice, totalPrice, reason }. Pure
 // function on a Playwright page — doesn't touch the shared `page`,
 // so safe to call concurrently from N tabs.
-async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
+async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) {
   const finalUrl = withDateParams(url, checkIn, checkOut);
   await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
   await normalizePageDisplay(targetPage);
-  const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut }) => {
+  const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut, bedrooms }) => {
     const nightsBetween = (a, b) => Math.max(
       1,
       Math.round((new Date(`${b}T12:00:00Z`).getTime() - new Date(`${a}T12:00:00Z`).getTime()) / 86400000),
@@ -818,6 +818,86 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
       return `${m}/${d}/${y}`;
     };
     const host = window.location.hostname.replace(/^www\./, "");
+
+    function parseMoneyAmount(raw) {
+      const n = parseFloat(String(raw || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function bedroomPhraseRe(n) {
+      if (!n || !Number.isFinite(Number(n))) return null;
+      const words = { 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six" };
+      const w = words[Number(n)];
+      return new RegExp(`(?:${n}${w ? `|${w}` : ""})[\\s-]*(?:bedroom|bedrooms|bed|br|bd)`, "i");
+    }
+
+    function tryBookingCom() {
+      if (!/booking\.com$/i.test(host)) return null;
+      const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
+      if (/no availability|sold out|not available|unavailable for your dates|no properties found/i.test(text)) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `Booking.com page says unavailable for ${checkIn} → ${checkOut}`,
+        };
+      }
+      const reserveBtn = Array.from(document.querySelectorAll('button, a, input[type="submit"], [role="button"]'))
+        .find((el) => {
+          const label = [
+            el.textContent,
+            el.getAttribute?.("aria-label"),
+            el.getAttribute?.("title"),
+            el.getAttribute?.("value"),
+          ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+          const disabled = el.disabled || el.getAttribute?.("aria-disabled") === "true";
+          return !disabled && /\b(reserve|select|book now|see availability|choose room)\b/i.test(label);
+        });
+      const targetBedroomRe = bedroomPhraseRe(bedrooms);
+      const rowTexts = Array.from(document.querySelectorAll("[data-block-id], tr, [class*=hprt], [class*=room]"))
+        .map((el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter((row) => row.length > 20 && row.length < 5000 && /(?:US\$|\$)\s*[\d,]+/.test(row));
+      const pricedRows = rowTexts.filter((row) => /\b(select|reserve|room|suite|apartment|villa|nights?|price)\b/i.test(row));
+      const targetRows = targetBedroomRe ? pricedRows.filter((row) => targetBedroomRe.test(row)) : pricedRows;
+      if (targetBedroomRe && pricedRows.length > 0 && targetRows.length === 0) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `Booking.com did not show a priced ${bedrooms}-bedroom room type for ${checkIn} → ${checkOut}`,
+        };
+      }
+      const priceText = (targetRows[0] || pricedRows[0] || text).replace(/\s+/g, " ");
+      const perNightMatch =
+        priceText.match(/(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)[^\n.]{0,40}(?:per night|nightly)/i) ||
+        priceText.match(/(?:per night|nightly)[^\$]{0,40}(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)/i);
+      const nightly = perNightMatch ? Math.round(parseMoneyAmount(perNightMatch[1])) : null;
+      let total = 0;
+      const amounts = Array.from(priceText.matchAll(/(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)/g))
+        .map((m) => Math.round(parseMoneyAmount(m[1])))
+        .filter((n) => n > 0);
+      const minStayTotal = Math.max(250, (nightly && nightly > 0 ? nightly : 50) * nights * 0.6);
+      const plausibleTotals = amounts.filter((n) => n >= minStayTotal && (!nightly || Math.abs(n - nightly) > 3));
+      if (plausibleTotals.length > 0) total = Math.min(...plausibleTotals);
+      if (!(total > 0) && nightly && reserveBtn) total = Math.round(nightly * nights);
+      if (total > 0) {
+        return {
+          available: "yes",
+          nightlyPrice: nightly && nightly > 0 ? nightly : Math.round(total / nights),
+          totalPrice: Math.round(total),
+          reason: `Booking.com detail page quoted $${Math.round(total).toLocaleString()} total for ${nights} nights`,
+        };
+      }
+      if (reserveBtn) {
+        return {
+          available: "unclear",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: "Booking.com showed a reserve/select flow but no parseable total price",
+        };
+      }
+      return null;
+    }
 
     async function trySuiteParadise() {
       if (!/suite-paradise\.com$/i.test(host)) return null;
@@ -943,6 +1023,17 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
     }
 
     try {
+      const booking = tryBookingCom();
+      if (booking) return booking;
+    } catch (e) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: `Booking.com detail parse error: ${String(e?.message || e).slice(0, 120)}`,
+      };
+    }
+    try {
       const sp = await trySuiteParadise();
       if (sp) return sp;
     } catch (e) {
@@ -965,7 +1056,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
       };
     }
     return null;
-  }, { checkIn, checkOut }).catch(() => null);
+  }, { checkIn, checkOut, bedrooms }).catch(() => null);
   if (platformResult) return platformResult;
   return await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
@@ -1051,10 +1142,10 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut) {
 }
 
 async function processPmUrlCheck(id, params) {
-  const { url, checkIn, checkOut } = params;
+  const { url, checkIn, checkOut, bedrooms } = params;
   log(`pm_url_check ${id}: ${url} ${checkIn}→${checkOut}`);
   await ensureBrowser();
-  const result = await scrapePmUrl(page, url, checkIn, checkOut);
+  const result = await scrapePmUrl(page, url, checkIn, checkOut, bedrooms ?? null);
   await dumpPageState("pm", { id, ...params });
   log(`pm_url_check ${id}: available=${result.available} price=${result.nightlyPrice}/n`);
   await postResult(id, result);
@@ -1065,7 +1156,7 @@ async function processPmUrlCheck(id, params) {
 // wall time ≈ slowest single check, not sum. Capped at 5 to keep
 // Chrome happy and to bound the per-request budget.
 async function processPmUrlCheckBatch(id, params) {
-  const { urls, checkIn, checkOut } = params;
+  const { urls, checkIn, checkOut, bedrooms } = params;
   log(`pm_url_check_batch ${id}: ${urls.length} urls ${checkIn}→${checkOut}`);
   await ensureBrowser();
   const cap = Math.min(urls.length, 5);
@@ -1075,7 +1166,7 @@ async function processPmUrlCheckBatch(id, params) {
       let tab = null;
       try {
         tab = await context.newPage();
-        const r = await scrapePmUrl(tab, url, checkIn, checkOut);
+        const r = await scrapePmUrl(tab, url, checkIn, checkOut, bedrooms ?? null);
         return { url, ...r };
       } catch (e) {
         return {

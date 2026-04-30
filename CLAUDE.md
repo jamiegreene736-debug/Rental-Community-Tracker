@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-04-30: Codex fixed the Steve Kuykendall multi-slot find-buy-in
+  flow after Jamie saw an error-before-results, duplicate unit selection,
+  and missing Booking/PM rates. Changes: client auto-fill now seeds its
+  picked-URL set with already-attached sibling slot URLs and live-search
+  panels hide candidates already attached elsewhere in the reservation;
+  `storage.attachBuyIn()` also rejects attaching the same canonical
+  listing URL to two units in one reservation. The live-search query keeps
+  previous completed results visible during slow refreshes so a transient
+  retry/error state doesn't make the scan look broken. Booking.com search
+  cards are now treated as URL discovery only because their card prices can
+  be teaser/partial totals; sidecar detail verification opens the Booking
+  page, requires a priced room block matching the requested bedroom count,
+  and only then promotes the real total/nightly rate. PM/Booking sidecar
+  verification now covers up to 25 URLs, and the sidecar Google PM finder
+  starts in parallel with other source discovery to reduce cold-scan wall
+  time. The live worker at `~/Downloads/vrbo-sidecar/worker.mjs` was copied
+  and restarted while testing. Smoke checks: `npm run build` passed;
+  `npm run check` still fails on pre-existing repo-wide TypeScript errors.
 - 2026-04-30: Codex diagnosed Steve Kuykendall / Unit 721 showing a
   `$0` Parrish fallback even though PM rows were scanned. Root cause was
   the local sidecar `pm_url_check_batch` verifier throwing a DOM
