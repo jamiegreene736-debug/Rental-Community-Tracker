@@ -155,6 +155,8 @@ async function dismissObstructions(targetPage = page, label = "page") {
         const strictCloseRe = /^(?:×|x|close|dismiss)$/i;
         const cookieRe = /\b(?:accept all|accept cookies|allow all|i agree|agree|reject all|decline|got it|ok)\b/i;
         const globalCookieRe = /\b(?:accept all|accept cookies|allow all|i agree|reject all|decline)\b/i;
+        const socialRe = /\b(?:twitter|x\.com|facebook|instagram|threads|pinterest|social|share)\b/i;
+        const socialHrefRe = /(?:^|\/\/|\.)(?:x\.com|twitter\.com|facebook\.com|instagram\.com|threads\.net|pinterest\.com|t\.co)\b/i;
 
         function isVisible(el) {
           if (!el || !(el instanceof HTMLElement)) return false;
@@ -180,6 +182,12 @@ async function dismissObstructions(targetPage = page, label = "page") {
 
         function isDisabled(el) {
           return Boolean(el.disabled) || el.getAttribute?.("aria-disabled") === "true";
+        }
+
+        function isSocialControl(el, label) {
+          const compact = String(label || "").trim();
+          const href = el.closest?.("a[href]")?.getAttribute("href") || el.getAttribute?.("href") || "";
+          return socialRe.test(compact) || socialHrefRe.test(href);
         }
 
         function isDismissLabel(label) {
@@ -233,6 +241,7 @@ async function dismissObstructions(targetPage = page, label = "page") {
           const target = controls.find((el) => {
             const label = labelOf(el);
             if (!label) return false;
+            if (isSocialControl(el, label)) return false;
             if (looksCookie && cookieRe.test(label)) return true;
             return isDismissLabel(label);
           });
@@ -245,11 +254,15 @@ async function dismissObstructions(targetPage = page, label = "page") {
 
         const controls = Array.from(document.querySelectorAll(CONTROL_SELECTOR))
           .filter((el) => isVisible(el) && !isDisabled(el));
-        const cookieTarget = controls.find((el) => globalCookieRe.test(labelOf(el)));
+        const cookieTarget = controls.find((el) => {
+          const label = labelOf(el);
+          return !isSocialControl(el, label) && globalCookieRe.test(label);
+        });
         if (cookieTarget) return clickCandidate(cookieTarget, "cookie-or-consent");
 
         const closeTarget = controls.find((el) => {
           const label = labelOf(el);
+          if (isSocialControl(el, label)) return false;
           if (!isDismissLabel(label)) return false;
           const rect = el.getBoundingClientRect();
           return rect.width <= 96 && rect.height <= 96;
