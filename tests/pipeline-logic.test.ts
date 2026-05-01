@@ -797,4 +797,94 @@ console.log("\nPoipu Kai buy-in target guard suite");
   console.log("  ✓ Poipu Kai condo/sub-community listings still pass");
 }
 
+// ---------- Buy-in final target bedroom proof ----------
+// Mirrors the split in server/routes.ts: unknown-bedroom candidates may
+// enter sidecar verification, but final/search-result rows require proof
+// that they match the requested bedroom count.
+
+console.log("\nBuy-in bedroom proof suite");
+
+{
+  type BuyInCandidate = {
+    title: string;
+    snippet?: string;
+    url: string;
+    bedrooms?: number;
+  };
+  const requestedBedrooms = 3;
+  const bedroomFromText = (text: string): number | null => {
+    const t = text.toLowerCase();
+    if (/\bstudio\b|\befficiency\b/.test(t)) return 0;
+    const m = t.match(/(\d+)\s*(?:br|bd|bdr|bedrooms?)\b/);
+    if (m) return parseInt(m[1], 10);
+    const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+    for (const [w, n] of Object.entries(words)) {
+      if (new RegExp(`\\b${w}[\\s-]bedroom\\b`).test(t)) return n;
+    }
+    return null;
+  };
+  const bedroomSignal = (c: BuyInCandidate): number | null =>
+    typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(`${c.title} ${c.snippet ?? ""} ${c.url}`);
+  const fits = (c: BuyInCandidate, requireBedroomProof = false): boolean => {
+    const inferred = bedroomSignal(c);
+    if (inferred !== null && inferred !== requestedBedrooms) return false;
+    if (requireBedroomProof && inferred === null) return false;
+    return true;
+  };
+
+  assert.equal(
+    fits({ title: "Poipu Kai condo with pool", url: "https://example.com/unit-812" }),
+    true,
+    "unknown bedroom rows can still be sent to sidecar for inspection",
+  );
+  assert.equal(
+    fits({ title: "Poipu Kai condo with pool", url: "https://example.com/unit-812" }, true),
+    false,
+    "unknown bedroom rows must not reach final search results",
+  );
+  assert.equal(
+    fits({ title: "Poipu Kai 2BR condo", url: "https://example.com/unit-812" }, true),
+    false,
+    "explicit 2BR rows must not reach final search results",
+  );
+  assert.equal(
+    fits({ title: "Poipu Kai 3BR condo", url: "https://example.com/unit-812" }, true),
+    true,
+    "explicit 3BR rows can reach final search results",
+  );
+  console.log("  ✓ final target rows require exact 3BR proof");
+}
+
+// ---------- Sidecar generic date-price trust guard ----------
+// Mirrors worker.mjs: generic visible prices are only trusted when both
+// requested dates are visible. A stale total for another search window is
+// downgraded to unclear.
+
+console.log("\nSidecar date signal suite");
+
+{
+  const dateHintVariants = (iso: string): string[] => {
+    const hints = [iso];
+    const d = new Date(`${iso}T12:00:00Z`);
+    if (Number.isFinite(d.getTime())) {
+      const monthShort = d.toLocaleString("en-US", { timeZone: "UTC", month: "short" });
+      const monthLong = d.toLocaleString("en-US", { timeZone: "UTC", month: "long" });
+      hints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`);
+      hints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${String(d.getUTCFullYear()).slice(-2)}`);
+      hints.push(`${monthShort} ${d.getUTCDate()}`);
+      hints.push(`${monthLong} ${d.getUTCDate()}`);
+    }
+    return hints;
+  };
+  const hasBothDates = (text: string, checkIn: string, checkOut: string): boolean => {
+    const lower = text.toLowerCase();
+    return dateHintVariants(checkIn).some((hint) => lower.includes(hint.toLowerCase())) &&
+      dateHintVariants(checkOut).some((hint) => lower.includes(hint.toLowerCase()));
+  };
+
+  assert.equal(hasBothDates("June 13 total $3,200", "2026-06-13", "2026-06-20"), false);
+  assert.equal(hasBothDates("Jun 13 to Jun 20 total $3,200", "2026-06-13", "2026-06-20"), true);
+  console.log("  ✓ generic sidecar prices require both requested dates");
+}
+
 console.log("\nall suites passed ✅");

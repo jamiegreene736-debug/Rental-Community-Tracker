@@ -254,6 +254,62 @@ function withPagePrepReason(result, dismissals, dateEntry) {
   };
 }
 
+function pmDateEntryComplete(dateEntry) {
+  return Boolean(
+    dateEntry?.filled?.some((f) => f.role === "range") ||
+    (dateEntry?.filled?.some((f) => f.role === "checkin") && dateEntry?.filled?.some((f) => f.role === "checkout")),
+  );
+}
+
+function attachDetectedBedrooms(result, bedrooms) {
+  if (!result) return result;
+  if (typeof result.bedrooms === "number" && Number.isFinite(result.bedrooms)) return result;
+  return {
+    ...result,
+    bedrooms: typeof bedrooms === "number" && Number.isFinite(bedrooms) ? bedrooms : null,
+  };
+}
+
+async function detectPmPageBedrooms(targetPage) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return withSoftTimeout(
+    targetPage.evaluate(() => {
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+      function extractBedroomCount(raw) {
+        const text = clean(raw).toLowerCase();
+        if (!text) return null;
+        if (/\bstudio\b|\befficiency\b/.test(text)) return 0;
+        const direct = text.match(/\b([1-9])\s*(?:br|bd|bdr|bedrooms?|bed\s*rooms?)\b/);
+        if (direct) return parseInt(direct[1], 10);
+        const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+        for (const [word, count] of Object.entries(words)) {
+          if (new RegExp(`\\b${word}[\\s-]*(?:bedroom|bedrooms|bed\\s*rooms?)\\b`).test(text)) return count;
+        }
+        return null;
+      }
+      const selectorGroups = [
+        "h1, [data-testid*='title' i], [class*='title' i]",
+        "[data-testid*='bedroom' i], [class*='bedroom' i], [class*='property-info' i], [class*='property-details' i], [class*='unit-details' i], [class*='amenit' i]",
+        "meta[name='description'], meta[property='og:description']",
+      ];
+      for (const selectors of selectorGroups) {
+        const parts = Array.from(document.querySelectorAll(selectors))
+          .slice(0, 12)
+          .map((el) => el instanceof HTMLMetaElement ? el.content : el.textContent)
+          .map(clean)
+          .filter(Boolean);
+        const found = extractBedroomCount(parts.join(" | "));
+        if (found !== null) return found;
+      }
+      return extractBedroomCount(`${document.title || ""} ${(document.body?.innerText || "").slice(0, 3000)}`);
+    }),
+    2_000,
+    null,
+  ).catch(() => null);
+}
+
 function authHeaders() {
   return ADMIN_SECRET ? { "X-Admin-Secret": ADMIN_SECRET } : {};
 }
@@ -1294,6 +1350,9 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         ["#checkin, #check_in, [name='checkin'], [name='check_in']", "#checkout, #check_out, [name='checkout'], [name='check_out']"],
         ["[name*='arrival' i], [id*='arrival' i], [name*='start' i], [id*='start' i]", "[name*='departure' i], [id*='departure' i], [name*='end' i], [id*='end' i]"],
       ];
+      const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
+      const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
 
       function isRendered(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1301,6 +1360,15 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         const style = window.getComputedStyle(el);
         return rect.width > 2 && rect.height > 2 &&
           style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
 
       function setInputValue(el, value, iso) {
@@ -1338,7 +1406,24 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         if (setInputValue(end, checkOutHuman, checkOut)) {
           filled.push({ role: "checkout", label: `${end.getAttribute("name") || end.id || "paired end"}`.slice(0, 80), visible: true });
         }
-        if (filled.length > 0) return { filled, submitLabel: null, openedLabel: null, controlCount: 2 };
+        const submit = filled.some((f) => f.role === "checkin") && filled.some((f) => f.role === "checkout")
+          ? Array.from(document.querySelectorAll(buttonSelector))
+            .filter((el) => el instanceof HTMLElement && isRendered(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
+            .find((el) => {
+              const label = textOf(el);
+              return submitRe.test(label) && !badDateActionRe.test(label);
+            })
+          : null;
+        if (submit) {
+          submit.scrollIntoView?.({ block: "center", inline: "center" });
+          submit.click();
+        }
+        if (filled.length > 0) return {
+          filled,
+          submitLabel: submit ? textOf(submit).slice(0, 80) || submit.tagName.toLowerCase() : null,
+          openedLabel: null,
+          controlCount: 2,
+        };
       }
       return null;
     }, { checkIn, checkOut }),
@@ -1701,6 +1786,12 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   await targetPage.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" })).catch(() => {});
   const dateEntry = await applyPmDateInputs(targetPage, checkIn, checkOut);
   await normalizePageDisplay(targetPage);
+  const hostForBedroomDetect = (() => {
+    try { return new URL(finalUrl).hostname.replace(/^www\./, ""); } catch { return ""; }
+  })();
+  const detectedBedrooms = /booking\.com$/i.test(hostForBedroomDetect)
+    ? null
+    : await detectPmPageBedrooms(targetPage);
   const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut, bedrooms }) => {
     const nightsBetween = (a, b) => Math.max(
       1,
@@ -2070,7 +2161,9 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     }
     return null;
   }, { checkIn, checkOut, bedrooms }).catch(() => null);
-  if (platformResult) return withPagePrepReason(platformResult, dismissals, dateEntry);
+  if (platformResult) {
+    return withPagePrepReason(attachDetectedBedrooms(platformResult, detectedBedrooms), dismissals, dateEntry);
+  }
   const genericResult = await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
     const NO_PATTERNS = [
@@ -2113,20 +2206,24 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     const totalPrice = text.match(/\$\s*([\d,]+)\s*total/i) || text.match(/total\s*\$\s*([\d,]+)/i);
     const nightlyN = perNight ? parseInt(perNight[1].replace(/,/g, ""), 10) : null;
     const totalN = totalPrice ? parseInt(totalPrice[1].replace(/,/g, ""), 10) : null;
-    const dateHints = [checkIn, checkOut];
-    for (const iso of [checkIn, checkOut]) {
+    const dateHintVariants = (iso) => {
+      const hints = [iso];
       const d = new Date(`${iso}T12:00:00Z`);
       if (Number.isFinite(d.getTime())) {
         const monthShort = d.toLocaleString("en-US", { timeZone: "UTC", month: "short" });
         const monthLong = d.toLocaleString("en-US", { timeZone: "UTC", month: "long" });
-        dateHints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`);
-        dateHints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${String(d.getUTCFullYear()).slice(-2)}`);
-        dateHints.push(`${monthShort} ${d.getUTCDate()}`);
-        dateHints.push(`${monthLong} ${d.getUTCDate()}`);
+        hints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`);
+        hints.push(`${d.getUTCMonth() + 1}/${d.getUTCDate()}/${String(d.getUTCFullYear()).slice(-2)}`);
+        hints.push(`${monthShort} ${d.getUTCDate()}`);
+        hints.push(`${monthLong} ${d.getUTCDate()}`);
       }
-    }
-    const hasDateSignal = dateHints.some((hint) => text.toLowerCase().includes(String(hint).toLowerCase()));
-    const hasDateSpecificPrice = totalN || (reserveBtn && nightlyN && hasDateSignal);
+      return hints;
+    };
+    const lowerText = text.toLowerCase();
+    const hasCheckInSignal = dateHintVariants(checkIn).some((hint) => lowerText.includes(String(hint).toLowerCase()));
+    const hasCheckOutSignal = dateHintVariants(checkOut).some((hint) => lowerText.includes(String(hint).toLowerCase()));
+    const hasDateSignal = hasCheckInSignal && hasCheckOutSignal;
+    const hasDateSpecificPrice = hasDateSignal && (totalN || (reserveBtn && nightlyN));
     if (hasDateSpecificPrice) {
       return {
         available: "yes",
@@ -2152,7 +2249,18 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       reason: "Page didn't show a clear availability/price signal — possibly login wall or non-standard PM layout",
     };
   }, { checkIn, checkOut, nights: Math.max(1, Math.round((new Date(`${checkOut}T12:00:00Z`).getTime() - new Date(`${checkIn}T12:00:00Z`).getTime()) / 86400000)) });
-  return withPagePrepReason(genericResult, dismissals, dateEntry);
+  const genericWithBedrooms = attachDetectedBedrooms(genericResult, detectedBedrooms);
+  const preparedGeneric = withPagePrepReason(genericWithBedrooms, dismissals, dateEntry);
+  if (preparedGeneric?.available === "yes" && (!pmDateEntryComplete(dateEntry) || !dateEntry?.submitLabel)) {
+    return {
+      ...preparedGeneric,
+      available: "unclear",
+      nightlyPrice: null,
+      totalPrice: null,
+      reason: `Date-specific search was not confirmed by a clicked availability/search submit; ${preparedGeneric.reason}`.slice(0, 800),
+    };
+  }
+  return preparedGeneric;
 }
 
 async function processPmUrlCheck(id, params) {

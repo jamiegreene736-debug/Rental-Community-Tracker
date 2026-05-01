@@ -2593,7 +2593,8 @@ export async function registerRoutes(
       return null;
     };
     // Reject if text mentions a bedroom count that clearly doesn't match.
-    // Keep unknowns — we show the user and they can verify.
+    // Unknowns are still allowed into the sidecar verifier so Chrome can
+    // inspect the detail page, but final/search-result rows require proof.
     const bedroomOk = (text: string): boolean => {
       const b = bedroomFromText(text);
       if (b === null) return true; // unknown — keep for manual review
@@ -2762,11 +2763,15 @@ export async function registerRoutes(
       // being inside the Poipu Kai condo/resort inventory.
       return hasPoipuKai && hasCondoSignal;
     };
-    const candidateFitsTarget = (c: Candidate): boolean => {
+    const candidateFitsTarget = (
+      c: Candidate,
+      opts: { requireBedroomProof?: boolean } = {},
+    ): boolean => {
       const hay = candidateHaystack(c);
       if (!mentionsResort(hay)) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
+      if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (!candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
@@ -3302,6 +3307,16 @@ export async function registerRoutes(
             for (const r of batchRes.results) {
               const seed = byUrl.get(r.url);
               if (!seed || r.available !== "yes") continue;
+              if (typeof r.bedrooms === "number" && Number.isFinite(r.bedrooms)) {
+                seed.bedrooms = r.bedrooms;
+              }
+              const bedroomSignal = candidateBedroomSignal(seed);
+              if (bedroomSignal !== bedrooms) {
+                console.log(
+                  `[find-buy-in] vrbo detail sidecar rejected ${seed.url}: bedroom proof=${bedroomSignal ?? "unknown"} expected=${bedrooms}`,
+                );
+                continue;
+              }
               const total = typeof r.totalPrice === "number" && r.totalPrice > 0
                 ? r.totalPrice
                 : typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
@@ -4254,6 +4269,10 @@ export async function registerRoutes(
         base = "Unavailable or blocked by stay rules";
       } else if (/did not show a priced .*bedroom|room type|bedroom room/i.test(raw)) {
         base = "Bedroom-specific room/rate not found";
+      } else if (/not requested \d+BR|did not confirm this is a \d+BR|identified \d+BR/i.test(raw)) {
+        base = "Bedroom count not confirmed";
+      } else if (/Date-specific search was not confirmed|clicked availability\/search submit/i.test(raw)) {
+        base = "Date search was not submitted";
       } else if (/generic book\/price signal|no date-specific total|no parseable total/i.test(raw)) {
         base = "Book/price visible but no date-specific total";
       } else if (/didn't show a clear availability\/price signal|non-standard PM layout|login wall/i.test(raw)) {
@@ -4345,6 +4364,19 @@ export async function registerRoutes(
                 continue;
               }
               sidecarBatchVerifiedUrls.add(c.url);
+              if (typeof r.bedrooms === "number" && Number.isFinite(r.bedrooms)) {
+                c.bedrooms = r.bedrooms;
+              }
+              const sidecarBedroomSignal = candidateBedroomSignal(c);
+              if (r.available === "yes" && sidecarBedroomSignal !== bedrooms) {
+                c.verified = sidecarBedroomSignal === null ? "unclear" : "no";
+                c.verifiedReason = sidecarBedroomSignal === null
+                  ? `Sidecar found a rate but did not confirm this is a ${bedrooms}BR listing: ${r.reason}`
+                  : `Sidecar detail page identified ${sidecarBedroomSignal}BR, not requested ${bedrooms}BR: ${r.reason}`;
+                c.verifiedNightlyPrice = null;
+                rememberSidecarVerifyReason(c, c.verifiedReason);
+                continue;
+              }
               c.verified = r.available;
               c.verifiedReason = r.reason;
               c.verifiedNightlyPrice = r.nightlyPrice ?? null;
@@ -4408,7 +4440,7 @@ export async function registerRoutes(
     }
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
-      const kept = items.filter(candidateFitsTarget);
+      const kept = items.filter((item) => candidateFitsTarget(item, { requireBedroomProof: true }));
       targetFilterDropped[key] += items.length - kept.length;
       return kept;
     };

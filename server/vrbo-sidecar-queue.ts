@@ -100,6 +100,7 @@ export type SidecarPmUrlCheckBatchResult = Array<{
   available: "yes" | "no" | "unclear";
   nightlyPrice: number | null;
   totalPrice: number | null;
+  bedrooms?: number | null;
   reason: string;
 }>;
 
@@ -197,6 +198,7 @@ export type SidecarPmUrlCheckResult = {
   available: "yes" | "no" | "unclear";
   nightlyPrice: number | null;
   totalPrice: number | null;
+  bedrooms?: number | null;
   reason: string;
 };
 
