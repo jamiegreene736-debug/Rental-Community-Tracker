@@ -53,6 +53,10 @@ Before making any changes:
   the search results visible behind it, and leaves a persistent "View
   log" button in the panel after close. This is meant to replace
   screenshot-only debugging when Jamie sees a partial/slow/fallback scan.
+  Follow-up smoke caught that verifier `no`/`unclear` counts were being
+  counted only inside the priced pool; Codex changed them to count every
+  sidecar-checked URL so the report does not say "25 checked, 0 no,
+  0 unclear" when all checked URLs were actually unavailable/unclear.
 - 2026-04-30: Codex fixed the Steve Kuykendall multi-slot find-buy-in
   flow after Jamie saw an error-before-results, duplicate unit selection,
   and missing Booking/PM rates. Changes: client auto-fill now seeds its

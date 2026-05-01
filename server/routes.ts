@@ -4334,9 +4334,9 @@ export async function registerRoutes(
     // rows the sidecar didn't cover (sidecar offline OR > 5 PMs) get
     // marked "skipped" so the UI distinguishes them from confirmed-yes.
     const preVerifyAttempted = sidecarBatchVerifiedUrls.size;
-    const preVerifyYes = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
-    const preVerifyNo = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
-    const preVerifyUnclear = priced.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "unclear").length;
+    const preVerifyYes = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
+    const preVerifyNo = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
+    const preVerifyUnclear = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "unclear").length;
     for (const c of priced) {
       if (c.source === "pm" && !c.verified) c.verified = "skipped";
     }
