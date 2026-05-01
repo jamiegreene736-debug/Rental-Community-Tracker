@@ -858,6 +858,34 @@ async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
   return clicked;
 }
 
+function normalizeBookingSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&amp;/g, "&")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm) {
+  try {
+    const current = new URL(page.url());
+    const actualSearchTerm = current.searchParams.get("ss") || "";
+    const expected = normalizeBookingSearchText(expectedSearchTerm);
+    const actual = normalizeBookingSearchText(actualSearchTerm);
+    if (actual && expected && actual !== expected) {
+      log(`booking_search: restored intended search term after autocomplete rewrite "${actualSearchTerm.slice(0, 90)}"`);
+      await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+      await page.waitForTimeout(PAGE_SETTLE_MS);
+      await dismissObstructions(page, "booking_search_after_query_restore");
+      return true;
+    }
+  } catch (e) {
+    log(`booking search-term restore skipped: ${e?.message ?? e}`);
+  }
+  return false;
+}
+
 async function processVrboSearch(id, params) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
@@ -1122,6 +1150,7 @@ async function processBookingSearch(id, params) {
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "booking_search");
   await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
+  await restoreBookingSearchUrlIfRewritten(url, effectiveSearchTerm);
   await applyBookingBedroomFilter(bedrooms).catch(() => false);
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
@@ -2368,8 +2397,24 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       });
     const perNight = text.match(/\$\s*([\d,]+)\s*(?:\/|per|a\s+)?\s*(?:night|nightly)/i);
     const totalPrice = text.match(/\$\s*([\d,]+)\s*total/i) || text.match(/total\s*\$\s*([\d,]+)/i);
+    const totalForStayRe = new RegExp(`\\$\\s*([\\d,]+(?:\\.\\d+)?)\\s*for\\s+${nights}\\s+nights?`, "ig");
+    const totalForStayMatches = Array.from(text.matchAll(totalForStayRe));
+    const availabilityIdx = text.search(/\byour dates are available\b/i);
+    const currentPriceIdx = text.search(/\bcurrent price\b/i);
+    const preferredTotalForStay =
+      totalForStayMatches.find((m) => availabilityIdx >= 0 && m.index != null && m.index >= availabilityIdx && m.index - availabilityIdx < 700) ||
+      totalForStayMatches.find((m) => currentPriceIdx >= 0 && m.index != null && m.index >= currentPriceIdx && m.index - currentPriceIdx < 700) ||
+      totalForStayMatches[0] ||
+      null;
     const nightlyN = perNight ? parseInt(perNight[1].replace(/,/g, ""), 10) : null;
-    const totalN = totalPrice ? parseInt(totalPrice[1].replace(/,/g, ""), 10) : null;
+    const totalN = totalPrice
+      ? parseInt(totalPrice[1].replace(/,/g, ""), 10)
+      : preferredTotalForStay
+      ? Math.round(parseFloat(preferredTotalForStay[1].replace(/,/g, "")))
+      : null;
+    const nightlyForSelectedStay = preferredTotalForStay && totalN
+      ? Math.round(totalN / nights)
+      : nightlyN;
     const dateHintVariants = (iso) => {
       const hints = [iso];
       const d = new Date(`${iso}T12:00:00Z`);
@@ -2387,15 +2432,16 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     const hasCheckInSignal = dateHintVariants(checkIn).some((hint) => lowerText.includes(String(hint).toLowerCase()));
     const hasCheckOutSignal = dateHintVariants(checkOut).some((hint) => lowerText.includes(String(hint).toLowerCase()));
     const hasDateSignal = hasCheckInSignal && hasCheckOutSignal;
-    const hasDateSpecificPrice = hasDateSignal && (totalN || (reserveBtn && nightlyN));
+    const hasAvailableDatesSignal = /\byour dates are available\b/i.test(text);
+    const hasDateSpecificPrice = hasDateSignal && (totalN || (reserveBtn && nightlyForSelectedStay) || (hasAvailableDatesSignal && totalN));
     if (hasDateSpecificPrice) {
       return {
         available: "yes",
-        nightlyPrice: nightlyN,
-        totalPrice: totalN ?? (nightlyN ? Math.round(nightlyN * nights) : null),
+        nightlyPrice: nightlyForSelectedStay,
+        totalPrice: totalN ?? (nightlyForSelectedStay ? Math.round(nightlyForSelectedStay * nights) : null),
         reason: reserveBtn
-          ? `Reserve/Book button present${nightlyN ? ` ($${nightlyN}/night)` : ""}${totalN ? ` ($${totalN} total)` : ""}`
-          : `Visible price${nightlyN ? ` $${nightlyN}/night` : ""}${totalN ? ` $${totalN} total` : ""}`,
+          ? `Reserve/Book button present${nightlyForSelectedStay ? ` ($${nightlyForSelectedStay}/night)` : ""}${totalN ? ` ($${totalN} total)` : ""}`
+          : `Visible price${nightlyForSelectedStay ? ` $${nightlyForSelectedStay}/night` : ""}${totalN ? ` $${totalN} total` : ""}`,
       };
     }
     if (reserveBtn || nightlyN || totalN) {
