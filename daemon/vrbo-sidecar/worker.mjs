@@ -222,16 +222,29 @@ async function dismissObstructions(targetPage = page, label = "page") {
   return actions;
 }
 
-function withDismissalReason(result, dismissals) {
-  if (!result || !Array.isArray(dismissals) || dismissals.length === 0) return result;
-  const detail = dismissals
-    .slice(0, 4)
-    .map((a) => `${a.kind}:${a.label}`)
-    .join(", ");
+function withPagePrepReason(result, dismissals, dateEntry) {
+  if (!result) return result;
+  const parts = [];
+  if (Array.isArray(dismissals) && dismissals.length > 0) {
+    const detail = dismissals
+      .slice(0, 4)
+      .map((a) => `${a.kind}:${a.label}`)
+      .join(", ");
+    parts.push(`dismissed obstruction(s): ${detail}`);
+  }
+  const filledCount = dateEntry?.filled?.length ?? 0;
+  if (filledCount > 0 || dateEntry?.openedLabel || dateEntry?.submitLabel) {
+    parts.push(
+      `entered dates (${filledCount} field${filledCount === 1 ? "" : "s"}` +
+      `${dateEntry?.openedLabel ? `, opened "${dateEntry.openedLabel}"` : ""}` +
+      `${dateEntry?.submitLabel ? `, clicked "${dateEntry.submitLabel}"` : ""})`,
+    );
+  }
+  if (parts.length === 0) return result;
   const base = result.reason || "Parsed page";
   return {
     ...result,
-    reason: `${base}; dismissed obstruction(s): ${detail}`.slice(0, 600),
+    reason: `${base}; ${parts.join("; ")}`.slice(0, 800),
   };
 }
 
@@ -959,6 +972,211 @@ function withDateParams(url, checkIn, checkOut) {
   }
 }
 
+async function applyPmDateInputs(targetPage, checkIn, checkOut) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const attempt = async (allowOpenOnly) => withSoftTimeout(
+    targetPage.evaluate(({ checkIn, checkOut, allowOpenOnly }) => {
+      const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
+      const [coutY, coutM, coutD] = String(checkOut).split("-").map((p) => parseInt(p, 10));
+      const checkInHuman = `${cinM}/${cinD}/${cinY}`;
+      const checkOutHuman = `${coutM}/${coutD}/${coutY}`;
+      const rangeHuman = `${checkInHuman} - ${checkOutHuman}`;
+      const controlSelector = [
+        "input",
+        "textarea",
+        "select",
+        "[contenteditable='true']",
+        "[role='textbox']",
+      ].join(",");
+      const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
+      const inRe = /\b(?:check[\s_-]*in|arrival|arrive|start|from|begin|beginning)\b/i;
+      const outRe = /\b(?:check[\s_-]*out|departure|depart|end|until|leave|leaving|to)\b/i;
+      const dateRe = /\b(?:date|dates|stay|calendar|availability|booking|reservation|arrival|departure|check[\s_-]*in|check[\s_-]*out)\b/i;
+      const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
+      const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
+      const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 2 && rect.height > 2 && rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+          el.getAttribute?.("class"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 3; i++, cur = cur.parentElement) {
+          parts.push(cur.getAttribute?.("aria-label"));
+          parts.push(cur.getAttribute?.("class"));
+          const txt = (cur.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length <= 240) parts.push(txt);
+        }
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function isDateControl(el) {
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute?.("type") || "").toLowerCase();
+        if (tag === "input" && ["button", "submit", "reset", "checkbox", "radio", "file", "image"].includes(type)) return false;
+        const ctx = contextOf(el);
+        if (tag === "input" && type === "date") return true;
+        if (!isVisible(el) && !(tag === "input" && type === "hidden" && /check|arrival|depart|date/i.test(ctx))) return false;
+        if (dateRe.test(ctx) || dateValueRe.test(ctx)) return true;
+        return false;
+      }
+
+      function setValue(el, value, iso) {
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute?.("type") || "").toLowerCase();
+        const nextValue = tag === "input" && type === "date" ? iso : value;
+        try { el.focus?.(); } catch {}
+        if (tag === "select") {
+          const options = Array.from(el.options || []);
+          const wanted = [nextValue, value, iso].map((s) => String(s).toLowerCase());
+          const option = options.find((o) => wanted.some((w) => String(o.value || "").toLowerCase().includes(w) || String(o.textContent || "").toLowerCase().includes(w)));
+          if (!option) return false;
+          el.value = option.value;
+        } else if (el.isContentEditable || el.getAttribute?.("role") === "textbox") {
+          el.textContent = nextValue;
+        } else {
+          const proto = Object.getPrototypeOf(el);
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) setter.call(el, nextValue);
+          else el.value = nextValue;
+        }
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return true;
+      }
+
+      function classify(el) {
+        const ctx = contextOf(el);
+        if (inRe.test(ctx) && !outRe.test(ctx)) return "checkin";
+        if (outRe.test(ctx) && !inRe.test(ctx)) return "checkout";
+        if (/\b(?:range|dates|stay)\b/i.test(ctx) && inRe.test(ctx) && outRe.test(ctx)) return "range";
+        return "unknown";
+      }
+
+      function clickSubmit(nearEls) {
+        const nearForms = new Set(nearEls.map((el) => el.closest?.("form")).filter(Boolean));
+        const buttons = Array.from(document.querySelectorAll(buttonSelector))
+          .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+        const candidates = buttons.filter((el) => {
+          const label = textOf(el);
+          if (!submitRe.test(label)) return false;
+          const form = el.closest?.("form");
+          return nearForms.size === 0 || nearForms.has(form) || /availability|rates|book|reserve|search/i.test(contextOf(el));
+        });
+        const target = candidates[0];
+        if (!target) return null;
+        target.scrollIntoView?.({ block: "center", inline: "center" });
+        target.click();
+        return textOf(target).slice(0, 80) || target.tagName.toLowerCase();
+      }
+
+      const controls = Array.from(document.querySelectorAll(controlSelector)).filter(isDateControl);
+      const visibleControls = controls.filter(isVisible);
+      const checkInEls = controls.filter((el) => classify(el) === "checkin");
+      const checkOutEls = controls.filter((el) => classify(el) === "checkout");
+      const rangeEls = controls.filter((el) => classify(el) === "range");
+      const filled = [];
+
+      const fillOne = (el, value, iso, role) => {
+        if (!el) return;
+        if (setValue(el, value, iso)) {
+          filled.push({ role, label: contextOf(el).slice(0, 80), visible: isVisible(el) });
+        }
+      };
+
+      if (checkInEls.length > 0 || checkOutEls.length > 0) {
+        fillOne(checkInEls[0], checkInHuman, checkIn, "checkin");
+        fillOne(checkOutEls[0], checkOutHuman, checkOut, "checkout");
+      } else if (rangeEls.length > 0) {
+        fillOne(rangeEls[0], rangeHuman, checkIn, "range");
+      } else if (visibleControls.length >= 2) {
+        fillOne(visibleControls[0], checkInHuman, checkIn, "checkin");
+        fillOne(visibleControls[1], checkOutHuman, checkOut, "checkout");
+      } else if (visibleControls.length === 1) {
+        fillOne(visibleControls[0], rangeHuman, checkIn, "range");
+      }
+
+      const submitLabel = filled.length > 0 ? clickSubmit(filled.map((f) => controls.find((el) => contextOf(el).slice(0, 80) === f.label)).filter(Boolean)) : null;
+      if (filled.length === 0 && allowOpenOnly) {
+        const openers = Array.from(document.querySelectorAll(buttonSelector))
+          .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
+          .filter((el) => openerRe.test(textOf(el)) || openerRe.test(contextOf(el)));
+        const opener = openers[0];
+        if (opener) {
+          opener.scrollIntoView?.({ block: "center", inline: "center" });
+          opener.click();
+          return { filled, submitLabel: null, openedLabel: textOf(opener).slice(0, 80) || opener.tagName.toLowerCase(), controlCount: controls.length };
+        }
+      }
+      return { filled, submitLabel, openedLabel: null, controlCount: controls.length };
+    }, { checkIn, checkOut, allowOpenOnly }),
+    5_000,
+    null,
+  );
+
+  const first = await attempt(true);
+  let result = first;
+  if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
+    await targetPage.waitForTimeout(1_000).catch(() => {});
+    await dismissObstructions(targetPage, "pm_date_entry_after_open");
+    const second = await attempt(false);
+    result = {
+      controlCount: second?.controlCount ?? first.controlCount ?? 0,
+      filled: [...(first.filled ?? []), ...(second?.filled ?? [])],
+      submitLabel: second?.submitLabel ?? first.submitLabel ?? null,
+      openedLabel: first.openedLabel,
+    };
+  }
+
+  const filledCount = result?.filled?.length ?? 0;
+  if (filledCount > 0 || result?.openedLabel || result?.submitLabel) {
+    log(
+      `pm_url_check: date entry controls=${result?.controlCount ?? 0} filled=${filledCount}` +
+      `${result?.openedLabel ? ` opened="${result.openedLabel}"` : ""}` +
+      `${result?.submitLabel ? ` clicked="${result.submitLabel}"` : ""}`,
+    );
+    if (result?.submitLabel || result?.openedLabel) {
+      await withSoftTimeout(targetPage.waitForLoadState("networkidle", { timeout: 4_000 }), 4_500);
+      await targetPage.waitForTimeout(1_000).catch(() => {});
+      await dismissObstructions(targetPage, "pm_url_check_after_date_submit");
+    }
+  }
+  return result;
+}
+
 // Visit `url` on `targetPage`, scrape an availability + price signal.
 // Returns { available, nightlyPrice, totalPrice, reason }. Pure
 // function on a Playwright page — doesn't touch the shared `page`,
@@ -968,6 +1186,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
   const dismissals = await dismissObstructions(targetPage, "pm_url_check");
+  const dateEntry = await applyPmDateInputs(targetPage, checkIn, checkOut);
   await normalizePageDisplay(targetPage);
   const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut, bedrooms }) => {
     const nightsBetween = (a, b) => Math.max(
@@ -1232,7 +1451,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     }
     return null;
   }, { checkIn, checkOut, bedrooms }).catch(() => null);
-  if (platformResult) return withDismissalReason(platformResult, dismissals);
+  if (platformResult) return withPagePrepReason(platformResult, dismissals, dateEntry);
   const genericResult = await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
     const NO_PATTERNS = [
@@ -1314,7 +1533,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       reason: "Page didn't show a clear availability/price signal — possibly login wall or non-standard PM layout",
     };
   }, { checkIn, checkOut, nights: Math.max(1, Math.round((new Date(`${checkOut}T12:00:00Z`).getTime() - new Date(`${checkIn}T12:00:00Z`).getTime()) / 86400000)) });
-  return withDismissalReason(genericResult, dismissals);
+  return withPagePrepReason(genericResult, dismissals, dateEntry);
 }
 
 async function processPmUrlCheck(id, params) {

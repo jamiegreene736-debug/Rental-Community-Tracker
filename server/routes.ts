@@ -4259,7 +4259,10 @@ export async function registerRoutes(
       } else if (/didn't show a clear availability\/price signal|non-standard PM layout|login wall/i.test(raw)) {
         base = "No clear availability/price signal";
       }
-      return /dismissed obstruction/i.test(raw) ? `${base} after popup/overlay dismissal` : base;
+      const suffixes: string[] = [];
+      if (/entered dates/i.test(raw)) suffixes.push("after date entry");
+      if (/dismissed obstruction/i.test(raw)) suffixes.push("after popup/overlay dismissal");
+      return suffixes.length > 0 ? `${base} ${suffixes.join(" + ")}` : base;
     };
     const rememberSidecarVerifyReason = (c: Candidate, reason?: string | null) => {
       const bucketName = normalizeSidecarVerifyReason(reason);

@@ -72,6 +72,15 @@ Before making any changes:
   report now summarizes top sidecar failure buckets (unavailable/stay-rule,
   no date-specific total, no clear signal, bot wall, navigation error, with
   popup-dismissal noted) so Jamie can paste one report instead of screenshots.
+  Follow-up from Jamie watching Chrome: PM URL verification was only adding
+  date query params and scraping, which fails on PM widgets that ignore URL
+  params until a human fills the inputs. The sidecar now runs a generic
+  `applyPmDateInputs()` step before scraping PM rates: it opens availability
+  widgets when needed, fills check-in/check-out or a date-range field,
+  clicks a nearby Search/Check Availability/View Rates/Book/Reserve action,
+  waits for the AJAX/navigation settle, then scrapes. Verification reasons
+  now include `entered dates (...)` and the server diagnostic buckets call
+  out outcomes "after date entry."
 - 2026-04-30: Codex added operator-facing diagnostics for
   `/api/operations/find-buy-in`. The route now returns a `diagnostics`
   object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM
