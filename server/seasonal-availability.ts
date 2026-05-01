@@ -61,6 +61,18 @@ export type AvailabilityThresholds = {
 };
 
 const SEASONS: SeasonKey[] = ["LOW", "HIGH", "HOLIDAY"];
+const SEASON_SCAN_HEARTBEAT_MS = 12_000;
+
+let seasonalScanQueue: Promise<unknown> = Promise.resolve();
+let seasonalScanActive: { propertyId: number; startedAt: number } | null = null;
+let seasonalScanQueued = 0;
+
+export function getSeasonalAvailabilityQueueStatus() {
+  return {
+    active: seasonalScanActive,
+    queued: seasonalScanQueued,
+  };
+}
 
 export const AVAILABILITY_LOCATION_BY_COMMUNITY: Record<string, AvailabilityLocation> = {
   "Poipu Kai":         { searchName: "Regency at Poipu Kai",        city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd",              lat: 21.8794, lng: -159.4609 },
@@ -90,6 +102,57 @@ function nightsBetween(checkIn: string, checkOut: string): number {
   const start = new Date(`${checkIn}T12:00:00Z`).getTime();
   const end = new Date(`${checkOut}T12:00:00Z`).getTime();
   return Math.max(1, Math.round((end - start) / 86_400_000));
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const err = new Error("seasonal availability scan cancelled");
+  err.name = "AbortError";
+  throw err;
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return rem ? `${minutes}m ${rem}s` : `${minutes}m`;
+}
+
+function enqueueSeasonalScan<T>(
+  args: {
+    propertyId: number;
+    signal?: AbortSignal;
+    onPhase?: (label: string) => void;
+  },
+  run: () => Promise<T>,
+): Promise<T> {
+  const queuedAhead = seasonalScanQueued + (seasonalScanActive ? 1 : 0);
+  seasonalScanQueued++;
+
+  let waitHeartbeat: NodeJS.Timeout | null = null;
+  const queuedAt = Date.now();
+  if (queuedAhead > 0) {
+    args.onPhase?.(`Waiting for sidecar scan slot (${queuedAhead} ahead)`);
+    waitHeartbeat = setInterval(() => {
+      args.onPhase?.(`Waiting for sidecar scan slot (${formatElapsed(Date.now() - queuedAt)})`);
+    }, SEASON_SCAN_HEARTBEAT_MS);
+  }
+
+  const task = seasonalScanQueue.then(async () => {
+    if (waitHeartbeat) clearInterval(waitHeartbeat);
+    seasonalScanQueued = Math.max(0, seasonalScanQueued - 1);
+    throwIfAborted(args.signal);
+    seasonalScanActive = { propertyId: args.propertyId, startedAt: Date.now() };
+    try {
+      return await run();
+    } finally {
+      seasonalScanActive = null;
+    }
+  });
+
+  seasonalScanQueue = task.catch(() => undefined);
+  return task;
 }
 
 function hashString(input: string): number {
@@ -295,6 +358,19 @@ export async function scanSeasonalAvailabilityCapacity(args: {
   config: PropertyUnitConfig;
   resortName?: string | null;
   manualMinSets?: number;
+  signal?: AbortSignal;
+  onPhase?: (label: string) => void;
+  onWindow?: (window: SeasonalAvailabilityWindow) => void;
+}): Promise<SeasonalAvailabilityResult> {
+  return enqueueSeasonalScan(args, () => runSeasonalAvailabilityCapacity(args));
+}
+
+async function runSeasonalAvailabilityCapacity(args: {
+  propertyId: number;
+  config: PropertyUnitConfig;
+  resortName?: string | null;
+  manualMinSets?: number;
+  signal?: AbortSignal;
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
 }): Promise<SeasonalAvailabilityResult> {
@@ -310,7 +386,12 @@ export async function scanSeasonalAvailabilityCapacity(args: {
 
   const results: SeasonalAvailabilityWindow[] = [];
   for (const { season, window } of windows) {
+    throwIfAborted(args.signal);
     args.onPhase?.(`Scanning ${season} sample (${window.checkIn} to ${window.checkOut})`);
+    const seasonStartedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      args.onPhase?.(`Still scanning ${season} sample (${formatElapsed(Date.now() - seasonStartedAt)})`);
+    }, SEASON_SCAN_HEARTBEAT_MS);
     try {
       const scan = await fetchMultiChannelBuyInByBR({
         community: loc.searchName,
@@ -326,9 +407,12 @@ export async function scanSeasonalAvailabilityCapacity(args: {
       results.push(result);
       args.onWindow?.(result);
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
       const result = buildErrorWindow({ season, window, units: args.config.units, thresholds, error });
       results.push(result);
       args.onWindow?.(result);
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 

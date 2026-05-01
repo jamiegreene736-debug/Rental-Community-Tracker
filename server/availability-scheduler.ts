@@ -18,6 +18,7 @@ import {
   type ChannelKey,
 } from "@shared/pricing-rates";
 import {
+  getSeasonalAvailabilityQueueStatus,
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
@@ -30,7 +31,7 @@ let _lastTickAt: Date | null = null;
 let _tickRunning = false;
 
 export function getScannerSchedulerStatus() {
-  return { lastTickAt: _lastTickAt, running: _tickRunning };
+  return { lastTickAt: _lastTickAt, running: _tickRunning, seasonalQueue: getSeasonalAvailabilityQueueStatus() };
 }
 
 // Main pipeline — identical to what the UI buttons do, all in one pass.

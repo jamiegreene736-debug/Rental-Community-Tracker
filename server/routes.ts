@@ -7304,7 +7304,27 @@ export async function registerRoutes(
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
-    const emit = (obj: Record<string, unknown>) => { res.write(JSON.stringify(obj) + "\n"); };
+    const scanAbort = new AbortController();
+    let streamOpen = true;
+    res.on("close", () => {
+      if (res.writableEnded) return;
+      streamOpen = false;
+      scanAbort.abort();
+    });
+    const emit = (obj: Record<string, unknown>) => {
+      if (!streamOpen || res.writableEnded || res.destroyed) return;
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        streamOpen = false;
+        scanAbort.abort();
+      }
+    };
+    const finishStream = () => {
+      if (!streamOpen || res.writableEnded || res.destroyed) return;
+      streamOpen = false;
+      res.end();
+    };
 
     if (mode !== "legacy-static-airbnb") {
       const thresholds = computeAvailabilityThresholds(config.units, minSets);
@@ -7353,6 +7373,7 @@ export async function registerRoutes(
           config,
           resortName,
           manualMinSets: minSets,
+          signal: scanAbort.signal,
           onPhase: (label) => emit({ type: "phase", label }),
           onWindow: emitWindow,
         });
@@ -7385,9 +7406,9 @@ export async function registerRoutes(
           durationMs: result.durationMs,
         });
       } catch (e: any) {
-        emit({ type: "error", error: e?.message ?? String(e) });
+        if (e?.name !== "AbortError") emit({ type: "error", error: e?.message ?? String(e) });
       }
-      res.end();
+      finishStream();
       return;
     }
 
@@ -7478,7 +7499,7 @@ export async function registerRoutes(
     }
 
     emit({ type: "done", weeks, baselineSets, baselineVerdict });
-    res.end();
+    finishStream();
   });
 
   // POST /api/availability/sync-blocks/:propertyId
