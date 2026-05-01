@@ -1,8 +1,9 @@
 // VRBO sidecar worker — drives real Chrome via CDP.
 //
 // v3 (2026-04-29): generalized to dispatch on op type. Each request
-// from the queue carries `opType` ∈ { vrbo_search, vrbo_photo_scrape,
-// booking_search, google_serp, pm_url_check } plus a `params` blob; this worker
+// from the queue carries `opType` ∈ { airbnb_search, vrbo_search,
+// vrbo_photo_scrape, booking_search, google_serp, pm_site_search,
+// pm_url_check } plus a `params` blob; this worker
 // dispatches to the right scrape function based on opType. Each
 // processor reuses the same Chrome instance — same dedicated
 // user-data-dir, same cookies, same accumulated trust.
@@ -673,6 +674,136 @@ async function dumpPageState(label, requestForLog) {
   }
 }
 
+// ─────────────────────── Airbnb search ──────────────────────────────
+async function processAirbnbSearch(id, params) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  log(
+    `airbnb_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
+    `${checkIn}→${checkOut} ${bedrooms}BR`,
+  );
+  await ensureBrowser();
+  const url =
+    `https://www.airbnb.com/s/${encodeURIComponent(effectiveSearchTerm)}/homes` +
+    `?query=${encodeURIComponent(effectiveSearchTerm)}` +
+    `&checkin=${checkIn}&checkout=${checkOut}` +
+    `&adults=2&min_bedrooms=${encodeURIComponent(String(bedrooms))}` +
+    `&room_types%5B%5D=Entire%20home%2Fapt&currency=USD&search_type=filter_change`;
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "airbnb_search");
+  await fillVisibleSearchField(page, effectiveSearchTerm, "airbnb_search").catch(() => null);
+  await clickVisibleSearchSubmit(page, "airbnb_search").catch(() => null);
+  await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  const state = await dumpPageState("airbnb", { id, ...params });
+  if (state && /captcha|access denied|not a robot|robot|unusual traffic/i.test(state.bodyExcerpt)) {
+    throw new Error("Airbnb bot wall — refresh cookies.json (airbnb.com) and kickstart");
+  }
+
+  const expectedNights = nightsBetween(checkIn, checkOut);
+  const cards = await page.evaluate(({ expectedNights, targetBedrooms, checkIn, checkOut }) => {
+    function clean(raw) {
+      return String(raw || "").replace(/\s+/g, " ").trim();
+    }
+    function extractBedrooms(raw) {
+      const text = clean(raw).toLowerCase();
+      const direct = text.match(/\b([1-9])\s*(?:br|bd|bdr|bedrooms?|bed\s*rooms?)\b/);
+      if (direct) return parseInt(direct[1], 10);
+      const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+      for (const [word, count] of Object.entries(words)) {
+        if (new RegExp(`\\b${word}[\\s-]*(?:bedroom|bedrooms|bed\\s*rooms?)\\b`).test(text)) return count;
+      }
+      return null;
+    }
+    function parseAmount(raw) {
+      const n = parseFloat(String(raw || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+      return Number.isFinite(n) ? n : 0;
+    }
+    function parsePrice(fullText) {
+      const text = clean(fullText);
+      const totalMatch =
+        text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|for\s+\d+\s+nights?)/i) ||
+        text.match(/total(?:\s+before\s+taxes)?\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+      if (totalMatch) {
+        const total = parseAmount(totalMatch[1]);
+        if (total > 0) return { totalPrice: Math.round(total), nightlyPrice: Math.round(total / expectedNights) };
+      }
+      const nightlyMatch =
+        text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:night|\/night|per night)/i) ||
+        text.match(/(?:night|\/night|per night)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+      if (nightlyMatch) {
+        const nightly = parseAmount(nightlyMatch[1]);
+        if (nightly > 0) return { nightlyPrice: Math.round(nightly), totalPrice: Math.round(nightly * expectedNights) };
+      }
+      const amounts = Array.from(text.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
+        .map((m) => parseAmount(m[1]))
+        .filter((n) => n > 0);
+      const plausibleTotal = amounts.filter((n) => n >= Math.max(250, expectedNights * 80)).sort((a, b) => a - b)[0];
+      if (plausibleTotal) return { totalPrice: Math.round(plausibleTotal), nightlyPrice: Math.round(plausibleTotal / expectedNights) };
+      const plausibleNightly = amounts.filter((n) => n >= 50 && n <= 5000).sort((a, b) => a - b)[0];
+      if (plausibleNightly) return { nightlyPrice: Math.round(plausibleNightly), totalPrice: Math.round(plausibleNightly * expectedNights) };
+      return null;
+    }
+    function cardForAnchor(anchor) {
+      let el = anchor;
+      let best = anchor;
+      for (let depth = 0; depth < 9 && el && el.parentElement; depth++) {
+        el = el.parentElement;
+        const txt = clean(el.textContent);
+        if (txt.includes("$") && txt.length > 50 && txt.length < 5000) {
+          best = el;
+          if (el.querySelector("img")) break;
+        }
+      }
+      return best;
+    }
+    function imageFrom(card) {
+      const img = card.querySelector("img");
+      return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
+    }
+    const out = [];
+    const seen = new Set();
+    const anchors = Array.from(document.querySelectorAll('a[href*="/rooms/"]'));
+    for (const a of anchors) {
+      const href = a.getAttribute("href") || "";
+      const match = href.match(/\/rooms\/(?:plus\/)?(\d+)/);
+      if (!match) continue;
+      const id = match[1];
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const card = cardForAnchor(a);
+      const fullText = clean(card.textContent || a.textContent || "");
+      const price = parsePrice(fullText);
+      if (!price) continue;
+      const bedrooms = extractBedrooms(fullText);
+      if (bedrooms !== null && bedrooms !== targetBedrooms) continue;
+      const title =
+        clean(a.getAttribute("aria-label")) ||
+        clean(card.querySelector("[data-testid*='listing-card-title' i], [id*='title' i], h3, h2")?.textContent) ||
+        clean(a.textContent) ||
+        `Airbnb room ${id}`;
+      const url = new URL(`/rooms/${id}`, "https://www.airbnb.com");
+      url.searchParams.set("check_in", checkIn);
+      url.searchParams.set("check_out", checkOut);
+      url.searchParams.set("adults", "2");
+      out.push({
+        url: url.toString(),
+        title: title.slice(0, 100),
+        totalPrice: price.totalPrice,
+        nightlyPrice: price.nightlyPrice,
+        bedrooms: bedrooms ?? targetBedrooms,
+        image: imageFrom(card),
+        snippet: fullText.slice(0, 220),
+      });
+    }
+    return out;
+  }, { expectedNights, targetBedrooms: Number.parseInt(String(bedrooms ?? ""), 10), checkIn, checkOut });
+
+  log(`airbnb_search ${id}: ${cards.length} priced room cards`);
+  await postResult(id, dedupeCandidatesByUrl(cards));
+}
+
 // ───────────────────────── VRBO search ──────────────────────────────
 async function applyVrboBedroomFilter(bedrooms) {
   const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
@@ -856,6 +987,222 @@ async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
     await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
   }
   return clicked;
+}
+
+function nightsBetween(checkIn, checkOut) {
+  return Math.max(
+    1,
+    Math.round((Date.parse(`${checkOut}T12:00:00Z`) - Date.parse(`${checkIn}T12:00:00Z`)) / 86400000),
+  );
+}
+
+function normalizeAbsoluteUrl(rawUrl, baseUrl) {
+  try {
+    return new URL(rawUrl, baseUrl).toString();
+  } catch {
+    return "";
+  }
+}
+
+function dedupeCandidatesByUrl(candidates) {
+  const seen = new Set();
+  const out = [];
+  for (const candidate of candidates) {
+    const key = String(candidate?.url || "").replace(/[?#].*$/, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+  }
+  return out;
+}
+
+async function fillVisibleSearchField(targetPage, searchTerm, label = "site_search") {
+  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  const filled = await withSoftTimeout(
+    targetPage.evaluate(({ searchTerm }) => {
+      const fieldRe = /\b(?:where|destination|location|search|keyword|property|resort|community|area|city)\b/i;
+      const badRe = /\b(?:email|phone|password|promo|coupon|newsletter|first name|last name|name on card)\b/i;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function setValue(el) {
+        try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+        try { el.focus?.(); } catch {}
+        const tag = el.tagName.toLowerCase();
+        if (el.isContentEditable || el.getAttribute?.("role") === "textbox") {
+          el.textContent = searchTerm;
+        } else if (tag === "input" || tag === "textarea") {
+          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+          if (setter) setter.call(el, searchTerm);
+          else el.value = searchTerm;
+        } else {
+          return false;
+        }
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return true;
+      }
+
+      const controls = Array.from(document.querySelectorAll("input:not([type='hidden']), textarea, [contenteditable='true'], [role='textbox']"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el))
+        .map((el) => {
+          const ctx = contextOf(el);
+          let score = 0;
+          if (fieldRe.test(ctx)) score += 80;
+          if (/search|where|destination|location/i.test(ctx)) score += 20;
+          if (badRe.test(ctx)) score -= 100;
+          const type = (el.getAttribute?.("type") || "").toLowerCase();
+          if (["date", "number", "email", "tel", "password"].includes(type)) score -= 80;
+          return { el, score, ctx };
+        })
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      const target = controls[0]?.el ?? null;
+      if (!target) return null;
+      return setValue(target) ? contextOf(target).slice(0, 100) : null;
+    }, { searchTerm }),
+    3_000,
+    null,
+  );
+  if (filled) log(`${label}: entered search term in "${filled}"`);
+  return filled;
+}
+
+async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter") {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
+  if (!Number.isFinite(targetBedrooms) || targetBedrooms <= 0) return null;
+  const filled = await withSoftTimeout(
+    targetPage.evaluate(({ targetBedrooms }) => {
+      const bedroomRe = /\b(?:bedroom|bedrooms|beds|br|bd)\b/i;
+      const badRe = /\b(?:bath|guest|adult|child|pet|price|email|phone)\b/i;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 4 && rect.height > 4 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 3; i++, cur = cur.parentElement) {
+          const txt = (cur.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length <= 180) parts.push(txt);
+        }
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function setValue(el) {
+        try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+        try { el.focus?.(); } catch {}
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+        if (setter) setter.call(el, String(targetBedrooms));
+        else el.value = String(targetBedrooms);
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return true;
+      }
+
+      const fields = Array.from(document.querySelectorAll("input:not([type='hidden']), select, [role='spinbutton']"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el))
+        .map((el) => {
+          const ctx = contextOf(el);
+          let score = 0;
+          if (bedroomRe.test(ctx)) score += 80;
+          if (badRe.test(ctx)) score -= 80;
+          return { el, score, ctx };
+        })
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      if (fields[0]) {
+        setValue(fields[0].el);
+        return `field:${fields[0].ctx.slice(0, 80)}`;
+      }
+
+      const buttons = Array.from(document.querySelectorAll("button, [role='button'], a"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+      const openFilter = buttons.find((el) => /\b(filter|rooms|guests|beds?)\b/i.test(textOf(el)) && bedroomRe.test(contextOf(el)))
+        ?? buttons.find((el) => /\b(filter|rooms|guests)\b/i.test(textOf(el)));
+      if (openFilter) openFilter.click();
+      const plus = buttons.find((el) => {
+        const hay = `${textOf(el)} ${contextOf(el)}`;
+        return bedroomRe.test(hay) && /\b(?:increase|add|plus|\+)\b/i.test(hay);
+      });
+      if (plus) {
+        for (let i = 0; i < targetBedrooms; i++) plus.click();
+        return `button:${textOf(plus).slice(0, 80)}`;
+      }
+      return null;
+    }, { targetBedrooms }),
+    4_000,
+    null,
+  );
+  if (filled) {
+    log(`${label}: applied ${targetBedrooms} bedroom filter via ${filled}`);
+    await targetPage.waitForTimeout(800).catch(() => {});
+  }
+  return filled;
 }
 
 function normalizeBookingSearchText(value) {
@@ -2585,6 +2932,182 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   return preparedGeneric;
 }
 
+function buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms) {
+  const start = site.searchUrl || site.baseUrl;
+  try {
+    const u = new URL(start);
+    for (const [key, value] of [
+      ["checkin", checkIn],
+      ["checkout", checkOut],
+      ["check_in", checkIn],
+      ["check_out", checkOut],
+      ["arrival", checkIn],
+      ["departure", checkOut],
+      ["startdate", checkIn],
+      ["enddate", checkOut],
+      ["bedrooms", String(bedrooms)],
+      ["beds", String(bedrooms)],
+      ["sleeps", "2"],
+      ["search", searchTerm],
+      ["q", searchTerm],
+      ["keyword", searchTerm],
+      ["location", searchTerm],
+    ]) {
+      if (!u.searchParams.has(key)) u.searchParams.set(key, value);
+    }
+    return u.toString();
+  } catch {
+    return start;
+  }
+}
+
+async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limit) {
+  const baseUrl = site.baseUrl;
+  return withSoftTimeout(
+    targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit }) => {
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+      function extractBedrooms(raw) {
+        const text = clean(raw).toLowerCase();
+        const direct = text.match(/\b([1-9])\s*(?:br|bd|bdr|bedrooms?|bed\s*rooms?)\b/);
+        if (direct) return parseInt(direct[1], 10);
+        const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+        for (const [word, count] of Object.entries(words)) {
+          if (new RegExp(`\\b${word}[\\s-]*(?:bedroom|bedrooms|bed\\s*rooms?)\\b`).test(text)) return count;
+        }
+        return null;
+      }
+      function sameHost(raw) {
+        try {
+          const b = new URL(baseUrl);
+          const u = new URL(raw, baseUrl);
+          return u.hostname.replace(/^www\./, "") === b.hostname.replace(/^www\./, "");
+        } catch {
+          return false;
+        }
+      }
+      function looksDetail(raw, text) {
+        let u;
+        try { u = new URL(raw, baseUrl); } catch { return false; }
+        const path = u.pathname.toLowerCase();
+        if (path === "/" || /\/(?:search|availability|rentals?|vacation-rentals?|properties|collections?|areas?|locations?)\/?$/.test(path)) return false;
+        if (/\/vrp\/unit\//i.test(path)) return true;
+        if (/\d/.test(path)) return true;
+        if (/\b(unit|condo|villa|home|suite|cottage|bungalow|townhome|property)\b/i.test(path)) return true;
+        return /\$\s*[\d,]+|\bbedroom|\bbr\b/i.test(text) && path.split("/").filter(Boolean).length >= 2;
+      }
+      function imageFrom(card) {
+        const img = card.querySelector("img");
+        return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
+      }
+      const targetText = clean(searchTerm).toLowerCase();
+      const targetTokens = targetText.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+      const out = [];
+      const seen = new Set();
+      for (const a of anchors) {
+        const href = a.getAttribute("href") || "";
+        const url = (() => {
+          try { return new URL(href, baseUrl).toString(); } catch { return ""; }
+        })();
+        if (!url || seen.has(url) || !sameHost(url)) continue;
+        let card = a;
+        for (let depth = 0; depth < 7 && card?.parentElement; depth++) {
+          card = card.parentElement;
+          const txt = clean(card.textContent);
+          if (txt.length > 60 && txt.length < 6000 && (txt.includes("$") || /bedroom|br|bd/i.test(txt) || card.querySelector("img"))) break;
+        }
+        const fullText = clean(card?.textContent || a.textContent || "");
+        if (!looksDetail(url, fullText)) continue;
+        const br = extractBedrooms(fullText);
+        if (br !== null && br !== bedrooms) continue;
+        const lower = `${url} ${fullText}`.toLowerCase();
+        if (targetTokens.length > 0 && !targetTokens.some((t) => lower.includes(t))) {
+          // Keep VRP unit URLs even when the card title omits the resort.
+          if (!/\/vrp\/unit\//i.test(url)) continue;
+        }
+        const title =
+          clean(card?.querySelector("h1, h2, h3, [class*='title' i], [data-testid*='title' i]")?.textContent) ||
+          clean(a.textContent) ||
+          new URL(url).pathname.split("/").filter(Boolean).pop()?.replace(/[-_]+/g, " ") ||
+          "Property manager listing";
+        seen.add(url);
+        out.push({
+          url,
+          title: title.slice(0, 100),
+          bedrooms: br ?? undefined,
+          image: imageFrom(card),
+          snippet: fullText.slice(0, 220),
+        });
+        if (out.length >= limit) break;
+      }
+      return out;
+    }, { baseUrl, searchTerm, bedrooms: Number.parseInt(String(bedrooms ?? ""), 10), limit }),
+    5_000,
+    [],
+  );
+}
+
+async function processPmSiteSearch(id, params) {
+  const { sites = [], searchTerm, checkIn, checkOut, bedrooms, perSiteLimit = 3 } = params;
+  log(`pm_site_search ${id}: ${sites.length} sites searchTerm="${searchTerm}" ${checkIn}→${checkOut} ${bedrooms}BR`);
+  await ensureBrowser();
+  const out = [];
+  const tabs = new Set();
+  for (const site of sites.slice(0, 8)) {
+    let tab = null;
+    try {
+      tab = await context.newPage();
+      tabs.add(tab);
+      await normalizePageDisplay(tab);
+      const url = buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms);
+      await tab.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+      await tab.waitForTimeout(PAGE_SETTLE_MS);
+      await dismissObstructions(tab, `pm_site_search_${site.label}`);
+      await fillVisibleSearchField(tab, searchTerm, `pm_site_search_${site.label}`).catch(() => null);
+      await applyPmDateInputs(tab, checkIn, checkOut).catch(() => null);
+      await fillBedroomFilter(tab, bedrooms, `pm_site_search_${site.label}`).catch(() => null);
+      await clickVisibleSearchSubmit(tab, `pm_site_search_${site.label}`).catch(() => null);
+      await withSoftTimeout(tab.waitForLoadState("networkidle", { timeout: 5_000 }), 5_500);
+      await tab.waitForTimeout(PAGE_SETTLE_MS);
+      const seeds = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit);
+      log(`pm_site_search ${id}: ${site.label} seeds=${seeds.length}`);
+      for (const seed of seeds) {
+        const verified = await scrapePmUrl(tab, seed.url, checkIn, checkOut, bedrooms).catch((e) => ({
+          available: "unclear",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `detail verify error: ${e?.message ?? e}`,
+        }));
+        if (verified.available !== "yes") continue;
+        const total = Number(verified.totalPrice || 0);
+        const nightly = Number(verified.nightlyPrice || (total > 0 ? Math.round(total / nightsBetween(checkIn, checkOut)) : 0));
+        if (!(total > 0) && !(nightly > 0)) continue;
+        out.push({
+          url: seed.url,
+          title: seed.title,
+          sourceLabel: site.label,
+          totalPrice: Math.round(total > 0 ? total : nightly * nightsBetween(checkIn, checkOut)),
+          nightlyPrice: Math.round(nightly > 0 ? nightly : total / nightsBetween(checkIn, checkOut)),
+          bedrooms: typeof verified.bedrooms === "number" ? verified.bedrooms : seed.bedrooms ?? bedrooms,
+          image: seed.image,
+          snippet: `${site.label} website search · ${verified.reason}`.slice(0, 240),
+        });
+      }
+    } catch (e) {
+      log(`pm_site_search ${id}: ${site?.label ?? "site"} error: ${e?.message ?? e}`);
+    } finally {
+      if (tab && !tab.isClosed?.()) await tab.close().catch(() => {});
+    }
+  }
+  await Promise.all(Array.from(tabs).map(async (tab) => {
+    try { if (tab && !tab.isClosed?.()) await tab.close(); } catch {}
+  }));
+  log(`pm_site_search ${id}: ${out.length} priced website-search candidates`);
+  await postResult(id, dedupeCandidatesByUrl(out));
+}
+
 async function processPmUrlCheck(id, params) {
   const { url, checkIn, checkOut, bedrooms } = params;
   log(`pm_url_check ${id}: ${url} ${checkIn}→${checkOut}`);
@@ -2660,10 +3183,12 @@ async function processRequest(req) {
 
   try {
     switch (opType) {
+      case "airbnb_search": return await processAirbnbSearch(req.id, params);
       case "vrbo_search": return await processVrboSearch(req.id, params);
       case "vrbo_photo_scrape": return await processVrboPhotoScrape(req.id, params);
       case "booking_search": return await processBookingSearch(req.id, params);
       case "google_serp": return await processGoogleSerp(req.id, params);
+      case "pm_site_search": return await processPmSiteSearch(req.id, params);
       case "pm_url_check": return await processPmUrlCheck(req.id, params);
       case "pm_url_check_batch": return await processPmUrlCheckBatch(req.id, params);
       default: throw new Error(`unknown opType: ${opType}`);

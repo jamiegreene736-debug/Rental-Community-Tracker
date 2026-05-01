@@ -8,11 +8,13 @@
 // gets past the bot wall.
 //
 // Originally just for VRBO search. Generalized 2026-04-29 to handle
-// four op types with the same queue machinery:
+// multiple op types with the same queue machinery:
+//   - airbnb_search    (drive airbnb.com search, return priced cards)
 //   - vrbo_search      (drive vrbo.com search, return priced cards)
 //   - booking_search   (drive booking.com search, return priced cards)
 //   - google_serp      (run a Google query, return organic results
 //                       — used for PM company discovery)
+//   - pm_site_search   (drive PM website search widgets/pages)
 //   - pm_url_check     (visit a specific PM URL, scrape availability +
 //                       price for the requested dates)
 //
@@ -40,15 +42,25 @@
 // shape and result shape; the daemon dispatches in worker.mjs based
 // on `opType`.
 export type SidecarOpType =
+  | "airbnb_search"
   | "vrbo_search"
   | "vrbo_photo_scrape"
   | "booking_search"
   | "google_serp"
+  | "pm_site_search"
   | "pm_url_check"
   | "pm_url_check_batch"
   | "vrbo_upload_photos"
   | "booking_upload_photos"
   | "guesty_disconnect_channel";
+
+export type SidecarAirbnbParams = {
+  destination: string;
+  searchTerm?: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+};
 
 export type SidecarVrboParams = {
   destination: string;
@@ -74,6 +86,21 @@ export type SidecarBookingParams = {
 export type SidecarGoogleSerpParams = {
   query: string;
   maxResults?: number;
+};
+
+export type SidecarPmSearchSite = {
+  label: string;
+  baseUrl: string;
+  searchUrl?: string;
+};
+
+export type SidecarPmSiteSearchParams = {
+  sites: SidecarPmSearchSite[];
+  searchTerm: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+  perSiteLimit?: number;
 };
 
 export type SidecarPmUrlCheckParams = {
@@ -155,10 +182,12 @@ export type SidecarGuestyDisconnectResult = {
 };
 
 export type SidecarParamsByOp = {
+  airbnb_search: SidecarAirbnbParams;
   vrbo_search: SidecarVrboParams;
   vrbo_photo_scrape: SidecarVrboPhotoScrapeParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
+  pm_site_search: SidecarPmSiteSearchParams;
   pm_url_check: SidecarPmUrlCheckParams;
   pm_url_check_batch: SidecarPmUrlCheckBatchParams;
   vrbo_upload_photos: SidecarPhotoUploadParams;
@@ -173,6 +202,7 @@ export type SidecarPropertyCandidate = {
   totalPrice: number;
   nightlyPrice: number;
   bedrooms?: number;
+  sourceLabel?: string;
   image?: string;
   snippet?: string;
   // PR #299: when daemon extracted from Vrbo's new "$X total includes
@@ -207,10 +237,12 @@ export type SidecarRequest = {
   status: "pending" | "in_progress" | "completed" | "failed";
   opType: SidecarOpType;
   params:
+    | SidecarAirbnbParams
     | SidecarVrboParams
     | SidecarVrboPhotoScrapeParams
     | SidecarBookingParams
     | SidecarGoogleSerpParams
+    | SidecarPmSiteSearchParams
     | SidecarPmUrlCheckParams
     | SidecarPmUrlCheckBatchParams
     | SidecarPhotoUploadParams
@@ -290,9 +322,10 @@ function makeRequestKey(
   params: SidecarRequest["params"],
 ): string {
   switch (opType) {
+    case "airbnb_search":
     case "vrbo_search":
     case "booking_search": {
-      const p = params as SidecarVrboParams | SidecarBookingParams;
+      const p = params as SidecarAirbnbParams | SidecarVrboParams | SidecarBookingParams;
       return `${opType}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
     }
     case "vrbo_photo_scrape": {
@@ -302,6 +335,14 @@ function makeRequestKey(
     case "google_serp": {
       const p = params as SidecarGoogleSerpParams;
       return `google_serp|${p.query.toLowerCase().trim()}|${p.maxResults ?? 20}`;
+    }
+    case "pm_site_search": {
+      const p = params as SidecarPmSiteSearchParams;
+      const sites = p.sites
+        .map((s) => `${s.label}:${s.searchUrl || s.baseUrl}`)
+        .sort()
+        .join(",");
+      return `pm_site_search|${sites}|${p.searchTerm.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}|${p.perSiteLimit ?? 6}`;
     }
     case "pm_url_check": {
       const p = params as SidecarPmUrlCheckParams;
@@ -346,10 +387,12 @@ function makeId(): string {
  */
 export function enqueueOp(
   req:
+    | { opType: "airbnb_search"; params: SidecarAirbnbParams }
     | { opType: "vrbo_search"; params: SidecarVrboParams }
     | { opType: "vrbo_photo_scrape"; params: SidecarVrboPhotoScrapeParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
+    | { opType: "pm_site_search"; params: SidecarPmSiteSearchParams }
     | { opType: "pm_url_check"; params: SidecarPmUrlCheckParams }
     | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams }
     | { opType: "vrbo_upload_photos"; params: SidecarPhotoUploadParams }
@@ -470,10 +513,12 @@ export function getStatus(): {
   let oldestPendingAge: number | null = null;
   let newestAt = 0;
   const byOpType: Record<SidecarOpType, number> = {
+    airbnb_search: 0,
     vrbo_search: 0,
     vrbo_photo_scrape: 0,
     booking_search: 0,
     google_serp: 0,
+    pm_site_search: 0,
     pm_url_check: 0,
     pm_url_check_batch: 0,
     vrbo_upload_photos: 0,
@@ -642,6 +687,42 @@ export async function searchBookingViaSidecar(opts: {
   };
 }
 
+export async function searchAirbnbViaSidecar(opts: {
+  destination: string;
+  searchTerm?: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  candidates: SidecarPropertyCandidate[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "airbnb_search",
+      params: {
+        destination: opts.destination,
+        searchTerm: opts.searchTerm,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs,
+  });
+  return {
+    candidates: (r.results ?? []) as SidecarPropertyCandidate[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
 export async function googleSerpViaSidecar(opts: {
   query: string;
   maxResults?: number;
@@ -663,6 +744,52 @@ export async function googleSerpViaSidecar(opts: {
   });
   return {
     hits: (r.results ?? []) as SidecarSerpHit[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+export async function searchPmSitesViaSidecar(opts: {
+  sites: SidecarPmSearchSite[];
+  searchTerm: string;
+  checkIn: string;
+  checkOut: string;
+  bedrooms: number;
+  perSiteLimit?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+}): Promise<{
+  candidates: SidecarPropertyCandidate[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (opts.sites.length === 0) {
+    return {
+      candidates: [],
+      workerOnline: false,
+      durationMs: 0,
+      reason: "no PM sites supplied",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "pm_site_search",
+      params: {
+        sites: opts.sites,
+        searchTerm: opts.searchTerm,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+        perSiteLimit: opts.perSiteLimit,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 120_000,
+  });
+  return {
+    candidates: (r.results ?? []) as SidecarPropertyCandidate[],
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,

@@ -2066,7 +2066,7 @@ export async function registerRoutes(
   //   3. lensMatches       — Google Lens reverse-image search for
   //                          PM URLs that share photos with the top
   //                          Airbnb candidates
-  const PM_GOOGLE_DISCOVERY_ENABLED = process.env.PM_GOOGLE_DISCOVERY_ENABLED !== "false";
+  const PM_GOOGLE_DISCOVERY_ENABLED = false;
 
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
   // Tracks how often each PM-discovery path returns priced+available units
@@ -2229,8 +2229,10 @@ export async function registerRoutes(
   //
   // Example: /api/admin/pm-discovery?community=Pili%20Mai&location=Kauai&probe=true
   app.get("/api/admin/pm-discovery", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    // Buy-in search is intentionally website/sidecar-first. Keep the
+    // env read only for legacy helper code that remains in this route,
+    // but do not require or prefer SearchAPI for the buy-in workflow.
+    const apiKey = process.env.SEARCHAPI_API_KEY ?? "";
     const community = String(req.query.community || "").trim();
     const location = (String(req.query.location || "").trim() || undefined) as string | undefined;
     const pages = req.query.pages ? Math.max(1, Math.min(5, parseInt(String(req.query.pages), 10) || 2)) : 2;
@@ -2787,14 +2789,16 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
+      const websiteSearchProof = /sidecar searched|website search was driven/i.test(c.verifiedReason ?? "");
       const targetSignal = mentionsResort(hay)
+        || websiteSearchProof
         || (c.source === "airbnb" && c.inTargetBounds === true)
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
-      if (!candidateIsPoipuKaiCondoLike(c)) return false;
+      if (!websiteSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
     };
@@ -2915,317 +2919,125 @@ export async function registerRoutes(
       }
     };
 
-    // ── Airbnb: TWO fetches run in parallel, then merged.
-    //    1) site: Google search — great at resort-specific matches via
-    //       quoted-name, but Google organic never carries live prices.
-    //    2) SearchAPI airbnb engine — returns listings with real prices
-    //       (price.extracted_total_price), filtered by tight map bounds.
-    //    Some legitimate condo listings don't name the resort in the title or
-    //    description, so GPS inside the community box is an equally strong keep
-    //    signal. Listings with no coords still need the resort text match.
-    //    This is what lets auto-fill actually pick a priced candidate.
+    // ── Airbnb: website search through the local Chrome sidecar ───────
+    // Operator directive 2026-05-01: do not use SearchAPI's Airbnb
+    // engine or Google site search for buy-in candidate pricing. Drive
+    // airbnb.com itself with the resort name, stay dates, and bedroom
+    // filter, then scrape the priced result cards returned by Airbnb.
     let airbnbRawCount = 0;
     let airbnbDropped = { noResort: 0, wrongBedrooms: 0 };
     let airbnbPricedCount = 0;
     let airbnbPricedDropped = { noResort: 0 };
+    let airbnbSidecarOnline = false;
+    let airbnbSidecarMs = 0;
+    let airbnbSidecarReason = "";
     const airbnbPromise: Promise<Candidate[]> = (async () => {
-      const [site, priced] = await Promise.all([
-        siteSearch("airbnb.com", "airbnb", "Airbnb"),
-        (async (): Promise<Candidate[]> => {
-          try {
-            const sp: Record<string, string> = {
-              engine: "airbnb",
-              check_in_date: checkIn,
-              check_out_date: checkOut,
-              adults: "2",
-              bedrooms: String(bedrooms),
-              type_of_place: "entire_home",
-              currency: "USD",
-              api_key: apiKey,
-              q: searchLocation,
-            };
-            addAirbnbBoundingBox(sp, bounds);
-            const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-            if (!r.ok) return [];
-            const data = await r.json() as any;
-            let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-            airbnbPricedCount = properties.length;
-            if (resortName || bounds) {
-              let noResort = 0;
-              properties = properties.filter((p: any) => {
-                const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
-                const keep = (resortName ? mentionsResort(hay) : false)
-                  || airbnbCoordsInBounds(p, bounds, 0.01);
-                if (!keep) noResort++;
-                return keep;
-              });
-              airbnbPricedDropped = { noResort };
-            }
-            return properties
-              .filter((p: any) => p?.price?.extracted_total_price > 0 && p?.link)
-              .map((p: any): Candidate => {
-                const total = Number(p.price.extracted_total_price);
-                const url = withStayDates("airbnb", String(p.link));
-                const inTargetBounds = airbnbCoordsInBounds(p, bounds, 0.01);
-                return {
-                  source: "airbnb",
-                  sourceLabel: "Airbnb",
-                  title: String(p?.name ?? p?.title ?? "Airbnb listing"),
-                  url,
-                  nightlyPrice: Math.round(total / Math.max(1, nights)),
-                  totalPrice: total,
-                  bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
-                  image: Array.isArray(p?.images) ? p.images[0] : undefined,
-                  snippet: String(p?.description ?? "").slice(0, 160),
-                  inTargetBounds,
-                  // Airbnb engine queried with check_in / check_out, so
-                  // the listings returned are filtered by date-specific
-                  // availability AND the price is the date-specific
-                  // total. Auto-verified — no need to spend a Stagehand
-                  // session on something the engine already confirmed.
-                  verified: "yes",
-                  verifiedNightlyPrice: Math.round(total / Math.max(1, nights)),
-                  verifiedReason: "Airbnb engine returned this listing as available for the requested dates with a date-specific total_price",
-                };
-              });
-          } catch (e: any) {
-            console.error(`[find-buy-in] airbnb engine error:`, e.message);
-            noteSourceError("Airbnb engine", e);
-            return [];
+      try {
+        const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
+        const r = await searchAirbnbViaSidecar({
+          destination: searchLocation,
+          searchTerm: searchLocation,
+          checkIn,
+          checkOut,
+          bedrooms,
+          walletBudgetMs: 120_000,
+        });
+        airbnbSidecarOnline = r.workerOnline;
+        airbnbSidecarMs = r.durationMs;
+        airbnbSidecarReason = r.reason;
+        airbnbRawCount = r.candidates.length;
+        airbnbPricedCount = r.candidates.length;
+        let noResort = 0;
+        let wrongBedrooms = 0;
+        const accepted = r.candidates.filter((c) => {
+          const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
+          const inferred = typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(hay);
+          if (inferred !== null && inferred !== bedrooms) {
+            wrongBedrooms++;
+            return false;
           }
-        })(),
-      ]);
-      airbnbRawCount = site.raw;
-      airbnbDropped = site.dropped;
-      // Dedupe by listing id in path, preferring the priced version.
-      const roomId = (u: string): string | null => {
-        const m = u.match(/\/rooms\/(?:plus\/)?(\d+)/);
-        return m ? m[1] : null;
-      };
-      const byId = new Map<string, Candidate>();
-      for (const c of priced) {
-        const id = roomId(c.url);
-        if (id) byId.set(id, c);
+          return c.totalPrice > 0 || c.nightlyPrice > 0;
+        });
+        airbnbDropped = { noResort, wrongBedrooms };
+        airbnbPricedDropped = { noResort };
+        return accepted.map((c): Candidate => {
+          const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
+          const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
+          return {
+            source: "airbnb",
+            sourceLabel: "Airbnb",
+            title: c.title,
+            url: withStayDates("airbnb", c.url),
+            nightlyPrice: Math.round(nightly),
+            totalPrice: Math.round(total),
+            bedrooms: c.bedrooms,
+            image: c.image,
+            snippet: c.snippet,
+            verified: "yes",
+            verifiedNightlyPrice: Math.round(nightly),
+            verifiedReason: "Airbnb sidecar searched airbnb.com with the resort, dates, and bedroom filter and scraped this priced result card",
+          };
+        });
+      } catch (e: any) {
+        console.error(`[find-buy-in] airbnb sidecar error:`, e?.message ?? e);
+        noteSourceError("Airbnb sidecar search", e);
+        return [];
       }
-      const unpriced = site.candidates.filter((c) => {
-        const id = roomId(c.url);
-        return !id || !byId.has(id);
-      });
-      return [...priced, ...unpriced];
     })();
 
-    // ── Booking.com / hotel-style inventory via Google Hotels engine ──────
-    // VRBO removed: same TOS subletting bar as Airbnb. Airbnb stays as
-    // telemetry + photo seed for reverse-image PM matches.
-    //
-    // Booking.com flow mirrors the Airbnb pattern (site search + priced
-    // engine, deduped). The priced side now uses SearchAPI's
-    // `google_hotels` engine — returns structured JSON with check-in/
-    // check-out date support and live `total_rate` / `rate_per_night`
-    // fields, instead of the previous site:booking.com Google scrape
-    // that depended on snippet text mentioning "$X/night" verbatim
-    // (most Booking.com snippets don't). Engine returns hotels AND
-    // vacation rentals from booking.com, hotels.com, expedia, etc. —
-    // we keep them all since they're commercially bookable, but tag
-    // the source as "booking" to fit the existing Candidate union.
+    // ── Booking.com: website search through the local Chrome sidecar ──
+    // Same 2026-05-01 operator directive as Airbnb: no Google Hotels
+    // engine and no Google organic site-search for buy-in pricing.
+    // Drive booking.com itself with destination, dates, and bedroom
+    // filter. Search cards seed detail verification below.
     let bookingRawCount = 0;
     let bookingDropped = { noResort: 0, wrongBedrooms: 0 };
     let bookingPricedCount = 0;
     let bookingSidecarCount = 0;
     let bookingSidecarOnline = false;
     const bookingPromise: Promise<Candidate[]> = (async () => {
-      const [site, priced, sidecar] = await Promise.all([
-        siteSearch("booking.com", "booking", "Booking.com"),
-        (async (): Promise<Candidate[]> => {
-          try {
-            const sp: Record<string, string> = {
-              engine: "google_hotels",
-              q: searchLocation,
-              check_in_date: checkIn,
-              check_out_date: checkOut,
-              adults: "2",
-              currency: "USD",
-              api_key: apiKey,
-            };
-            const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-            if (!r.ok) {
-              console.warn(`[find-buy-in] google_hotels HTTP ${r.status}`);
-              noteSourceError("Booking.com google_hotels", `HTTP ${r.status}`);
-              return [];
-            }
-            const data = await r.json() as any;
-            let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-            bookingPricedCount = properties.length;
-            // Resort filter — same rule we apply to the airbnb engine.
-            if (resortName) {
-              properties = properties.filter((p: any) => {
-                const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
-                return mentionsResort(hay);
-              });
-            }
-            return properties
-              .map((p: any): Candidate | null => {
-                // Different google_hotels response shapes seen in the
-                // wild — total_rate.extracted_lowest is the most reliable
-                // priced field; rate_per_night.extracted_lowest is its
-                // per-night counterpart. Either presence is enough.
-                const totalLowest = Number(p?.total_rate?.extracted_lowest ?? p?.total_rate?.lowest ?? 0);
-                const perNightLowest = Number(p?.rate_per_night?.extracted_lowest ?? p?.rate_per_night?.lowest ?? 0);
-                const url = String(p?.link ?? p?.url ?? "");
-                if (!url) return null;
-                const total = totalLowest > 0 ? totalLowest : perNightLowest * Math.max(1, nights);
-                const nightly = perNightLowest > 0 ? perNightLowest : Math.round(total / Math.max(1, nights));
-                return {
-                  source: "booking",
-                  sourceLabel: "Booking.com",
-                  title: String(p?.name ?? p?.title ?? "Hotel listing").slice(0, 100),
-                  url,
-                  // google_hotels prices are property-level and often
-                  // point at a cheaper 1BR room inside a multi-room
-                  // resort page. Treat them as URL discovery; sidecar
-                  // detail verification below must confirm a room block
-                  // matching the requested bedroom count before the row
-                  // can enter the priced/cheapest pool.
-                  nightlyPrice: 0,
-                  totalPrice: 0,
-                  // type_of_place often surfaces "Vacation rental" / "Hotel" /
-                  // "Resort"; not directly bedroom-mappable but useful in UI.
-                  bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
-                  image: Array.isArray(p?.images) ? (p.images[0]?.original_image ?? p.images[0]?.thumbnail ?? p.images[0]) : (p?.thumbnail ?? undefined),
-                  snippet: [
-                    String(p?.description ?? p?.type ?? "").slice(0, 120),
-                    total > 0 ? `google_hotels property quote $${Math.round(total).toLocaleString()} requires room-level verification` : "",
-                  ].filter(Boolean).join(" · "),
-                };
-              })
-              .filter((c: Candidate | null): c is Candidate => c !== null);
-          } catch (e: any) {
-            console.error(`[find-buy-in] google_hotels engine error:`, e.message);
-            noteSourceError("Booking.com google_hotels", e);
-            return [];
-          }
-        })(),
-        // ── Path 3: local-Mac sidecar (operator's real Chrome) ──────
-        // When the daemon is online, drives Booking.com search on the
-        // operator's actual browser using the resort-specific search
-        // location, requested dates, and bedroom count. Falls through
-        // gracefully when worker offline (75s wallet, then empty array).
-        (async (): Promise<Candidate[]> => {
-          try {
-            const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
-            const r = await searchBookingViaSidecar({
-              destination: searchLocation,
-              searchTerm: searchLocation,
-              checkIn,
-              checkOut,
-              bedrooms,
-              walletBudgetMs: 75_000,
-            });
-            bookingSidecarCount = r.candidates.length;
-            bookingSidecarOnline = r.workerOnline;
-            // PR #319 (operator directive 2026-04-30): drop cards
-            // whose detected bedroom count doesn't EXACTLY equal the
-            // requested count. Booking's URL filter (entire_place_
-            // bedroom_count) gets stripped on redirect, so client-
-            // side filtering is the only authority. Worker.mjs's
-            // post-PR-318 parser requires bedrooms detected and >=
-            // minBd — this tightens that to ===, so a 3BR search
-            // never surfaces 4BR alternatives unless we explicitly
-            // change the contract.
-            const accepted = r.candidates.filter((c) => c.bedrooms === bedrooms);
-            const dropped = r.candidates.length - accepted.length;
-            if (dropped > 0) {
-              console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} non-${bedrooms}BR candidates`);
-            }
-            // Booking search cards are URL discovery only. Their visible
-            // price text can be a low teaser / partial subtotal that
-            // disagrees with the detail page's room block (operator saw
-            // $89/night on a card while the detail page quoted $4,341).
-            // Leave these unpriced/unverified here; the sidecar batch
-            // verifier below opens each detail URL and promotes only
-            // date-specific, bedroom-matching room-block totals.
-            return accepted.map((c): Candidate => ({
-              source: "booking",
-              sourceLabel: "Booking.com",
-              title: c.title.slice(0, 100),
-              url: c.url,
-              nightlyPrice: 0,
-              totalPrice: 0,
-              bedrooms: c.bedrooms,
-              image: c.image,
-              snippet: c.snippet || (c.totalPrice > 0 ? `Booking search card showed $${c.totalPrice.toLocaleString()} before detail verification` : undefined),
-            }));
-          } catch (e: any) {
-            console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
-            noteSourceError("Booking.com sidecar search", e);
-            return [];
-          }
-        })(),
-      ]);
-      bookingRawCount = site.raw;
-      bookingDropped = site.dropped;
-      // Dedupe by URL — sidecar (operator's real Chrome) ranks FIRST,
-      // then engine, then site:search. The sidecar prices are the
-      // most authoritative when present.
-      const seen = new Set<string>();
-      const out: Candidate[] = [];
-      for (const c of sidecar) {
-        if (seen.has(c.url)) continue;
-        seen.add(c.url);
-        out.push(c);
+      try {
+        const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
+        const r = await searchBookingViaSidecar({
+          destination: searchLocation,
+          searchTerm: searchLocation,
+          checkIn,
+          checkOut,
+          bedrooms,
+          walletBudgetMs: 120_000,
+        });
+        bookingRawCount = r.candidates.length;
+        bookingSidecarCount = r.candidates.length;
+        bookingSidecarOnline = r.workerOnline;
+        bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
+        const accepted = r.candidates.filter((c) => c.bedrooms === bedrooms);
+        const dropped = r.candidates.length - accepted.length;
+        bookingDropped = { noResort: 0, wrongBedrooms: dropped };
+        if (dropped > 0) {
+          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} non-${bedrooms}BR candidates`);
+        }
+        return accepted.map((c): Candidate => ({
+          source: "booking",
+          sourceLabel: "Booking.com",
+          title: c.title.slice(0, 100),
+          url: withStayDates("booking", c.url),
+          nightlyPrice: 0,
+          totalPrice: 0,
+          bedrooms: c.bedrooms,
+          image: c.image,
+          snippet: c.snippet || (c.totalPrice > 0 ? `Booking search card showed $${c.totalPrice.toLocaleString()} before detail verification` : undefined),
+        }));
+      } catch (e: any) {
+        console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
+        noteSourceError("Booking.com sidecar search", e);
+        return [];
       }
-      for (const c of priced) {
-        if (seen.has(c.url)) continue;
-        seen.add(c.url);
-        out.push(c);
-      }
-      for (const c of site.candidates) {
-        if (seen.has(c.url)) continue;
-        seen.add(c.url);
-        out.push(c);
-      }
-      return out;
     })();
 
-    // ── Vrbo: Apify actor (priced/all-in) + Google site:search (unpriced) ─
-    // Two paths run in parallel and merge:
-    //
-    //   1. Apify (`easyapi/vrbo-property-listing-scraper` by default) —
-    //      returns priced candidates with all-in totals (base + cleaning +
-    //      service + taxes) in USD when it works. Currently returning 0
-    //      raw items for our Hawaii destinations because Vrbo's search
-    //      requires `regionId`/`latLong` disambiguators we don't yet
-    //      have. Future work: bake regionId per destination via a
-    //      one-time Browserbase autocomplete lookup. When that lands the
-    //      priced path comes online for free.
-    //
-    //   2. Google `site:vrbo.com` — returns unpriced URLs from Google's
-    //      index, same behavior as before PR #204. Operator clicks
-    //      through to see rates. This is the safety net while the
-    //      Apify path is a no-op so we don't regress to "0 Vrbo
-    //      candidates" entirely.
-    //
-    // Merge order: Apify-priced FIRST (operator sees rates upfront when
-    // available), then Google-discovered detail URLs get checked by
-    // the same sidecar before they are allowed into the result set.
-    // Raw Google organic rows never reach the UI because they have no
-    // date-specific quote and were rendering as "manual quote".
-    // Vrbo: simplified to two paths after PR #275.
-    //
-    // Old shape: 9 parallel paths (Apify direct, Browserbase, ScrapingBee,
-    // Outscraper, Trivago meta-search, Apify web-scraper, Stagehand managed
-    // agent, Google site:search, sidecar). Vrbo's anti-bot fingerprints
-    // every server-side residential-proxy path; only the operator's local
-    // Chrome (sidecar, path 9) consistently returned priced cards. The
-    // other 7 priced paths returned empty 95%+ of the time, costing money
-    // and producing duplicate noise on the rare occasion something leaked
-    // through. Per operator directive 2026-04-30: sidecar is the primary,
-    // and Google site:search is only a detail-URL seed list that must be
-    // sidecar-priced before display.
-    //
-    // Daemon online  → priced cards from the operator's home-IP Chrome.
-    // Daemon offline → no VRBO rows. Showing unpriced "manual quote"
-    //                  VRBO rows was misleading in the buy-in workflow.
+    // ── Vrbo: website search through the local Chrome sidecar ────────
+    // Website-search-only buy-in methodology: no Apify, no Google
+    // site-search seed list. Drive vrbo.com itself with resort, dates,
+    // and bedroom count, then trust only priced cards from that page.
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
     let vrboGoogleCount = 0;
@@ -3235,179 +3047,60 @@ export async function registerRoutes(
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      // Search the OTA with the resort-specific location first. The
-      // sidecar log must show exactly what an operator would type into
-      // Vrbo's destination box, not just the broad market fallback.
-      // The diagnostic `vrboDestination` now mirrors this same value so
-      // copied logs show the actual OTA search term.
       const targetSearchTerm = searchLocation;
-      const [googleResults, sidecarResults] = await Promise.all([
-        siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
-          console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
-          noteSourceError("Vrbo site search", e);
-          return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
-        }),
-        (async (): Promise<{ candidates: Candidate[]; workerOnline: boolean; durationMs: number; reason: string }> => {
-          const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
-          const r = await searchVrboViaSidecar({
-            destination: targetSearchTerm,
-            searchTerm: targetSearchTerm,
-            checkIn,
-            checkOut,
-            bedrooms,
-            walletBudgetMs: 75_000,
-          });
-          if (!r) return { candidates: [], workerOnline: false, durationMs: 0, reason: "sidecar disabled" };
-          // PR #319 (operator directive 2026-04-30): same exact-
-          // bedroom filter as booking sidecar above. Vrbo's destination
-          // search ("Poipu Kai") sometimes surfaces 1BR/2BR units in
-          // adjacent areas — operator's screenshot showed 12× 1BR + 5×
-          // 2BR in a 3BR Amy search. Drop anything that's not exactly
-          // the requested count. Unknown-bedroom cards are also dropped:
-          // live smoke showed Vrbo can still label cheap studio/1BR
-          // cards as unknown after its own "Minimum bedrooms" filter.
-          const acceptedVrbo = r.candidates.filter((c) => {
-            const inferred = typeof c.bedrooms === "number"
-              ? c.bedrooms
-              : bedroomFromText(`${c.title} ${c.snippet ?? ""}`);
-            return inferred === bedrooms;
-          });
-          const droppedVrbo = r.candidates.length - acceptedVrbo.length;
-          if (droppedVrbo > 0) {
-            console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR or unknown-BR candidates`);
-          }
-          return {
-            // Sidecar VRBO scrape runs the operator's real Chrome
-            // against vrbo.com search with the date filter applied,
-            // so the prices ARE date-specific (same shape as the
-            // Booking sidecar candidates above). Mark verified=yes
-            // so the cheapest-pool gate (`verified === "yes"`) admits
-            // them — operator wants Vrbo eligible to be the auto-pick
-            // when it's the cheapest option (PR #306).
-            candidates: acceptedVrbo.map((c): Candidate => {
-              const inferred = typeof c.bedrooms === "number"
-                ? c.bedrooms
-                : bedroomFromText(`${c.title} ${c.snippet ?? ""}`) ?? undefined;
-              return {
-                source: "vrbo" as const,
-                sourceLabel: "Vrbo",
-                title: c.title,
-                url: withStayDates("vrbo", c.url),
-                nightlyPrice: c.nightlyPrice,
-                totalPrice: c.totalPrice,
-                bedrooms: inferred,
-                image: c.image,
-                snippet: c.snippet,
-                verified: "yes",
-                verifiedNightlyPrice: c.nightlyPrice,
-                verifiedReason: "Vrbo sidecar (operator's real Chrome) returned a date-specific quote",
-              };
-            }),
-            workerOnline: r.workerOnline,
-            durationMs: r.durationMs,
-            reason: r.reason,
-          };
-        })().catch((e: any) => {
-          console.error("[find-buy-in] vrbo (sidecar) error:", e?.message ?? e);
-          noteSourceError("Vrbo sidecar search", e);
-          return { candidates: [] as Candidate[], workerOnline: false, durationMs: 0, reason: e?.message ?? "sidecar error" };
-        }),
-      ]);
-
-      vrboGoogleCount = googleResults.candidates.length;
-      vrboSidecarCount = sidecarResults.candidates.length;
-      vrboSidecarOnline = sidecarResults.workerOnline;
-      vrboSidecarMs = sidecarResults.durationMs;
-      vrboSidecarReason = sidecarResults.reason;
-      vrboDropped = googleResults.dropped;
-      vrboRawCount = googleResults.raw + vrboSidecarCount;
-
-      const priceGoogleVrboDetails = async (): Promise<Candidate[]> => {
-        if (!sidecarResults.workerOnline || googleResults.candidates.length === 0) return [];
-        try {
-          const { checkPmUrlsBatchViaSidecar } = await import("./vrbo-sidecar-queue");
-          const byUrl = new Map(googleResults.candidates.map((c) => [c.url, c] as const));
-          const urls = googleResults.candidates
-            .map((c) => c.url)
-            .filter((url, idx, arr) => arr.indexOf(url) === idx)
-            .slice(0, 10);
-          const pricedDetails: Candidate[] = [];
-          for (let i = 0; i < urls.length; i += 5) {
-            const batch = urls.slice(i, i + 5);
-            const batchRes = await checkPmUrlsBatchViaSidecar({
-              urls: batch,
-              checkIn,
-              checkOut,
-              bedrooms,
-              walletBudgetMs: 55_000,
-            });
-            if (!batchRes.workerOnline) {
-              console.log(`[find-buy-in] vrbo detail sidecar skipped/offline: ${batchRes.reason}`);
-              break;
-            }
-            for (const r of batchRes.results) {
-              const seed = byUrl.get(r.url);
-              if (!seed || r.available !== "yes") continue;
-              if (typeof r.bedrooms === "number" && Number.isFinite(r.bedrooms)) {
-                seed.bedrooms = r.bedrooms;
-              }
-              const bedroomSignal = candidateBedroomSignal(seed);
-              if (bedroomSignal !== bedrooms) {
-                console.log(
-                  `[find-buy-in] vrbo detail sidecar rejected ${seed.url}: bedroom proof=${bedroomSignal ?? "unknown"} expected=${bedrooms}`,
-                );
-                continue;
-              }
-              const total = typeof r.totalPrice === "number" && r.totalPrice > 0
-                ? r.totalPrice
-                : typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
-                  ? r.nightlyPrice * nights
-                  : 0;
-              if (!(total > 0)) continue;
-              const nightly = typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
-                ? r.nightlyPrice
-                : Math.round(total / Math.max(1, nights));
-              pricedDetails.push({
-                ...seed,
-                nightlyPrice: Math.round(nightly),
-                totalPrice: Math.round(total),
-                verified: "yes",
-                verifiedNightlyPrice: Math.round(nightly),
-                verifiedReason: `Vrbo detail sidecar returned a date-specific quote: ${r.reason}`,
-              });
-            }
-          }
-          if (pricedDetails.length > 0) {
-            console.log(`[find-buy-in] vrbo detail sidecar priced ${pricedDetails.length}/${urls.length} Google-discovered VRBO URLs`);
-          }
-          return pricedDetails;
-        } catch (e: any) {
-          console.error("[find-buy-in] vrbo detail sidecar error:", e?.message ?? e);
-          noteSourceError("Vrbo detail sidecar", e);
-          return [];
+      try {
+        const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+        const r = await searchVrboViaSidecar({
+          destination: targetSearchTerm,
+          searchTerm: targetSearchTerm,
+          checkIn,
+          checkOut,
+          bedrooms,
+          walletBudgetMs: 120_000,
+        });
+        if (!r) return [];
+        const acceptedVrbo = r.candidates.filter((c) => {
+          const inferred = typeof c.bedrooms === "number"
+            ? c.bedrooms
+            : bedroomFromText(`${c.title} ${c.snippet ?? ""}`);
+          return inferred === bedrooms;
+        });
+        const droppedVrbo = r.candidates.length - acceptedVrbo.length;
+        if (droppedVrbo > 0) {
+          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR or unknown-BR candidates`);
         }
-      };
-      const detailPriced = await priceGoogleVrboDetails();
-      vrboDetailPricedCount = detailPriced.length;
-
-      // Dedupe by Vrbo listing id (e.g. /3208123) — sidecar ranks first
-      // because it carries real prices. Google-discovered detail URLs
-      // are included only after sidecar pricing succeeds.
-      const listingIdOf = (url: string): string | null => {
-        const m = url.match(/vrbo\.com\/(\d+)/);
-        return m ? m[1] : null;
-      };
-      const seenIds = new Set<string>();
-      const out: Candidate[] = [];
-      const pushIfNew = (c: Candidate) => {
-        const id = listingIdOf(c.url);
-        if (id && seenIds.has(id)) return;
-        if (id) seenIds.add(id);
-        out.push(c);
-      };
-      for (const c of sidecarResults.candidates) pushIfNew(c);
-      for (const c of detailPriced) pushIfNew(c);
-      return out;
+        vrboGoogleCount = 0;
+        vrboSidecarCount = acceptedVrbo.length;
+        vrboSidecarOnline = r.workerOnline;
+        vrboSidecarMs = r.durationMs;
+        vrboSidecarReason = r.reason;
+        vrboDropped = { noResort: 0, wrongBedrooms: droppedVrbo };
+        vrboRawCount = r.candidates.length;
+        vrboDetailPricedCount = 0;
+        return acceptedVrbo.map((c): Candidate => {
+          const inferred = typeof c.bedrooms === "number"
+            ? c.bedrooms
+            : bedroomFromText(`${c.title} ${c.snippet ?? ""}`) ?? undefined;
+          return {
+            source: "vrbo" as const,
+            sourceLabel: "Vrbo",
+            title: c.title,
+            url: withStayDates("vrbo", c.url),
+            nightlyPrice: c.nightlyPrice,
+            totalPrice: c.totalPrice,
+            bedrooms: inferred,
+            image: c.image,
+            snippet: c.snippet,
+            verified: "yes",
+            verifiedNightlyPrice: c.nightlyPrice,
+            verifiedReason: "Vrbo sidecar searched vrbo.com with the resort, dates, and bedroom filter and scraped this priced result card",
+          };
+        });
+      } catch (e: any) {
+        console.error("[find-buy-in] vrbo (sidecar) error:", e?.message ?? e);
+        noteSourceError("Vrbo sidecar search", e);
+        return [];
+      }
     })();
 
     // ── Property-management companies via SearchAPI discovery ──────────────
@@ -3651,7 +3344,7 @@ export async function registerRoutes(
     // Only runs for Poipu — SP's footprint is Poipu only, so no point
     // hitting the sitemap from a non-Poipu search. `community.toLowerCase()`
     // contains "poipu" for both "Poipu Kai" and "Pili Mai at Poipu".
-    const isPoipu = /poipu|pili\s*mai/i.test(community);
+    const isPoipu = false;
     const spDiscoveryPromise: Promise<Candidate[]> = isPoipu
       ? (async () => {
           pmDiscoveryStats.spCalls++;
@@ -3714,7 +3407,7 @@ export async function registerRoutes(
     // sitemap walk. We still gate to "is Hawaii" because both PMs are
     // HI-only and we don't want to walk their sitemaps for, say, a
     // Florida search.
-    const isHawaii = /hawaii|kauai|maui|oahu|honolulu|big\s*island|hawai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai|wailea|kaanapali|kihei|lahaina|kaneohe/i.test(community);
+    const isHawaii = false;
 
     const vrpDiscoveryPromise = (
       siteKey: keyof typeof VRP_SITES,
@@ -3936,6 +3629,63 @@ export async function registerRoutes(
       }
     })();
 
+    let pmWebsiteSidecarCount = 0;
+    let pmWebsiteSidecarOnline = false;
+    let pmWebsiteSidecarMs = 0;
+    let pmWebsiteSidecarReason = "";
+    const pmWebsiteSidecarPromise: Promise<Candidate[]> = (async () => {
+      try {
+        const pmSites = [
+          { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
+          ...Object.values(VRP_SITES).map((site) => ({ label: site.label, baseUrl: site.baseUrl })),
+          { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com" },
+          ...Object.values(STREAMLINE_SITES).map((site) => ({ label: site.label, baseUrl: site.baseUrl })),
+        ];
+        const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
+        const r = await searchPmSitesViaSidecar({
+          sites: pmSites,
+          searchTerm: searchLocation,
+          checkIn,
+          checkOut,
+          bedrooms,
+          perSiteLimit: 3,
+          walletBudgetMs: 150_000,
+        });
+        pmWebsiteSidecarCount = r.candidates.length;
+        pmWebsiteSidecarOnline = r.workerOnline;
+        pmWebsiteSidecarMs = r.durationMs;
+        pmWebsiteSidecarReason = r.reason;
+        return r.candidates
+          .filter((c) => {
+            const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
+            const inferred = typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(hay);
+            return inferred === bedrooms && (c.totalPrice > 0 || c.nightlyPrice > 0);
+          })
+          .map((c): Candidate => {
+            const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
+            const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
+            return {
+              source: "pm",
+              sourceLabel: c.sourceLabel || "Property manager",
+              title: c.title,
+              url: withStayDates("pm", c.url),
+              nightlyPrice: Math.round(nightly),
+              totalPrice: Math.round(total),
+              bedrooms: c.bedrooms,
+              image: c.image,
+              snippet: c.snippet,
+              verified: "yes",
+              verifiedNightlyPrice: Math.round(nightly),
+              verifiedReason: "Property-manager website search was driven by the sidecar with resort, dates, and bedroom filters, then the listing page returned a date-specific quote",
+            };
+          });
+      } catch (e: any) {
+        console.error(`[find-buy-in] pm website sidecar error:`, e?.message ?? e);
+        noteSourceError("PM website sidecar search", e);
+        return [];
+      }
+    })();
+
     // Per-source wall-budget. Without this, a single hanging source
     // (Stagehand Vrbo agent stuck on a CAPTCHA, an Apify actor that
     // doesn't return, etc.) blocks the entire find-buy-in until
@@ -3963,11 +3713,12 @@ export async function registerRoutes(
         ),
       ]);
     };
-    const [airbnb, booking, vrbo, pmGoogle, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
-      withTimeout(airbnbPromise, 60_000, [] as Candidate[], "airbnb"),
-      withTimeout(bookingPromise, 60_000, [] as Candidate[], "booking"),
+    const [airbnb, booking, vrbo, pmGoogle, pmWebsiteSidecarDiscovered, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
+      withTimeout(airbnbPromise, 150_000, [] as Candidate[], "airbnb-sidecar"),
+      withTimeout(bookingPromise, 150_000, [] as Candidate[], "booking-sidecar"),
       withTimeout(vrboPromise, 180_000, [] as Candidate[], "vrbo"),
       withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
+      withTimeout(pmWebsiteSidecarPromise, 180_000, [] as Candidate[], "pm-website-sidecar"),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
       // 80-95s range even at concurrency=24 (their WP front
@@ -3991,6 +3742,7 @@ export async function registerRoutes(
     // unpriced), but dedupe by URL — sitemap walks and Google may both
     // surface the same unit. Per-PM domains don't overlap, so just union.
     const seenPmUrls = new Set<string>([
+      ...pmWebsiteSidecarDiscovered.map((c) => c.url),
       ...spDiscovered.map((c) => c.url),
       ...pkDiscovered.map((c) => c.url),
       ...cbDiscovered.map((c) => c.url),
@@ -4001,6 +3753,7 @@ export async function registerRoutes(
       ...slPrincevilleDiscovered.map((c) => c.url),
     ]);
     const pm: Candidate[] = [
+      ...pmWebsiteSidecarDiscovered,
       ...spDiscovered,
       ...pkDiscovered,
       ...cbDiscovered,
@@ -4786,12 +4539,13 @@ export async function registerRoutes(
     const diagnosticSources = [
       {
         source: "Airbnb",
-        status: sourceStatus(["airbnb"], ["airbnb", "Airbnb"], airbnbRawCount + airbnbPricedCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived resort/bedroom filters"),
-        raw: airbnbRawCount + airbnbPricedCount,
+        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters"),
+        raw: airbnbRawCount,
         kept: airbnbTarget.length,
         priced: pricedCount(airbnbTarget),
         verified: verifiedYesCount(airbnbTarget),
-        message: `${airbnbPricedCount} Airbnb engine rows, ${airbnbRawCount} organic rows; ${airbnbTarget.length} kept after target filters.`,
+        durationMs: airbnbSidecarMs,
+        message: `sidecarOnline=${airbnbSidecarOnline}; websitePriced=${airbnbPricedCount}; ${airbnbTarget.length} kept after target filters${airbnbSidecarReason ? `; ${airbnbSidecarReason}` : ""}.`,
       },
       {
         source: "Vrbo",
@@ -4805,21 +4559,22 @@ export async function registerRoutes(
       },
       {
         source: "Booking.com",
-        status: sourceStatus(["booking"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com detail page produced a bedroom-matching rate"),
+        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com detail page produced a bedroom-matching rate"),
         raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
         kept: bookingTarget.length,
         priced: pricedCount(bookingTarget),
         verified: verifiedYesCount(bookingTarget),
-        message: `${bookingRawCount} organic, ${bookingPricedCount} google_hotels discovery, ${bookingSidecarCount} sidecar search card(s). Detail verification is required before pricing is trusted.`,
+        message: `${bookingSidecarCount} Booking.com website sidecar search card(s). Detail verification is required before pricing is trusted.`,
       },
       {
         source: "PM companies",
-        status: sourceStatus(["pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
-        raw: pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length,
+        status: sourceStatus(["pm-website-sidecar", "pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
+        raw: pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length,
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}.`,
+        durationMs: pmWebsiteSidecarMs,
+        message: `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -4861,7 +4616,7 @@ export async function registerRoutes(
       "",
       "Debug counts:",
       JSON.stringify({
-        rawCounts: { airbnb: airbnbRawCount, airbnbEngine: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmWebsiteSidecar: pmWebsiteSidecarCount, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
@@ -4894,11 +4649,10 @@ export async function registerRoutes(
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
-      + `airbnb=${airbnb.length}/${airbnbRawCount} `
-      + `airbnbEngine=${airbnbPricedCount} raw (dropped noResort=${airbnbPricedDropped.noResort}) · `
+      + `airbnb=${airbnb.length}/${airbnbRawCount} (websiteSidecar=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
-      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (google_hotels discovery + sidecar detail verify) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (searchapi+photoMatches+knownPMs+searchApiFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar + sidecar detail verify) `
+      + `pm=${pm.length}/${pmRawCount}+websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}/online=${pmWebsiteSidecarOnline}/${pmWebsiteSidecarMs}ms${pmWebsiteSidecarReason ? "; " + pmWebsiteSidecarReason : ""} +${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (website sidecar primary; legacy API/search disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
@@ -4926,6 +4680,7 @@ export async function registerRoutes(
       // them). Order roughly matches build/value priority so the
       // panel reads top-to-bottom in newest→oldest order.
       pmSourceBreakdown: [
+        { label: "PM website sidecar search",      count: pmWebsiteSidecarDiscovered.length },
         { label: "Suite Paradise",                count: spDiscovered.length },
         { label: "Parrish Kauai",                 count: pkDiscovered.length },
         { label: "CB Island Vacations",           count: cbDiscovered.length },
@@ -4939,7 +4694,7 @@ export async function registerRoutes(
         { label: "Sidecar rate checks",            count: sidecarBatchVerifiedUrls.size },
       ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, airbnbEngine: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
