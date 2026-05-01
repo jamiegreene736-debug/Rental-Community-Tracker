@@ -2507,7 +2507,7 @@ export async function registerRoutes(
     const community = config.community;
     const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
     const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
-    const vrboDestination = COMMUNITY_VRBO_DESTINATIONS[community] || `${community}, Hawaii`;
+    const vrboDestination = searchLocation;
     const bounds = COMMUNITY_BOUNDS[community];
 
     // ── Resort-name resolution ───────────────────────────────────────────
@@ -3057,15 +3057,16 @@ export async function registerRoutes(
           }
         })(),
         // ── Path 3: local-Mac sidecar (operator's real Chrome) ──────
-        // When the daemon is online, drives booking.com search on the
-        // operator's actual browser. Same approach we already use for
-        // VRBO. Falls through gracefully when worker offline (75s
-        // wallet, then empty array).
+        // When the daemon is online, drives Booking.com search on the
+        // operator's actual browser using the resort-specific search
+        // location, requested dates, and bedroom count. Falls through
+        // gracefully when worker offline (75s wallet, then empty array).
         (async (): Promise<Candidate[]> => {
           try {
             const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
             const r = await searchBookingViaSidecar({
               destination: searchLocation,
+              searchTerm: searchLocation,
               checkIn,
               checkOut,
               bedrooms,
@@ -3185,19 +3186,12 @@ export async function registerRoutes(
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      // PR #321: use the curated COMMUNITY_VRBO_DESTINATIONS map so
-      // sidecar searches encompass the WHOLE community area, not just
-      // the resortName extracted from Guesty's listing title. The
-      // previous `resortName ?? community` resolved to bare "Poipu
-      // Kai" for Regency listings, which Vrbo autocomplete narrowed
-      // to a region returning 1BR/2BR units only (daemon log:
-      // BRs=[1,1,1,1,1,1,1,?,1,2,2,1,2,?,1,1,2,1,2] — 0 of 19 cards
-      // were 3BR). The map's broader area-level strings (e.g.
-      // "Poipu, Koloa, Kauai, Hawaii") give Vrbo's autocomplete the
-      // island anchor it needs to surface the full inventory.
-      const targetDestination =
-        COMMUNITY_VRBO_DESTINATIONS[community]
-        ?? `${resortName ?? community}, Hawaii`;
+      // Search the OTA with the resort-specific location first. The
+      // sidecar log must show exactly what an operator would type into
+      // Vrbo's destination box, not just the broad market fallback.
+      // The diagnostic `vrboDestination` now mirrors this same value so
+      // copied logs show the actual OTA search term.
+      const targetSearchTerm = searchLocation;
       const [googleResults, sidecarResults] = await Promise.all([
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
@@ -3207,7 +3201,8 @@ export async function registerRoutes(
         (async (): Promise<{ candidates: Candidate[]; workerOnline: boolean; durationMs: number; reason: string }> => {
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchVrboViaSidecar({
-            destination: targetDestination,
+            destination: targetSearchTerm,
+            searchTerm: targetSearchTerm,
             checkIn,
             checkOut,
             bedrooms,

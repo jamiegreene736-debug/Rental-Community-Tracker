@@ -607,9 +607,58 @@ async function applyVrboBedroomFilter(bedrooms) {
   }
 }
 
+async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const clicked = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 8 && rect.height > 8 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+      const candidates = Array.from(document.querySelectorAll("button, input[type='submit'], [role='button']"))
+        .filter((el) => isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+      const target = candidates.find((el) => {
+        const label = textOf(el);
+        return /^(search|find|submit)$/i.test(label) ||
+          /\b(search|find stays|show stays|show properties)\b/i.test(label);
+      });
+      if (!target) return null;
+      const clickedLabel = textOf(target).slice(0, 80) || target.tagName.toLowerCase();
+      target.scrollIntoView?.({ block: "center", inline: "center" });
+      target.click?.();
+      return clickedLabel;
+    }),
+    2_000,
+    null,
+  );
+  if (clicked) {
+    log(`${label}: clicked visible search submit "${clicked}"`);
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  }
+  return clicked;
+}
+
 async function processVrboSearch(id, params) {
-  const { destination, checkIn, checkOut, bedrooms } = params;
-  log(`vrbo_search ${id}: ${destination} ${checkIn}→${checkOut} ${bedrooms}BR`);
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  log(
+    `vrbo_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
+    `${checkIn}→${checkOut} ${bedrooms}BR`,
+  );
   await ensureBrowser();
   // PR #301: drop minBedrooms URL filter — Vrbo's server-side filter
   // is unreliable (returns 5 properties for a regionId+minBedrooms=3
@@ -621,12 +670,13 @@ async function processVrboSearch(id, params) {
   // Force currency=USD so Canadian operators don't get CAD values
   // mistakenly persisted as USD.
   const url =
-    `https://www.vrbo.com/search?destination=${encodeURIComponent(destination)}` +
+    `https://www.vrbo.com/search?destination=${encodeURIComponent(effectiveSearchTerm)}` +
     `&startDate=${checkIn}&endDate=${checkOut}` +
     `&adults=2&sort=PRICE_LOW_TO_HIGH&currency=USD`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "vrbo_search");
+  await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   const state = await dumpPageState("vrbo", { id, ...params });
   if (state && /show us your human side|we can.?t tell if you.?re a human/i.test(state.bodyExcerpt)) {
     throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
@@ -850,20 +900,25 @@ async function processVrboPhotoScrape(id, params) {
 
 // ─────────────────────── Booking.com search ─────────────────────────
 async function processBookingSearch(id, params) {
-  const { destination, checkIn, checkOut, bedrooms } = params;
-  log(`booking_search ${id}: ${destination} ${checkIn}→${checkOut} ${bedrooms}BR`);
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  log(
+    `booking_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
+    `${checkIn}→${checkOut} ${bedrooms}BR`,
+  );
   await ensureBrowser();
   // Booking.com supports `nflt=entire_place_bedroom_count%3D${bedrooms}`
   // for the bedroom filter (URL-encoded "entire_place_bedroom_count=N"),
   // sorted by price: `&order=price`.
   const url =
-    `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(destination)}` +
+    `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(effectiveSearchTerm)}` +
     `&checkin=${checkIn}&checkout=${checkOut}` +
     `&group_adults=2&no_rooms=1&group_children=0` +
     `&order=price&nflt=${encodeURIComponent("entire_place_bedroom_count=" + bedrooms)}`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "booking_search");
+  await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");

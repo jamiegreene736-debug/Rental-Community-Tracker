@@ -52,6 +52,7 @@ export type SidecarOpType =
 
 export type SidecarVrboParams = {
   destination: string;
+  searchTerm?: string;
   checkIn: string;
   checkOut: string;
   bedrooms: number;
@@ -64,6 +65,7 @@ export type SidecarVrboPhotoScrapeParams = {
 
 export type SidecarBookingParams = {
   destination: string;
+  searchTerm?: string;
   checkIn: string;
   checkOut: string;
   bedrooms: number;
@@ -289,7 +291,7 @@ function makeRequestKey(
     case "vrbo_search":
     case "booking_search": {
       const p = params as SidecarVrboParams | SidecarBookingParams;
-      return `${opType}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
+      return `${opType}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
     }
     case "vrbo_photo_scrape": {
       const p = params as SidecarVrboPhotoScrapeParams;
@@ -525,6 +527,7 @@ export function getHeartbeat(): {
  */
 export async function searchVrboViaSidecar(opts: {
   destination: string;
+  searchTerm?: string;
   checkIn: string;
   checkOut: string;
   bedrooms: number;
@@ -541,6 +544,7 @@ export async function searchVrboViaSidecar(opts: {
       opType: "vrbo_search",
       params: {
         destination: opts.destination,
+        searchTerm: opts.searchTerm,
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
@@ -594,6 +598,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
 
 export async function searchBookingViaSidecar(opts: {
   destination: string;
+  searchTerm?: string;
   checkIn: string;
   checkOut: string;
   bedrooms: number;
@@ -610,6 +615,7 @@ export async function searchBookingViaSidecar(opts: {
       opType: "booking_search",
       params: {
         destination: opts.destination,
+        searchTerm: opts.searchTerm,
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
