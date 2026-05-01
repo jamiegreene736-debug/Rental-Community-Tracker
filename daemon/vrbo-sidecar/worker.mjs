@@ -41,6 +41,8 @@ const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 10_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
 const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
+const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETRY_MS ?? 1_500);
+const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PER_REQUEST_BUDGET_MS = 90_000;
 const VIEWPORT = { width: 1280, height: 820 };
 
@@ -1203,39 +1205,52 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
   const hasCompleteDateEntry = (entry) =>
     entry?.filled?.some((f) => f.role === "range") ||
     (entry?.filled?.some((f) => f.role === "checkin") && entry?.filled?.some((f) => f.role === "checkout"));
+  const mergeDateEntry = (prev, next) => {
+    const filled = [];
+    const seen = new Set();
+    for (const item of [...(prev?.filled ?? []), ...(next?.filled ?? [])]) {
+      const key = `${item.role}|${item.label}|${item.visible}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      filled.push(item);
+    }
+    return {
+      controlCount: next?.controlCount ?? prev?.controlCount ?? 0,
+      filled,
+      submitLabel: next?.submitLabel ?? prev?.submitLabel ?? null,
+      openedLabel: prev?.openedLabel ?? next?.openedLabel ?? null,
+    };
+  };
   if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
     await targetPage.waitForTimeout(1_000).catch(() => {});
     await dismissObstructions(targetPage, "pm_date_entry_after_open");
     const second = await attempt(false);
-    result = {
-      controlCount: second?.controlCount ?? first.controlCount ?? 0,
-      filled: [...(first.filled ?? []), ...(second?.filled ?? [])],
-      submitLabel: second?.submitLabel ?? first.submitLabel ?? null,
-      openedLabel: first.openedLabel,
-    };
-  } else if (first?.filled?.length > 0 && !hasCompleteDateEntry(first)) {
-    await targetPage.waitForTimeout(800).catch(() => {});
+    result = mergeDateEntry(first, second);
+  }
+  for (let i = 0; result?.filled?.length > 0 && !hasCompleteDateEntry(result) && i < 2; i++) {
+    await targetPage.waitForTimeout(PM_PARTIAL_DATE_RETRY_MS).catch(() => {});
     await dismissObstructions(targetPage, "pm_date_entry_after_partial");
-    const second = await attempt(false);
-    result = {
-      controlCount: second?.controlCount ?? first.controlCount ?? 0,
-      filled: [...(first.filled ?? []), ...(second?.filled ?? [])],
-      submitLabel: second?.submitLabel ?? null,
-      openedLabel: first.openedLabel ?? second?.openedLabel ?? null,
-    };
+    const next = await attempt(false);
+    result = mergeDateEntry(result, next);
+    if (!next?.filled?.length && !next?.openedLabel && !next?.submitLabel) break;
   }
 
   const filledCount = result?.filled?.length ?? 0;
+  const entryComplete = hasCompleteDateEntry(result);
   if (filledCount > 0 || result?.openedLabel || result?.submitLabel) {
     log(
       `pm_url_check: date entry controls=${result?.controlCount ?? 0} filled=${filledCount}` +
+      `${result?.filled?.length ? ` roles=${result.filled.map((f) => f.role).join("+")}` : ""}` +
+      `${entryComplete ? " complete=true" : filledCount > 0 ? " complete=false" : ""}` +
       `${result?.openedLabel ? ` opened="${result.openedLabel}"` : ""}` +
       `${result?.submitLabel ? ` clicked="${result.submitLabel}"` : ""}`,
     );
-    if (result?.submitLabel || result?.openedLabel) {
-      await withSoftTimeout(targetPage.waitForLoadState("networkidle", { timeout: 4_000 }), 4_500);
-      await targetPage.waitForTimeout(1_000).catch(() => {});
-      await dismissObstructions(targetPage, "pm_url_check_after_date_submit");
+    if (entryComplete || result?.submitLabel || result?.openedLabel) {
+      if (result?.submitLabel || result?.openedLabel) {
+        await withSoftTimeout(targetPage.waitForLoadState("networkidle", { timeout: 4_000 }), 4_500);
+      }
+      await targetPage.waitForTimeout(entryComplete ? PM_POST_DATE_SETTLE_MS : 1_000).catch(() => {});
+      await dismissObstructions(targetPage, entryComplete ? "pm_url_check_after_date_entry" : "pm_url_check_after_date_submit");
     }
   }
   return result;
@@ -1620,11 +1635,13 @@ async function processPmUrlCheckBatch(id, params) {
   await ensureBrowser();
   const cap = Math.min(urls.length, 5);
   const slice = urls.slice(0, cap);
+  const tabs = new Set();
   const results = await Promise.all(
     slice.map(async (url) => {
       let tab = null;
       try {
         tab = await context.newPage();
+        tabs.add(tab);
         const r = await scrapePmUrl(tab, url, checkIn, checkOut, bedrooms ?? null);
         return { url, ...r };
       } catch (e) {
@@ -1635,13 +1652,12 @@ async function processPmUrlCheckBatch(id, params) {
           totalPrice: null,
           reason: `tab error: ${e?.message ?? String(e)}`.slice(0, 200),
         };
-      } finally {
-        if (tab) {
-          try { await tab.close(); } catch {}
-        }
       }
     }),
   );
+  await Promise.all(Array.from(tabs).map(async (tab) => {
+    try { if (tab && !tab.isClosed?.()) await tab.close(); } catch {}
+  }));
   log(
     `pm_url_check_batch ${id}: yes=${results.filter((r) => r.available === "yes").length} no=${results.filter((r) => r.available === "no").length} unclear=${results.filter((r) => r.available === "unclear").length}`,
   );
