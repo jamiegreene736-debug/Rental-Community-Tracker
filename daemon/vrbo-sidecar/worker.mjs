@@ -1262,7 +1262,24 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
 // so safe to call concurrently from N tabs.
 async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) {
   const finalUrl = withDateParams(url, checkIn, checkOut);
-  await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  const navResponse = await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  const navStatus = navResponse?.status?.();
+  if (navStatus === 404 || navStatus === 410) {
+    return {
+      available: "no",
+      nightlyPrice: null,
+      totalPrice: null,
+      reason: `HTTP ${navStatus}: PM page is no longer published for this URL`,
+    };
+  }
+  if (typeof navStatus === "number" && navStatus >= 400) {
+    return {
+      available: "unclear",
+      nightlyPrice: null,
+      totalPrice: null,
+      reason: `HTTP ${navStatus}: PM page did not load cleanly`,
+    };
+  }
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
   const dismissals = await dismissObstructions(targetPage, "pm_url_check");
   const dateEntry = await applyPmDateInputs(targetPage, checkIn, checkOut);
@@ -1302,6 +1319,101 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       const words = { 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six" };
       const w = words[Number(n)];
       return new RegExp(`(?:${n}${w ? `|${w}` : ""})[\\s-]*(?:bedroom|bedrooms|bed|br|bd)`, "i");
+    }
+
+    async function callStreamline(methodName, params) {
+      const sp = new URLSearchParams();
+      sp.set("action", "streamlinecore-api-request");
+      sp.set("params", JSON.stringify({ methodName, params }));
+      const resp = await fetch(`/wp-admin/admin-ajax.php?${sp.toString()}`, {
+        headers: {
+          Accept: "application/json, text/javascript, */*; q=0.01",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+      if (!resp.ok) return { ok: false, reason: `HTTP ${resp.status}` };
+      const raw = await resp.text();
+      let json = null;
+      try { json = JSON.parse(raw); } catch { return { ok: false, reason: "non-JSON response" }; }
+      if (json?.status?.code) {
+        return { ok: false, reason: `${json.status.code}: ${json.status.description || ""}`.slice(0, 180) };
+      }
+      return { ok: true, data: json?.data };
+    }
+
+    function streamlineWindowAvailable(avail) {
+      const begin = String(avail?.range?.beginDate || "").split("/").map((p) => parseInt(p, 10));
+      const availability = String(avail?.availability || "");
+      const minStay = String(avail?.minStay || "").split(",").map((p) => parseInt(p, 10)).filter(Number.isFinite);
+      if (begin.length !== 3 || availability.length === 0) return null;
+      const [bm, bd, by] = begin;
+      const beginMs = Date.UTC(by, bm - 1, bd, 12, 0, 0);
+      const startMs = new Date(`${checkIn}T12:00:00Z`).getTime();
+      const endMs = new Date(`${checkOut}T12:00:00Z`).getTime();
+      const startIdx = Math.round((startMs - beginMs) / 86400000);
+      const endIdx = Math.round((endMs - beginMs) / 86400000);
+      if (startIdx < 0 || endIdx > availability.length) return null;
+      const window = availability.slice(startIdx, endIdx);
+      if (/N/.test(window)) return { available: false, reason: `blocked nights ${window}` };
+      const requiredMinStay = minStay[startIdx] || 1;
+      if (nights < requiredMinStay) return { available: false, reason: `${requiredMinStay}-night minimum` };
+      return { available: true, reason: `calendar open ${window}` };
+    }
+
+    async function tryStreamline() {
+      if (!/(?:alekonakauai|princevillevacationrentals)\.com$/i.test(host)) return null;
+      const html = document.documentElement?.innerHTML ?? "";
+      const unitIdMatch =
+        html.match(/propertyId\s*=\s*(\d+)/) ||
+        html.match(/(?:unit_id|unitId|property_id|propertyId)["'\s:=]+(\d+)/i);
+      const unitId = unitIdMatch ? parseInt(unitIdMatch[1], 10) : 0;
+      if (!(unitId > 0)) return null;
+
+      const availability = await callStreamline("GetPropertyAvailabilityRawData", {
+        unit_id: unitId,
+        use_room_type_logic: "no",
+        standard_pricing: 1,
+      });
+      const availabilityState = availability.ok ? streamlineWindowAvailable(availability.data) : null;
+      if (availabilityState?.available === false) {
+        return {
+          available: "no",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `Streamline calendar: ${availabilityState.reason} for ${checkIn} → ${checkOut} (unitId=${unitId})`,
+        };
+      }
+
+      const quote = await callStreamline("GetPreReservationPrice", {
+        unit_id: unitId,
+        startdate: checkIn,
+        enddate: checkOut,
+        adults: 2,
+        children: 0,
+      });
+      const total = quote.ok ? parseMoneyAmount(quote.data?.total) : 0;
+      if (availabilityState?.available === true && total > 0) {
+        return {
+          available: "yes",
+          nightlyPrice: Math.round(total / nights),
+          totalPrice: Math.round(total),
+          reason: `Streamline API: $${Math.round(total).toLocaleString()} total for ${nights} nights; ${availabilityState.reason} (unitId=${unitId})`,
+        };
+      }
+      if (total > 0) {
+        return {
+          available: "unclear",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `Streamline API quoted $${Math.round(total).toLocaleString()} but calendar availability was inconclusive for ${checkIn} → ${checkOut} (unitId=${unitId})`,
+        };
+      }
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: `Streamline API returned no usable quote for ${checkIn} → ${checkOut} (unitId=${unitId}${quote.ok ? "" : `; ${quote.reason}`})`,
+      };
     }
 
     function tryBookingCom() {
@@ -1495,6 +1607,17 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       return null;
     }
 
+    try {
+      const streamline = await tryStreamline();
+      if (streamline) return streamline;
+    } catch (e) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: `Streamline API parse error: ${String(e?.message || e).slice(0, 120)}`,
+      };
+    }
     try {
       const booking = tryBookingCom();
       if (booking) return booking;

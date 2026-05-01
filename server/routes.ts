@@ -4250,7 +4250,7 @@ export async function registerRoutes(
         base = "Bot wall / access denied";
       } else if (/tab error|timeout|net::|navigation|ERR_|fetch failed|closed|crash/i.test(raw)) {
         base = "Navigation or tab error";
-      } else if (/not available|no availability|sold out|unavailable|booked night|no check-in|minimum/i.test(raw)) {
+      } else if (/not available|no availability|sold out|unavailable|booked night|blocked nights|no check-in|minimum/i.test(raw)) {
         base = "Unavailable or blocked by stay rules";
       } else if (/did not show a priced .*bedroom|room type|bedroom room/i.test(raw)) {
         base = "Bedroom-specific room/rate not found";
