@@ -2028,33 +2028,33 @@ export async function registerRoutes(
   //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
   //     cheapest: [top 2 cross-source by nightly price]
   //   }
-  // PM discovery: Google-search paths feature flag (PR #314).
+  // PM discovery: SearchAPI-backed Google paths feature flag (PR #314).
   //
-  // Operator directive 2026-04-29: Google started returning 403s on
-  // both the sidecar (home-IP scrape) and SearchAPI engine=google
-  // PM-domain-discovery queries. Three Google-dependent paths in
-  // find-buy-in were affected:
-  //   1. pmPromise         — Stage 1 (find PM domains) + Stage 2
-  //                          (per-PM site:search deep-dive) via
-  //                          SearchAPI engine=google
-  //   2. pmSidecarFinder   — sidecar googleSerpViaSidecar query for
-  //                          additional PM URLs (PR #306 added)
-  //   3. lensMatches       — Google Lens reverse-image search for
-  //                          PM URLs that share photos with the top
-  //                          Airbnb candidates (PR #225-era)
+  // Operator directive 2026-05-01: Google searches must be server-side
+  // SearchAPI calls only. The sidecar/Chrome daemon is reserved for
+  // visiting already-discovered PM/OTA pages to verify pricing and
+  // availability. Driving google.com through Chrome gets the operator's
+  // local browser flagged and then pollutes the same session we need for
+  // VRBO/Booking/PM page checks.
   //
-  // When this flag is disabled during a Google-side outage, the
-  // cheapest pool still draws from:
+  // When this flag is disabled during a SearchAPI/Google-side outage,
+  // the cheapest pool still draws from non-Google direct sources:
   //   - Airbnb engine (SearchAPI engine=airbnb — not Google)
   //   - Booking sidecar + google_hotels engine (different API surface)
   //   - Vrbo sidecar (operator's home-IP Chrome)
   //   - Suite-Paradise sitemap walk (no Google)
   //   - VRP_SITES sitemap walks (no Google) — Parrish, CB Island,
-  //     Piko, EVR Hawaii (PR #313)
+  //     Piko, EVR Hawaii
   //
-  // Enabled by default again (2026-04-30): the operator wants the
-  // long-tail PM discovery paths active. Keep an emergency kill-switch
-  // for Google-side outages without another deploy.
+  // Google-dependent API-only paths currently gated by this flag:
+  //   1. pmPromise         — Stage 1 (find PM domains) + Stage 2
+  //                          (per-PM site:search deep-dive) via
+  //                          SearchAPI engine=google
+  //   2. pmSearchApiFinder — broad SearchAPI engine=google queries for
+  //                          additional PM URLs
+  //   3. lensMatches       — Google Lens reverse-image search for
+  //                          PM URLs that share photos with the top
+  //                          Airbnb candidates
   const PM_GOOGLE_DISCOVERY_ENABLED = process.env.PM_GOOGLE_DISCOVERY_ENABLED !== "false";
 
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
@@ -2226,7 +2226,17 @@ export async function registerRoutes(
     const probeForVrp = /^(true|1)$/i.test(String(req.query.probe || ""));
     if (!community) return res.status(400).json({ error: "community query param required" });
     try {
-      const result = await discoverPmDomains({ community, location, apiKey, pages, probeForVrp });
+      const loc = COMMUNITY_LOCATION_BY_KEY[community];
+      const discoveryCommunity = loc?.searchName ?? community;
+      const discoveryLocation = location ?? (loc ? `${loc.city}, ${loc.state}` : undefined);
+      const result = await discoverPmDomains({
+        community: discoveryCommunity,
+        location: discoveryLocation,
+        apiKey,
+        pages,
+        probeForVrp,
+      });
+      (result as any).requestedCommunity = community;
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
@@ -2289,15 +2299,20 @@ export async function registerRoutes(
       // shared PM domains across communities only probe once.
       const perCommunityResults = await Promise.all(
         communities.map(async (community) => {
-          const location = COMMUNITY_SEARCH_LOCATIONS[community]?.split(",")[1]?.trim();
+          const loc = COMMUNITY_LOCATION_BY_KEY[community];
+          const discoveryCommunity = loc?.searchName ?? community;
+          const location = loc
+            ? `${loc.city}, ${loc.state}`
+            : COMMUNITY_SEARCH_LOCATIONS[community]?.split(",")[1]?.trim();
           try {
             const r = await discoverPmDomains({
-              community,
+              community: discoveryCommunity,
               location,
               apiKey,
               pages: 2,
               probeForVrp: true,
             });
+            (r as any).communityKey = community;
             return [community, r] as const;
           } catch (e: any) {
             return [community, { error: e?.message ?? String(e) }] as const;
@@ -2510,6 +2525,9 @@ export async function registerRoutes(
       }
     } catch (e: any) {
       console.warn(`[find-buy-in] couldn't resolve resort name for property ${propertyId}:`, e.message);
+    }
+    if (!resortName) {
+      resortName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName ?? null;
     }
 
     // Normalize a string for inclusion checks — lowercase + collapse punctuation
@@ -3332,24 +3350,19 @@ export async function registerRoutes(
       return out;
     })();
 
-    // ── Property-management companies via Google search ────────────────────
-    // No live pricing — we return company sites + their booking page as
-    // starting points so the host can price-check manually if the OTA results
-    // above aren't cheap enough.
-    // PM companies — Stage 1: find relevant PM companies via Google.
-    // Stage 2: for each PM company, do a secondary `site:` search to surface
-    // specific property listing pages (not just the homepage) for the target
-    // bedroom count. This gives the host actual per-property URLs they can
-    // click through to, rather than a generic PM homepage.
+    // ── Property-management companies via SearchAPI discovery ──────────────
+    // SearchAPI discovers PM domains + candidate listing pages; the sidecar
+    // only visits those already-discovered pages later for rate/availability
+    // verification. Do not route Google SERPs through the local Chrome
+    // sidecar — that gets the operator's browser flagged by Google.
     //
-    // Stage 1 source priority (PR #306):
-    //   1. Sidecar Google SERP — runs against the operator's real Chrome
-    //      on home IP. Returns Hawaii/Florida-tilted PM rankings that
-    //      SearchAPI's datacenter IPs miss. ~3-5s extra wall but more
-    //      relevant domain set feeds Stage 2.
-    //   2. SearchAPI engine=google — fallback when daemon offline.
+    // Stage 1: find relevant PM companies via SearchAPI engine=google.
+    // Stage 2: for each PM company, do a secondary `site:` SearchAPI query to
+    // surface specific property listing pages (not just the homepage) for the
+    // target bedroom count. This gives the host actual per-property URLs they
+    // can click through to, rather than a generic PM homepage.
     let pmRawCount = 0;
-    let pmStage1Source: "sidecar" | "searchapi" | "none" = "none";
+    let pmStage1Source: "searchapi" | "none" = "none";
     const pmPromise: Promise<Candidate[]> = (async () => {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Operator directive after Google 403s on PM-domain queries.
@@ -3358,35 +3371,18 @@ export async function registerRoutes(
       }
       try {
         const qualifier = resortName ? `"${resortName}"` : community;
-        const query = `${qualifier} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`;
-
-        // Try sidecar first.
         let organic: Array<{ link?: string; title?: string; snippet?: string }> = [];
-        try {
-          const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
-          const sidecarSerp = await googleSerpViaSidecar({
-            query,
-            maxResults: 10,
-            walletBudgetMs: 60_000,
-          });
-          if (sidecarSerp.workerOnline && sidecarSerp.hits.length > 0) {
-            organic = sidecarSerp.hits.map((h) => ({
-              link: h.url,
-              title: h.title,
-              snippet: h.snippet,
-            }));
-            pmStage1Source = "sidecar";
-            console.log(
-              `[find-buy-in] pm-stage1 via sidecar: ${organic.length} organic results (${sidecarSerp.durationMs}ms)`,
-            );
-          }
-        } catch (e: any) {
-          console.warn(`[find-buy-in] pm-stage1 sidecar attempt failed:`, e?.message ?? e);
-          noteSourceError("PM stage-1 sidecar", e);
-        }
-
-        // Fallback: SearchAPI engine=google.
-        if (organic.length === 0) {
+        const locality = searchLocation.replace(/,/g, " ");
+        const stage1Queries = Array.from(new Set([
+          `${qualifier} vacation rental property management OR rentals -airbnb.com -vrbo.com -booking.com`,
+          `${qualifier} ${locality} vacation rental "book direct" -airbnb.com -vrbo.com -booking.com`,
+          `${qualifier} ${bedrooms} bedroom condo rental Kauai -airbnb.com -vrbo.com -booking.com`,
+          resortName && resortName !== community
+            ? `"${community}" "${resortName}" vacation rental property management -airbnb.com -vrbo.com -booking.com`
+            : null,
+        ].filter((q): q is string => !!q)));
+        const seenOrganicLinks = new Set<string>();
+        const queryResults = await Promise.all(stage1Queries.map(async (query) => {
           const params = new URLSearchParams({
             engine: "google",
             q: query,
@@ -3399,10 +3395,18 @@ export async function registerRoutes(
             return [];
           }
           const data = await r.json() as any;
-          organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
-          pmStage1Source = "searchapi";
-          console.log(`[find-buy-in] pm-stage1 via SearchAPI fallback: ${organic.length} organic results`);
+          return Array.isArray(data?.organic_results) ? data.organic_results : [];
+        }));
+        for (const batch of queryResults) {
+          for (const hit of batch) {
+            const link = String(hit?.link ?? "");
+            if (!link || seenOrganicLinks.has(link)) continue;
+            seenOrganicLinks.add(link);
+            organic.push(hit);
+          }
         }
+        pmStage1Source = "searchapi";
+        console.log(`[find-buy-in] pm-stage1 via SearchAPI: ${organic.length} organic results across ${stage1Queries.length} queries`);
         pmRawCount = organic.length;
 
         // Dedupe by domain and keep the top N candidate PM sites
@@ -3422,12 +3426,11 @@ export async function registerRoutes(
               homepageUrl: url,
               snippet: String(o?.snippet ?? "").slice(0, 140),
             });
-            // Cap raised 6→10 (PR #307). Stage 2 fans out 2 SearchAPI
-            // calls per domain in parallel, ~1s each — 4 extra domains
-            // adds at most ~1s wall (parallel) but meaningfully widens
-            // the PM funnel for resorts where the relevant manager
-            // ranks 7th-10th on Google rather than top-6.
-            if (pmSites.length >= 10) break;
+            // Keep a broad PM domain set; Stage 2 fans out SearchAPI calls
+            // in parallel and the later sidecar verifier caps actual page
+            // visits. This matters for Kaha Lani-style resorts where the
+            // relevant managers do not all rank in the first few results.
+            if (pmSites.length >= 14) break;
           } catch { /* skip malformed URLs */ }
         }
 
@@ -3537,7 +3540,7 @@ export async function registerRoutes(
                   source: "pm" as const,
                   sourceLabel: site.title,
                   title: String(h?.title ?? "Listing").slice(0, 100),
-                  url: String(h?.link ?? ""),
+                  url: withStayDates("pm", String(h?.link ?? "")),
                   nightlyPrice: nightly,
                   totalPrice: nightly ? nightly * nights : 0,
                   bedrooms: inferred ?? undefined,
@@ -3804,55 +3807,71 @@ export async function registerRoutes(
     const slAlekonaDiscoveryPromise = streamlineDiscoveryPromise("alekonaKauai", "slAlekonaCalls");
     const slPrincevilleDiscoveryPromise = streamlineDiscoveryPromise("princevilleVacationRentals", "slPrincevilleCalls");
 
-    // Sidecar Google PM finder: start this before the main Promise.all so
-    // its home-IP Google scrape overlaps with Booking/VRBO/PM sitemap
-    // work. Previously it ran after all source discovery finished, adding
-    // ~25-30s to cold find-buy-in scans before the sidecar batch verifier
-    // even started.
-    const pmSidecarFinderPromise: Promise<Candidate[]> = (async () => {
+    // Broad PM page finder: start this before the main Promise.all so its
+    // SearchAPI calls overlap with Booking/VRBO/PM sitemap work. It finds
+    // long-tail PM pages that the per-domain Stage 2 search may miss.
+    // Sidecar/Chrome is deliberately NOT used for Google search.
+    const pmSearchApiFinderPromise: Promise<Candidate[]> = (async () => {
       if (!PM_GOOGLE_DISCOVERY_ENABLED) return [];
       try {
-        const { googleSerpViaSidecar } = await import("./vrbo-sidecar-queue");
         const target = resortName ?? community;
-        const sidecarSerp = await googleSerpViaSidecar({
-          query: `"${target}" ${bedrooms} bedroom vacation rental property management book directly`,
-          maxResults: 20,
-          walletBudgetMs: 75_000,
-        });
-        if (!sidecarSerp.workerOnline) {
-          console.log(`[find-buy-in] sidecar-google-serp skipped (worker offline)`);
-          noteSourceError("Sidecar Google PM finder", sidecarSerp.reason || "worker offline");
-          return [];
-        }
+        const locality = searchLocation.replace(/,/g, " ");
+        const queries = Array.from(new Set([
+          `"${target}" ${bedrooms} bedroom vacation rental property management book directly`,
+          `"${target}" ${bedrooms}BR condo rental direct booking ${locality}`,
+          `"${target}" "${checkIn.slice(0, 4)}" vacation rental ${bedrooms} bedroom`,
+          resortName && resortName !== community
+            ? `"${community}" "${resortName}" ${bedrooms} bedroom condo rental`
+            : null,
+        ].filter((q): q is string => !!q)));
         const otaDomains = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com)$/i;
         const seen = new Set<string>();
         const candidates: Candidate[] = [];
-        for (const hit of sidecarSerp.hits) {
-          let host = "";
-          try { host = new URL(hit.url).hostname.replace(/^www\./, ""); } catch { continue; }
-          if (otaDomains.test(host)) continue;
-          if (seen.has(hit.url)) continue;
-          const candidate: Candidate = {
-            source: "pm",
-            sourceLabel: host,
-            title: hit.title.slice(0, 100),
-            url: withStayDates("pm", hit.url),
-            nightlyPrice: 0,
-            totalPrice: 0,
-            bedrooms: undefined,
-            snippet: hit.snippet?.slice(0, 160),
-          };
-          if (!candidateFitsTarget(candidate)) continue;
-          seen.add(hit.url);
-          candidates.push(candidate);
+        const started = Date.now();
+        const batches = await Promise.all(queries.map(async (query) => {
+          const params = new URLSearchParams({
+            engine: "google",
+            q: query,
+            num: "10",
+            api_key: apiKey,
+          });
+          const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+          if (!r.ok) {
+            noteSourceError("SearchAPI PM finder", `HTTP ${r.status}`);
+            return [];
+          }
+          const data = await r.json() as any;
+          return Array.isArray(data?.organic_results) ? data.organic_results : [];
+        }));
+        for (const batch of batches) {
+          for (const hit of batch) {
+            const url = String(hit?.link ?? "");
+            if (!url || seen.has(url)) continue;
+            let host = "";
+            try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { continue; }
+            if (otaDomains.test(host)) continue;
+            const candidate: Candidate = {
+              source: "pm",
+              sourceLabel: host,
+              title: String(hit?.title ?? host).slice(0, 100),
+              url: withStayDates("pm", url),
+              nightlyPrice: 0,
+              totalPrice: 0,
+              bedrooms: bedroomFromText(`${hit?.title ?? ""} ${hit?.snippet ?? ""}`) ?? undefined,
+              snippet: String(hit?.snippet ?? "").slice(0, 160),
+            };
+            if (!candidateFitsTarget(candidate)) continue;
+            seen.add(url);
+            candidates.push(candidate);
+          }
         }
         console.log(
-          `[find-buy-in] sidecar-google-serp raw ${candidates.length} PM URLs (worker online, query="${target}" ${bedrooms}BR, ${sidecarSerp.durationMs}ms)`,
+          `[find-buy-in] searchapi-pm-finder raw ${candidates.length} PM URLs (target="${target}" ${bedrooms}BR, ${queries.length} queries, ${Date.now() - started}ms)`,
         );
         return candidates;
       } catch (e: any) {
-        console.error(`[find-buy-in] sidecar-google-serp error:`, e?.message ?? e);
-        noteSourceError("Sidecar Google PM finder", e);
+        console.error(`[find-buy-in] searchapi-pm-finder error:`, e?.message ?? e);
+        noteSourceError("SearchAPI PM finder", e);
         return [];
       }
     })();
@@ -4150,34 +4169,39 @@ export async function registerRoutes(
         });
       }
     }
-    // ── PM discovery via Google ─────────────────────────────────────
+    // ── PM discovery via SearchAPI ──────────────────────────────────
     // The Stagehand-based PM finder (Browserbase + Anthropic agent that
-    // drove Google search like a human) was retired in PR #275. Sidecar
-    // Google SERP below replaces it: same query, same data, but driven
-    // from the operator's actual home-IP Chrome — gets long-tail PM
-    // results SearchAPI's Google misses *and* doesn't burn an extra
-    // ~$0.30 + 60s per find-buy-in.
-
-    // Sidecar Google PM finder was started before the main source
-    // Promise.all. Await its already-running result now and de-dupe
-    // against PM rows found by the structured scrapers/searches above.
-    const pmSidecarFinderRaw = await pmSidecarFinderPromise;
-    const existingPmUrlSet = new Set(pm.map((c) => c.url));
-    const pmSidecarFinderCandidates = pmSidecarFinderRaw.filter((c) => {
-      if (existingPmUrlSet.has(c.url)) return false;
-      existingPmUrlSet.add(c.url);
+    // drove Google search like a human) was retired in PR #275. The
+    // broad PM finder now uses SearchAPI only, then the sidecar verifies
+    // candidate PM URLs directly.
+    const pmSearchApiFinderRaw = await pmSearchApiFinderPromise;
+    const pmDedupeKey = (rawUrl: string): string => {
+      try {
+        const u = new URL(rawUrl);
+        u.search = "";
+        u.hash = "";
+        return u.toString();
+      } catch {
+        return rawUrl;
+      }
+    };
+    const existingPmUrlSet = new Set(pm.map((c) => pmDedupeKey(c.url)));
+    const pmSearchApiFinderCandidates = pmSearchApiFinderRaw.filter((c) => {
+      const key = pmDedupeKey(c.url);
+      if (existingPmUrlSet.has(key)) return false;
+      existingPmUrlSet.add(key);
       return true;
     });
-    if (pmSidecarFinderRaw.length > 0) {
+    if (pmSearchApiFinderRaw.length > 0) {
       console.log(
-        `[find-buy-in] sidecar-google-serp added ${pmSidecarFinderCandidates.length}/${pmSidecarFinderRaw.length} PM URLs after PM de-dupe`,
+        `[find-buy-in] searchapi-pm-finder added ${pmSearchApiFinderCandidates.length}/${pmSearchApiFinderRaw.length} PM URLs after PM de-dupe`,
       );
     }
 
     // ── Sidecar batch URL verify (operator's real Chrome) ────────────
     // Take unverified direct-booking URLs from Booking.com organic rows
-    // plus every PM discovery path (Google deep-dive, reverse-image PM
-    // matches, sidecar-Google PM finder) and ask the daemon to fan out
+    // plus every PM discovery path (SearchAPI deep-dive, reverse-image PM
+    // matches, SearchAPI PM finder) and ask the daemon to fan out
     // 5 parallel Chrome tabs per batch to scrape availability + price
     // for the requested window.
     // Total wall ≈ one slow tab per 5 URLs. Yields:
@@ -4195,7 +4219,7 @@ export async function registerRoutes(
     for (const c of [
       ...pmGoogle,
       ...photoMatchPmCandidates,
-      ...pmSidecarFinderCandidates,
+      ...pmSearchApiFinderCandidates,
       ...booking.filter((candidate) => candidate.source === "booking" && !candidate.verified),
     ]) {
       if (!c.url || c.verified || sidecarVerifySeen.has(c.url)) continue;
@@ -4260,15 +4284,14 @@ export async function registerRoutes(
       }
     }
 
-    // Stagehand PM finder retired in PR #275 — sidecar Google SERP above
-    // replaces it. Variable kept (always empty) so the merging code below
-    // doesn't need to change shape.
+    // Stagehand PM finder retired in PR #275. Variable kept (always empty)
+    // so the merging code below doesn't need to change shape.
     const pmFinderCandidates: Candidate[] = [];
 
     const pmAugmented: Candidate[] = [
       ...pm,
       ...photoMatchPmCandidates,
-      ...pmSidecarFinderCandidates,
+      ...pmSearchApiFinderCandidates,
       ...pmFinderCandidates,
     ];
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
@@ -4586,12 +4609,12 @@ export async function registerRoutes(
       },
       {
         source: "PM companies",
-        status: sourceStatus(["pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSidecarFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
-        raw: pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSidecarFinderCandidates.length,
+        status: sourceStatus(["pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
+        raw: pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length,
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        message: `stage1=${pmStage1Source}; sidecarFinder=${pmSidecarFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; direct PM priced=${pricedCount(pmTarget)}.`,
+        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; direct PM priced=${pricedCount(pmTarget)}.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -4663,7 +4686,7 @@ export async function registerRoutes(
       + `airbnbEngine=${airbnbPricedCount} raw · `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (google_hotels discovery + sidecar detail verify) `
-      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSidecarFinderCandidates.length}+${pmFinderCandidates.length} (google+photoMatches+knownPMs+sidecarFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (searchapi+photoMatches+knownPMs+searchApiFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
@@ -4700,11 +4723,11 @@ export async function registerRoutes(
         { label: "Alekona Kauai",                 count: slAlekonaDiscovered.length },
         { label: "Princeville Vacation Rentals",  count: slPrincevilleDiscovered.length },
         { label: "Google site-search (other PMs)",count: pmGoogle.filter((c) => !seenPmUrls.has(c.url)).length },
-        { label: "Sidecar Google PM finder",       count: pmSidecarFinderCandidates.length },
+        { label: "SearchAPI PM finder",            count: pmSearchApiFinderCandidates.length },
         { label: "Sidecar rate checks",            count: sidecarBatchVerifiedUrls.size },
       ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSidecarFinder: pmSidecarFinderCandidates.length, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,

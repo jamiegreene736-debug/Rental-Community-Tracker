@@ -76,10 +76,10 @@ export interface PmDiscoveryResult {
   rawHits: number;
   domains: DiscoveredDomain[];
   /**
-   * PR #309: breakdown of which path served each Google query. Sums
-   * to `queries.length`. Lets the admin endpoint surface "X/Y queries
-   * went through the operator's real Chrome (sidecar) vs Y/Z went
-   * through SearchAPI fallback".
+   * Breakdown of which path served each Google query. `sidecar` is kept
+   * for response compatibility, but is always 0 after the 2026-05-01
+   * operator directive: Google search discovery must run through
+   * SearchAPI only, never through the local Chrome sidecar.
    */
   sourceBreakdown?: { sidecar: number; searchapi: number };
 }
@@ -183,25 +183,17 @@ async function fetchOrganicViaSearchApi(
 }
 
 /**
- * Sidecar-primary Google fetch (PR #309). Drives the operator's real
- * Chrome on home IP via `googleSerpViaSidecar`, falling back to
- * SearchAPI when the daemon is offline. Returns up to `pages * 10`
- * results per query in one sidecar call (the daemon's google_serp op
- * supports `maxResults` natively); SearchAPI fallback keeps the
- * page-by-page paging behaviour. Per-PM site:search ranking is
- * meaningfully Hawaii/Florida-tilted on the operator's home IP — PMs
- * that don't rank well on SearchAPI's datacenter IPs surface here.
- *
- * Returns a tuple: `[hits, source]` so the caller can log/expose
- * whichever path served the request.
+ * SearchAPI-only Google fetch. Sidecar/Chrome is deliberately not used
+ * for google.com because it gets the operator's browser flagged. The
+ * sidecar is reserved for direct URL rate/availability checks.
  */
-async function fetchOrganicViaSidecarOrApi(
+async function fetchOrganicViaSearchApiOnly(
   query: string,
   pages: number,
   apiKey: string,
-): Promise<{ hits: Array<{ link: string }>; source: "sidecar" | "searchapi"; durationMs: number }> {
-  // PR #327 (operator directive 2026-04-30): sidecar Google SERP
-  // path REMOVED. Driving Google search through Playwright kept
+): Promise<{ hits: Array<{ link: string }>; source: "searchapi"; durationMs: number }> {
+  // PR #327/#latest operator directive: sidecar Google SERP path
+  // REMOVED. Driving Google search through Playwright kept
   // tripping Google's bot detection — Chrome would zoom in/out and
   // exhibit unusual scroll behavior that flagged the session, then
   // every subsequent VRBO/Booking partner-portal scrape inherited
@@ -253,18 +245,15 @@ export async function discoverPmDomains(opts: {
   const covered = coveredHostnames();
   const byHost = new Map<string, DiscoveredDomain>();
   let rawHits = 0;
-  // PR #309: track which path served each Google query so the admin
-  // endpoint can show the operator how often the sidecar was used vs.
-  // the SearchAPI fallback. Useful for diagnosing daemon-offline
-  // periods and verifying the operator's home-IP ranking is actually
-  // hitting the discovery flow.
+  // Track which path served each Google query. `sidecarQueryCount`
+  // intentionally stays 0; retained so older admin clients that render
+  // `sourceBreakdown.sidecar` don't break.
   let sidecarQueryCount = 0;
   let searchapiQueryCount = 0;
 
   for (const query of queries) {
-    const r = await fetchOrganicViaSidecarOrApi(query, pages, opts.apiKey);
-    if (r.source === "sidecar") sidecarQueryCount++;
-    else searchapiQueryCount++;
+    const r = await fetchOrganicViaSearchApiOnly(query, pages, opts.apiKey);
+    searchapiQueryCount++;
     rawHits += r.hits.length;
     for (const o of r.hits) {
       const host = normalizeHostname(o.link);

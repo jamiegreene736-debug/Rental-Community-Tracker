@@ -43,6 +43,20 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-01: Codex changed find-buy-in PM discovery so Google searches
+  are SearchAPI-only. The local Chrome sidecar should no longer be used
+  to visit google.com for PM sourcing; it should only open concrete
+  candidate PM/OTA URLs to verify rates and availability. In
+  `server/routes.ts`, the old `googleSerpViaSidecar` PM stage-1 and
+  "Sidecar Google PM finder" paths were replaced with multi-query
+  SearchAPI discovery (`pmPromise` + `pmSearchApiFinder`). Kaha Lani also
+  now falls back to the curated `COMMUNITY_LOCATION_BY_KEY` search name
+  (`Kaha Lani Resort`) when Guesty title lookup cannot resolve a resort,
+  and `/api/admin/pm-discovery` / `/api/admin/pm-auto-discover-all` use
+  curated resort search names instead of generic internal keys like
+  `Kapaa Beachfront`. The admin discovery module
+  `server/pm-discovery.ts` keeps `sourceBreakdown.sidecar` for response
+  compatibility, but it is intentionally always `0`.
 - 2026-04-30: Codex added operator-facing diagnostics for
   `/api/operations/find-buy-in`. The route now returns a `diagnostics`
   object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM
