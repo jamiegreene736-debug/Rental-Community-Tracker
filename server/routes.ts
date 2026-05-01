@@ -4216,7 +4216,7 @@ export async function registerRoutes(
     // Take unverified direct-booking URLs from Booking.com organic rows
     // plus every PM discovery path (SearchAPI deep-dive, reverse-image PM
     // matches, SearchAPI PM finder), then force any remaining unpriced
-    // "manual quote" PM rows through the same sidecar verifier. SearchAPI
+    // PM rows through the same sidecar verifier. SearchAPI
     // can only find the page; if the row has no rate, the local Chrome
     // sidecar is the right next step to try the live booking widget.
     // Total wall ≈ one slow tab per 5 URLs. Yields:
@@ -4241,7 +4241,7 @@ export async function registerRoutes(
         return rawUrl;
       }
     };
-    const isManualQuoteCandidate = (c: Candidate): boolean =>
+    const isAutoWidgetCheckCandidate = (c: Candidate): boolean =>
       c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0);
     type SidecarReasonBucket = { count: number; examples: string[] };
     const sidecarVerifyReasonCounts = new Map<string, SidecarReasonBucket>();
@@ -4288,10 +4288,10 @@ export async function registerRoutes(
     const sidecarVerifyPool = [
       // Booking search/google-hotels rows are detail-page discovery only.
       // Verify them before broad PM rows so Booking.com doesn't sit in
-      // the UI as "manual quote" just because the 25-row PM budget filled.
+      // the UI without an automatic verification state.
       ...booking.filter((candidate) => candidate.source === "booking" && !candidate.verified),
-      // Then check every PM row the UI would otherwise label manual.
-      ...pm.filter((candidate) => isManualQuoteCandidate(candidate) && !candidate.verified),
+      // Then check every unpriced PM row the UI would otherwise keep as unverified.
+      ...pm.filter((candidate) => isAutoWidgetCheckCandidate(candidate) && !candidate.verified),
       ...pmGoogle,
       ...photoMatchPmCandidates,
       ...pmSearchApiFinderCandidates,
@@ -4308,7 +4308,7 @@ export async function registerRoutes(
       // edge timeout on slow pages.
       if (sidecarVerifyTargets.length >= 60) break;
     }
-    const sidecarManualQuoteTargetCount = sidecarVerifyTargets.filter(isManualQuoteCandidate).length;
+    const sidecarAutoWidgetTargetCount = sidecarVerifyTargets.filter(isAutoWidgetCheckCandidate).length;
     let sidecarVerifySkippedForBudget = 0;
     if (sidecarVerifyTargets.length > 0) {
       try {
@@ -4377,7 +4377,7 @@ export async function registerRoutes(
         const no = sidecarVerifyTargets.filter((c) => c.verified === "no").length;
         const unclear = sidecarVerifyTargets.filter((c) => c.verified === "unclear").length;
         console.log(
-          `[find-buy-in] sidecar-batch-verify checked=${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length} manualQuoteTargets=${sidecarManualQuoteTargetCount} skippedForBudget=${sidecarVerifySkippedForBudget} yes=${yes} no=${no} unclear=${unclear} (${sidecarVerifyMs}ms)`,
+          `[find-buy-in] sidecar-batch-verify checked=${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length} autoWidgetTargets=${sidecarAutoWidgetTargetCount} skippedForBudget=${sidecarVerifySkippedForBudget} yes=${yes} no=${no} unclear=${unclear} (${sidecarVerifyMs}ms)`,
         );
       } catch (e: any) {
         console.error(`[find-buy-in] sidecar-batch-verify error:`, e?.message ?? e);
@@ -4504,9 +4504,9 @@ export async function registerRoutes(
     const verifiedCheapest = priced.filter((c) => c.verified === "yes");
     // Cap at 20 — multi-slot reservations need enough variety to fill
     // distinct units per slot. Do not fall back to unpriced PM rows here:
-    // Auto-fill consumes this list directly, so a manual quote fallback
-    // creates a $0 attached buy-in. Unverified/manual PM rows stay visible
-    // below in the scanned-options table for human review.
+    // Auto-fill consumes this list directly, so an unpriced fallback
+    // creates a $0 attached buy-in. Unverified PM rows stay visible
+    // below in the scanned-options table with their automatic status.
     const cheapest = verifiedCheapest.slice(0, 20);
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
 
@@ -4747,7 +4747,7 @@ export async function registerRoutes(
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}.`,
+        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -4758,7 +4758,7 @@ export async function registerRoutes(
         verified: preVerifyYes,
         message: sidecarVerifyTargets.length === 0
           ? "No unverified Booking.com/PM detail URLs needed sidecar verification."
-          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
+          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
       },
     ];
     const diagnosticsSeverity: "ok" | "warning" | "error" = issueList.some((i) => i.severity === "error")

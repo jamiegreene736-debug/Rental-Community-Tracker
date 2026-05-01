@@ -625,7 +625,7 @@ export default function Bookings() {
           title: "No verified priced candidates",
           description: scanned > 0
             ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates. The scanned-options table is open below.`
-            : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the search manually.",
+            : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the live search.",
         });
       } else if (zeroCostFills.length === filled.length) {
         const hasVrboPick = filled.some((r) => /(?:^|\.)vrbo\.com/.test(r.picked?.url ?? ""));
@@ -646,7 +646,7 @@ export default function Bookings() {
             : `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
-            + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached without live price — review manually` : "")
+            + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached without live price — review before confirming` : "")
             + (airbnbPickCount > 0 ? ` · ⚠️ ${airbnbPickCount} Airbnb URL${airbnbPickCount > 1 ? "s" : ""} attached (TOS prohibits sublet — see slot notes)` : "")
             + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });

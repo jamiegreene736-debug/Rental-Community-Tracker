@@ -978,6 +978,320 @@ function withDateParams(url, checkIn, checkOut) {
   }
 }
 
+async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+
+  const runCalendarAction = (action, iso = null) => withSoftTimeout(
+    targetPage.evaluate(({ action, iso }) => {
+      const dateContextRe = /\b(?:check[\s_-]*in|check[\s_-]*out|arrival|departure|arrive|depart|date|dates|stay|calendar|availability|rates|booking|reservation|book now|reserve|select dates)\b/i;
+      const badActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
+      const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|continue)\b/i;
+      const nextRe = /^(?:next|next month|following month|›|»|>|→)$/i;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 3 && rect.height > 3 && rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+          el.getAttribute?.("class"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 4; i++, cur = cur.parentElement) {
+          parts.push(cur.getAttribute?.("aria-label"));
+          parts.push(cur.getAttribute?.("class"));
+          const txt = (cur.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length <= 320) parts.push(txt);
+        }
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
+      function disabled(el) {
+        return Boolean(el.disabled) ||
+          el.getAttribute?.("aria-disabled") === "true" ||
+          /\b(?:disabled|unavailable|blocked)\b/i.test(el.getAttribute?.("class") || "");
+      }
+
+      function activate(el) {
+        const label = textOf(el).slice(0, 80) || el.tagName.toLowerCase();
+        el.scrollIntoView?.({ block: "center", inline: "center" });
+        const init = { bubbles: true, cancelable: true, view: window };
+        try { el.dispatchEvent(new PointerEvent("pointerdown", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("mousedown", init)); } catch {}
+        try { el.dispatchEvent(new PointerEvent("pointerup", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("mouseup", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("click", init)); } catch { el.click?.(); }
+        return label;
+      }
+
+      function isoParts(rawIso) {
+        const [y, m, d] = String(rawIso || "").split("-").map((p) => parseInt(p, 10));
+        if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+        const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+        return {
+          y,
+          m,
+          d,
+          iso: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+          mdyyyy: `${m}/${d}/${y}`,
+          padded: `${String(m).padStart(2, "0")}/${String(d).padStart(2, "0")}/${y}`,
+          monthLong: date.toLocaleString("en-US", { timeZone: "UTC", month: "long" }),
+          monthShort: date.toLocaleString("en-US", { timeZone: "UTC", month: "short" }),
+        };
+      }
+
+      function scoreDateCell(el, rawIso) {
+        const p = isoParts(rawIso);
+        if (!p || !isVisible(el) || disabled(el)) return 0;
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 180 || rect.height > 180) return 0;
+        const attrs = [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+          el.getAttribute?.("data-date"),
+          el.getAttribute?.("data-day"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+          el.getAttribute?.("datetime"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        const label = attrs.toLowerCase();
+        const ancestor = contextOf(el).toLowerCase();
+        const monthYear = new RegExp(`\\b(?:${p.monthLong}|${p.monthShort})\\b[\\s\\S]{0,80}\\b${p.y}\\b`, "i");
+        if (label.includes(p.iso)) return 100;
+        if (label.includes(p.padded.toLowerCase()) || label.includes(p.mdyyyy.toLowerCase())) return 96;
+        if (label.includes(`${p.monthLong.toLowerCase()} ${p.d}, ${p.y}`) || label.includes(`${p.monthShort.toLowerCase()} ${p.d}, ${p.y}`)) return 94;
+        if (label.includes(`${p.monthLong.toLowerCase()} ${p.d}`) || label.includes(`${p.monthShort.toLowerCase()} ${p.d}`)) return 86;
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (text === String(p.d) && monthYear.test(ancestor)) return 78;
+        if (new RegExp(`\\b${p.d}\\b`).test(text) && monthYear.test(ancestor)) return 66;
+        return 0;
+      }
+
+      function findDateCell(rawIso) {
+        const selector = [
+          "button",
+          "a",
+          "[role='button']",
+          "td",
+          "div[aria-label]",
+          "span[aria-label]",
+          "[data-date]",
+          "[data-day]",
+          "time",
+        ].join(",");
+        return Array.from(document.querySelectorAll(selector))
+          .map((el) => ({ el, score: scoreDateCell(el, rawIso) }))
+          .filter((x) => x.score > 0)
+          .sort((a, b) => b.score - a.score)[0]?.el ?? null;
+      }
+
+      function openCalendar() {
+        if (iso && findDateCell(iso)) return null;
+        const controls = Array.from(document.querySelectorAll("input, textarea, [role='textbox'], button, a, [role='button']"))
+          .filter((el) => el instanceof HTMLElement && isVisible(el) && !disabled(el))
+          .map((el) => {
+            const label = textOf(el);
+            const ctx = contextOf(el);
+            const hay = `${label} ${ctx}`;
+            let score = 0;
+            if (dateContextRe.test(hay)) score += 50;
+            if (/check[\s_-]*in|arrival|check[\s_-]*out|departure|dates|calendar/i.test(hay)) score += 30;
+            if (/book now|reserve|check availability|select dates|view rates|show rates/i.test(hay)) score += 10;
+            if (badActionRe.test(label)) score = 0;
+            return { el, score, label };
+          })
+          .filter((x) => x.score > 0)
+          .sort((a, b) => b.score - a.score);
+        const target = controls[0]?.el ?? null;
+        if (!target) return null;
+        return { openedLabel: activate(target) };
+      }
+
+      function clickDate(rawIso) {
+        const target = findDateCell(rawIso);
+        if (!target) return null;
+        return { clickedLabel: activate(target) };
+      }
+
+      function clickNextMonth() {
+        const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"))
+          .filter((el) => el instanceof HTMLElement && isVisible(el) && !disabled(el))
+          .map((el) => ({ el, label: textOf(el), ctx: contextOf(el) }))
+          .filter(({ label, ctx }) => {
+            if (badActionRe.test(label)) return false;
+            return nextRe.test(label.trim()) || /\bnext\b/i.test(label) || /\bnext\b/i.test(ctx) || /chevron[-_\s]*right|arrow[-_\s]*right/i.test(ctx);
+          });
+        const target = candidates[0]?.el ?? null;
+        if (!target) return null;
+        return { openedLabel: activate(target) };
+      }
+
+      function submitDates() {
+        const buttons = Array.from(document.querySelectorAll("button, a, input[type='button'], input[type='submit'], [role='button']"))
+          .filter((el) => el instanceof HTMLElement && isVisible(el) && !disabled(el));
+        const target = buttons.find((el) => {
+          const label = textOf(el);
+          if (!submitRe.test(label)) return false;
+          if (badActionRe.test(label)) return false;
+          return true;
+        });
+        if (!target) return null;
+        return { submitLabel: activate(target) };
+      }
+
+      if (action === "open") return openCalendar();
+      if (action === "click-date") return iso ? clickDate(iso) : null;
+      if (action === "next-month") return clickNextMonth();
+      if (action === "submit") return submitDates();
+      return null;
+    }, { action, iso }),
+    3_000,
+    null,
+  );
+
+  const filled = [];
+  let openedLabel = null;
+  let submitLabel = null;
+  const openResult = await runCalendarAction("open", checkIn);
+  if (openResult?.openedLabel) {
+    openedLabel = openResult.openedLabel;
+    await targetPage.waitForTimeout(500).catch(() => {});
+  }
+
+  for (const [role, iso] of [["checkin", checkIn], ["checkout", checkOut]]) {
+    let clicked = null;
+    for (let i = 0; i < 8 && !clicked; i++) {
+      clicked = await runCalendarAction("click-date", iso);
+      if (clicked?.clickedLabel) break;
+      const next = await runCalendarAction("next-month", iso);
+      if (next?.openedLabel) {
+        openedLabel = openedLabel ?? next.openedLabel;
+        await targetPage.waitForTimeout(350).catch(() => {});
+      } else if (i === 0) {
+        const retryOpen = await runCalendarAction("open", iso);
+        if (retryOpen?.openedLabel) {
+          openedLabel = openedLabel ?? retryOpen.openedLabel;
+          await targetPage.waitForTimeout(500).catch(() => {});
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+    if (clicked?.clickedLabel) {
+      filled.push({ role, label: `calendar ${clicked.clickedLabel}`.slice(0, 80), visible: true });
+      await targetPage.waitForTimeout(600).catch(() => {});
+    }
+  }
+
+  if (filled.length > 0) {
+    const submit = await runCalendarAction("submit");
+    if (submit?.submitLabel) {
+      submitLabel = submit.submitLabel;
+      await targetPage.waitForTimeout(600).catch(() => {});
+    }
+  }
+
+  return { filled, submitLabel, openedLabel, controlCount: 0 };
+}
+
+async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return withSoftTimeout(
+    targetPage.evaluate(({ checkIn, checkOut }) => {
+      const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
+      const [coutY, coutM, coutD] = String(checkOut).split("-").map((p) => parseInt(p, 10));
+      const checkInHuman = `${cinM}/${cinD}/${cinY}`;
+      const checkOutHuman = `${coutM}/${coutD}/${coutY}`;
+      const pairs = [
+        ["#book_start_date, [name='book_start_date']", "#book_end_date, [name='book_end_date']"],
+        ["#checkin, #check_in, [name='checkin'], [name='check_in']", "#checkout, #check_out, [name='checkout'], [name='check_out']"],
+        ["[name*='arrival' i], [id*='arrival' i], [name*='start' i], [id*='start' i]", "[name*='departure' i], [id*='departure' i], [name*='end' i], [id*='end' i]"],
+      ];
+
+      function isRendered(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 2 && rect.height > 2 &&
+          style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function setInputValue(el, value, iso) {
+        if (!el) return false;
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute?.("type") || "").toLowerCase();
+        const nextValue = tag === "input" && type === "date" ? iso : value;
+        try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+        try { el.focus?.(); } catch {}
+        const proto = Object.getPrototypeOf(el);
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        if (setter) setter.call(el, nextValue);
+        else el.value = nextValue;
+        try {
+          const jq = window.jQuery || window.$;
+          if (jq?.fn?.datepicker && jq(el)?.hasClass?.("hasDatepicker")) {
+            jq(el).datepicker("setDate", value);
+            jq(el).trigger("input").trigger("change").trigger("blur");
+          }
+        } catch {}
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return true;
+      }
+
+      for (const [startSelector, endSelector] of pairs) {
+        const start = Array.from(document.querySelectorAll(startSelector)).find(isRendered);
+        const end = Array.from(document.querySelectorAll(endSelector)).find(isRendered);
+        if (!start || !end || start === end) continue;
+        const filled = [];
+        if (setInputValue(start, checkInHuman, checkIn)) {
+          filled.push({ role: "checkin", label: `${start.getAttribute("name") || start.id || "paired start"}`.slice(0, 80), visible: true });
+        }
+        if (setInputValue(end, checkOutHuman, checkOut)) {
+          filled.push({ role: "checkout", label: `${end.getAttribute("name") || end.id || "paired end"}`.slice(0, 80), visible: true });
+        }
+        if (filled.length > 0) return { filled, submitLabel: null, openedLabel: null, controlCount: 2 };
+      }
+      return null;
+    }, { checkIn, checkOut }),
+    5_000,
+    null,
+  );
+}
+
 async function applyPmDateInputs(targetPage, checkIn, checkOut) {
   if (!targetPage || targetPage.isClosed?.()) return null;
   const attempt = async (allowOpenOnly) => withSoftTimeout(
@@ -1049,6 +1363,29 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
 
+      function fieldContextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        const nearestField = el.closest?.(".form-group, .date-group, [class*='field' i], [class*='date' i]");
+        const fieldText = (nearestField?.textContent || "").replace(/\s+/g, " ").trim();
+        if (fieldText.length <= 120) parts.push(fieldText);
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+
       function isDateControl(el) {
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
@@ -1079,6 +1416,13 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
           if (setter) setter.call(el, nextValue);
           else el.value = nextValue;
         }
+        try {
+          const jq = window.jQuery || window.$;
+          if (jq?.fn?.datepicker && jq(el)?.hasClass?.("hasDatepicker")) {
+            jq(el).datepicker("setDate", value);
+            jq(el).trigger("input").trigger("change").trigger("blur");
+          }
+        } catch {}
         for (const name of ["input", "change", "blur"]) {
           el.dispatchEvent(new Event(name, { bubbles: true }));
         }
@@ -1086,6 +1430,9 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       }
 
       function classify(el) {
+        const fieldCtx = fieldContextOf(el);
+        if (inRe.test(fieldCtx) && !outRe.test(fieldCtx)) return "checkin";
+        if (outRe.test(fieldCtx) && !inRe.test(fieldCtx)) return "checkout";
         const ctx = contextOf(el);
         if (inRe.test(ctx) && !outRe.test(ctx)) return "checkin";
         if (outRe.test(ctx) && !inRe.test(ctx)) return "checkout";
@@ -1200,8 +1547,6 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
     null,
   );
 
-  const first = await attempt(true);
-  let result = first;
   const hasCompleteDateEntry = (entry) =>
     entry?.filled?.some((f) => f.role === "range") ||
     (entry?.filled?.some((f) => f.role === "checkin") && entry?.filled?.some((f) => f.role === "checkout"));
@@ -1221,6 +1566,12 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       openedLabel: prev?.openedLabel ?? next?.openedLabel ?? null,
     };
   };
+  const knownPair = await fillKnownPmDatePairs(targetPage, checkIn, checkOut);
+  await targetPage.waitForTimeout(hasCompleteDateEntry(knownPair) ? 500 : 0).catch(() => {});
+  const first = hasCompleteDateEntry(knownPair)
+    ? knownPair
+    : mergeDateEntry(knownPair, await attempt(true));
+  let result = first;
   if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
     await targetPage.waitForTimeout(1_000).catch(() => {});
     await dismissObstructions(targetPage, "pm_date_entry_after_open");
@@ -1233,6 +1584,16 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
     const next = await attempt(false);
     result = mergeDateEntry(result, next);
     if (!next?.filled?.length && !next?.openedLabel && !next?.submitLabel) break;
+  }
+  if (!hasCompleteDateEntry(result)) {
+    await targetPage.waitForTimeout(500).catch(() => {});
+    const knownPairRetry = await fillKnownPmDatePairs(targetPage, checkIn, checkOut);
+    result = mergeDateEntry(result, knownPairRetry);
+  }
+  if (!hasCompleteDateEntry(result)) {
+    await dismissObstructions(targetPage, "pm_date_entry_calendar_fallback");
+    const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
+    result = mergeDateEntry(result, calendar);
   }
 
   const filledCount = result?.filled?.length ?? 0;
@@ -1282,6 +1643,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   }
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
   const dismissals = await dismissObstructions(targetPage, "pm_url_check");
+  await targetPage.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" })).catch(() => {});
   const dateEntry = await applyPmDateInputs(targetPage, checkIn, checkOut);
   await normalizePageDisplay(targetPage);
   const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut, bedrooms }) => {
