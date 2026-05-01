@@ -649,9 +649,10 @@ async function dumpPageState(label, requestForLog) {
       path.join(__dirname, `last-${label}-state.json`),
       JSON.stringify({ ...requestForLog, ...state }, null, 2),
     );
-    // Full-page screenshot so we capture all listings, not just the
-    // viewport. Quality 70 keeps file size sensible (~150-300KB).
-    await page.screenshot({ path: path.join(__dirname, `last-${label}.jpg`), type: "jpeg", quality: 70, fullPage: true }).catch(() => {});
+    // Viewport screenshot only. Playwright full-page screenshots scroll
+    // the visible Chrome window; on Vrbo that trips the "Ask a question"
+    // widget and makes the operator think the worker is clicking around.
+    await page.screenshot({ path: path.join(__dirname, `last-${label}.jpg`), type: "jpeg", quality: 70, fullPage: false }).catch(() => {});
     log(`${label} state: url=${state.url.slice(0, 100)} title="${state.title.slice(0, 60)}"`);
     return state;
   } catch {
@@ -2482,7 +2483,6 @@ async function processRequest(req) {
     }
   } finally {
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
-    await resetPage().catch(() => {});
   }
 }
 
