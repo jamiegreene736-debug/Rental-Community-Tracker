@@ -23,7 +23,7 @@ import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
-  ArrowUpDown, ArrowUp, ArrowDown, Star,
+  ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -1294,6 +1294,7 @@ type FindBuyInResponse = {
     booking: LiveCandidate[];
     pm: LiveCandidate[];
   };
+  diagnostics?: FindBuyInDiagnostics;
   cheapest: LiveCandidate[];
   // Same units as `cheapest` but grouped: when the same physical unit
   // is listed across multiple channels (Airbnb + VRBO + a PM site, all
@@ -1323,6 +1324,42 @@ type FindBuyInResponse = {
     resortName?: string | null;
   };
 };
+
+type FindBuyInDiagnostics = {
+  severity: "ok" | "warning" | "error";
+  title: string;
+  summary: string;
+  generatedAt: string;
+  elapsedMs?: number;
+  request?: {
+    propertyId?: number;
+    community?: string;
+    resortName?: string | null;
+    bedrooms?: number;
+    checkIn?: string;
+    checkOut?: string;
+    nights?: number;
+  };
+  sources?: Array<{
+    source: string;
+    status: "ok" | "warning" | "error" | "timeout" | "skipped";
+    raw?: number;
+    kept?: number;
+    priced?: number;
+    verified?: number;
+    durationMs?: number;
+    message?: string;
+  }>;
+  issues?: Array<{
+    severity: "warning" | "error";
+    source: string;
+    summary: string;
+    detail?: string;
+  }>;
+  report: string;
+};
+
+const autoOpenedSearchDiagnosticKeys = new Set<string>();
 
 function sourceBadgeClass(src: string) {
   switch (src) {
@@ -1414,8 +1451,10 @@ function LiveSearchSection({
   propertyId: number;
   slot: SlotInfo;
 }) {
+  const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -1445,6 +1484,49 @@ function LiveSearchSection({
     refetchOnMount: "always",
     placeholderData: (previousData) => previousData,
   });
+
+  const hardErrorDiagnostics = useMemo<FindBuyInDiagnostics | null>(() => {
+    if (!isError || data) return null;
+    const message = (error as Error | undefined)?.message ?? "Unknown search failure";
+    const generatedAt = new Date().toISOString();
+    const report = [
+      "Find buy-in diagnostic report",
+      `Generated: ${generatedAt}`,
+      `Request: propertyId=${propertyId}; reservation=${reservation._id}; slot=${slot.unitId}; bedrooms=${slot.bedrooms}; checkIn=${checkInYmd}; checkOut=${checkOutYmd}`,
+      "Severity: error",
+      `Summary: Search request failed before returning source-level results.`,
+      "",
+      "Issues:",
+      `- [error] Find buy-in request: ${message}`,
+    ].join("\n");
+    return {
+      severity: "error",
+      title: "Search failed before results returned",
+      summary: message,
+      generatedAt,
+      request: { propertyId, bedrooms: slot.bedrooms, checkIn: checkInYmd, checkOut: checkOutYmd },
+      sources: [],
+      issues: [{ severity: "error", source: "Find buy-in request", summary: message }],
+      report,
+    };
+  }, [isError, data, error, propertyId, reservation._id, slot.unitId, slot.bedrooms, checkInYmd, checkOutYmd]);
+  const searchDiagnostics = data?.diagnostics ?? hardErrorDiagnostics;
+  const diagnosticKey = searchDiagnostics
+    ? [
+      propertyId,
+      slot.bedrooms,
+      checkInYmd,
+      checkOutYmd,
+      searchDiagnostics.generatedAt,
+      searchDiagnostics.severity,
+    ].join("|")
+    : "";
+  useEffect(() => {
+    if (!searchDiagnostics || searchDiagnostics.severity === "ok" || !diagnosticKey) return;
+    if (autoOpenedSearchDiagnosticKeys.has(diagnosticKey)) return;
+    autoOpenedSearchDiagnosticKeys.add(diagnosticKey);
+    setDiagnosticsOpen(true);
+  }, [searchDiagnostics, diagnosticKey]);
 
   const attachedElsewhereKeys = useMemo(() => new Set(
     reservation.slots
@@ -1491,10 +1573,27 @@ function LiveSearchSection({
 
   if (isError && !data) {
     return (
-      <div className="border rounded-lg p-4 text-sm text-destructive">
-        <AlertCircle className="h-4 w-4 inline mr-1" /> Search failed: {(error as Error).message}
-        <Button size="sm" variant="outline" className="ml-2" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
-      </div>
+      <>
+        <div className="border rounded-lg p-4 text-sm text-destructive flex items-center justify-between gap-3 flex-wrap">
+          <span>
+            <AlertCircle className="h-4 w-4 inline mr-1" /> Search failed: {(error as Error).message}
+          </span>
+          <span className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setDiagnosticsOpen(true)}>
+              <FileText className="h-3.5 w-3.5 mr-1" /> Error log
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
+          </span>
+        </div>
+        {searchDiagnostics && (
+          <SearchDiagnosticsDialog
+            diagnostics={searchDiagnostics}
+            open={diagnosticsOpen}
+            onOpenChange={setDiagnosticsOpen}
+            onCopySuccess={() => toast({ title: "Search log copied" })}
+          />
+        )}
+      </>
     );
   }
 
@@ -1576,6 +1675,22 @@ function LiveSearchSection({
             Latest refresh failed: {(error as Error).message}. Showing the last completed scan.
           </span>
           <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
+        </div>
+      )}
+      {searchDiagnostics && searchDiagnostics.severity !== "ok" && (
+        <div className="border border-amber-300 bg-amber-50/70 text-amber-900 rounded-md px-3 py-2 text-[11px] flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-2">
+            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <span>{searchDiagnostics.summary}</span>
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-[11px] shrink-0"
+            onClick={() => setDiagnosticsOpen(true)}
+          >
+            View log
+          </Button>
         </div>
       )}
       {hiddenAlreadyAttachedCount > 0 && (
@@ -1736,6 +1851,15 @@ function LiveSearchSection({
         </details>
       ))}
 
+      {searchDiagnostics && (
+        <SearchDiagnosticsDialog
+          diagnostics={searchDiagnostics}
+          open={diagnosticsOpen}
+          onOpenChange={setDiagnosticsOpen}
+          onCopySuccess={() => toast({ title: "Search log copied" })}
+        />
+      )}
+
       {recordTarget && (
         <RecordBuyInDialog
           candidate={recordTarget}
@@ -1746,6 +1870,135 @@ function LiveSearchSection({
         />
       )}
     </div>
+  );
+}
+
+function diagnosticStatusClass(status: string) {
+  switch (status) {
+    case "ok":
+      return "bg-emerald-100 text-emerald-800 border-emerald-300";
+    case "error":
+      return "bg-red-100 text-red-800 border-red-300";
+    case "timeout":
+      return "bg-orange-100 text-orange-800 border-orange-300";
+    case "warning":
+      return "bg-amber-100 text-amber-800 border-amber-300";
+    case "skipped":
+      return "bg-slate-100 text-slate-700 border-slate-300";
+    default:
+      return "bg-muted text-muted-foreground";
+  }
+}
+
+function SearchDiagnosticsDialog({
+  diagnostics,
+  open,
+  onOpenChange,
+  onCopySuccess,
+}: {
+  diagnostics: FindBuyInDiagnostics;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCopySuccess?: () => void;
+}) {
+  const copyReport = async () => {
+    await navigator.clipboard.writeText(diagnostics.report);
+    onCopySuccess?.();
+  };
+  const issueCount = diagnostics.issues?.length ?? 0;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            {diagnostics.title}
+          </DialogTitle>
+          <DialogDescription>
+            This report stays available after you close the popup. Results underneath are still visible.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className={`rounded-md border px-3 py-2 text-sm ${diagnostics.severity === "error" ? "border-red-300 bg-red-50 text-red-900" : diagnostics.severity === "warning" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-emerald-300 bg-emerald-50 text-emerald-900"}`}>
+            {diagnostics.summary}
+          </div>
+
+          {diagnostics.sources && diagnostics.sources.length > 0 && (
+            <div className="rounded-md border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Source</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Raw</TableHead>
+                    <TableHead className="text-right">Kept</TableHead>
+                    <TableHead className="text-right">Priced</TableHead>
+                    <TableHead className="text-right">Verified</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {diagnostics.sources.map((source) => (
+                    <TableRow key={source.source}>
+                      <TableCell>
+                        <div className="font-medium">{source.source}</div>
+                        {source.message && (
+                          <div className="text-[11px] text-muted-foreground max-w-xl">{source.message}</div>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={`text-[10px] ${diagnosticStatusClass(source.status)}`}>
+                          {source.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right">{source.raw ?? 0}</TableCell>
+                      <TableCell className="text-right">{source.kept ?? 0}</TableCell>
+                      <TableCell className="text-right">{source.priced ?? 0}</TableCell>
+                      <TableCell className="text-right">{source.verified ?? 0}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+
+          {issueCount > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50/70 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-900 mb-2">
+                Issues
+              </p>
+              <div className="space-y-2">
+                {diagnostics.issues!.map((issue, idx) => (
+                  <div key={`${issue.source}-${idx}`} className="text-xs text-amber-950">
+                    <span className="font-semibold">[{issue.severity}] {issue.source}:</span>{" "}
+                    {issue.summary}
+                    {issue.detail && <span className="text-amber-800"> — {issue.detail}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Copy-friendly report
+              </p>
+              <Button size="sm" variant="outline" onClick={copyReport}>
+                <Copy className="h-3.5 w-3.5 mr-1" /> Copy log
+              </Button>
+            </div>
+            <pre className="max-h-72 overflow-auto rounded-md bg-slate-950 text-slate-50 p-3 text-[11px] whitespace-pre-wrap">
+              {diagnostics.report}
+            </pre>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

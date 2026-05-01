@@ -43,6 +43,16 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-04-30: Codex added operator-facing diagnostics for
+  `/api/operations/find-buy-in`. The route now returns a `diagnostics`
+  object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM
+  companies`, sidecar verifier), raw/kept/priced/verified counts,
+  elapsed time, captured source errors/timeouts, and a copy-friendly
+  report string. The bookings live-search UI auto-opens a dismissible
+  "Search log" dialog whenever severity is `warning` or `error`, keeps
+  the search results visible behind it, and leaves a persistent "View
+  log" button in the panel after close. This is meant to replace
+  screenshot-only debugging when Jamie sees a partial/slow/fallback scan.
 - 2026-04-30: Codex fixed the Steve Kuykendall multi-slot find-buy-in
   flow after Jamie saw an error-before-results, duplicate unit selection,
   and missing Booking/PM rates. Changes: client auto-fill now seeds its

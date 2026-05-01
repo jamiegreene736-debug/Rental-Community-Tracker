@@ -2579,6 +2579,14 @@ export async function registerRoutes(
 
     console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
+    const scanStartedAt = Date.now();
+    const sourceErrors: Array<{ source: string; message: string }> = [];
+    const sourceTimeouts: Array<{ source: string; ms: number }> = [];
+    const noteSourceError = (source: string, error: unknown) => {
+      const raw = error instanceof Error ? error.message : String(error ?? "unknown error");
+      sourceErrors.push({ source, message: raw.slice(0, 600) });
+    };
+
     type Candidate = {
       source: "airbnb" | "vrbo" | "booking" | "pm";
       sourceLabel: string;
@@ -2831,6 +2839,7 @@ export async function registerRoutes(
         return { candidates: kept, raw: organic.length, dropped: { noResort, wrongBedrooms } };
       } catch (e: any) {
         console.error(`[find-buy-in] ${source} site:${siteDomain} error:`, e.message);
+        noteSourceError(`${source} site:${siteDomain}`, e);
         return { candidates: [], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
       }
     };
@@ -2908,6 +2917,7 @@ export async function registerRoutes(
               });
           } catch (e: any) {
             console.error(`[find-buy-in] airbnb engine error:`, e.message);
+            noteSourceError("Airbnb engine", e);
             return [];
           }
         })(),
@@ -2967,6 +2977,7 @@ export async function registerRoutes(
             const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
             if (!r.ok) {
               console.warn(`[find-buy-in] google_hotels HTTP ${r.status}`);
+              noteSourceError("Booking.com google_hotels", `HTTP ${r.status}`);
               return [];
             }
             const data = await r.json() as any;
@@ -3017,6 +3028,7 @@ export async function registerRoutes(
               .filter((c: Candidate | null): c is Candidate => c !== null);
           } catch (e: any) {
             console.error(`[find-buy-in] google_hotels engine error:`, e.message);
+            noteSourceError("Booking.com google_hotels", e);
             return [];
           }
         })(),
@@ -3071,6 +3083,7 @@ export async function registerRoutes(
             }));
           } catch (e: any) {
             console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
+            noteSourceError("Booking.com sidecar search", e);
             return [];
           }
         })(),
@@ -3164,6 +3177,7 @@ export async function registerRoutes(
       const [googleResults, sidecarResults] = await Promise.all([
         siteSearch("vrbo.com", "vrbo", "Vrbo").catch((e: any) => {
           console.error("[find-buy-in] vrbo (google site:search) error:", e?.message ?? e);
+          noteSourceError("Vrbo site search", e);
           return { candidates: [] as Candidate[], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
         }),
         (async (): Promise<{ candidates: Candidate[]; workerOnline: boolean; durationMs: number; reason: string }> => {
@@ -3227,6 +3241,7 @@ export async function registerRoutes(
           };
         })().catch((e: any) => {
           console.error("[find-buy-in] vrbo (sidecar) error:", e?.message ?? e);
+          noteSourceError("Vrbo sidecar search", e);
           return { candidates: [] as Candidate[], workerOnline: false, durationMs: 0, reason: e?.message ?? "sidecar error" };
         }),
       ]);
@@ -3290,6 +3305,7 @@ export async function registerRoutes(
           return pricedDetails;
         } catch (e: any) {
           console.error("[find-buy-in] vrbo detail sidecar error:", e?.message ?? e);
+          noteSourceError("Vrbo detail sidecar", e);
           return [];
         }
       };
@@ -3366,6 +3382,7 @@ export async function registerRoutes(
           }
         } catch (e: any) {
           console.warn(`[find-buy-in] pm-stage1 sidecar attempt failed:`, e?.message ?? e);
+          noteSourceError("PM stage-1 sidecar", e);
         }
 
         // Fallback: SearchAPI engine=google.
@@ -3377,7 +3394,10 @@ export async function registerRoutes(
             api_key: apiKey,
           });
           const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-          if (!r.ok) return [];
+          if (!r.ok) {
+            noteSourceError("PM stage-1 SearchAPI", `HTTP ${r.status}`);
+            return [];
+          }
           const data = await r.json() as any;
           organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
           pmStage1Source = "searchapi";
@@ -3440,7 +3460,10 @@ export async function registerRoutes(
                 api_key: apiKey,
               });
               const rr = await fetch(`https://www.searchapi.io/api/v1/search?${pp.toString()}`);
-              if (!rr.ok) return [];
+              if (!rr.ok) {
+                noteSourceError(`PM deep-dive ${site.domain}`, `HTTP ${rr.status}`);
+                return [];
+              }
               const dd = await rr.json() as any;
               return Array.isArray(dd?.organic_results) ? dd.organic_results : [];
             }));
@@ -3528,6 +3551,7 @@ export async function registerRoutes(
             return candidates;
           } catch (e: any) {
             console.error(`[find-buy-in] pm deep-dive ${site.domain} error:`, e.message);
+            noteSourceError(`PM deep-dive ${site.domain}`, e);
             return [];
           }
         }));
@@ -3541,6 +3565,7 @@ export async function registerRoutes(
         return flat;
       } catch (e: any) {
         console.error("[find-buy-in] pm error:", e.message);
+        noteSourceError("PM Google discovery", e);
         pmDiscoveryStats.googleCalls++;
         return [];
       }
@@ -3605,6 +3630,7 @@ export async function registerRoutes(
             }));
           } catch (e: any) {
             console.error("[find-buy-in] sp-discovery error:", e.message);
+            noteSourceError("Suite Paradise discovery", e);
             return [];
           }
         })()
@@ -3671,6 +3697,7 @@ export async function registerRoutes(
           }));
         } catch (e: any) {
           console.error(`[find-buy-in] vrp-discovery:${site.label} error:`, e.message);
+          noteSourceError(`${site.label} discovery`, e);
           return [];
         }
       })();
@@ -3718,6 +3745,7 @@ export async function registerRoutes(
             }));
           } catch (e: any) {
             console.error("[find-buy-in] gv-discovery error:", e.message);
+            noteSourceError("Gather Vacations discovery", e);
             return [];
           }
         })()
@@ -3768,6 +3796,7 @@ export async function registerRoutes(
           }));
         } catch (e: any) {
           console.error(`[find-buy-in] streamline:${site.label} error:`, e.message);
+          noteSourceError(`${site.label} discovery`, e);
           return [];
         }
       })();
@@ -3792,6 +3821,7 @@ export async function registerRoutes(
         });
         if (!sidecarSerp.workerOnline) {
           console.log(`[find-buy-in] sidecar-google-serp skipped (worker offline)`);
+          noteSourceError("Sidecar Google PM finder", sidecarSerp.reason || "worker offline");
           return [];
         }
         const otaDomains = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com)$/i;
@@ -3822,6 +3852,7 @@ export async function registerRoutes(
         return candidates;
       } catch (e: any) {
         console.error(`[find-buy-in] sidecar-google-serp error:`, e?.message ?? e);
+        noteSourceError("Sidecar Google PM finder", e);
         return [];
       }
     })();
@@ -3847,6 +3878,7 @@ export async function registerRoutes(
         new Promise<T>((resolve) =>
           timeout = setTimeout(() => {
             console.warn(`[find-buy-in] ${label} timed out after ${ms}ms — using fallback`);
+            sourceTimeouts.push({ source: label, ms });
             resolve(fallback);
           }, ms),
         ),
@@ -3976,6 +4008,7 @@ export async function registerRoutes(
         return out;
       } catch (e: any) {
         console.warn(`[find-buy-in] google_lens error:`, e.message);
+        noteSourceError("Google Lens photo match", e);
         return [];
       }
     }
@@ -4211,6 +4244,7 @@ export async function registerRoutes(
             }
           } else if (!batchRes.workerOnline) {
             console.log(`[find-buy-in] sidecar-batch-verify skipped (worker offline): ${batchRes.reason}`);
+            noteSourceError("Sidecar rate verifier", batchRes.reason || "worker offline");
             break;
           }
         }
@@ -4222,6 +4256,7 @@ export async function registerRoutes(
         );
       } catch (e: any) {
         console.error(`[find-buy-in] sidecar-batch-verify error:`, e?.message ?? e);
+        noteSourceError("Sidecar rate verifier", e);
       }
     }
 
@@ -4457,6 +4492,170 @@ export async function registerRoutes(
     }
     units.sort((a, b) => a.minNightlyPrice - b.minNightlyPrice);
     const cheapestUnits = units.slice(0, 20);
+    const scanElapsedMs = Date.now() - scanStartedAt;
+
+    type SearchDiagnosticStatus = "ok" | "warning" | "error" | "timeout" | "skipped";
+    const pricedCount = (items: Candidate[]) => items.filter((c) => c.nightlyPrice > 0 || c.totalPrice > 0).length;
+    const verifiedYesCount = (items: Candidate[]) => items.filter((c) => c.verified === "yes").length;
+    const issueList: Array<{ severity: "warning" | "error"; source: string; summary: string; detail?: string }> = [];
+    for (const t of sourceTimeouts) {
+      issueList.push({
+        severity: "warning",
+        source: t.source,
+        summary: `${t.source} timed out after ${Math.round(t.ms / 1000)}s and returned fallback results`,
+      });
+    }
+    for (const err of sourceErrors) {
+      issueList.push({
+        severity: "warning",
+        source: err.source,
+        summary: `${err.source} reported an issue`,
+        detail: err.message,
+      });
+    }
+    if (!vrboSidecarOnline) {
+      issueList.push({
+        severity: "warning",
+        source: "Vrbo sidecar",
+        summary: "Vrbo sidecar was not online or did not return priced cards",
+        detail: vrboSidecarReason || "worker offline / unavailable",
+      });
+    }
+    if (sidecarVerifyTargets.length > 0 && sidecarBatchVerifiedUrls.size === 0) {
+      issueList.push({
+        severity: "warning",
+        source: "Sidecar rate verifier",
+        summary: "No Booking.com/PM detail URLs were verified by the sidecar",
+        detail: "Candidates remain visible for manual review, but none were promoted to verified bookable.",
+      });
+    }
+    if (cheapest.length === 0) {
+      const severity = priced.length === 0 && (airbnbTarget.length + bookingTarget.length + vrboTarget.length + pmTarget.length) === 0 ? "error" : "warning";
+      issueList.push({
+        severity,
+        source: "Cheapest pick",
+        summary: "No verified bookable candidate was available for auto-pick",
+        detail: priced.length > 0
+          ? `${priced.length} priced candidate(s) were scanned, but none passed verified=yes for ${checkIn} to ${checkOut}.`
+          : "No scanned source produced a date-specific price for this stay window.",
+      });
+    }
+
+    const sourceStatus = (
+      timeoutLabels: string[],
+      errorNeedles: string[],
+      raw: number,
+      kept: number,
+      pricedRows: number,
+      verifiedRows: number,
+      messageWhenEmpty: string,
+    ): SearchDiagnosticStatus => {
+      if (sourceTimeouts.some((t) => timeoutLabels.includes(t.source))) return "timeout";
+      if (sourceErrors.some((e) => errorNeedles.some((needle) => e.source.includes(needle))) && kept === 0 && raw === 0) return "error";
+      if (verifiedRows > 0 || pricedRows > 0 || kept > 0 || raw > 0) return "ok";
+      return messageWhenEmpty ? "warning" : "skipped";
+    };
+    const diagnosticSources = [
+      {
+        source: "Airbnb",
+        status: sourceStatus(["airbnb"], ["airbnb", "Airbnb"], airbnbRawCount + airbnbPricedCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived resort/bedroom filters"),
+        raw: airbnbRawCount + airbnbPricedCount,
+        kept: airbnbTarget.length,
+        priced: pricedCount(airbnbTarget),
+        verified: verifiedYesCount(airbnbTarget),
+        message: `${airbnbPricedCount} Airbnb engine rows, ${airbnbRawCount} organic rows; ${airbnbTarget.length} kept after target filters.`,
+      },
+      {
+        source: "Vrbo",
+        status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters"),
+        raw: vrboRawCount,
+        kept: vrboTarget.length,
+        priced: pricedCount(vrboTarget),
+        verified: verifiedYesCount(vrboTarget),
+        durationMs: vrboSidecarMs,
+        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
+      },
+      {
+        source: "Booking.com",
+        status: sourceStatus(["booking"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com detail page produced a bedroom-matching rate"),
+        raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
+        kept: bookingTarget.length,
+        priced: pricedCount(bookingTarget),
+        verified: verifiedYesCount(bookingTarget),
+        message: `${bookingRawCount} organic, ${bookingPricedCount} google_hotels discovery, ${bookingSidecarCount} sidecar search card(s). Detail verification is required before pricing is trusted.`,
+      },
+      {
+        source: "PM companies",
+        status: sourceStatus(["pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSidecarFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
+        raw: pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSidecarFinderCandidates.length,
+        kept: pmTarget.length,
+        priced: pricedCount(pmTarget),
+        verified: verifiedYesCount(pmTarget),
+        message: `stage1=${pmStage1Source}; sidecarFinder=${pmSidecarFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; direct PM priced=${pricedCount(pmTarget)}.`,
+      },
+      {
+        source: "Sidecar rate verifier",
+        status: sidecarVerifyTargets.length === 0 ? "skipped" : sidecarBatchVerifiedUrls.size > 0 ? "ok" : "warning",
+        raw: sidecarVerifyTargets.length,
+        kept: sidecarBatchVerifiedUrls.size,
+        priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
+        verified: preVerifyYes,
+        message: sidecarVerifyTargets.length === 0
+          ? "No unverified Booking.com/PM detail URLs needed sidecar verification."
+          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}.`,
+      },
+    ];
+    const diagnosticsSeverity: "ok" | "warning" | "error" = issueList.some((i) => i.severity === "error")
+      ? "error"
+      : issueList.length > 0
+        ? "warning"
+        : "ok";
+    const diagnosticsSummary = diagnosticsSeverity === "ok"
+      ? `Search completed: ${cheapest.length} verified candidate(s), ${airbnbTarget.length + bookingTarget.length + vrboTarget.length + pmTarget.length} scanned rows.`
+      : `Search completed with ${issueList.length} diagnostic item(s): ${cheapest.length} verified candidate(s), ${airbnbTarget.length + bookingTarget.length + vrboTarget.length + pmTarget.length} scanned rows.`;
+    const diagnosticsReport = [
+      "Find buy-in diagnostic report",
+      `Generated: ${new Date().toISOString()}`,
+      `Request: propertyId=${propertyId}; community=${community}; resort=${resortName ?? "unknown"}; bedrooms=${bedrooms}; checkIn=${checkIn}; checkOut=${checkOut}; nights=${nights}`,
+      `Elapsed: ${scanElapsedMs}ms`,
+      `Severity: ${diagnosticsSeverity}`,
+      `Summary: ${diagnosticsSummary}`,
+      "",
+      "Sources:",
+      ...diagnosticSources.map((s) =>
+        `- ${s.source}: status=${s.status}; raw=${s.raw}; kept=${s.kept}; priced=${s.priced}; verified=${s.verified}${s.durationMs ? `; durationMs=${s.durationMs}` : ""}; ${s.message}`,
+      ),
+      "",
+      "Issues:",
+      ...(issueList.length > 0
+        ? issueList.map((i) => `- [${i.severity}] ${i.source}: ${i.summary}${i.detail ? ` (${i.detail})` : ""}`)
+        : ["- none"]),
+      "",
+      "Debug counts:",
+      JSON.stringify({
+        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
+        dropped: {
+          airbnb: airbnbDropped,
+          vrbo: vrboDropped,
+          booking: bookingDropped,
+          photoMatchBedroomMismatch: photoMatchBedroomMismatchDropped,
+          photoMatchLanding: photoMatchLandingDropped,
+          targetFilter: targetFilterDropped,
+        },
+        verification: { attempted: preVerifyAttempted, yes: preVerifyYes, no: preVerifyNo, unclear: preVerifyUnclear },
+      }, null, 2),
+    ].join("\n");
+    const diagnostics = {
+      severity: diagnosticsSeverity,
+      title: diagnosticsSeverity === "ok" ? "Search completed" : diagnosticsSeverity === "error" ? "Search needs attention" : "Search completed with warnings",
+      summary: diagnosticsSummary,
+      generatedAt: new Date().toISOString(),
+      elapsedMs: scanElapsedMs,
+      request: { propertyId, community, resortName, bedrooms, checkIn, checkOut, nights },
+      sources: diagnosticSources,
+      issues: issueList,
+      report: diagnosticsReport,
+    };
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
@@ -4527,6 +4726,7 @@ export async function registerRoutes(
         vrboDestination,
         resortName,
       },
+      diagnostics,
       cheapest,
       cheapestUnits,
       totalPricedResults: priced.length,
