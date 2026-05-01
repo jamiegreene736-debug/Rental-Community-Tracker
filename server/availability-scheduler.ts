@@ -18,12 +18,10 @@ import {
   type ChannelKey,
 } from "@shared/pricing-rates";
 import {
-  countAirbnbCandidates,
-  computeSetsFromCounts,
-  verdictFor,
-  findCheapestPricedNightly,
-  type SeasonKey,
-} from "./availability-search";
+  scanSeasonalAvailabilityCapacity,
+  type SeasonalAvailabilityWindow,
+} from "./seasonal-availability";
+import { syncScannerBlocksForProperty } from "./sync-scanner-blocks";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
 
@@ -33,42 +31,6 @@ let _tickRunning = false;
 
 export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
-}
-
-// Pick a representative mid-season check-in. LOW = Sep, HIGH = Jul,
-// HOLIDAY = late Dec. Roll forward 1 year if the target is already in
-// the past or too close to now (listings hide short-notice).
-function pickDateForSeason(season: SeasonKey): { checkIn: string; checkOut: string } {
-  const now = new Date();
-  const y = now.getFullYear();
-  const minAhead = 30 * 86_400_000;
-  const makeWindow = (year: number, month: number, day: number) => {
-    const d = new Date(year, month, day, 12, 0, 0);
-    if (d.getTime() < now.getTime() + minAhead) return makeWindow(year + 1, month, day);
-    const ci = d.toISOString().slice(0, 10);
-    const co = new Date(d.getTime() + 7 * 86_400_000).toISOString().slice(0, 10);
-    return { checkIn: ci, checkOut: co };
-  };
-  switch (season) {
-    case "LOW":     return makeWindow(y, 8, 15);   // mid-September
-    case "HIGH":    return makeWindow(y, 6, 10);   // mid-July
-    case "HOLIDAY": return makeWindow(y, 11, 26);  // late-December
-  }
-}
-
-// Which season is this month in? Hawaii-ish default map — good enough
-// for the initial run. Falls back to LOW for anything we don't know.
-const MONTH_SEASONS: Record<number, SeasonKey> = {
-  1: "HIGH", 2: "LOW", 3: "HIGH", 4: "HIGH",
-  5: "LOW", 6: "HIGH", 7: "HIGH", 8: "HIGH",
-  9: "LOW", 10: "LOW", 11: "LOW", 12: "HIGH",
-};
-function seasonForMonth(yearMonth: string): SeasonKey {
-  const [_, m] = yearMonth.split("-").map(Number);
-  // Late-December override — holiday prices.
-  const isHoliday = m === 12;
-  if (isHoliday) return "HOLIDAY";
-  return MONTH_SEASONS[m] ?? "LOW";
 }
 
 // Main pipeline — identical to what the UI buttons do, all in one pass.
@@ -112,127 +74,50 @@ export async function runFullScanForProperty(
   } catch { /* non-fatal */ }
 
   const community = config.community;
-  const uniqueBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms)));
   const summaries: string[] = [];
 
-  // ── Inventory: candidate count per BR ──
-  let countsByBR: Record<number, number> = {};
-  let baselineSets = 0;
-  let baselineVerdict: "open" | "tight" | "blocked" = "blocked";
+  let seasonalWindows: SeasonalAvailabilityWindow[] = [];
   if (opts.runInventory) {
-    const out = await Promise.all(uniqueBedrooms.map(async (br) => {
-      const r = await countAirbnbCandidates({ resortName, community, bedrooms: br, apiKey });
-      return [br, r.count] as [number, number];
-    }));
-    countsByBR = Object.fromEntries(out);
-    baselineSets = computeSetsFromCounts(config.units, countsByBR);
-    baselineVerdict = verdictFor(baselineSets, opts.minSets);
-    summaries.push(`inventory ${baselineSets} sets (${baselineVerdict})`);
+    const scan = await scanSeasonalAvailabilityCapacity({
+      propertyId,
+      config,
+      resortName,
+      manualMinSets: opts.minSets,
+    });
+    seasonalWindows = scan.windows;
+    const worst = seasonalWindows.reduce((acc, w) => {
+      const rank = { open: 0, tight: 1, blocked: 2 };
+      if (!acc) return w;
+      if (rank[w.verdict] > rank[acc.verdict]) return w;
+      if (rank[w.verdict] === rank[acc.verdict] && w.maxSets < acc.maxSets) return w;
+      return acc;
+    }, null as SeasonalAvailabilityWindow | null);
+    const open = seasonalWindows.filter((w) => w.verdict === "open").length;
+    const tight = seasonalWindows.filter((w) => w.verdict === "tight").length;
+    const blocked = seasonalWindows.filter((w) => w.verdict === "blocked").length;
+    summaries.push(`inventory ${worst?.maxSets ?? 0} sets (${worst?.verdict ?? "blocked"})`);
+    summaries.push(`season-windows ${open} open/${tight} tight/${blocked} blocked`);
   }
 
-  // ── Pricing telemetry: 1 sample per season per BR ──
-  // We snapshot the live Airbnb retail rate per season for visibility
-  // (lets the operator see if the market is moving), but we do NOT use
-  // these as the cost basis — those are other hosts' SELL prices, not
-  // our buy-in cost. Pushing rates off them caused 197% margins.
-  const priceByBR: Record<SeasonKey, Record<number, number | null>> = {
-    LOW: {}, HIGH: {}, HOLIDAY: {},
-  };
-  if (opts.runPricing) {
-    const seasons: SeasonKey[] = ["LOW", "HIGH", "HOLIDAY"];
-    for (const s of seasons) {
-      const { checkIn, checkOut } = pickDateForSeason(s);
-      const res = await Promise.all(uniqueBedrooms.map(async (br) => {
-        const nightly = await findCheapestPricedNightly({
-          resortName, community, bedrooms: br, checkIn, checkOut,
-          q: `${resortName ?? community}, Hawaii`, apiKey,
-        });
-        return [br, nightly] as [number, number | null];
-      }));
-      for (const [br, n] of res) priceByBR[s][br] = n;
-    }
-    const pricedSeasons = Object.entries(priceByBR)
-      .filter(([_, m]) => Object.values(m).some((v) => v != null))
-      .map(([s]) => s);
-    summaries.push(`market-snapshot ${pricedSeasons.length}/3 seasons`);
-  }
-
-  // ── Block sync: push owner-blocks for insufficient windows ──
-  if (opts.runSyncBlocks && opts.runInventory) {
-    // Build 52 weeks of verdicts. ONLY explicit per-window overrides
-    // (force-block) turn into actual Guesty blocks here — the baseline
-    // supply count is NOT fanned out across all 52 weeks.
-    //
-    // Earlier revisions applied `baselineVerdict` to every non-override
-    // week, which meant a single point-in-time Airbnb-listing count of
-    // "2 sets, need 3" auto-blocked every future week for a year.
-    // That's the wrong shape: baseline is a SIGNAL about current supply
-    // tightness, not an ACTION that should block bookings 11 months
-    // out when supply will almost certainly have shifted by then.
-    //
-    // The per-week scan flow (manual "Run inventory scan" button +
-    // "Push Blackouts to Guesty" in the Availability tab) is the
-    // correct place to push real per-week blocks — it actually queries
-    // each window individually. See Load-Bearing Decision #19 in
-    // AGENTS.md.
+  if (opts.runSyncBlocks && opts.runInventory && seasonalWindows.length > 0) {
     const overrides = await storage.getScannerOverrides(propertyId);
     const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
-    const today = new Date(); today.setHours(12, 0, 0, 0);
-    const weeks = 52;
-    const windows: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked"; maxSets?: number; minSets: number }> = [];
-    for (let w = 1; w <= weeks; w++) {
-      const start = new Date(today); start.setDate(start.getDate() + (w - 1) * 7);
-      const end = new Date(start); end.setDate(end.getDate() + 7);
-      const sd = start.toISOString().slice(0, 10);
-      const ed = end.toISOString().slice(0, 10);
-      const ov = overrideByStart.get(sd);
-      const verdict: "open" | "blocked" =
-        ov && ov.mode === "force-block" ? "blocked" : "open";
-      windows.push({ startDate: sd, endDate: ed, verdict, maxSets: baselineSets, minSets: opts.minSets });
-    }
-
-    const active = await storage.getActiveScannerBlocks(propertyId);
-    const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
-    const desiredBlocks = new Set(windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`));
-    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
-    let created = 0, removed = 0, failed = 0;
-    for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
-      const key = `${w.startDate}:${w.endDate}`;
-      if (activeKeyed.has(key)) continue;
-      try {
-        const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets} sets`;
-        const resp = await guestyRequest("PUT", calPath, {
-          startDate: w.startDate,
-          endDate: w.endDate,
-          status: "unavailable",
-          note: `nexstay-scanner (cron): ${reason}`,
-        }) as any;
-        const createdBlocksArr = resp?.data?.blocks?.createdBlocks ?? resp?.blocks?.createdBlocks ?? [];
-        await storage.createScannerBlock({
-          propertyId, guestyListingId,
-          startDate: w.startDate, endDate: w.endDate,
-          guestyBlockId: createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null,
-          reason,
-        });
-        created++;
-        await new Promise((r) => setTimeout(r, 150));
-      } catch { failed++; }
-    }
-    for (const b of active) {
-      const key = `${b.startDate}:${b.endDate}`;
-      if (desiredBlocks.has(key)) continue;
-      try {
-        await guestyRequest("PUT", calPath, {
-          startDate: b.startDate,
-          endDate: b.endDate,
-          status: "available",
-        });
-        await storage.markScannerBlockRemoved(b.id);
-        removed++;
-        await new Promise((r) => setTimeout(r, 150));
-      } catch { failed++; }
-    }
-    summaries.push(`blocks +${created}/-${removed}${failed ? `/×${failed}` : ""}`);
+    const windows = seasonalWindows.map((w) => {
+      const ov = overrideByStart.get(w.startDate);
+      const verdict: "blocked" | "available" | "tight" | "error" = ov
+        ? (ov.mode === "force-block" ? "blocked" : "available")
+        : (w.verdict === "open" ? "available" : w.verdict);
+      return {
+        startDate: w.startDate,
+        endDate: w.endDate,
+        verdict,
+        maxSets: ov?.mode === "force-block" ? 0 : w.maxSets,
+        minSets: w.minSets,
+        reason: ov ? `manual override: ${ov.mode}` : w.reason,
+      };
+    });
+    const result = await syncScannerBlocksForProperty(propertyId, windows);
+    summaries.push(`blocks +${result.created}/-${result.removed}${result.failures.length ? `/×${result.failures.length}` : ""}`);
   }
 
   // ── Rate push: per-month Guesty calendar from STATIC buy-in cost ──

@@ -101,7 +101,7 @@ const TAX_NORMALIZATION_FACTOR: Record<RegionKey, number> = {
   florida: 1.11,
 };
 
-function inferRegion(city: string, state: string): RegionKey {
+export function inferRegion(city: string, state: string): RegionKey {
   const s = state.toLowerCase();
   if (s === "hawaii" || s === "hi") return "hawaii";
   if (s === "florida" || s === "fl") return "florida";
@@ -375,6 +375,20 @@ export type MultiChannelBuyInResult = {
       pm: number | null;
     }
   >;
+  // Live availability counts from the same exact dated search window.
+  // These are raw channel counts and may double-count cross-listed
+  // homes; the Availability tab applies a de-dupe discount before
+  // deciding whether a season is open/tight/blocked.
+  channelAvailableCountsByBR: Record<
+    number,
+    {
+      airbnb: number;
+      vrbo: number;
+      booking: number;
+      pm: number;
+      total: number;
+    }
+  >;
   // Window the snapshot was taken on, so the UI can label "Live
   // 2026-05-29 → 06-05: Airbnb $620 · VRBO $580 · Booking $605 · PM $590".
   snapshotCheckIn: string;
@@ -415,10 +429,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // sidecar searches all hit this window. When omitted, defaults to
   // the legacy 7-night, 30-day-out window.
   dateOverride?: { checkIn: string; checkOut: string };
-  // PR #282: optional flag to skip sidecar (used for HIGH/HOLIDAY
-  // seasons where we only sample via the Airbnb engine — the sidecar
-  // budget is reserved for the LOW-season scan where the operator
-  // is actively hunting buy-in deals).
+  // Optional escape hatch for low-cost probes. Normal pricing and
+  // availability scans do not skip sidecar: LOW/HIGH/HOLIDAY all use
+  // VRBO + Booking + PM verification.
   skipSidecar?: boolean;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
@@ -441,6 +454,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   }
 
   const targetDest = args.searchName ?? args.community;
+  const nights = nightsBetween(checkIn, checkOut);
 
   // Fan out everything in parallel. The Airbnb engine doesn't go
   // through the daemon (single fast SearchAPI call); sidecar VRBO +
@@ -461,6 +475,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     br: number;
     channel: ChannelKey;
     cheapestNightly: number | null;
+    availableCount: number;
     // PR #299: when daemon used Vrbo's new "$X total includes taxes &
     // fees" format, cheapestNightly is already all-in. Skip the
     // per-region tax-normalization multiplier downstream.
@@ -501,7 +516,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
           });
-          if (!r) return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false, reason: "wrapper returned null" };
+          if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
           // Filter to listings that actually quote a per-night and
           // (when bedroom count is known) match the requested BR.
           // Sidecar VRBO scrape returns nightlyPrice already
@@ -512,10 +527,12 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // so, downstream skips the per-region tax multiplier — the
           // value is already fully loaded.
           let cheapest = Infinity;
+          let availableCount = 0;
           let cheapestIncludesTaxes = false;
           for (const c of r.candidates) {
             if (!(c.nightlyPrice > 0)) continue;
             if (c.bedrooms != null && c.bedrooms !== br) continue;
+            availableCount++;
             if (c.nightlyPrice < cheapest) {
               cheapest = c.nightlyPrice;
               cheapestIncludesTaxes = c.priceIncludesTaxes ?? false;
@@ -525,12 +542,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
             br,
             channel: "vrbo",
             cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
+            availableCount,
             cheapestIncludesTaxes,
             workerOnline: r.workerOnline,
             reason: r.reason,
           };
         } catch (e: any) {
-          return { br, channel: "vrbo", cheapestNightly: null, workerOnline: false, reason: e?.message ?? String(e) };
+          return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
     );
@@ -554,23 +572,26 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the
           // BookingSearch processor in worker.mjs). Compute nightly
-          // from the requested 7-night window.
+          // from this exact sampled window.
           let cheapest = Infinity;
+          let availableCount = 0;
           for (const c of r.candidates) {
             if (!(c.totalPrice > 0)) continue;
             if (c.bedrooms != null && c.bedrooms !== br) continue;
-            const nightly = Math.round(c.totalPrice / 7);
+            availableCount++;
+            const nightly = Math.round(c.totalPrice / nights);
             if (nightly < cheapest) cheapest = nightly;
           }
           return {
             br,
             channel: "booking",
             cheapestNightly: Number.isFinite(cheapest) ? cheapest : null,
+            availableCount,
             workerOnline: r.workerOnline,
             reason: r.reason,
           };
         } catch (e: any) {
-          return { br, channel: "booking", cheapestNightly: null, workerOnline: false, reason: e?.message ?? String(e) };
+          return { br, channel: "booking", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
     );
@@ -654,6 +675,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // region's combined tax factor (see TAX_NORMALIZATION_FACTOR comment
   // above).
   const channelCheapestByBR: MultiChannelBuyInResult["channelCheapestByBR"] = {};
+  const channelAvailableCountsByBR: MultiChannelBuyInResult["channelAvailableCountsByBR"] = {};
   for (const br of args.bedroomCounts) {
     const airbnbSamples = airbnbResult.ratesByBR[br] ?? [];
     const airbnbCheapest =
@@ -690,6 +712,17 @@ export async function fetchMultiChannelBuyInByBR(args: {
       pm: pmRates?.medianNightly != null && passSanity(pmRates.medianNightly, airbnbCheapest)
         ? pmRates.medianNightly
         : null,
+    };
+    const airbnbCount = airbnbSamples.length;
+    const vrboCount = vrboSidecar?.availableCount ?? 0;
+    const bookingCount = bookingSidecar?.availableCount ?? 0;
+    const pmCount = pmRates?.sampleCount ?? 0;
+    channelAvailableCountsByBR[br] = {
+      airbnb: airbnbCount,
+      vrbo: vrboCount,
+      booking: bookingCount,
+      pm: pmCount,
+      total: airbnbCount + vrboCount + bookingCount + pmCount,
     };
   }
 
@@ -774,6 +807,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   return {
     ratesByBR: airbnbResult.ratesByBR,
     channelCheapestByBR,
+    channelAvailableCountsByBR,
     snapshotCheckIn: checkIn,
     snapshotCheckOut: checkOut,
     daemonOnline,

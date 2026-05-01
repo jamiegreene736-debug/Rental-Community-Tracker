@@ -41,6 +41,12 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage 
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
+import {
+  aggregateSeasonalCandidates,
+  computeAvailabilityThresholds,
+  scanSeasonalAvailabilityCapacity,
+  type SeasonalAvailabilityWindow,
+} from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, listScanableFolders } from "./photo-listing-scanner";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -7244,21 +7250,20 @@ export async function registerRoutes(
   //
   // The dashboard's Availability tab used to surface individual buy-in
   // candidates to click. That's not the job — the real goal is a
-  // booking-safety guarantee: for every 7-day window in the next 24
-  // months, make sure we can find enough independent complete buy-in
-  // SETS (one listing per unit slot, no reuse across sets) to honor
-  // whatever a guest books + some buffer. When we can't, block that
-  // window in Guesty's calendar so it can't be oversold.
+  // booking-safety guarantee: sample LOW, HIGH, and HOLIDAY season
+  // windows through the same sidecar-backed buy-in engine, make sure
+  // we can find enough independent complete buy-in SETS (one listing
+  // per unit slot, no reuse across sets), and block only windows where
+  // verified availability is genuinely below the block floor.
   //
   // Two endpoints:
   //   GET  /api/availability/scan/:propertyId         streams per-window verdicts
   //   POST /api/availability/sync-blocks/:propertyId  diffs scan vs DB-tracked
   //                                                    blocks and writes to Guesty
   //
-  // Guesty blocking uses POST /blocks (with reasonType: "owner_block"),
-  // NOT the calendar PUT. Scanner-placed blocks get a `source: "nexstay-scanner"`
-  // tag in the DB so the diff step never touches blocks placed by
-  // humans or other integrations.
+  // Guesty blocking uses calendar PUT with status: "unavailable".
+  // Scanner-placed blocks are tracked in the DB so the diff step never
+  // touches blocks placed by humans or other integrations.
 
   app.get("/api/availability/scan/:propertyId", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -7268,6 +7273,7 @@ export async function registerRoutes(
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
     const weeks = Math.min(Math.max(parseInt((req.query.weeks as string) ?? "52", 10) || 52, 4), 104);
     const minSets = Math.max(1, parseInt((req.query.minSets as string) ?? "3", 10) || 3);
+    const mode = String(req.query.mode ?? "seasonal-sidecar");
 
     const config = PROPERTY_UNIT_CONFIGS[propertyId];
     if (!config) return res.status(404).json({ error: `Property ${propertyId} not in config` });
@@ -7300,8 +7306,94 @@ export async function registerRoutes(
     res.flushHeaders();
     const emit = (obj: Record<string, unknown>) => { res.write(JSON.stringify(obj) + "\n"); };
 
+    if (mode !== "legacy-static-airbnb") {
+      const thresholds = computeAvailabilityThresholds(config.units, minSets);
+      const seasonalTotal = 3;
+      emit({
+        type: "start",
+        mode: "seasonal-sidecar",
+        propertyId,
+        guestyListingId,
+        community,
+        resortName,
+        units: config.units,
+        minSets: thresholds.blockMinSets,
+        openMinSets: thresholds.openMinSets,
+        blockMinSets: thresholds.blockMinSets,
+        weeks: seasonalTotal,
+      });
+
+      const applyOverride = (window: SeasonalAvailabilityWindow): SeasonalAvailabilityWindow & Record<string, unknown> => {
+        const ov = overrideByStart.get(window.startDate);
+        if (!ov) return window;
+        const verdict = ov.mode === "force-block" ? "blocked" : "open";
+        return {
+          ...window,
+          verdict,
+          maxSets: ov.mode === "force-open" ? window.openMinSets + 5 : 0,
+          overridden: true,
+          overrideMode: ov.mode,
+          overrideNote: ov.note ?? null,
+          reason: ov.mode === "force-open"
+            ? `Manual override forced this ${window.season} sample open.`
+            : `Manual override forced this ${window.season} sample blocked.`,
+        };
+      };
+
+      const streamedWindows: Array<SeasonalAvailabilityWindow & Record<string, unknown>> = [];
+      const emitWindow = (window: SeasonalAvailabilityWindow) => {
+        const w = applyOverride(window);
+        streamedWindows.push(w);
+        emit({ type: "window", ...w });
+      };
+
+      try {
+        const result = await scanSeasonalAvailabilityCapacity({
+          propertyId,
+          config,
+          resortName,
+          manualMinSets: minSets,
+          onPhase: (label) => emit({ type: "phase", label }),
+          onWindow: emitWindow,
+        });
+        const finalWindows = result.windows.map(applyOverride);
+        const emittedKeys = new Set(streamedWindows.map((w) => `${w.season}:${w.startDate}`));
+        for (const w of finalWindows) {
+          const key = `${w.season}:${w.startDate}`;
+          if (!emittedKeys.has(key)) emit({ type: "window", ...w });
+        }
+        const aggregate = aggregateSeasonalCandidates(finalWindows as SeasonalAvailabilityWindow[]);
+        emit({
+          type: "candidates",
+          mode: "seasonal-sidecar",
+          countsByBR: aggregate.countsByBR,
+          channelCountsByBR: aggregate.channelCountsByBR,
+          samplesByBR: {},
+          errors: {},
+          baselineSets: aggregate.baselineSets,
+          baselineVerdict: aggregate.baselineVerdict,
+          thresholds: result.thresholds,
+          region: result.region,
+          searchName: result.searchName,
+        });
+        emit({
+          type: "done",
+          mode: "seasonal-sidecar",
+          weeks: result.windows.length,
+          baselineSets: aggregate.baselineSets,
+          baselineVerdict: aggregate.baselineVerdict,
+          durationMs: result.durationMs,
+        });
+      } catch (e: any) {
+        emit({ type: "error", error: e?.message ?? String(e) });
+      }
+      res.end();
+      return;
+    }
+
     emit({
       type: "start",
+      mode: "legacy-static-airbnb",
       propertyId,
       guestyListingId,
       community,
@@ -10595,7 +10687,7 @@ export async function registerRoutes(
     const row = await storage.upsertScannerSchedule({
       propertyId,
       enabled: body.enabled ?? existing?.enabled ?? false,
-      intervalHours: body.intervalHours ?? existing?.intervalHours ?? 12,
+      intervalHours: body.intervalHours ?? existing?.intervalHours ?? 24,
       runInventory: body.runInventory ?? existing?.runInventory ?? true,
       runPricing: body.runPricing ?? existing?.runPricing ?? true,
       runSyncBlocks: body.runSyncBlocks ?? existing?.runSyncBlocks ?? true,

@@ -1,10 +1,10 @@
 // Availability / inventory scanner UI — phase 1+2 rewrite (Apr 2026).
 //
 // Replaces the old "shopping list of buy-ins" UX with a safety-guarantee
-// heatmap: 52 rolling 7-day windows, each colored by how many independent
-// complete buy-in SETS exist. Windows where we can't find enough sets
-// get pushed as unavailable blocks to Guesty's calendar so they can't
-// be oversold.
+// seasonal scan: LOW, HIGH, and HOLIDAY samples are checked through the
+// sidecar-backed multi-channel buy-in engine. Windows where we cannot verify
+// enough independent complete buy-in sets can be pushed as unavailable blocks
+// to Guesty's calendar so they cannot be oversold.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -12,13 +12,29 @@ type Verdict = "open" | "tight" | "blocked" | "pending";
 
 type CandidateListing = { id: string; url: string; title: string };
 
+type AvailabilityChannelCounts = {
+  airbnb: number;
+  vrbo: number;
+  booking: number;
+  pm: number;
+  total: number;
+  effective: number;
+};
+
 type WindowResult = {
   startDate: string;
   endDate: string;
+  season?: "LOW" | "HIGH" | "HOLIDAY";
+  nights?: number;
   verdict: Verdict;
   maxSets?: number;
   minSets?: number;
+  openMinSets?: number;
+  blockMinSets?: number;
   listingCounts?: Record<string, number>;
+  channelCounts?: Record<string, AvailabilityChannelCounts>;
+  daemonOnline?: boolean;
+  reason?: string;
   sample?: Record<string, CandidateListing[]>;
   overridden?: boolean;
   overrideMode?: "force-open" | "force-block";
@@ -26,22 +42,33 @@ type WindowResult = {
 };
 
 type CandidatesEvent = {
+  mode?: "seasonal-sidecar" | "legacy-static-airbnb";
   countsByBR: Record<string, number>;
+  channelCountsByBR?: Record<string, AvailabilityChannelCounts>;
   samplesByBR: Record<string, CandidateListing[]>;
   errors: Record<string, string>;
   baselineSets: number;
   baselineVerdict: Verdict;
+  thresholds?: {
+    openMinSets: number;
+    blockMinSets: number;
+    openCandidatesByBR: Record<string, number>;
+    blockCandidatesByBR: Record<string, number>;
+  };
 };
 
 type Unit = { unitId: string; unitLabel: string; bedrooms: number };
 
 type ScanContext = {
+  mode?: "seasonal-sidecar" | "legacy-static-airbnb";
   propertyId: number;
   guestyListingId: string | null;
   community: string;
   resortName: string | null;
   units: Unit[];
   minSets: number;
+  openMinSets?: number;
+  blockMinSets?: number;
   weeks: number;
 };
 
@@ -71,6 +98,7 @@ function fmtShort(iso: string): string {
 // so nothing is silently lost — it just renders as plain text.
 type RunBadges = {
   inventory?: { sets: number; verdict: "open" | "tight" | "blocked" };
+  seasonWindows?: { open: number; tight: number; blocked: number };
   marketSnapshot?: { seen: number; total: number };
   blocks?: { added: number; removed: number; failed: number };
   rates?: { pushed: number; total: number };
@@ -84,6 +112,8 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
     let m;
     if ((m = p.match(/^inventory\s+(\d+)\s+sets\s+\((open|tight|blocked)\)$/i))) {
       out.inventory = { sets: parseInt(m[1], 10), verdict: m[2].toLowerCase() as "open" | "tight" | "blocked" };
+    } else if ((m = p.match(/^season-windows\s+(\d+)\s+open\/(\d+)\s+tight\/(\d+)\s+blocked$/i))) {
+      out.seasonWindows = { open: parseInt(m[1], 10), tight: parseInt(m[2], 10), blocked: parseInt(m[3], 10) };
     } else if ((m = p.match(/^market-snapshot\s+(\d+)\/(\d+)\s+seasons$/i))) {
       out.marketSnapshot = { seen: parseInt(m[1], 10), total: parseInt(m[2], 10) };
     } else if ((m = p.match(/^blocks\s+\+(\d+)\/-(\d+)(?:\/\xD7(\d+))?$/i))) {
@@ -109,6 +139,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [candidates, setCandidates] = useState<CandidatesEvent | null>(null);
   const [results, setResults] = useState<WindowResult[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [scanPhase, setScanPhase] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncResult, setSyncResult] = useState<any>(null);
@@ -307,6 +338,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     setCtx(null);
     setCandidates(null);
     setError(null);
+    setScanPhase("Starting seasonal sidecar scan");
     setProgress(null);
     setSelectedIdx(null);
     setSyncResult(null);
@@ -315,7 +347,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
     try {
       const resp = await fetch(
-        `/api/availability/scan/${propertyId}?weeks=${weeks}&minSets=${minSets}`,
+        `/api/availability/scan/${propertyId}?mode=seasonal-sidecar&weeks=${weeks}&minSets=${minSets}`,
         { signal: controller.signal },
       );
       if (!resp.ok || !resp.body) {
@@ -341,24 +373,32 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           if (evt.type === "start") {
             total = evt.weeks ?? total;
             setCtx({
+              mode: evt.mode ?? "legacy-static-airbnb",
               propertyId: evt.propertyId,
               guestyListingId: evt.guestyListingId ?? null,
               community: evt.community,
               resortName: evt.resortName ?? null,
               units: evt.units ?? [],
               minSets: evt.minSets,
+              openMinSets: evt.openMinSets,
+              blockMinSets: evt.blockMinSets,
               weeks: evt.weeks,
             });
             setProgress({ done: 0, total });
           } else if (evt.type === "candidates") {
             setCandidates(evt as CandidatesEvent);
+          } else if (evt.type === "phase") {
+            setScanPhase(evt.label ?? evt.phase ?? "Scanning");
           } else if (evt.type === "window") {
             done++;
             collected.push(evt as WindowResult);
             setResults([...collected]);
             setProgress({ done, total });
+            setScanPhase(evt.season ? `${evt.season} sample complete` : "Scanning");
+          } else if (evt.type === "error") {
+            setError(evt.error ?? "Scan failed");
           } else if (evt.type === "done") {
-            /* finished — total stays */
+            setScanPhase(null);
           }
         }
       }
@@ -366,6 +406,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       if (e?.name !== "AbortError") setError(e?.message ?? String(e));
     } finally {
       setScanning(false);
+      setScanPhase(null);
       abortRef.current = null;
     }
   }, [propertyId, weeks, minSets]);
@@ -489,6 +530,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   }, [propertyId]);
 
   const selected = selectedIdx != null ? results[selectedIdx] : null;
+  const selectedChannelRows = selected?.channelCounts
+    ? Object.entries(selected.channelCounts)
+        .map(([br, counts]) => ({ br, counts }))
+        .sort((a, b) => Number(a.br) - Number(b.br))
+    : [];
 
   const blockedCount = summary.blocked;
   const tightCount = summary.tight;
@@ -516,8 +562,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               ⏱ Auto-scan scheduler {schedule?.enabled ? "ON" : "OFF"}
             </div>
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-              When enabled, the server runs the inventory scan + price scan + Guesty block + rate sync every{" "}
-              <b>{schedule?.intervalHours ?? 12}h</b> in the background.
+              When enabled, the server runs seasonal sidecar inventory + price scan + Guesty block + rate sync every{" "}
+              <b>{schedule?.intervalHours ?? 24}h</b> in the background.
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
               {schedule?.lastRunStatus && (() => {
                 const statusColor =
@@ -581,6 +627,15 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       Market snapshot: <b>{b.marketSnapshot.seen}/{b.marketSnapshot.total}</b> seasons
                     </span>
                   )}
+                  {b.seasonWindows && (
+                    <span style={chipStyle}>
+                      Seasons: <b style={{ color: "#166534" }}>{b.seasonWindows.open}</b> open
+                      {" / "}
+                      <b style={{ color: "#92400e" }}>{b.seasonWindows.tight}</b> tight
+                      {" / "}
+                      <b style={{ color: "#991b1b" }}>{b.seasonWindows.blocked}</b> blocked
+                    </span>
+                  )}
                   {b.blocks && (
                     <span style={chipStyle}>
                       Blocks: <b style={{ color: "#166534" }}>+{b.blocks.added}</b>
@@ -603,7 +658,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             <label style={{ fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
               Every
               <select
-                value={schedule?.intervalHours ?? 12}
+                value={schedule?.intervalHours ?? 24}
                 onChange={(e) => updateSchedule({ intervalHours: parseInt(e.target.value, 10) })}
                 disabled={!schedule}
                 style={{ padding: "2px 6px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
@@ -635,7 +690,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "#6b7280" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runInventory} onChange={(e) => updateSchedule({ runInventory: e.target.checked })} />
-              Inventory check
+              Seasonal sidecar inventory
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runPricing} onChange={(e) => updateSchedule({ runPricing: e.target.checked })} />
@@ -646,7 +701,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               Sync blocks to Guesty
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Min sets:
+              Manual block floor:
               <select
                 value={schedule.minSets}
                 onChange={(e) => updateSchedule({ minSets: parseInt(e.target.value, 10) })}
@@ -724,6 +779,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       ) : (
                         <span style={{ color: "#6b7280" }}>
                           {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
+                          {parsed.seasonWindows && <>seasons <b style={{ color: "#166534" }}>{parsed.seasonWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.seasonWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.seasonWindows.blocked}</b> · </>}
                           {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
                           {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
                           {!parsed.inventory && !parsed.blocks && !parsed.rates && r.summary}
@@ -791,22 +847,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
+        <span style={{ fontSize: 12, color: "#6b7280" }}>
+          Season windows: <b>LOW</b> · <b>HIGH</b> · <b>HOLIDAY</b>
+        </span>
         <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
-          Weeks ahead:
-          <select
-            value={weeks}
-            onChange={(e) => setWeeks(parseInt(e.target.value, 10))}
-            disabled={scanning}
-            style={{ padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}
-          >
-            <option value={26}>26 (~6 mo)</option>
-            <option value={52}>52 (1 yr)</option>
-            <option value={78}>78 (~18 mo)</option>
-            <option value={104}>104 (2 yr)</option>
-          </select>
-        </label>
-        <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
-          Minimum sets needed:
+          Manual block floor:
           <select
             value={minSets}
             onChange={(e) => setMinSets(parseInt(e.target.value, 10))}
@@ -814,7 +859,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             style={{ padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}
           >
             <option value={2}>2 (tight)</option>
-            <option value={3}>3 (recommended)</option>
+            <option value={3}>3</option>
             <option value={4}>4 (conservative)</option>
             <option value={5}>5 (paranoid)</option>
           </select>
@@ -825,7 +870,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           disabled={scanning}
           style={{ fontSize: 12 }}
         >
-          {scanning ? "Scanning…" : results.length > 0 ? "↺ Re-scan" : "▶ Run inventory scan"}
+          {scanning ? "Scanning…" : results.length > 0 ? "↺ Re-scan" : "▶ Run seasonal scan"}
         </button>
         {scanning && (
           <button className="glb-btn" onClick={stopScan} style={{ fontSize: 12 }}>
@@ -834,7 +879,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         )}
         {progress && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
-            {progress.done} / {progress.total} weeks
+            {progress.done} / {progress.total} season windows{scanPhase ? ` · ${scanPhase}` : ""}
           </span>
         )}
         <div style={{ flex: 1 }} />
@@ -854,21 +899,21 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, lineHeight: 1.6 }}>
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
-          {" "}A "set" = one listing per unit slot (no reuse). Window is <b>blocked</b> when fewer than <b>{ctx.minSets}</b> independent sets exist.
+          {" "}A "set" = one listing per unit slot (no reuse). Seasonal samples are <b>blocked</b> below <b>{ctx.blockMinSets ?? ctx.minSets}</b> de-duped set(s) and <b>open</b> at <b>{ctx.openMinSets ?? (ctx.minSets + 2)}</b>.
         </div>
       )}
       {candidates && (
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, lineHeight: 1.6 }}>
-          <b>Candidate inventory found at this resort</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
-            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> listings</span>
+          <b>Lowest verified seasonal inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
+            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> effective options</span>
           ))} · max independent sets: <b>{candidates.baselineSets}</b>
-          {candidates.baselineSets < (ctx?.minSets ?? 3) && (
+          {candidates.baselineSets < (ctx?.blockMinSets ?? ctx?.minSets ?? 3) && (
             <span style={{ color: "#991b1b", marginLeft: 8 }}>
-              (below {ctx?.minSets ?? 3}-set floor → all weeks block)
+              (below {(ctx?.blockMinSets ?? ctx?.minSets ?? 3)}-set block floor)
             </span>
           )}
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
-            Counts are static per scan — listings don't appear/disappear week-to-week, so a single search powers all {ctx?.weeks ?? 52} windows. Re-run the scan to refresh.
+            Counts are dated searches from Airbnb, VRBO, Booking.com, and property-manager sites, with cross-channel duplicate risk discounted.
           </div>
         </div>
       )}
@@ -879,7 +924,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <span style={{ color: "#991b1b", fontWeight: 600 }}>✗ {summary.blocked} blocked</span>
           {tightCount > 0 && (
             <span style={{ color: "#6b7280" }}>
-              · Tight weeks can still be booked but won't auto-block.
+              · Tight windows can still be booked but won't auto-block.
             </span>
           )}
         </div>
@@ -945,13 +990,13 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         return (
           <div style={{ marginBottom: 24, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
             <div style={{ padding: "8px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              {months.length}-Month Summary — blocks pushed to Guesty
+              Seasonal Sample Summary — blocks pushed to Guesty
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                   <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Month</th>
-                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Weeks</th>
+                  <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Windows</th>
                   <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#166534" }}>Open</th>
                   <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#92400e" }}>Tight</th>
                   <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600, color: "#991b1b" }}>Blocked</th>
@@ -998,10 +1043,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Weekly Pricing Correlation
+              Sample-Window Pricing Correlation
             </span>
             <span style={{ fontSize: 11, color: "#6b7280" }}>
-              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked weeks skipped.
+              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked windows skipped.
             </span>
             <div style={{ flex: 1 }} />
             {!pricingRows && (
@@ -1011,7 +1056,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 disabled={pricingBusy}
                 style={{ fontSize: 11 }}
               >
-                {pricingBusy ? "Computing…" : "▶ Compute weekly rates"}
+                {pricingBusy ? "Computing…" : "▶ Compute sample rates"}
               </button>
             )}
             {pricingRows && (
@@ -1019,10 +1064,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 className="glb-btn"
                 onClick={syncWeeklyRates}
                 disabled={ratesSyncBusy || !listingId}
-                title={!listingId ? "Select a Guesty listing first" : `Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} weekly rates to Guesty`}
+	                title={!listingId ? "Select a Guesty listing first" : `Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} sample-window rates to Guesty`}
                 style={{ fontSize: 11 }}
               >
-                {ratesSyncBusy ? "Pushing…" : `↑ Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} rates to Guesty`}
+	                {ratesSyncBusy ? "Pushing…" : `↑ Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} rates to Guesty`}
               </button>
             )}
             {pricingRows && (
@@ -1051,7 +1096,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             }}>
               {ratesSyncResult.ok ? "✓" : "⚠"}
               {" "}<b>On {new Date(ratesSyncResult.syncedAt ?? Date.now()).toLocaleString()}</b>
-              {" — "}pushed <b>{ratesSyncResult.pushed ?? 0}</b> of <b>{ratesSyncResult.total ?? 0}</b> weekly rates to Guesty
+	              {" — "}pushed <b>{ratesSyncResult.pushed ?? 0}</b> of <b>{ratesSyncResult.total ?? 0}</b> sample-window rates to Guesty
               {ratesSyncResult.failures && ratesSyncResult.failures.length > 0 && (
                 <span style={{ color: "#92400e" }}>, {ratesSyncResult.failures.length} failed</span>
               )}
@@ -1062,7 +1107,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Week</th>
+	                  <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Window</th>
                   <th style={{ textAlign: "left", padding: "6px 12px", fontWeight: 600 }}>Verdict</th>
                   <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Base cost / night</th>
                   <th style={{ textAlign: "right", padding: "6px 12px", fontWeight: 600 }}>Baseline rate</th>
@@ -1108,7 +1153,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           )}
           {!pricingRows && !pricingBusy && (
             <div style={{ padding: "12px 16px", fontSize: 12, color: "#6b7280", textAlign: "center" }}>
-              Click <b>Compute weekly rates</b> to see per-week pricing based on this scan's tightness signal.
+              Click <b>Compute sample rates</b> to see pricing based on this scan's tightness signal.
             </div>
           )}
         </div>
@@ -1144,15 +1189,17 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                         fontSize: 11,
                       }}
                     >
-                      <div style={{ fontSize: 10, opacity: 0.8 }}>{fmtShort(r.startDate)} → {fmtShort(r.endDate)}</div>
-                      <div style={{ fontWeight: 700, textTransform: "uppercase", fontSize: 10, letterSpacing: "0.04em", marginTop: 2 }}>
-                        {r.overridden ? `forced ${r.overrideMode === "force-open" ? "open" : "blocked"}` : r.verdict}
-                      </div>
-                      {typeof r.maxSets === "number" && !r.overridden && (
-                        <div style={{ fontSize: 10, opacity: 0.8 }}>
-                          {r.maxSets} set{r.maxSets === 1 ? "" : "s"} / need {r.minSets ?? minSets}
-                        </div>
-                      )}
+	                      <div style={{ fontSize: 10, opacity: 0.8 }}>
+	                        {r.season ? `${r.season} · ` : ""}{fmtShort(r.startDate)} → {fmtShort(r.endDate)}
+	                      </div>
+	                      <div style={{ fontWeight: 700, textTransform: "uppercase", fontSize: 10, letterSpacing: "0.04em", marginTop: 2 }}>
+	                        {r.overridden ? `forced ${r.overrideMode === "force-open" ? "open" : "blocked"}` : r.verdict}
+	                      </div>
+	                      {typeof r.maxSets === "number" && !r.overridden && (
+	                        <div style={{ fontSize: 10, opacity: 0.8 }}>
+	                          {r.maxSets} set{r.maxSets === 1 ? "" : "s"} / block &lt; {r.minSets ?? minSets}
+	                        </div>
+	                      )}
                     </div>
                   );
                 })}
@@ -1162,21 +1209,34 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         })}
       </div>
 
-      {/* ── Detail panel for the selected week ───────────────── */}
+      {/* ── Detail panel for the selected sample window ────────── */}
       {selected && (
         <div style={{ marginTop: 18, padding: 16, background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 600 }}>
-                Week of {fmtShort(selected.startDate)} → {fmtShort(selected.endDate)}
+                {selected.season ? `${selected.season} sample` : "Window"}: {fmtShort(selected.startDate)} → {fmtShort(selected.endDate)}
+                {selected.nights ? ` (${selected.nights} nights)` : ""}
               </div>
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
                 Verdict: <b style={{ color: verdictColor(selected.verdict).fg }}>{selected.verdict}</b>
-                {typeof selected.maxSets === "number" && <> · {selected.maxSets} set{selected.maxSets === 1 ? "" : "s"} found · need {selected.minSets ?? minSets}</>}
+                {typeof selected.maxSets === "number" && <> · {selected.maxSets} effective set{selected.maxSets === 1 ? "" : "s"}</>}
+                <> · block below {selected.blockMinSets ?? selected.minSets ?? minSets}</>
+                {selected.openMinSets != null && <> · open at {selected.openMinSets}</>}
                 {selected.listingCounts && (
-                  <> · listings: {Object.entries(selected.listingCounts).map(([br, n]) => `${br}BR=${n}`).join(" · ")}</>
+                  <> · effective by BR: {Object.entries(selected.listingCounts).map(([br, n]) => `${br}BR=${n}`).join(" · ")}</>
                 )}
               </div>
+              {selected.reason && (
+                <div style={{ fontSize: 11, color: "#4b5563", marginTop: 4, maxWidth: 900 }}>
+                  {selected.reason}
+                </div>
+              )}
+              {selected.daemonOnline === false && (
+                <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
+                  Sidecar was offline or incomplete for this sample, so it is shown as tight instead of auto-blocked.
+                </div>
+              )}
               {selected.overridden && (
                 <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
                   ⚠ Manual override: {selected.overrideMode === "force-open" ? "forced open" : "forced blocked"}
@@ -1213,12 +1273,50 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </div>
           </div>
 
-          {/* Candidate inventory — same listings power every week, listed
-              here so the operator can spot-check a few before booking. */}
+          {selectedChannelRows.length > 0 && (
+            <div style={{ marginBottom: 12, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
+              <div style={{ padding: "6px 10px", background: "#f9fafb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Sidecar availability by bedroom
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ color: "#6b7280", background: "#fff" }}>
+                    <th style={{ textAlign: "left", padding: "5px 10px", fontWeight: 600 }}>Bedroom</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Airbnb</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>VRBO</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Booking</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>PM sites</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Raw</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Effective</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedChannelRows.map(({ br, counts }) => (
+                    <tr key={br} style={{ borderTop: "1px solid #f3f4f6" }}>
+                      <td style={{ padding: "5px 10px", fontWeight: 600 }}>{br}BR</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right" }}>{counts.airbnb}</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right" }}>{counts.vrbo}</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right" }}>{counts.booking}</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right" }}>{counts.pm}</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right", color: "#6b7280" }}>{counts.total}</td>
+                      <td style={{ padding: "5px 10px", textAlign: "right", fontWeight: 700 }}>{counts.effective}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ padding: "6px 10px", fontSize: 10, color: "#9ca3af", borderTop: "1px solid #f3f4f6" }}>
+                Effective count discounts likely cross-listed homes so the blocker does not assume every channel result is a unique buy-in option.
+              </div>
+            </div>
+          )}
+
+          {/* Legacy static-Airbnb scans included sample URLs. Seasonal sidecar
+              scans primarily return channel counts, but keep this fallback
+              visible when old scan payloads are loaded. */}
           {selected.sample && Object.keys(selected.sample).length > 0 ? (
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Sample candidate listings at this resort
+                Legacy sample candidate listings
               </div>
               {Object.entries(selected.sample).map(([br, listings]) => (
                 <div key={br} style={{ marginBottom: 8 }}>
@@ -1240,14 +1338,14 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 </div>
               ))}
               <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
-                Inventory count is the same for every week in this scan — daily re-runs catch listings appearing/disappearing.
+                These URLs appear only for the legacy static scan path; seasonal sidecar scans use dated channel counts above.
               </div>
             </div>
-          ) : (
+          ) : selectedChannelRows.length === 0 ? (
             <div style={{ fontSize: 12, color: "#6b7280" }}>
-              {selected.verdict === "blocked" && "No inventory found at this resort for the required bedroom mix. Will be blocked on Guesty if you click Sync."}
+              {selected.verdict === "blocked" && "No dated inventory was verified for the required bedroom mix. This window will be blocked on Guesty if you click Sync."}
             </div>
-          )}
+          ) : null}
         </div>
       )}
     </div>
