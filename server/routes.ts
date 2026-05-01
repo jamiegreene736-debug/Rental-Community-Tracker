@@ -2754,8 +2754,15 @@ export async function registerRoutes(
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (normalizedResortName !== "poipu kai") return true;
       const n = norm(candidateHaystack(c));
-      const hasNamedPoipuKaiComplex = /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n);
+      const hasNamedPoipuKaiComplex =
+        /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n)
+        || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
+        || /\bpoipu\s+kai\s+villas?\b/.test(n);
       if (hasNamedPoipuKaiComplex) return true;
+      // Vrbo often abbreviates Manualoha cards as "MA 1-310" without
+      // spelling out Poipu Kai or Manualoha. Keep those exact unit-code
+      // shapes, while still rejecting broader Koloa/Pili Mai/home rows.
+      if (c.source === "vrbo" && /\bma\s+\d+(?:\s+\d+)?\b/.test(n)) return true;
       const hasPoipuKai = /\bpoipu kai\b/.test(n);
       const hasCondoSignal = /\b(condo|condominium|villa|villas|apartment|townhome|townhouse|unit|suite)\b/.test(n);
       // "Near/in Prime Poipu Kai location" copy is not enough by itself:
@@ -2768,7 +2775,9 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
-      if (!mentionsResort(hay)) return false;
+      const targetSignal = mentionsResort(hay)
+        || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
