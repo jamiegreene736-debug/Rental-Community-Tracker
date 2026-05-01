@@ -8,6 +8,7 @@ import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
+import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 
 const app = express();
 const httpServer = createServer(app);
@@ -37,7 +38,7 @@ export function log(message: string, source = "express") {
     hour12: true,
   });
 
-  console.log(`${formattedTime} [${source}] ${message}`);
+  console.log(`${formattedTime} [${source}] ${sanitizeForChatText(message, { maxLength: 4_000 })}`);
 }
 
 app.use((req, res, next) => {
@@ -56,7 +57,7 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${JSON.stringify(sanitizeForChatValue(capturedJsonResponse, { maxLength: 1_000, maxArrayLength: 5 }))}`;
       }
 
       log(logLine);
@@ -71,9 +72,9 @@ app.use((req, res, next) => {
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    const message = sanitizeForChatText(err.message || "Internal Server Error", { maxLength: 1_000 });
 
-    console.error("Internal Server Error:", err);
+    console.error("Internal Server Error:", sanitizeForChatText(err, { maxLength: 4_000 }));
 
     if (res.headersSent) {
       return next(err);

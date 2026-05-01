@@ -45,6 +45,7 @@ import {
   AlertCircle,
   ExternalLink,
   Search,
+  Copy,
   Star,
   Sparkles,
   Award,
@@ -70,6 +71,7 @@ import {
   type UnitPricing,
 } from "@/data/pricing-data";
 import { getAllMultiUnitProperties, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { buildBuyInTrackerSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 
 type ReportSummary = {
   totalBuyInCost: number;
@@ -384,6 +386,7 @@ function BestBuyInFinder() {
   const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [otherResults, setOtherResults] = useState<OtherPlatformResults | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lastSearchError, setLastSearchError] = useState<string | null>(null);
   // Per-platform fee buffers — each tuned to that platform's actual fee structure
   // Airbnb: ~14% guest service fee + ~14.96% Hawaii TAT/GET ≈ 28% on top of search-result price
   // VRBO/Google Hotels: ~10% service fee + ~14.96% taxes ≈ 22%
@@ -457,6 +460,7 @@ function BestBuyInFinder() {
     setLoading(true);
     setResults(null);
     setOtherResults(null);
+    setLastSearchError(null);
     setSelectedListings({});
     setPlatformCheckState("idle");
     setPlatformCheckResults([]);
@@ -468,12 +472,15 @@ function BestBuyInFinder() {
       ]);
       let airbnbData: AirbnbSearchResults | null = null;
       let otherData: OtherPlatformResults | null = null;
+      const issues: string[] = [];
       if (airbnbRes.ok) {
         airbnbData = await airbnbRes.json();
         for (const key of Object.keys(airbnbData!.searches)) {
           for (const prop of airbnbData!.searches[key].properties) prop.source = "airbnb";
         }
         setResults(airbnbData);
+      } else {
+        issues.push(`Airbnb ${airbnbRes.status}: ${await airbnbRes.text()}`);
       }
       if (otherRes.ok) {
         otherData = await otherRes.json();
@@ -484,9 +491,13 @@ function BestBuyInFinder() {
           for (const prop of otherData!.suiteParadise[key].properties) prop.source = "suite-paradise";
         }
         setOtherResults(otherData);
+      } else {
+        issues.push(`Other platforms ${otherRes.status}: ${await otherRes.text()}`);
       }
       if (airbnbData) autoSelectCheapest(airbnbData, otherData);
-    } catch {
+      if (issues.length) setLastSearchError(sanitizeForChatText(issues.join(" | "), { maxLength: 800 }));
+    } catch (err: any) {
+      setLastSearchError(sanitizeForChatText(err?.message ?? err, { maxLength: 800 }));
     } finally {
       setLoading(false);
     }
@@ -567,6 +578,30 @@ function BestBuyInFinder() {
   const getTotalNeededCount = () => {
     if (!results) return 0;
     return results.unitsNeeded.reduce((sum, n) => sum + n.count, 0);
+  };
+
+  const copySafeSearchLog = async (status: "success" | "error") => {
+    const log = buildBuyInTrackerSearchDebugLog({
+      status,
+      request: {
+        propertyId: selectedPropertyId,
+        checkIn,
+        checkOut,
+      },
+      airbnb: results,
+      other: otherResults,
+      selectedCounts: Object.fromEntries(
+        Object.entries(selectedListings).map(([key, items]) => [key, items.length]),
+      ),
+      error: lastSearchError ?? undefined,
+    });
+
+    try {
+      await navigator.clipboard.writeText(log);
+      toast({ title: "Safe debug log copied", description: "Raw URLs and secrets were redacted." });
+    } catch {
+      toast({ title: "Could not copy debug log", variant: "destructive" });
+    }
   };
 
   const allUnitsSelected = () => {
@@ -724,6 +759,7 @@ function BestBuyInFinder() {
     setLoading(true);
     setResults(null);
     setOtherResults(null);
+    setLastSearchError(null);
     setSelectedListings({});
     setPlatformCheckState("idle");
     setPlatformCheckResults([]);
@@ -736,6 +772,7 @@ function BestBuyInFinder() {
 
       let airbnbData: AirbnbSearchResults | null = null;
       let otherData: OtherPlatformResults | null = null;
+      const issues: string[] = [];
 
       if (airbnbRes.ok) {
         airbnbData = await airbnbRes.json();
@@ -746,8 +783,10 @@ function BestBuyInFinder() {
         }
         setResults(airbnbData);
       } else {
-        const errData = await airbnbRes.json().catch(() => ({ error: "Server error" }));
-        toast({ title: "Airbnb search issue", description: errData.error || "Failed to search Airbnb", variant: "destructive" });
+        const errText = await airbnbRes.text().catch(() => "Server error");
+        const safeError = sanitizeForChatText(errText || "Failed to search Airbnb", { maxLength: 800 });
+        issues.push(`Airbnb ${airbnbRes.status}: ${safeError}`);
+        toast({ title: "Airbnb search issue", description: safeError, variant: "destructive" });
       }
 
       if (otherRes.ok) {
@@ -763,13 +802,19 @@ function BestBuyInFinder() {
           }
         }
         setOtherResults(otherData);
+      } else {
+        const errText = await otherRes.text().catch(() => "Server error");
+        issues.push(`Other platforms ${otherRes.status}: ${sanitizeForChatText(errText, { maxLength: 800 })}`);
       }
 
       if (airbnbData) {
         autoSelectCheapest(airbnbData, otherData);
       }
+      if (issues.length) setLastSearchError(issues.join(" | "));
     } catch (err: any) {
-      toast({ title: "Search failed", description: err.message, variant: "destructive" });
+      const safeError = sanitizeForChatText(err?.message ?? err, { maxLength: 800 });
+      setLastSearchError(safeError);
+      toast({ title: "Search failed", description: safeError, variant: "destructive" });
     } finally {
       setLoading(false);
     }
@@ -793,7 +838,7 @@ function BestBuyInFinder() {
           <Label className="text-sm">Property</Label>
           <Select
             value={selectedPropertyId}
-            onValueChange={v => { setSelectedPropertyId(v); setResults(null); setOtherResults(null); }}
+            onValueChange={v => { setSelectedPropertyId(v); setResults(null); setOtherResults(null); setLastSearchError(null); }}
           >
             <SelectTrigger data-testid="select-finder-property">
               <SelectValue placeholder="Select property..." />
@@ -812,7 +857,7 @@ function BestBuyInFinder() {
           <Input
             type="date"
             value={checkIn}
-            onChange={e => { setCheckIn(e.target.value); setResults(null); setOtherResults(null); }}
+            onChange={e => { setCheckIn(e.target.value); setResults(null); setOtherResults(null); setLastSearchError(null); }}
             data-testid="input-finder-checkin"
           />
         </div>
@@ -821,7 +866,7 @@ function BestBuyInFinder() {
           <Input
             type="date"
             value={checkOut}
-            onChange={e => { setCheckOut(e.target.value); setResults(null); setOtherResults(null); }}
+            onChange={e => { setCheckOut(e.target.value); setResults(null); setOtherResults(null); setLastSearchError(null); }}
             data-testid="input-finder-checkout"
           />
         </div>
@@ -832,7 +877,24 @@ function BestBuyInFinder() {
             <><Search className="h-4 w-4 mr-2" /> Find Best Buy-Ins</>
           )}
         </Button>
+        {(results || lastSearchError) && (
+          <Button
+            onClick={() => copySafeSearchLog(results ? "success" : "error")}
+            disabled={loading}
+            variant="outline"
+            data-testid="button-copy-safe-buyin-log"
+          >
+            <Copy className="h-4 w-4 mr-2" /> Copy Safe Log
+          </Button>
+        )}
       </div>
+
+      {lastSearchError && !loading && !results && (
+        <div className="mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1 break-words">{lastSearchError}</div>
+        </div>
+      )}
 
       {selectedProp && pricing && !results && !loading && (
         <div className="mt-4 p-3 rounded-md bg-muted/50">

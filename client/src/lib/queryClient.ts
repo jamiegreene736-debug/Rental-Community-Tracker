@@ -1,8 +1,9 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { sanitizeForChatText } from "@shared/safe-log";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
+    const text = sanitizeForChatText((await res.text()) || res.statusText, { maxLength: 4_000 });
     throw new Error(`${res.status}: ${text}`);
   }
 }

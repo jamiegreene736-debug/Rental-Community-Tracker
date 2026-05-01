@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Copy } from "lucide-react";
+import { buildSafeErrorLog, sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 
 interface Props {
   children: ReactNode;
@@ -9,6 +10,7 @@ interface Props {
 
 interface State {
   error: Error | null;
+  copied: boolean;
 }
 
 /**
@@ -19,21 +21,38 @@ interface State {
  * tree — users just see a white screen with no clue what went wrong.
  */
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, copied: false };
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, copied: false };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("[ErrorBoundary]", error, info);
+    console.error("[ErrorBoundary]", sanitizeForChatValue(error), sanitizeForChatValue(info));
   }
 
-  reset = () => this.setState({ error: null });
+  reset = () => this.setState({ error: null, copied: false });
+
+  copySafeLog = async () => {
+    if (!this.state.error) return;
+    const log = buildSafeErrorLog(this.state.error, {
+      route: window.location.pathname,
+      page: document.title,
+    });
+    try {
+      await navigator.clipboard.writeText(log);
+      this.setState({ copied: true });
+    } catch {
+      this.setState({ copied: false });
+    }
+  };
 
   render() {
     if (!this.state.error) return this.props.children;
     if (this.props.fallback) return this.props.fallback(this.state.error, this.reset);
+
+    const safeMessage = sanitizeForChatText(this.state.error.message, { maxLength: 2_000 });
+    const safeStack = sanitizeForChatText(this.state.error.stack ?? "", { maxLength: 8_000 });
 
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-6">
@@ -43,17 +62,20 @@ export class ErrorBoundary extends Component<Props, State> {
             <h1 className="text-xl font-semibold">Something broke on this page</h1>
           </div>
           <p className="text-sm text-muted-foreground mb-3">
-            A render error crashed the component tree. The specific error is below — send this to
-            whoever is helping you debug.
+            A render error crashed the component tree. The sanitized error is below.
           </p>
           <div className="bg-background border rounded p-3 mb-4 max-h-60 overflow-auto">
             <pre className="text-xs font-mono whitespace-pre-wrap">
-              <strong className="text-destructive">{this.state.error.name}:</strong> {this.state.error.message}
+              <strong className="text-destructive">{this.state.error.name}:</strong> {safeMessage}
               {"\n\n"}
-              {this.state.error.stack ?? ""}
+              {safeStack}
             </pre>
           </div>
           <div className="flex gap-2">
+            <Button onClick={this.copySafeLog} variant="outline">
+              <Copy className="h-4 w-4 mr-2" />
+              {this.state.copied ? "Copied" : "Copy Safe Log"}
+            </Button>
             <Button onClick={this.reset} variant="default">Try again</Button>
             <Button onClick={() => (window.location.href = "/")} variant="outline">Go to Dashboard</Button>
           </div>

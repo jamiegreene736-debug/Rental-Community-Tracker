@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
+import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1541,6 +1542,30 @@ function LiveSearchSection({
     return !!key && attachedElsewhereKeys.has(key);
   };
 
+  const copySafeSearchLog = async (status: "success" | "error") => {
+    const log = buildBuyInSearchDebugLog({
+      status,
+      request: {
+        propertyId,
+        reservationId: reservation._id,
+        unitId: slot.unitId,
+        unitLabel: slot.unitLabel,
+        bedrooms: slot.bedrooms,
+        checkIn: checkInYmd,
+        checkOut: checkOutYmd,
+      },
+      response: data ?? null,
+      error: status === "error" ? error : undefined,
+    });
+
+    try {
+      await navigator.clipboard.writeText(log);
+      toast({ title: "Safe debug log copied", description: "Raw URLs and secrets were redacted." });
+    } catch {
+      toast({ title: "Could not copy debug log", variant: "destructive" });
+    }
+  };
+
   // Dead-code preserved for reference — used to gate on a button click
   if (false as boolean) {
     return (
@@ -1582,6 +1607,9 @@ function LiveSearchSection({
           <span className="flex items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => setDiagnosticsOpen(true)}>
               <FileText className="h-3.5 w-3.5 mr-1" /> Error log
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => copySafeSearchLog("error")}>
+              <Copy className="h-3.5 w-3.5 mr-1" /> Copy Safe Log
             </Button>
             <Button size="sm" variant="outline" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
           </span>
@@ -1661,6 +1689,9 @@ function LiveSearchSection({
           <SidecarStatusBadge />
           <Button size="sm" variant="ghost" onClick={() => setRefreshNonce((n) => n + 1)}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => copySafeSearchLog("success")}>
+            <Copy className="h-3.5 w-3.5 mr-1" /> Copy Safe Log
           </Button>
         </div>
       </div>
@@ -1902,8 +1933,9 @@ function SearchDiagnosticsDialog({
   onOpenChange: (open: boolean) => void;
   onCopySuccess?: () => void;
 }) {
+  const safeReport = sanitizeForChatText(diagnostics.report, { maxLength: 12_000 });
   const copyReport = async () => {
-    await navigator.clipboard.writeText(diagnostics.report);
+    await navigator.clipboard.writeText(safeReport);
     onCopySuccess?.();
   };
   const issueCount = diagnostics.issues?.length ?? 0;
@@ -1983,14 +2015,14 @@ function SearchDiagnosticsDialog({
           <div>
             <div className="flex items-center justify-between gap-2 mb-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Copy-friendly report
+                Copy-friendly safe report
               </p>
               <Button size="sm" variant="outline" onClick={copyReport}>
-                <Copy className="h-3.5 w-3.5 mr-1" /> Copy log
+                <Copy className="h-3.5 w-3.5 mr-1" /> Copy safe log
               </Button>
             </div>
             <pre className="max-h-72 overflow-auto rounded-md bg-slate-950 text-slate-50 p-3 text-[11px] whitespace-pre-wrap">
-              {diagnostics.report}
+              {safeReport}
             </pre>
           </div>
         </div>
