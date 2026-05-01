@@ -120,6 +120,10 @@ async function dismissObstructions(targetPage = page, label = "page") {
         function isDismissLabel(label) {
           const compact = String(label || "").trim();
           if (!compact) return false;
+          // Accessibility skip links are often visible/focusable near the top
+          // of PM pages. They are not overlays and clicking them can move the
+          // page away from the booking widget during rate checks.
+          if (/^skip\s+to\s+main\s+content$/i.test(compact)) return false;
           if (strictCloseRe.test(compact)) return true;
           return compact.length <= 90 && closeRe.test(compact);
         }
@@ -995,6 +999,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
       const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1093,6 +1098,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         const candidates = buttons.filter((el) => {
           const label = textOf(el);
           if (!submitRe.test(label)) return false;
+          if (badDateActionRe.test(label)) return false;
           const form = el.closest?.("form");
           return nearForms.size === 0 || nearForms.has(form) || /availability|rates|book|reserve|search/i.test(contextOf(el));
         });
@@ -1133,7 +1139,11 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       if (filled.length === 0 && allowOpenOnly) {
         const openers = Array.from(document.querySelectorAll(buttonSelector))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
-          .filter((el) => openerRe.test(textOf(el)) || openerRe.test(contextOf(el)));
+          .filter((el) => {
+            const label = textOf(el);
+            if (badDateActionRe.test(label)) return false;
+            return openerRe.test(label) || openerRe.test(contextOf(el));
+          });
         const opener = openers[0];
         if (opener) {
           opener.scrollIntoView?.({ block: "center", inline: "center" });
