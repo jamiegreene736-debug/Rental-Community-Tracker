@@ -14164,14 +14164,15 @@ export async function registerRoutes(
       br: number,
       sidecarRan: boolean,
     ) => {
-      if (!scan) return { basis: null as number | null, channelRates: [] as number[], samples: 0, channels: { airbnb: null, vrbo: null, booking: null } };
-      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
+      if (!scan) return { basis: null as number | null, channelRates: [] as number[], samples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } };
+      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
       if (sidecarRan) {
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
+        if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
@@ -14185,9 +14186,8 @@ export async function registerRoutes(
     const allLowRates: number[] = [];
     for (const br of bedroomCounts) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      // PR #305: HIGH and HOLIDAY now run sidecar VRBO + Booking too,
-      // so the basis pulls in the channel medians the same way LOW
-      // always has.
+      // HIGH and HOLIDAY now run the same multichannel path as LOW:
+      // Airbnb, sidecar VRBO, sidecar Booking, and verified PM rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 
@@ -14201,7 +14201,11 @@ export async function registerRoutes(
       const lowRangeMin = lowResult.channelRates.length > 0 ? lowResult.channelRates[0] : sortedSamples[0];
       const lowRangeMax = lowResult.channelRates.length > 0 ? lowResult.channelRates[lowResult.channelRates.length - 1] : sortedSamples[sortedSamples.length - 1];
 
-      const basisSource = lowResult.channelRates.length >= 2
+      const hasNonAirbnbChannel =
+        !!lowResult.channels.vrbo ||
+        !!lowResult.channels.booking ||
+        !!lowResult.channels.pm;
+      const basisSource = hasNonAirbnbChannel
         ? "live-multichannel-median"
         : "airbnb";
       await storage.upsertPropertyMarketRate({
@@ -14294,12 +14298,12 @@ export async function registerRoutes(
 
     // Multi-season multi-channel scan (PR #282).
     //
-    // Pulls per-season basis: LOW + HIGH + HOLIDAY. LOW does the full
-    // multichannel pull (Airbnb engine + sidecar VRBO + sidecar
-    // Booking). HIGH and HOLIDAY use Airbnb engine only — the daemon
-    // can't fan out 3× sidecar requests in parallel and HIGH/HOLIDAY
-    // basis is mostly market-driven, so the engine median is a
-    // reasonable proxy. Total wall: ~30-90s per property.
+    // Pulls per-season basis: LOW + HIGH + HOLIDAY. Each season uses
+    // Airbnb engine + sidecar VRBO + sidecar Booking + verified PM
+    // website rates. PM combines known direct-booking APIs with
+    // SearchAPI-discovered PM detail URLs checked through the sidecar.
+    // Total wall can run several minutes because the daemon serializes
+    // browser work through the operator's Chrome.
     //
     // Persistence:
     //   - LOW basis     → medianNightly        (legacy single-value
@@ -14348,21 +14352,23 @@ export async function registerRoutes(
         : sorted[mid];
     };
     // Helper: compute the per-season basis for a BR from a season's
-    // scan result. LOW prefers cross-channel median; HIGH/HOLIDAY use
-    // Airbnb-only median (since sidecar wasn't run for those).
+    // scan result. Every season can include Airbnb, VRBO, Booking, and
+    // PM channel signals; falls back to Airbnb sample median when no
+    // verified sidecar/direct channel signal lands.
     const basisForSeason = (
       scan: typeof seasonScan.perSeason["LOW"],
       br: number,
       sidecarRan: boolean,
-    ): { basis: number | null; channelRates: number[]; airbnbSamples: number; channels: { airbnb: number | null; vrbo: number | null; booking: number | null } } => {
-      if (!scan) return { basis: null, channelRates: [], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null } };
-      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null };
+    ): { basis: number | null; channelRates: number[]; airbnbSamples: number; channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null } } => {
+      if (!scan) return { basis: null, channelRates: [], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } };
+      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
       if (sidecarRan) {
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
+        if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
@@ -14377,22 +14383,25 @@ export async function registerRoutes(
       high: number | null;
       holiday: number | null;
       basisSource: "live-multichannel-median" | "airbnb" | "none";
-      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
       channelCount: number;
     };
     const persisted: Persisted[] = [];
     for (const br of wantBedrooms) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      // PR #305: HIGH and HOLIDAY now run sidecar VRBO + Booking too,
-      // so the basis pulls in the channel medians the same way LOW
-      // always has.
+      // HIGH and HOLIDAY now run the same multichannel path as LOW:
+      // Airbnb, sidecar VRBO, sidecar Booking, and verified PM rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 
+      const hasNonAirbnbChannel =
+        !!lowResult.channels.vrbo ||
+        !!lowResult.channels.booking ||
+        !!lowResult.channels.pm;
       const basisSource: Persisted["basisSource"] =
         lowResult.basis == null
           ? "none"
-          : lowResult.channelRates.length >= 2
+          : hasNonAirbnbChannel
             ? "live-multichannel-median"
             : "airbnb";
 

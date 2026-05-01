@@ -1808,7 +1808,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Live per-channel cheapest snapshot from the most recent refresh.
   // Ephemeral (not persisted on the server, not in property_market_rates)
   // — refresh response carries it; we render a card showing "Cheapest
-  // right now: airbnb $620 · vrbo $580 · booking $605" so the operator
+  // right now: airbnb $620 · vrbo $580 · booking $605 · pm $590" so the operator
   // can see when one channel diverges materially from the median basis.
   const [liveSnapshot, setLiveSnapshot] = useState<{
     seasons: {
@@ -1827,9 +1827,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       holiday: number | null;
       basisSource: "live-multichannel-median" | "airbnb" | "none";
       channelCount: number;
-      // LOW-season per-channel breakdown — same as before. HIGH +
-      // HOLIDAY don't get the per-channel chips (Airbnb-only basis).
-      channels: { airbnb: number | null; vrbo: number | null; booking: number | null };
+      // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
+      // as basis numbers, but the compact chip row shows the LOW
+      // channel mix from the most recent scan.
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
     }>;
   } | null>(null);
 
@@ -1844,7 +1845,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // passes for several minutes (typical during sidecar phases).
   type ScanWarning = {
     season: "LOW" | "HIGH" | "HOLIDAY";
-    channel: "airbnb" | "vrbo" | "booking" | "engine";
+    channel: "airbnb" | "vrbo" | "booking" | "pm" | "engine";
     kind: "captcha" | "blocked" | "rate-limit" | "timeout" | "network" | "unknown";
     message: string;
     reason?: string;
@@ -1982,6 +1983,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
               vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
               booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
+              pm: typeof p.channels?.pm === "number" ? p.channels.pm : null,
             },
           })),
         });
@@ -3519,7 +3521,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the cheapest verified nightly per channel (Airbnb / VRBO / Booking) for the LOW-season sample window. Rates are normalized all-in: Airbnb engine totals natively include service fee + taxes; VRBO + Booking sidecar rates are scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). Seasonal multipliers handle HIGH/HOLIDAY months.">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the verified nightly channel signals (Airbnb / VRBO / Booking / PM) for the LOW-season sample window. Rates are normalized all-in: Airbnb engine totals natively include service fee + taxes; VRBO, Booking, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). Seasonal multipliers handle HIGH/HOLIDAY months.">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
@@ -3570,7 +3572,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY using the Airbnb engine + sidecar VRBO + sidecar Booking — all three seasons multichannel as of PR #305 (was LOW-only before). Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome) so wall time scales with N_BRs × 6 ops × ~90s = 5–15 min for typical 1–2 BR multi-unit listings. Cancellable mid-flight; partial results persist. When sidecar is offline a season falls back to Airbnb-only median. Auto-refreshes weekly via the scheduler."
+                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY using the Airbnb engine + sidecar VRBO + sidecar Booking + verified PM website rates. PM rates come from known direct-booking APIs and SearchAPI-discovered PM pages checked through the local Chrome sidecar. Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome), so wall time can be several minutes. Cancellable mid-flight; partial results persist. When sidecar is offline a season falls back to Airbnb/direct PM data where available. Auto-refreshes weekly via the scheduler."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
@@ -3696,7 +3698,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="LOW window samples sidecar VRBO + Booking + Airbnb. HIGH/HOLIDAY pull Airbnb engine only for speed.">
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Each season samples Airbnb, sidecar VRBO, sidecar Booking, and verified PM website rates where available.">
                                     Auto-refresh every 7 days · click ↻ to scan now
                                   </span>
                                 </div>
@@ -3725,7 +3727,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         : live?.source === "airbnb" ? "airbnb" as const
                                         : live ? "airbnb" as const : "none" as const);
                                     const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
-                                    const channels = snapshotRow?.channels ?? { airbnb: null, vrbo: null, booking: null };
+                                    const channels = snapshotRow?.channels ?? { airbnb: null, vrbo: null, booking: null, pm: null };
                                     const fmtBasis = (n: number | null) => n != null && n > 0 ? `$${n.toLocaleString()}` : "—";
                                     const fmtChip = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
                                     const seasonChip = (season: "LOW" | "HIGH" | "HOLIDAY", value: number | null, color: string) => (
@@ -3759,13 +3761,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {miniChip("airbnb", channels.airbnb)}
                                           {miniChip("vrbo", channels.vrbo)}
                                           {miniChip("booking", channels.booking)}
+                                          {miniChip("pm", channels.pm)}
                                         </div>
                                       </div>
                                     );
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). LOW basis = median across Airbnb/VRBO/Booking, all-in (taxes + fees normalized). HIGH/HOLIDAY basis = Airbnb-engine median for that season's window (sidecar reserved for the LOW pull where buy-in deal-hunting matters most). When a season's basis is missing — e.g. HOLIDAY scan returned empty — the formula falls back to LOW × the seasonal multiplier so the table always has a price.
+                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). Basis = median across verified Airbnb/VRBO/Booking/PM channel signals, all-in (taxes + fees included or normalized). When a season's basis is missing — e.g. HOLIDAY scan returned empty — the formula falls back to LOW × the seasonal multiplier so the table always has a price.
                                 </div>
                               </div>
                             )}
