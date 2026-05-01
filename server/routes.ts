@@ -8784,6 +8784,21 @@ export async function registerRoutes(
     });
   });
 
+  // POST /api/admin/vrbo-sidecar/heartbeat — worker liveness tick.
+  //
+  // /next already stamps liveness while the daemon is idle. Long-running
+  // website searches can hold the worker inside one claimed request for
+  // several minutes, so the daemon also pings this endpoint during work.
+  // This keeps the Operations badge truthful: "online and busy" should
+  // not look like "can't reach sidecar."
+  app.post("/api/admin/vrbo-sidecar/heartbeat", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { id?: unknown };
+    const { stampHeartbeat } = await import("./vrbo-sidecar-queue");
+    stampHeartbeat(typeof body.id === "string" ? body.id : undefined);
+    return res.json({ ok: true });
+  });
+
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
   // Body: { id, results?: unknown, error?: string }
   app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {

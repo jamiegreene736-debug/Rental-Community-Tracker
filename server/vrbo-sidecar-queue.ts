@@ -101,6 +101,7 @@ export type SidecarPmSiteSearchParams = {
   checkOut: string;
   bedrooms: number;
   perSiteLimit?: number;
+  budgetMs?: number;
 };
 
 export type SidecarPmUrlCheckParams = {
@@ -288,6 +289,15 @@ function nowMs(): number {
   return Date.now();
 }
 
+export function stampHeartbeat(id?: string): void {
+  lastWorkerPollAt = nowMs();
+  if (!id) return;
+  const r = queue.get(id);
+  if (r?.status === "in_progress") {
+    r.claimedAt = lastWorkerPollAt;
+  }
+}
+
 function cleanup(): void {
   const now = nowMs();
   for (const [id, r] of queue) {
@@ -445,7 +455,7 @@ export function enqueue(opts: SidecarVrboParams): {
  */
 export function next(): SidecarRequest | null {
   cleanup();
-  lastWorkerPollAt = nowMs();
+  stampHeartbeat();
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
@@ -783,6 +793,9 @@ export async function searchPmSitesViaSidecar(opts: {
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
         perSiteLimit: opts.perSiteLimit,
+        budgetMs: opts.walletBudgetMs
+          ? Math.max(15_000, Math.min(135_000, opts.walletBudgetMs - 30_000))
+          : undefined,
       },
     },
     pollIntervalMs: opts.pollIntervalMs,

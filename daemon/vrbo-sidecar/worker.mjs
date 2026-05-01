@@ -40,10 +40,12 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 10_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
+const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
 const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
 const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETRY_MS ?? 1_500);
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
+const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGET_MS ?? 150_000);
 const PER_REQUEST_BUDGET_MS = 90_000;
 const VIEWPORT = { width: 1280, height: 820 };
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
@@ -577,6 +579,37 @@ async function pollNext() {
     headers: authHeaders(),
   });
   return data.request ?? null;
+}
+
+let lastHeartbeatSentAt = 0;
+
+async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
+  const now = Date.now();
+  if (!force && now - lastHeartbeatSentAt < 15_000) return false;
+  lastHeartbeatSentAt = now;
+  try {
+    const r = await fetch(`${SERVER}/api/admin/vrbo-sidecar/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(id ? { id } : {}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return true;
+  } catch (e) {
+    if (!/404|fetch failed|AbortError/i.test(e?.message ?? "")) {
+      log(`${label} failed: ${e?.message ?? e}`);
+    }
+    return false;
+  }
+}
+
+function startBusyHeartbeat(label, id = null) {
+  void sendHeartbeat(`start ${label}`, true, id);
+  const interval = setInterval(() => {
+    void sendHeartbeat(`busy ${label}`, true, id);
+  }, HEARTBEAT_BUSY_MS);
+  interval.unref?.();
+  return () => clearInterval(interval);
 }
 
 // ── Auto-refresh cookies pushed by the Chrome extension ─────────────
@@ -3051,11 +3084,18 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
 
 async function processPmSiteSearch(id, params) {
   const { sites = [], searchTerm, checkIn, checkOut, bedrooms, perSiteLimit = 3 } = params;
-  log(`pm_site_search ${id}: ${sites.length} sites searchTerm="${searchTerm}" ${checkIn}→${checkOut} ${bedrooms}BR`);
+  const budgetMs = Number(params.budgetMs ?? PM_SITE_SEARCH_BUDGET_MS);
+  const deadline = Date.now() + Math.max(15_000, budgetMs);
+  const hasBudget = (reserveMs = 0) => Date.now() + reserveMs < deadline;
+  log(`pm_site_search ${id}: ${sites.length} sites searchTerm="${searchTerm}" ${checkIn}→${checkOut} ${bedrooms}BR budget=${budgetMs}ms`);
   await ensureBrowser();
   const out = [];
   const tabs = new Set();
   for (const site of sites.slice(0, 8)) {
+    if (!hasBudget(8_000)) {
+      log(`pm_site_search ${id}: stopping before ${site.label}; budget nearly exhausted`);
+      break;
+    }
     let tab = null;
     try {
       tab = await context.newPage();
@@ -3074,7 +3114,21 @@ async function processPmSiteSearch(id, params) {
       const seeds = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit);
       log(`pm_site_search ${id}: ${site.label} seeds=${seeds.length}`);
       for (const seed of seeds) {
-        const verified = await scrapePmUrl(tab, seed.url, checkIn, checkOut, bedrooms).catch((e) => ({
+        if (!hasBudget(6_000)) {
+          log(`pm_site_search ${id}: stopping seed checks for ${site.label}; budget nearly exhausted`);
+          break;
+        }
+        const remainingMs = Math.max(1_000, deadline - Date.now());
+        const verified = await withSoftTimeout(
+          scrapePmUrl(tab, seed.url, checkIn, checkOut, bedrooms),
+          Math.min(18_000, remainingMs),
+          {
+            available: "unclear",
+            nightlyPrice: null,
+            totalPrice: null,
+            reason: "detail verify timed out before PM website search budget",
+          },
+        ).catch((e) => ({
           available: "unclear",
           nightlyPrice: null,
           totalPrice: null,
@@ -3228,6 +3282,7 @@ async function tick() {
     return false;
   }
   const startedAt = Date.now();
+  const stopBusyHeartbeat = startBusyHeartbeat(req.opType ?? "request", req.id);
   try {
     await processRequest(req);
     consecutiveErrors = 0;
@@ -3240,6 +3295,9 @@ async function tick() {
       await teardownBrowser("error suggests CDP died");
     }
     return true; // we DID process (even if it errored) — keep busy-looping
+  } finally {
+    stopBusyHeartbeat();
+    await sendHeartbeat(`finish ${req.opType ?? "request"}`, true, req.id);
   }
 }
 
