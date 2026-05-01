@@ -56,7 +56,11 @@ Before making any changes:
   curated resort search names instead of generic internal keys like
   `Kapaa Beachfront`. The admin discovery module
   `server/pm-discovery.ts` keeps `sourceBreakdown.sidecar` for response
-  compatibility, but it is intentionally always `0`.
+  compatibility, but it is intentionally always `0`. Follow-up in this
+  session: find-buy-in now prioritizes unpriced PM rows that would render
+  as "manual quote" and pushes them through `checkPmUrlsBatchViaSidecar`
+  before returning results, so Chrome gets a chance to extract a live
+  rate from the PM booking widget automatically.
 - 2026-04-30: Codex added operator-facing diagnostics for
   `/api/operations/find-buy-in`. The route now returns a `diagnostics`
   object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM
