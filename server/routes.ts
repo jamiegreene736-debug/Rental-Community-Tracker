@@ -4064,6 +4064,8 @@ export async function registerRoutes(
     }
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => ({
       ...c,
+      verified: c.verified ?? "skipped",
+      verifiedReason: c.verifiedReason ?? "Airbnb organic result only; Airbnb engine did not return a date-specific price for this listing",
       photoMatches: photoMatchesByUrl.get(c.url) ?? [],
     }));
 
@@ -4284,13 +4286,15 @@ export async function registerRoutes(
       return rows.join("; ");
     };
     const sidecarVerifyPool = [
-      // Prioritize the rows the UI would otherwise label "manual quote"
-      // so the operator doesn't have to click each one.
+      // Booking search/google-hotels rows are detail-page discovery only.
+      // Verify them before broad PM rows so Booking.com doesn't sit in
+      // the UI as "manual quote" just because the 25-row PM budget filled.
+      ...booking.filter((candidate) => candidate.source === "booking" && !candidate.verified),
+      // Then check every PM row the UI would otherwise label manual.
       ...pm.filter((candidate) => isManualQuoteCandidate(candidate) && !candidate.verified),
       ...pmGoogle,
       ...photoMatchPmCandidates,
       ...pmSearchApiFinderCandidates,
-      ...booking.filter((candidate) => candidate.source === "booking" && !candidate.verified),
     ];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
@@ -4298,10 +4302,11 @@ export async function registerRoutes(
       if (!candidateFitsTarget(c)) continue;
       sidecarVerifySeen.add(key);
       sidecarVerifyTargets.push(c);
-      // Five 5-tab batches keeps the route under Railway's request
-      // budget while covering manual-quote PM discovery plus Booking.com
-      // detail pages that organic search surfaced without a rate.
-      if (sidecarVerifyTargets.length >= 25) break;
+      // Keep building targets; the loop below stops on remaining route
+      // budget rather than a fixed row count. This lets warm/fast runs
+      // verify all Booking/PM candidates while still protecting Railway's
+      // edge timeout on slow pages.
+      if (sidecarVerifyTargets.length >= 60) break;
     }
     const sidecarManualQuoteTargetCount = sidecarVerifyTargets.filter(isManualQuoteCandidate).length;
     let sidecarVerifySkippedForBudget = 0;
@@ -4316,6 +4321,10 @@ export async function registerRoutes(
             console.warn(
               `[find-buy-in] sidecar-batch-verify stopping early with ${sidecarVerifySkippedForBudget} URL(s) unchecked to avoid Railway timeout`,
             );
+            for (const skipped of sidecarVerifyTargets.slice(i)) {
+              skipped.verified = "skipped";
+              skipped.verifiedReason = "Sidecar auto-check skipped to avoid the Railway request timeout. Click Refresh to continue from a warmer cache.";
+            }
             break;
           }
           const batchTargets = sidecarVerifyTargets.slice(i, i + 5);
@@ -4331,7 +4340,12 @@ export async function registerRoutes(
             const byUrl = new Map(batchRes.results.map((r) => [r.url, r] as const));
             for (const c of batchTargets) {
               const r = byUrl.get(c.url);
-              if (!r) continue;
+              if (!r) {
+                c.verified = "unclear";
+                c.verifiedReason = "Sidecar returned no result for this detail page";
+                rememberSidecarVerifyReason(c, c.verifiedReason);
+                continue;
+              }
               sidecarBatchVerifiedUrls.add(c.url);
               c.verified = r.available;
               c.verifiedReason = r.reason;
@@ -4352,6 +4366,10 @@ export async function registerRoutes(
           } else if (!batchRes.workerOnline) {
             console.log(`[find-buy-in] sidecar-batch-verify skipped (worker offline): ${batchRes.reason}`);
             noteSourceError("Sidecar rate verifier", batchRes.reason || "worker offline");
+            for (const skipped of sidecarVerifyTargets.slice(i)) {
+              skipped.verified = "skipped";
+              skipped.verifiedReason = batchRes.reason || "Sidecar worker was offline before this detail page could be checked";
+            }
             break;
           }
         }
@@ -4367,6 +4385,13 @@ export async function registerRoutes(
       }
     }
 
+    for (const c of sidecarVerifyTargets) {
+      if (!c.verified) {
+        c.verified = "skipped";
+        c.verifiedReason = "Sidecar auto-check did not return a conclusive result before the route completed";
+      }
+    }
+
     // Stagehand PM finder retired in PR #275. Variable kept (always empty)
     // so the merging code below doesn't need to change shape.
     const pmFinderCandidates: Candidate[] = [];
@@ -4377,6 +4402,12 @@ export async function registerRoutes(
       ...pmSearchApiFinderCandidates,
       ...pmFinderCandidates,
     ];
+    for (const c of [...booking, ...pmAugmented]) {
+      if ((c.source === "booking" || c.source === "pm") && !c.verified) {
+        c.verified = "skipped";
+        c.verifiedReason = "Not auto-checked in this scan because the route budget was reserved for higher-priority detail pages";
+      }
+    }
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
       const kept = items.filter(candidateFitsTarget);
@@ -4634,8 +4665,8 @@ export async function registerRoutes(
         source: "Sidecar rate verifier",
         summary: "No Booking.com/PM detail URLs were verified by the sidecar",
         detail: sidecarReasonSummary
-          ? `Candidates remain visible for manual review. Top outcomes: ${sidecarReasonSummary}`
-          : "Candidates remain visible for manual review, but none were promoted to verified bookable.",
+          ? `Candidates remain visible with automatic verification states. Top outcomes: ${sidecarReasonSummary}`
+          : "Candidates remain visible with automatic verification states, but none were promoted to verified bookable.",
       });
     }
     if (sidecarBatchVerifiedUrls.size > 0 && preVerifyYes === 0) {
@@ -4651,7 +4682,7 @@ export async function registerRoutes(
         severity: "warning",
         source: "Sidecar rate verifier",
         summary: `Skipped ${sidecarVerifySkippedForBudget} sidecar check(s) to avoid the Railway request timeout`,
-        detail: "The unchecked rows remain visible for manual review. Click Refresh to continue from a warmer cache.",
+        detail: "Unchecked rows are marked skipped. Click Refresh to continue from a warmer cache.",
       });
     }
     if (cheapest.length === 0) {

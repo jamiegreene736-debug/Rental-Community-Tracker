@@ -632,10 +632,10 @@ export default function Bookings() {
         toast({
           title: hasVrboPick
             ? `Attached ${filled.length} Vrbo link${filled.length > 1 ? "s" : ""} for review`
-            : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} — click 🔍 Verify rate per slot`,
+            : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} for review`,
           description: hasVrboPick
-            ? `A source returned a review link without a usable price. Verify the cost manually before confirming with the guest.`
-            : `A PM source returned a link without a usable price. Use Verify rate on each slot before confirming with the guest.`
+            ? `A source returned a review link without a usable price. Re-run live search before confirming with the guest.`
+            : `A PM source returned a link without a usable price. Re-run live search before confirming with the guest.`
             + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
@@ -1834,7 +1834,7 @@ function LiveSearchSection({
           </p>
           <p className="text-[11px] text-amber-700/90">
             {data?.debug?.verification?.available === false
-              ? "No source returned a live priced, verified option during this scan. All scanned options are listed below for manual review."
+              ? "No source returned a live priced, verified option during this scan. All scanned options are listed below with their automatic verification state."
               : data?.debug?.verification?.attempted
                 ? `Tried to verify ${data.debug.verification.attempted} top-priced candidates: ${data.debug.verification.yes} bookable, ${data.debug.verification.no} unavailable, ${data.debug.verification.unclear} unclear. Browse all scanned options below.`
                 : "No priced PM/Booking candidates surfaced for these dates and bedrooms. Browse all scanned options below or click 'Refresh'."}
@@ -2061,7 +2061,7 @@ type SortKey = "source" | "title" | "total" | "nightly";
 type SortDir = "asc" | "desc";
 
 type VerifyState = {
-  status: "idle" | "loading" | "yes" | "no" | "unclear" | "error";
+  status: "idle" | "loading" | "yes" | "no" | "unclear" | "skipped" | "error";
   reason?: string;
   nightlyPriceUsd?: number | null;
 };
@@ -2149,10 +2149,10 @@ function ScannedOptionsTable({
       const next = { ...prev };
       for (const c of all) {
         if (next[c.url]) continue; // don't clobber existing state
-        if (c.verified === "yes" && c.totalPrice > 0) {
+        if (c.verified) {
           next[c.url] = {
-            status: "yes",
-            reason: c.verifiedReason ?? "Server returned this listing verified and priced for these dates",
+            status: c.verified,
+            reason: c.verifiedReason ?? "Server returned this listing with an availability outcome",
             nightlyPriceUsd: c.verifiedNightlyPrice ?? c.nightlyPrice ?? null,
           };
         } else if (c.source === "airbnb" && c.totalPrice > 0) {
@@ -2167,7 +2167,7 @@ function ScannedOptionsTable({
     });
 
     // Build verify queue.
-    const nonAirbnb = all.filter((c) => c.source !== "airbnb" && c.verified !== "yes");
+    const nonAirbnb = all.filter((c) => c.source !== "airbnb" && !c.verified);
     const pricedToVerify = nonAirbnb
       .filter((c) => c.totalPrice > 0)
       .sort((a, b) => a.totalPrice - b.totalPrice)
@@ -2459,6 +2459,8 @@ function ScannedOptionsTable({
                       size="sm"
                       className="h-6 px-1.5 text-[10px]"
                       onClick={() => onRecord(c)}
+                      disabled={!canRecordLiveResult(c)}
+                      title={canRecordLiveResult(c) ? "Record this verified live rate" : "Record is disabled until a live date-specific rate is verified"}
                     >
                       <ShoppingCart className="h-2.5 w-2.5" />
                     </Button>
@@ -2476,15 +2478,13 @@ function ScannedOptionsTable({
 function VerifyCell({ state, onVerify }: { state: VerifyState; onVerify: () => void }) {
   if (state.status === "idle") {
     return (
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-6 px-1.5 text-[10px]"
-        onClick={onVerify}
-        title="Drives the listing page with Haiku to confirm availability for these dates (~$0.01)"
+      <span
+        className="inline-flex items-center gap-1 text-[10px] text-slate-600 dark:text-slate-400"
+        title="This row did not receive an automatic verification state in the last scan"
       >
-        <CheckCircle2 className="h-2.5 w-2.5 mr-1" /> Verify
-      </Button>
+        <AlertCircle className="h-3 w-3" />
+        Not checked
+      </span>
     );
   }
   if (state.status === "loading") {
@@ -2528,6 +2528,17 @@ function VerifyCell({ state, onVerify }: { state: VerifyState; onVerify: () => v
       </button>
     );
   }
+  if (state.status === "skipped") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] text-slate-600 dark:text-slate-400"
+        title={state.reason}
+      >
+        <AlertCircle className="h-3 w-3" />
+        Not checked
+      </span>
+    );
+  }
   // unclear
   return (
     <span
@@ -2538,6 +2549,17 @@ function VerifyCell({ state, onVerify }: { state: VerifyState; onVerify: () => v
       Unclear
     </span>
   );
+}
+
+function liveRateFallbackText(verified: LiveCandidate["verified"] | LiveUnitListing["verified"]): string {
+  if (verified === "no") return "not available";
+  if (verified === "unclear") return "no live rate found";
+  if (verified === "skipped") return "not auto-checked";
+  return "no live rate";
+}
+
+function canRecordLiveResult(item: { verified?: string; totalPrice?: number }): boolean {
+  return item.verified === "yes" && (item.totalPrice ?? 0) > 0;
 }
 
 // One row in the cheapest panel — represents a SINGLE physical unit
@@ -2603,6 +2625,10 @@ function UnitRow({
               <Badge className="text-[9px] bg-amber-500 text-white shrink-0" title={l.verifiedReason ?? undefined}>
                 ?
               </Badge>
+            ) : l.verified === "skipped" ? (
+              <Badge className="text-[9px] bg-slate-500 text-white shrink-0" title={l.verifiedReason ?? undefined}>
+                -
+              </Badge>
             ) : null}
             <div className="grow min-w-0">
               {l.nightlyPrice > 0 ? (
@@ -2611,7 +2637,7 @@ function UnitRow({
                   <span className="text-muted-foreground">/night ({fmtMoney(l.totalPrice)} total)</span>
                 </p>
               ) : (
-                <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+                <p className="text-[11px] text-muted-foreground italic">{liveRateFallbackText(l.verified)}</p>
               )}
             </div>
             <Button
@@ -2626,6 +2652,8 @@ function UnitRow({
               size="sm"
               className="h-6 px-2 text-[10px] shrink-0"
               onClick={() => onRecord(l)}
+              disabled={!canRecordLiveResult(l)}
+              title={canRecordLiveResult(l) ? "Record this verified live rate" : "Record is disabled until a live date-specific rate is verified"}
             >
               <ShoppingCart className="h-3 w-3 mr-1" /> Record
             </Button>
@@ -2659,7 +2687,11 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
               </Badge>
             ) : c.verified === "unclear" ? (
               <Badge className="text-[9px] bg-amber-500 text-white" title={c.verifiedReason ?? undefined}>
-                ? Unclear — verify manually
+                ? No live rate found
+              </Badge>
+            ) : c.verified === "skipped" ? (
+              <Badge className="text-[9px] bg-slate-500 text-white" title={c.verifiedReason ?? undefined}>
+                - Not auto-checked
               </Badge>
             ) : null}
             <p className="font-medium text-sm truncate">{c.title}</p>
@@ -2673,7 +2705,7 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
               <p className="text-[10px] text-muted-foreground">{fmtMoney(c.nightlyPrice)}/night</p>
             </>
           ) : (
-            <p className="text-[11px] text-muted-foreground italic">manual quote</p>
+            <p className="text-[11px] text-muted-foreground italic">{liveRateFallbackText(c.verified)}</p>
           )}
         </div>
         <div className="flex flex-col gap-1 shrink-0">
@@ -2691,6 +2723,8 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
             size="sm"
             className="h-7 px-2 text-[11px]"
             onClick={onRecord}
+            disabled={!canRecordLiveResult(c)}
+            title={canRecordLiveResult(c) ? "Record this verified live rate" : "Record is disabled until a live date-specific rate is verified"}
           >
             <ShoppingCart className="h-3 w-3 mr-1" /> Record
           </Button>
@@ -2870,7 +2904,7 @@ function VerifyRateDialog({
           <div className="space-y-3">
             <div className="rounded-md border-2 border-amber-500/50 bg-amber-50 dark:bg-amber-950/30 p-4 space-y-2">
               <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-                {manualPm.name} requires a manual quote
+                {manualPm.name} does not expose an automatic rate
               </p>
               <p className="text-xs text-amber-800 dark:text-amber-300">
                 {state.extracted?.reason ?? `${manualPm.name}'s public site doesn't display rates inline. Their booking flow is a contact form (reCAPTCHA-protected) that emails their team for a quote.`}
