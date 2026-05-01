@@ -2753,11 +2753,14 @@ export async function registerRoutes(
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (normalizedResortName !== "poipu kai") return true;
       const n = norm(candidateHaystack(c));
-      const hasCondoSignal = /\b(condo|condominium|villa|villas|apartment|townhome|townhouse|regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n);
-      if (hasCondoSignal) return true;
-      // Airbnb and PM sites often use "home"/"cottage" literally for
-      // detached houses. Do not sell those as Poipu Kai condo buy-ins.
-      return !/\b(home|house|cottage|estate|residence|residences)\b/.test(n);
+      const hasNamedPoipuKaiComplex = /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n);
+      if (hasNamedPoipuKaiComplex) return true;
+      const hasPoipuKai = /\bpoipu kai\b/.test(n);
+      const hasCondoSignal = /\b(condo|condominium|villa|villas|apartment|townhome|townhouse|unit|suite)\b/.test(n);
+      // "Near/in Prime Poipu Kai location" copy is not enough by itself:
+      // detached-home aggregators can mention the neighborhood without
+      // being inside the Poipu Kai condo/resort inventory.
+      return hasPoipuKai && hasCondoSignal;
     };
     const candidateFitsTarget = (c: Candidate): boolean => {
       const hay = candidateHaystack(c);

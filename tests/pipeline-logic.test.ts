@@ -759,4 +759,42 @@ console.log("\nGuesty session cache priority suite");
   console.log("  ✓ empty cookies array in cache falls through to env");
 }
 
+// ---------- Buy-in Poipu Kai target guard ----------
+// Mirrors the narrow Poipu Kai candidate guard in server/routes.ts.
+// This prevents generic neighborhood / nearby-POI copy from qualifying a
+// detached-home aggregator listing as real Poipu Kai resort inventory.
+
+console.log("\nPoipu Kai buy-in target guard suite");
+
+{
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const isPoipuKaiCondoLike = (haystack: string): boolean => {
+    const n = norm(haystack);
+    const hasNamedPoipuKaiComplex = /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n);
+    if (hasNamedPoipuKaiComplex) return true;
+    const hasPoipuKai = /\bpoipu kai\b/.test(n);
+    const hasCondoSignal = /\b(condo|condominium|villa|villas|apartment|townhome|townhouse|unit|suite)\b/.test(n);
+    return hasPoipuKai && hasCondoSignal;
+  };
+
+  assert.equal(
+    isPoipuKaiCondoLike("Pool, Spa, Gourmet Kitchen and Private Backyard. Prime Poipu Kai location, walk to Shipwreck Beach."),
+    false,
+    "generic private-backyard listing near Poipu Kai should not pass",
+  );
+  console.log("  ✓ generic near-Poipu-Kai home copy is rejected");
+
+  assert.equal(
+    isPoipuKaiCondoLike("Poipu Sands at Poipu Kai #523 - 3 bedroom condo"),
+    true,
+    "named Poipu Kai sub-community should pass",
+  );
+  assert.equal(
+    isPoipuKaiCondoLike("Poipu Kai 3 Bedroom with Pool and Spa - spacious apartment"),
+    true,
+    "Poipu Kai plus apartment/condo-style signal should pass",
+  );
+  console.log("  ✓ Poipu Kai condo/sub-community listings still pass");
+}
+
 console.log("\nall suites passed ✅");
