@@ -1272,7 +1272,7 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
   const runCalendarAction = (action, iso = null) => withSoftTimeout(
     targetPage.evaluate(({ action, iso }) => {
       const dateContextRe = /\b(?:check[\s_-]*in|check[\s_-]*out|arrival|departure|arrive|depart|date|dates|stay|calendar|availability|rates|booking|reservation|book now|reserve|select dates)\b/i;
-      const badActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
+      const badActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|continue)\b/i;
       const nextRe = /^(?:next|next month|following month|›|»|>|→)$/i;
 
@@ -1325,7 +1325,7 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
       function disabled(el) {
         return Boolean(el.disabled) ||
           el.getAttribute?.("aria-disabled") === "true" ||
-          /\b(?:disabled|unavailable|blocked)\b/i.test(el.getAttribute?.("class") || "");
+          /\b(?:disabled|unavailable|blocked|booked|unselectable)\b/i.test(el.getAttribute?.("class") || "");
       }
 
       function activate(el) {
@@ -1395,6 +1395,7 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
           "span[aria-label]",
           "[data-date]",
           "[data-day]",
+          "[class*='day' i]",
           "time",
         ].join(",");
         return Array.from(document.querySelectorAll(selector))
@@ -1412,9 +1413,11 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
             const ctx = contextOf(el);
             const hay = `${label} ${ctx}`;
             let score = 0;
+            if (!label && /^(?:a|button)$/i.test(el.tagName)) score = -100;
             if (dateContextRe.test(hay)) score += 50;
             if (/check[\s_-]*in|arrival|check[\s_-]*out|departure|dates|calendar/i.test(hay)) score += 30;
             if (/book now|reserve|check availability|select dates|view rates|show rates/i.test(hay)) score += 10;
+            if (/^(?:overview|rooms|amenities|availability|location|reviews|rentals|vacation rentals|find a property|show filters|clear search|remove from favorites)(?:\s+.*)?$/i.test(label.trim())) score = 0;
             if (badActionRe.test(label)) score = 0;
             return { el, score, label };
           })
@@ -1432,7 +1435,7 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
       }
 
       function clickNextMonth() {
-        const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"))
+        const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], [class*='next' i], [class*='arrow' i], [class*='chevron' i]"))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !disabled(el))
           .map((el) => ({ el, label: textOf(el), ctx: contextOf(el) }))
           .filter(({ label, ctx }) => {
@@ -1529,7 +1532,7 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
       ];
       const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b/i;
 
       function isRendered(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1548,10 +1551,34 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
 
+      function dateValueNeedles(value, iso) {
+        const needles = [value, iso].filter(Boolean).map(String);
+        const [y, m, d] = String(iso || "").split("-").map((p) => parseInt(p, 10));
+        if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+          needles.push(`${m}/${d}/${y}`);
+          needles.push(`${String(m).padStart(2, "0")}/${String(d).padStart(2, "0")}/${y}`);
+          needles.push(`${m}-${d}-${y}`);
+          needles.push(`${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}-${y}`);
+        }
+        return needles.map((s) => s.toLowerCase());
+      }
+
+      function valueWasApplied(el, value, iso) {
+        const tag = el.tagName.toLowerCase();
+        const current = String(el.isContentEditable || el.getAttribute?.("role") === "textbox"
+          ? (el.textContent || "")
+          : tag === "select"
+          ? (el.value || el.selectedOptions?.[0]?.textContent || "")
+          : (el.value || el.getAttribute?.("value") || "")).toLowerCase();
+        if (!current.trim()) return false;
+        return dateValueNeedles(value, iso).some((needle) => needle && current.includes(needle));
+      }
+
       function setInputValue(el, value, iso) {
         if (!el) return false;
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
+        if (tag === "input" && type !== "hidden" && el.readOnly && isRendered(el)) return false;
         const nextValue = tag === "input" && type === "date" ? iso : value;
         try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
         try { el.focus?.(); } catch {}
@@ -1569,7 +1596,7 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         for (const name of ["input", "change", "blur"]) {
           el.dispatchEvent(new Event(name, { bubbles: true }));
         }
-        return true;
+        return valueWasApplied(el, nextValue, iso);
       }
 
       for (const [startSelector, endSelector] of pairs) {
@@ -1632,7 +1659,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
       const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1714,9 +1741,33 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         return false;
       }
 
+      function dateValueNeedles(value, iso) {
+        const needles = [value, iso].filter(Boolean).map(String);
+        const [y, m, d] = String(iso || "").split("-").map((p) => parseInt(p, 10));
+        if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+          needles.push(`${m}/${d}/${y}`);
+          needles.push(`${String(m).padStart(2, "0")}/${String(d).padStart(2, "0")}/${y}`);
+          needles.push(`${m}-${d}-${y}`);
+          needles.push(`${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}-${y}`);
+        }
+        return needles.map((s) => s.toLowerCase());
+      }
+
+      function valueWasApplied(el, value, iso) {
+        const tag = el.tagName.toLowerCase();
+        const current = String(el.isContentEditable || el.getAttribute?.("role") === "textbox"
+          ? (el.textContent || "")
+          : tag === "select"
+          ? (el.value || el.selectedOptions?.[0]?.textContent || "")
+          : (el.value || el.getAttribute?.("value") || "")).toLowerCase();
+        if (!current.trim()) return false;
+        return dateValueNeedles(value, iso).some((needle) => needle && current.includes(needle));
+      }
+
       function setValue(el, value, iso) {
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
+        if (tag === "input" && type !== "hidden" && el.readOnly && isVisible(el)) return false;
         const nextValue = tag === "input" && type === "date" ? iso : value;
         try { el.focus?.(); } catch {}
         if (tag === "select") {
@@ -1743,7 +1794,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         for (const name of ["input", "change", "blur"]) {
           el.dispatchEvent(new Event(name, { bubbles: true }));
         }
-        return true;
+        return valueWasApplied(el, nextValue, iso);
       }
 
       function classify(el) {
@@ -1759,16 +1810,48 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
 
       function clickSubmit(nearEls) {
         const nearForms = new Set(nearEls.map((el) => el.closest?.("form")).filter(Boolean));
+        const visibleNearRects = nearEls
+          .filter(isVisible)
+          .map((el) => el.getBoundingClientRect());
+        const nearBounds = visibleNearRects.length > 0
+          ? {
+              top: Math.min(...visibleNearRects.map((r) => r.top)),
+              bottom: Math.max(...visibleNearRects.map((r) => r.bottom)),
+              left: Math.min(...visibleNearRects.map((r) => r.left)),
+              right: Math.max(...visibleNearRects.map((r) => r.right)),
+            }
+          : null;
+        function isBadSubmitContainer(el) {
+          return Boolean(el.closest?.("footer, nav, header, [class*='footer' i], [class*='social' i], [class*='share' i], [class*='contact' i], [class*='chat' i], [class*='question' i], [class*='favorite' i]"));
+        }
         const buttons = Array.from(document.querySelectorAll(buttonSelector))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
-        const candidates = buttons.filter((el) => {
+        const candidates = buttons.map((el) => {
           const label = textOf(el);
-          if (!submitRe.test(label)) return false;
-          if (badDateActionRe.test(label)) return false;
+          if (!submitRe.test(label)) return null;
+          if (badDateActionRe.test(label) || isBadSubmitContainer(el)) return null;
           const form = el.closest?.("form");
-          return nearForms.size === 0 || nearForms.has(form) || /availability|rates|book|reserve|search/i.test(contextOf(el));
-        });
-        const target = candidates[0];
+          const ctx = contextOf(el);
+          const rect = el.getBoundingClientRect();
+          const nearForm = nearForms.size > 0 && nearForms.has(form);
+          const nearWidget =
+            nearBounds &&
+            rect.bottom >= nearBounds.top - 260 &&
+            rect.top <= nearBounds.bottom + 700 &&
+            rect.right >= nearBounds.left - 320 &&
+            rect.left <= nearBounds.right + 420;
+          const contextual = /availability|rates|book|reserve|search/i.test(ctx);
+          if (nearForms.size > 0 && !nearForm && !nearWidget && !contextual) return null;
+          if (nearForms.size === 0 && nearBounds && !nearWidget && !contextual) return null;
+          let score = 0;
+          if (nearForm) score += 80;
+          if (nearWidget) score += 50;
+          if (/^(?:search|check availability|check rates|view rates|show rates|update results|apply)$/i.test(label.trim())) score += 30;
+          if (contextual) score += 15;
+          if (nearBounds) score -= Math.min(30, Math.abs(rect.top - nearBounds.bottom) / 50);
+          return { el, score };
+        }).filter(Boolean).sort((a, b) => b.score - a.score);
+        const target = candidates[0]?.el;
         if (!target) return null;
         target.scrollIntoView?.({ block: "center", inline: "center" });
         target.click();
@@ -1849,6 +1932,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
           .filter((el) => {
             const label = textOf(el);
             if (badDateActionRe.test(label)) return false;
+            if (/^(?:overview|rooms|amenities|availability|location|reviews|rentals|vacation rentals|find a property|show filters|clear search|remove from favorites)(?:\s+.*)?$/i.test(label.trim())) return false;
             return openerRe.test(label) || openerRe.test(contextOf(el));
           });
         const opener = openers[0];
@@ -1865,8 +1949,8 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
   );
 
   const hasCompleteDateEntry = (entry) =>
-    entry?.filled?.some((f) => f.role === "range") ||
-    (entry?.filled?.some((f) => f.role === "checkin") && entry?.filled?.some((f) => f.role === "checkout"));
+    entry?.filled?.some((f) => f.role === "range" && f.visible) ||
+    (entry?.filled?.some((f) => f.role === "checkin" && f.visible) && entry?.filled?.some((f) => f.role === "checkout" && f.visible));
   const mergeDateEntry = (prev, next) => {
     const filled = [];
     const seen = new Set();
@@ -1912,7 +1996,11 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, calendar);
   }
-
+  if (hasCompleteDateEntry(result) && !result?.submitLabel) {
+    await targetPage.waitForTimeout(700).catch(() => {});
+    const submitRetry = await attempt(false);
+    if (submitRetry?.submitLabel) result = mergeDateEntry(result, submitRetry);
+  }
   const filledCount = result?.filled?.length ?? 0;
   const entryComplete = hasCompleteDateEntry(result);
   if (filledCount > 0 || result?.openedLabel || result?.submitLabel) {
@@ -2396,7 +2484,10 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
         return textReserveRe.test(label);
       });
     const perNight = text.match(/\$\s*([\d,]+)\s*(?:\/|per|a\s+)?\s*(?:night|nightly)/i);
-    const totalPrice = text.match(/\$\s*([\d,]+)\s*total/i) || text.match(/total\s*\$\s*([\d,]+)/i);
+    const totalPrice =
+      text.match(/\$\s*([\d,]+)\s*total/i) ||
+      text.match(/total\s*\$\s*([\d,]+)/i) ||
+      text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:including|incl\.?)\s+(?:taxes?\s*(?:&|and)\s*)?fees?/i);
     const totalForStayRe = new RegExp(`\\$\\s*([\\d,]+(?:\\.\\d+)?)\\s*for\\s+${nights}\\s+nights?`, "ig");
     const totalForStayMatches = Array.from(text.matchAll(totalForStayRe));
     const availabilityIdx = text.search(/\byour dates are available\b/i);
@@ -2434,6 +2525,18 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     const hasDateSignal = hasCheckInSignal && hasCheckOutSignal;
     const hasAvailableDatesSignal = /\byour dates are available\b/i.test(text);
     const hasDateSpecificPrice = hasDateSignal && (totalN || (reserveBtn && nightlyForSelectedStay) || (hasAvailableDatesSignal && totalN));
+    const path = window.location.pathname;
+    const isCollectionSearchPage =
+      (/\/bedrooms?\//i.test(path) || /\/(?:search|vacation-rentals|rentals)\/?$/i.test(path)) &&
+      /\b(?:results?|properties|list view|map view|show filters|clear search)\b/i.test(text);
+    if (hasDateSpecificPrice && isCollectionSearchPage) {
+      return {
+        available: "unclear",
+        nightlyPrice: null,
+        totalPrice: null,
+        reason: "Search-results page showed a date-specific price, but it was not a detail page for the candidate listing",
+      };
+    }
     if (hasDateSpecificPrice) {
       return {
         available: "yes",
