@@ -2759,6 +2759,10 @@ export async function registerRoutes(
         || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
         || /\bpoipu\s+kai\s+villas?\b/.test(n);
       if (hasNamedPoipuKaiComplex) return true;
+      const hasExplicitPoipuKaiBayview =
+        /\bpoipu\s+kai(?:'s|s)?\s+bayview\s+neighborhood\b/.test(n)
+        || (/\bpoipu\s+kai\b/.test(n) && /\bbayview\s+neighborhood\b/.test(n));
+      if (c.source === "vrbo" && hasExplicitPoipuKaiBayview) return true;
       // Vrbo often abbreviates Manualoha cards as "MA 1-310" without
       // spelling out Poipu Kai or Manualoha. Keep those exact unit-code
       // shapes, while still rejecting broader Koloa/Pili Mai/home rows.

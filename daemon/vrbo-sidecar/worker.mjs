@@ -2461,7 +2461,16 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   }, { checkIn, checkOut, nights: Math.max(1, Math.round((new Date(`${checkOut}T12:00:00Z`).getTime() - new Date(`${checkIn}T12:00:00Z`).getTime()) / 86400000)) });
   const genericWithBedrooms = attachDetectedBedrooms(genericResult, detectedBedrooms);
   const preparedGeneric = withPagePrepReason(genericWithBedrooms, dismissals, dateEntry);
-  if (preparedGeneric?.available === "yes" && (!pmDateEntryComplete(dateEntry) || !dateEntry?.submitLabel)) {
+  const canTrustVrboAutoUpdatedQuote =
+    /(?:^|\.)vrbo\.com$/i.test(hostForBedroomDetect)
+    && pmDateEntryComplete(dateEntry)
+    && Number(preparedGeneric?.totalPrice || 0) > 0
+    && /(?:visible price|reserve\/book button present)/i.test(preparedGeneric?.reason || "");
+  if (
+    preparedGeneric?.available === "yes"
+    && !canTrustVrboAutoUpdatedQuote
+    && (!pmDateEntryComplete(dateEntry) || !dateEntry?.submitLabel)
+  ) {
     return {
       ...preparedGeneric,
       available: "unclear",
