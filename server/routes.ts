@@ -4279,7 +4279,8 @@ export async function registerRoutes(
         base = "No clear availability/price signal";
       }
       const suffixes: string[] = [];
-      if (/entered dates/i.test(raw)) suffixes.push("after date entry");
+      if (/clicked\s+"/i.test(raw)) suffixes.push("after search submit");
+      else if (/entered dates/i.test(raw)) suffixes.push("after date entry");
       if (/dismissed obstruction/i.test(raw)) suffixes.push("after popup/overlay dismissal");
       return suffixes.length > 0 ? `${base} ${suffixes.join(" + ")}` : base;
     };
