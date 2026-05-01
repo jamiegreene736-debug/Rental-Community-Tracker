@@ -45,10 +45,12 @@ const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETR
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PER_REQUEST_BUDGET_MS = 90_000;
 const VIEWPORT = { width: 1280, height: 820 };
+const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
 
 let browser = null;
 let context = null;
 let page = null;
+let contextGuardsInstalled = false;
 
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
@@ -61,6 +63,67 @@ function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
     Promise.resolve(promise).catch(() => fallback),
     new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
   ]);
+}
+
+function hostFromUrl(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./i, "");
+  } catch {
+    return "";
+  }
+}
+
+function shouldBlockNavigation(rawUrl) {
+  const host = hostFromUrl(rawUrl);
+  return Boolean(host && BLOCKED_NAV_HOST_RE.test(host));
+}
+
+async function installContextGuards() {
+  if (!context || contextGuardsInstalled) return;
+  contextGuardsInstalled = true;
+
+  await context.route("**/*", async (route) => {
+    const rawUrl = route.request().url();
+    if (shouldBlockNavigation(rawUrl)) {
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    await route.continue().catch(() => {});
+  }).catch((e) => {
+    log(`context route guard failed: ${e?.message ?? e}`);
+  });
+
+  context.on("page", (createdPage) => {
+    void (async () => {
+      await createdPage.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {});
+      const rawUrl = createdPage.url?.() ?? "";
+      if (shouldBlockNavigation(rawUrl)) {
+        log(`closed blocked popup/tab: ${rawUrl.slice(0, 140)}`);
+        await createdPage.close({ runBeforeUnload: false }).catch(() => {});
+      }
+    })();
+  });
+}
+
+async function closeExtraTabs(reason, keepPage = page) {
+  if (!context) return 0;
+  const pages = context.pages().filter((p) => p && !p.isClosed?.());
+  let closedCount = 0;
+  for (const candidate of pages) {
+    if (candidate === keepPage) continue;
+    try {
+      const closed = await withSoftTimeout(
+        candidate.close({ runBeforeUnload: false }).then(() => true),
+        1_500,
+        false,
+      );
+      if (closed) closedCount++;
+    } catch {
+      // Racy by nature: Chrome may already have closed the tab.
+    }
+  }
+  if (closedCount > 0) log(`${reason}: closed ${closedCount} extra tab(s)`);
+  return closedCount;
 }
 
 async function dismissObstructions(targetPage = page, label = "page") {
@@ -430,6 +493,7 @@ async function ensureBrowser() {
   log("connecting to Chrome via CDP…");
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
   context = browser.contexts()[0] ?? (await browser.newContext());
+  await installContextGuards();
   const cookies = loadCookies();
   const seeded = await addCookiesBestEffort(cookies, "startup cookie seed");
   log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile cookies (${cookies.length} cookies available on disk)`);
@@ -449,28 +513,12 @@ async function ensureBrowser() {
   // tab as the only one. Net result: each daemon start gives us a
   // single fresh tab, no clutter, no stale state, no risk of
   // accidentally scraping a leftover tab.
-  const stalePages = context.pages().filter((p) => !p.isClosed?.());
   page = await Promise.race([
     context.newPage(),
     new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
   ]);
   await normalizePageDisplay(page);
-  let closedCount = 0;
-  for (const stale of stalePages) {
-    if (stale === page) continue; // defensive — shouldn't happen
-    if (stale.isClosed?.()) continue;
-    try {
-      const closed = await withSoftTimeout(
-        stale.close({ runBeforeUnload: false }).then(() => true),
-        1_500,
-        false,
-      );
-      if (closed) closedCount++;
-    } catch {
-      // Non-fatal — Chrome may have already closed the tab, or we
-      // hit a race. Leaving an extra tab is harmless.
-    }
-  }
+  const closedCount = await closeExtraTabs("startup tab cleanup", page);
   log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
 }
 
@@ -500,6 +548,7 @@ async function teardownBrowser(reason) {
   browser = null;
   context = null;
   page = null;
+  contextGuardsInstalled = false;
 }
 
 async function fetchJson(url, init) {
@@ -1180,7 +1229,7 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
   const runCalendarAction = (action, iso = null) => withSoftTimeout(
     targetPage.evaluate(({ action, iso }) => {
       const dateContextRe = /\b(?:check[\s_-]*in|check[\s_-]*out|arrival|departure|arrive|depart|date|dates|stay|calendar|availability|rates|booking|reservation|book now|reserve|select dates)\b/i;
-      const badActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
+      const badActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|continue)\b/i;
       const nextRe = /^(?:next|next month|following month|›|»|>|→)$/i;
 
@@ -1437,7 +1486,7 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
       ];
       const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
 
       function isRendered(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1540,7 +1589,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
       const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|terms|privacy|cookies?|policy|map|directions)\b/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -2421,14 +2470,19 @@ async function processRequest(req) {
     await resetPage();
   }
 
-  switch (opType) {
-    case "vrbo_search": return processVrboSearch(req.id, params);
-    case "vrbo_photo_scrape": return processVrboPhotoScrape(req.id, params);
-    case "booking_search": return processBookingSearch(req.id, params);
-    case "google_serp": return processGoogleSerp(req.id, params);
-    case "pm_url_check": return processPmUrlCheck(req.id, params);
-    case "pm_url_check_batch": return processPmUrlCheckBatch(req.id, params);
-    default: throw new Error(`unknown opType: ${opType}`);
+  try {
+    switch (opType) {
+      case "vrbo_search": return await processVrboSearch(req.id, params);
+      case "vrbo_photo_scrape": return await processVrboPhotoScrape(req.id, params);
+      case "booking_search": return await processBookingSearch(req.id, params);
+      case "google_serp": return await processGoogleSerp(req.id, params);
+      case "pm_url_check": return await processPmUrlCheck(req.id, params);
+      case "pm_url_check_batch": return await processPmUrlCheckBatch(req.id, params);
+      default: throw new Error(`unknown opType: ${opType}`);
+    }
+  } finally {
+    await closeExtraTabs(`after ${opType}`, page).catch(() => {});
+    await resetPage().catch(() => {});
   }
 }
 
