@@ -1115,17 +1115,55 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const checkOutEls = controls.filter((el) => classify(el) === "checkout");
       const rangeEls = controls.filter((el) => classify(el) === "range");
       const filled = [];
+      const filledEls = [];
+
+      const uniqueControls = (items) => Array.from(new Set(items.filter(Boolean)));
+      const preferVisible = (items) => items.find(isVisible) ?? items[0] ?? null;
+      const nextVisibleAfter = (el) => {
+        if (!el) return null;
+        const idx = visibleControls.indexOf(el);
+        if (idx < 0) return null;
+        return visibleControls.slice(idx + 1).find((candidate) => !filledEls.includes(candidate)) ?? null;
+      };
+      const previousVisibleBefore = (el) => {
+        if (!el) return null;
+        const idx = visibleControls.indexOf(el);
+        if (idx < 0) return null;
+        return [...visibleControls.slice(0, idx)].reverse().find((candidate) => !filledEls.includes(candidate)) ?? null;
+      };
+      const firstUnusedVisible = (...exclude) =>
+        visibleControls.find((candidate) => !exclude.includes(candidate) && !filledEls.includes(candidate)) ?? null;
 
       const fillOne = (el, value, iso, role) => {
-        if (!el) return;
+        if (!el || filledEls.includes(el)) return null;
         if (setValue(el, value, iso)) {
+          filledEls.push(el);
           filled.push({ role, label: contextOf(el).slice(0, 80), visible: isVisible(el) });
+          return el;
         }
+        return null;
+      };
+      const fillFirst = (candidates, value, iso, role) => {
+        for (const candidate of uniqueControls(candidates)) {
+          const used = fillOne(candidate, value, iso, role);
+          if (used) return used;
+        }
+        return null;
       };
 
       if (checkInEls.length > 0 || checkOutEls.length > 0) {
-        fillOne(checkInEls[0], checkInHuman, checkIn, "checkin");
-        fillOne(checkOutEls[0], checkOutHuman, checkOut, "checkout");
+        const labeledCheckIn = preferVisible(checkInEls);
+        const labeledCheckOut = preferVisible(checkOutEls);
+        const usedCheckIn = fillFirst([
+          labeledCheckIn,
+          previousVisibleBefore(labeledCheckOut),
+          firstUnusedVisible(labeledCheckOut),
+        ], checkInHuman, checkIn, "checkin");
+        fillFirst([
+          labeledCheckOut,
+          nextVisibleAfter(usedCheckIn ?? labeledCheckIn),
+          firstUnusedVisible(usedCheckIn ?? labeledCheckIn),
+        ], checkOutHuman, checkOut, "checkout");
       } else if (rangeEls.length > 0) {
         fillOne(rangeEls[0], rangeHuman, checkIn, "range");
       } else if (visibleControls.length >= 2) {
@@ -1135,7 +1173,10 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         fillOne(visibleControls[0], rangeHuman, checkIn, "range");
       }
 
-      const submitLabel = filled.length > 0 ? clickSubmit(filled.map((f) => controls.find((el) => contextOf(el).slice(0, 80) === f.label)).filter(Boolean)) : null;
+      const hasCompleteDateEntry =
+        filled.some((f) => f.role === "range") ||
+        (filled.some((f) => f.role === "checkin") && filled.some((f) => f.role === "checkout"));
+      const submitLabel = hasCompleteDateEntry ? clickSubmit(filledEls) : null;
       if (filled.length === 0 && allowOpenOnly) {
         const openers = Array.from(document.querySelectorAll(buttonSelector))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
@@ -1159,6 +1200,9 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
 
   const first = await attempt(true);
   let result = first;
+  const hasCompleteDateEntry = (entry) =>
+    entry?.filled?.some((f) => f.role === "range") ||
+    (entry?.filled?.some((f) => f.role === "checkin") && entry?.filled?.some((f) => f.role === "checkout"));
   if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
     await targetPage.waitForTimeout(1_000).catch(() => {});
     await dismissObstructions(targetPage, "pm_date_entry_after_open");
@@ -1168,6 +1212,16 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       filled: [...(first.filled ?? []), ...(second?.filled ?? [])],
       submitLabel: second?.submitLabel ?? first.submitLabel ?? null,
       openedLabel: first.openedLabel,
+    };
+  } else if (first?.filled?.length > 0 && !hasCompleteDateEntry(first)) {
+    await targetPage.waitForTimeout(800).catch(() => {});
+    await dismissObstructions(targetPage, "pm_date_entry_after_partial");
+    const second = await attempt(false);
+    result = {
+      controlCount: second?.controlCount ?? first.controlCount ?? 0,
+      filled: [...(first.filled ?? []), ...(second?.filled ?? [])],
+      submitLabel: second?.submitLabel ?? null,
+      openedLabel: first.openedLabel ?? second?.openedLabel ?? null,
     };
   }
 
