@@ -836,7 +836,7 @@ async function processVrboSearch(id, params) {
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
 
   const result = await page.evaluate((args) => {
-    const { expectedNights } = args;
+    const { expectedNights, targetBedrooms } = args;
 
     // Card selector with fallback chain. Vrbo's data-stid attribute
     // has changed multiple times; relying on a single fixed selector
@@ -915,22 +915,19 @@ async function processVrboSearch(id, params) {
         }
       }
       if (!(totalPrice > 0) || !(totalNights > 0)) { drops.noPrice++; continue; }
-      if (bedroomsExtracted == null) { drops.badBedrooms++; }
+      if (bedroomsExtracted !== targetBedrooms) { drops.badBedrooms++; continue; }
 
       out.push({
         url: "https://www.vrbo.com" + propertyPath,
         title: title.slice(0, 80),
         totalPrice,
         nightlyPrice: Math.round(totalPrice / totalNights),
-        // bedrooms can be undefined when extraction fails — downstream
-        // helper treats undefined as "unknown, probably matches" so a
-        // nameless 3BR doesn't get dropped from a 3BR scan.
-        bedrooms: bedroomsExtracted ?? undefined,
+        bedrooms: bedroomsExtracted,
         priceIncludesTaxes,
       });
     }
     return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
-  }, { expectedNights });
+  }, { expectedNights, targetBedrooms: Number.parseInt(String(bedrooms ?? ""), 10) });
 
   const cards = result.out;
   const allInCount = cards.filter((c) => c.priceIncludesTaxes).length;
@@ -1097,7 +1094,7 @@ async function processBookingSearch(id, params) {
       const bedrooms = bdMatch ? parseInt(bdMatch[1], 10) : 0;
       if (!url) continue;
       if (!(totalPrice > 0)) continue;
-      if (bedrooms && bedrooms < minBd) continue;
+      if (bedrooms !== minBd) continue;
       out.push({
         url,
         title: title.slice(0, 80),
