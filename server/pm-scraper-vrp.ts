@@ -122,6 +122,17 @@ function pickAttr(html: string, attr: string): string | null {
   return m ? m[1] : null;
 }
 
+function pickHiddenInputValue(html: string, namePattern: RegExp): string | null {
+  const inputs = html.match(/<input\b[^>]*>/gi) ?? [];
+  for (const input of inputs) {
+    const name = input.match(/\bname=["']([^"']+)["']/i)?.[1] ?? "";
+    if (!namePattern.test(name)) continue;
+    const value = input.match(/\bvalue=["']([^"']+)["']/i)?.[1];
+    if (value) return value;
+  }
+  return null;
+}
+
 async function fetchUnitMeta(site: VrpSiteConfig, url: string): Promise<VrpUnitMeta | null> {
   const cache = unitMetaCache(site.baseUrl);
   const cached = cache.get(url);
@@ -136,8 +147,8 @@ async function fetchUnitMeta(site: VrpSiteConfig, url: string): Promise<VrpUnitM
       return null;
     }
     const html = await r.text();
-    const unitId = pickAttr(html, "unit-id");
-    const slug = pickAttr(html, "unit-slug");
+    const unitId = pickAttr(html, "unit-id") ?? pickHiddenInputValue(html, /(?:^|[\[_-])unit[_-]?id(?:\]|$)/i);
+    const slug = pickAttr(html, "unit-slug") ?? new URL(url).pathname.match(/\/vrp\/unit\/([^/?#]+)/i)?.[1] ?? null;
     const name = pickAttr(html, "unit-name") ?? "";
     const beds = pickAttr(html, "unit-beds");
     const city = pickAttr(html, "unit-city") ?? "";

@@ -2193,19 +2193,34 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
 
     async function tryVrpMain() {
       const dataEl = document.querySelector("[data-unit-id][data-unit-slug]") || document.querySelector("#unit-data");
-      const unitId = dataEl?.getAttribute("data-unit-id") || dataEl?.dataset?.unitId || null;
-      const slug = dataEl?.getAttribute("data-unit-slug") || dataEl?.dataset?.unitSlug || null;
+      const hiddenUnitEl = document.querySelector('input[name="obj[unit_id]"], input[name*="unit_id" i], input[name*="unitId" i]');
+      const pathSlug = (() => {
+        const m = window.location.pathname.match(/\/vrp\/unit\/([^/?#]+)/i);
+        return m ? decodeURIComponent(m[1]) : null;
+      })();
+      const unitId =
+        dataEl?.getAttribute("data-unit-id") ||
+        dataEl?.dataset?.unitId ||
+        hiddenUnitEl?.getAttribute("value") ||
+        hiddenUnitEl?.value ||
+        null;
+      const slug =
+        dataEl?.getAttribute("data-unit-slug") ||
+        dataEl?.dataset?.unitSlug ||
+        pathSlug ||
+        null;
       if (!unitId || !slug) return null;
       const [ratesResp, bookedResp] = await Promise.all([
         fetch(`/?vrpjax=1&act=getUnitRates&unitId=${encodeURIComponent(unitId)}`, { headers: { Accept: "application/json, text/javascript, */*; q=0.01" } }),
         fetch(`/?vrpjax=1&act=getUnitBookedDates&par=${encodeURIComponent(slug)}`, { headers: { Accept: "application/json, text/javascript, */*; q=0.01" } }),
       ]);
-      if (!ratesResp.ok || !bookedResp.ok) return null;
+      if (!bookedResp.ok) return null;
       let rates = null;
       let booked = {};
-      try { rates = await ratesResp.json(); } catch { return null; }
+      if (ratesResp.ok) {
+        try { rates = await ratesResp.json(); } catch { rates = null; }
+      }
       try { booked = await bookedResp.json(); } catch { booked = {}; }
-      if (!rates || typeof rates !== "object") return null;
 
       const bookedSet = new Set(booked.bookedDates || []);
       for (const iso of isoNights) {
@@ -2243,6 +2258,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
           reason: `VRP calendar: ${requiredMinLOS}-night minimum for ${checkIn}`,
         };
       }
+      if (!rates || typeof rates !== "object") return null;
       let total = 0;
       let pricedNights = 0;
       for (const iso of isoNights) {
