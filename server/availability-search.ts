@@ -162,10 +162,7 @@ export async function findCheapestPricedNightly(opts: FindCheapestOptions): Prom
     q: opts.q,
   };
   if (opts.bounds) {
-    sp.sw_lat = String(opts.bounds.sw_lat);
-    sp.sw_lng = String(opts.bounds.sw_lng);
-    sp.ne_lat = String(opts.bounds.ne_lat);
-    sp.ne_lng = String(opts.bounds.ne_lng);
+    sp.bounding_box = `[[${opts.bounds.ne_lat},${opts.bounds.ne_lng}],[${opts.bounds.sw_lat},${opts.bounds.sw_lng}]]`;
   }
   try {
     const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
@@ -176,7 +173,14 @@ export async function findCheapestPricedNightly(opts: FindCheapestOptions): Prom
       const tokens = opts.resortName.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter((t) => t.length >= 3);
       properties = properties.filter((p: any) => {
         const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
-        return tokens.every((t) => hay.includes(t));
+        const lat = Number(p?.gps_coordinates?.latitude);
+        const lng = Number(p?.gps_coordinates?.longitude);
+        const inBounds = opts.bounds
+          ? Number.isFinite(lat) && Number.isFinite(lng)
+            && lat >= opts.bounds.sw_lat - 0.01 && lat <= opts.bounds.ne_lat + 0.01
+            && lng >= opts.bounds.sw_lng - 0.01 && lng <= opts.bounds.ne_lng + 0.01
+          : false;
+        return tokens.every((t) => hay.includes(t)) || inBounds;
       });
     }
     properties = properties.filter((p: any) => {

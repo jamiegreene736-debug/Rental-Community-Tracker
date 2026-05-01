@@ -1488,7 +1488,7 @@ type FindBuyInResponse = {
   // falls back to the flat `cheapest` list.
   cheapestUnits?: LiveUnit[];
   debug?: {
-    rawCounts?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number; photoMatches?: number };
+    rawCounts?: { airbnb?: number; airbnbEngine?: number; vrbo?: number; booking?: number; pm?: number; photoMatches?: number };
     dropped?: {
       airbnb?: { noResort: number; wrongBedrooms: number };
       vrbo?: { noResort: number; wrongBedrooms: number };
@@ -1958,7 +1958,7 @@ function LiveSearchSection({
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb {data.debug.rawCounts.airbnb ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
+            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
             {pmSourceBreakdown.length > 0 && (
               <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} PM sources had results)</>
             )}

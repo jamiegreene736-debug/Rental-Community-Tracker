@@ -2628,6 +2628,7 @@ export async function registerRoutes(
       bedrooms?: number;
       image?: string;
       snippet?: string;
+      inTargetBounds?: boolean;
       // Reverse-image-search matches on this candidate's photo. Used
       // to surface "this exact unit also listed at <PM company>" links
       // — the operator can't sublet from Airbnb directly, but the same
@@ -2759,6 +2760,7 @@ export async function registerRoutes(
     };
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (normalizedResortName !== "poipu kai") return true;
+      if (c.source === "airbnb" && c.inTargetBounds) return true;
       const n = norm(candidateHaystack(c));
       const hasNamedPoipuKaiComplex =
         /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n)
@@ -2786,6 +2788,7 @@ export async function registerRoutes(
     ): boolean => {
       const hay = candidateHaystack(c);
       const targetSignal = mentionsResort(hay)
+        || (c.source === "airbnb" && c.inTargetBounds === true)
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
@@ -2841,6 +2844,23 @@ export async function registerRoutes(
           break;
       }
       return u.toString();
+    };
+
+    type CommunityBounds = { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
+
+    const addAirbnbBoundingBox = (sp: Record<string, string>, b: CommunityBounds | undefined): void => {
+      if (!b) return;
+      // SearchAPI's current Airbnb API uses one bounding_box param; the older
+      // sw_lat/sw_lng/ne_lat/ne_lng fields are ignored by the engine.
+      sp.bounding_box = `[[${b.ne_lat},${b.ne_lng}],[${b.sw_lat},${b.sw_lng}]]`;
+    };
+
+    const airbnbCoordsInBounds = (p: any, b: CommunityBounds | undefined, pad = 0): boolean => {
+      if (!b) return false;
+      const lat = Number(p?.gps_coordinates?.latitude ?? p?.gpsCoordinates?.latitude);
+      const lng = Number(p?.gps_coordinates?.longitude ?? p?.gpsCoordinates?.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      return lat >= b.sw_lat - pad && lat <= b.ne_lat + pad && lng >= b.sw_lng - pad && lng <= b.ne_lng + pad;
     };
 
     // Helper: run a Google site: search restricted to one OTA and filter
@@ -2899,13 +2919,15 @@ export async function registerRoutes(
     //    1) site: Google search — great at resort-specific matches via
     //       quoted-name, but Google organic never carries live prices.
     //    2) SearchAPI airbnb engine — returns listings with real prices
-    //       (price.extracted_total_price), filtered by location bounds.
-    //    The engine sometimes returns listings outside the target resort
-    //    so we post-filter to require the resort name in title/desc.
+    //       (price.extracted_total_price), filtered by tight map bounds.
+    //    Some legitimate condo listings don't name the resort in the title or
+    //    description, so GPS inside the community box is an equally strong keep
+    //    signal. Listings with no coords still need the resort text match.
     //    This is what lets auto-fill actually pick a priced candidate.
     let airbnbRawCount = 0;
     let airbnbDropped = { noResort: 0, wrongBedrooms: 0 };
     let airbnbPricedCount = 0;
+    let airbnbPricedDropped = { noResort: 0 };
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       const [site, priced] = await Promise.all([
         siteSearch("airbnb.com", "airbnb", "Airbnb"),
@@ -2922,30 +2944,29 @@ export async function registerRoutes(
               api_key: apiKey,
               q: searchLocation,
             };
-            if (bounds) {
-              sp.sw_lat = String(bounds.sw_lat);
-              sp.sw_lng = String(bounds.sw_lng);
-              sp.ne_lat = String(bounds.ne_lat);
-              sp.ne_lng = String(bounds.ne_lng);
-            }
+            addAirbnbBoundingBox(sp, bounds);
             const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
             if (!r.ok) return [];
             const data = await r.json() as any;
             let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
             airbnbPricedCount = properties.length;
-            // Require resort mention in title/desc — the engine's geo
-            // bounds aren't tight enough to guarantee it alone.
-            if (resortName) {
+            if (resortName || bounds) {
+              let noResort = 0;
               properties = properties.filter((p: any) => {
                 const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`;
-                return mentionsResort(hay);
+                const keep = (resortName ? mentionsResort(hay) : false)
+                  || airbnbCoordsInBounds(p, bounds, 0.01);
+                if (!keep) noResort++;
+                return keep;
               });
+              airbnbPricedDropped = { noResort };
             }
             return properties
               .filter((p: any) => p?.price?.extracted_total_price > 0 && p?.link)
               .map((p: any): Candidate => {
                 const total = Number(p.price.extracted_total_price);
                 const url = withStayDates("airbnb", String(p.link));
+                const inTargetBounds = airbnbCoordsInBounds(p, bounds, 0.01);
                 return {
                   source: "airbnb",
                   sourceLabel: "Airbnb",
@@ -2956,6 +2977,7 @@ export async function registerRoutes(
                   bedrooms: typeof p?.bedrooms === "number" ? p.bedrooms : undefined,
                   image: Array.isArray(p?.images) ? p.images[0] : undefined,
                   snippet: String(p?.description ?? "").slice(0, 160),
+                  inTargetBounds,
                   // Airbnb engine queried with check_in / check_out, so
                   // the listings returned are filtered by date-specific
                   // availability AND the price is the date-specific
@@ -4839,7 +4861,7 @@ export async function registerRoutes(
       "",
       "Debug counts:",
       JSON.stringify({
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbEngine: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
@@ -4873,7 +4895,7 @@ export async function registerRoutes(
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} `
-      + `airbnbEngine=${airbnbPricedCount} raw · `
+      + `airbnbEngine=${airbnbPricedCount} raw (dropped noResort=${airbnbPricedDropped.noResort}) · `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (google_hotels discovery + sidecar detail verify) `
       + `pm=${pm.length}/${pmRawCount}+${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (searchapi+photoMatches+knownPMs+searchApiFinder; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
@@ -4917,7 +4939,7 @@ export async function registerRoutes(
         { label: "Sidecar rate checks",            count: sidecarBatchVerifiedUrls.size },
       ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbEngine: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingEngine: bookingPricedCount, pm: pmRawCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
@@ -4965,11 +4987,10 @@ export async function registerRoutes(
   // listings that have been booked since the initial search, or that
   // returned a "starting from" price not tied to our specific nights.
   //
-  // Only Airbnb is verifiable — we re-call the airbnb engine with a narrow
-  // query (resort + bedroom count + dates) and confirm the listing id is
-  // still in the priced results. Vrbo/Booking/PM have no per-listing
-  // verification endpoint in SearchAPI, so they return available=null
-  // (unknown — don't block the attach, just flag to the client).
+  // Only Airbnb is verifiable — use SearchAPI's exact airbnb_property engine
+  // first, then fall back to a bounded Airbnb search if the property endpoint
+  // is inconclusive. Vrbo/Booking/PM have no per-listing verification endpoint
+  // here, so they return available=null (unknown — don't block the attach).
   app.get("/api/operations/verify-listing", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
@@ -4980,6 +5001,8 @@ export async function registerRoutes(
     const q = (req.query.q as string) || "";
     const bedroomsRaw = req.query.bedrooms as string | undefined;
     const bedrooms = bedroomsRaw ? parseInt(bedroomsRaw, 10) : null;
+    const propertyIdRaw = req.query.propertyId as string | undefined;
+    const propertyId = propertyIdRaw ? parseInt(propertyIdRaw, 10) : null;
 
     if (!url) return res.status(400).json({ error: "url required" });
     if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
@@ -4992,36 +5015,97 @@ export async function registerRoutes(
       return res.json({ available: null, reason: "unsupported-source", listingId: null });
     }
     const listingId = m[1];
+    const propertyConfig = propertyId && !isNaN(propertyId) ? PROPERTY_UNIT_NEEDS[propertyId] : null;
+    const verificationBounds = propertyConfig ? COMMUNITY_BOUNDS[propertyConfig.community] : undefined;
+    const verificationLocation = propertyConfig
+      ? COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`
+      : null;
+
+    const addVerificationBounds = (sp: Record<string, string>): void => {
+      if (!verificationBounds) return;
+      sp.bounding_box = `[[${verificationBounds.ne_lat},${verificationBounds.ne_lng}],[${verificationBounds.sw_lat},${verificationBounds.sw_lng}]]`;
+    };
 
     try {
-      const sp: Record<string, string> = {
-        engine: "airbnb",
-        check_in_date: checkIn,
-        check_out_date: checkOut,
-        adults: "2",
-        currency: "USD",
-        api_key: apiKey,
-        q: q || "Hawaii",
-      };
-      if (bedrooms && !isNaN(bedrooms)) sp.bedrooms = String(bedrooms);
-      const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-      if (!r.ok) {
-        return res.json({ available: null, reason: `engine-${r.status}`, listingId });
+      // First ask SearchAPI for the exact Airbnb property with the target
+      // dates. This avoids false negatives caused by a real, bookable listing
+      // falling off the first page of a broad map search.
+      try {
+        const detailParams = new URLSearchParams({
+          engine: "airbnb_property",
+          property_id: listingId,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          currency: "USD",
+          api_key: apiKey,
+        });
+        const detailResp = await fetch(`https://www.searchapi.io/api/v1/search?${detailParams.toString()}`);
+        if (detailResp.ok) {
+          const detail = await detailResp.json() as any;
+          const property = detail?.property;
+          if (property) {
+            if (property.is_booking_available === false) {
+              return res.json({ available: false, reason: "property-api-unavailable", listingId });
+            }
+            const total = Number(property?.price?.extracted_total_price ?? 0);
+            if (total > 0) {
+              return res.json({
+                available: true,
+                listingId,
+                currentTotalPrice: total,
+                title: property?.title ?? property?.name ?? null,
+              });
+            }
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[verify-listing] property API fallback for ${listingId}:`, e.message);
       }
-      const data = await r.json() as any;
-      const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
+
+      const verificationParts = verificationLocation
+        ? verificationLocation.split(",").map((p) => p.trim()).filter(Boolean)
+        : [];
+      const qCandidates = verificationBounds && verificationLocation
+        ? [verificationLocation]
+        : Array.from(new Set([
+            q || null,
+            verificationLocation,
+            verificationParts.length > 1 ? verificationParts.slice(1).join(", ") : null,
+            propertyConfig ? `${propertyConfig.community}, Hawaii` : null,
+          ].filter((v): v is string => !!v)));
+
+      const searchOne = async (query: string): Promise<any[]> => {
+        const sp: Record<string, string> = {
+          engine: "airbnb",
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          currency: "USD",
+          api_key: apiKey,
+          q: query || "Hawaii",
+        };
+        if (bedrooms && !isNaN(bedrooms)) sp.bedrooms = String(bedrooms);
+        addVerificationBounds(sp);
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
+        if (!r.ok) return [];
+        const data = await r.json() as any;
+        return Array.isArray(data?.properties) ? data.properties : [];
+      };
+
+      const batches = await Promise.all((qCandidates.length ? qCandidates : ["Hawaii"]).map(searchOne));
+      const seen = new Map<string, any>();
+      for (const p of batches.flat()) {
+        const id = String(p?.id ?? "");
+        if (id && !seen.has(id)) seen.set(id, p);
+      }
+      const properties = Array.from(seen.values());
       const match = properties.find((p: any) => String(p?.id ?? "") === listingId);
 
       if (!match) {
-        // Listing didn't appear in the re-query. Could mean it's been booked,
-        // dropped out of the top-N for other reasons, or is just further down
-        // the results. Conservative: report available=false only when the
-        // query was narrow enough that absence is meaningful (q present AND
-        // bedrooms present). Otherwise report unknown.
-        if (q && bedrooms) {
-          return res.json({ available: false, reason: "not-in-priced-results", listingId, checkedCount: properties.length });
-        }
-        return res.json({ available: null, reason: "insufficient-query-scope", listingId, checkedCount: properties.length });
+        // Absence from search results is no longer enough to call the listing
+        // unavailable; Airbnb ranking and pagination can hide valid cheap units.
+        return res.json({ available: null, reason: "not-in-priced-results", listingId, checkedCount: properties.length });
       }
 
       const total = Number(match?.price?.extracted_total_price ?? 0);
@@ -5460,7 +5544,7 @@ export async function registerRoutes(
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
-  // SearchAPI Airbnb supports sw_lat/sw_lng/ne_lat/ne_lng to geo-constrain results.
+  // SearchAPI Airbnb accepts these as a single bounding_box query param.
   // We also post-filter by GPS coordinates in the returned listings for extra precision.
   const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
     "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
@@ -5533,13 +5617,11 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
-        // q is always required by SearchAPI; bounds are added on top for geo-precision
+        // q is kept as a human-readable location hint; bounding_box is the
+        // actual geo constraint SearchAPI's Airbnb engine honors.
         searchParams.q = searchLocation;
         if (communityBounds) {
-          searchParams.sw_lat = String(communityBounds.sw_lat);
-          searchParams.sw_lng = String(communityBounds.sw_lng);
-          searchParams.ne_lat = String(communityBounds.ne_lat);
-          searchParams.ne_lng = String(communityBounds.ne_lng);
+          searchParams.bounding_box = `[[${communityBounds.ne_lat},${communityBounds.ne_lng}],[${communityBounds.sw_lat},${communityBounds.sw_lng}]]`;
         }
 
         const params = new URLSearchParams(searchParams);
@@ -7140,10 +7222,7 @@ export async function registerRoutes(
           q: searchLocation,
         };
         if (bounds) {
-          sp.sw_lat = String(bounds.sw_lat);
-          sp.sw_lng = String(bounds.sw_lng);
-          sp.ne_lat = String(bounds.ne_lat);
-          sp.ne_lng = String(bounds.ne_lng);
+          sp.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
         }
         try {
           const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
@@ -11093,13 +11172,11 @@ export async function registerRoutes(
           api_key: apiKey,
         };
 
-        // q is always required by SearchAPI; bounds are added on top for geo-precision
+        // q is kept as a human-readable location hint; bounding_box is the
+        // actual geo constraint SearchAPI's Airbnb engine honors.
         searchParams.q = searchLocation;
         if (communityBounds) {
-          searchParams.sw_lat = String(communityBounds.sw_lat);
-          searchParams.sw_lng = String(communityBounds.sw_lng);
-          searchParams.ne_lat = String(communityBounds.ne_lat);
-          searchParams.ne_lng = String(communityBounds.ne_lng);
+          searchParams.bounding_box = `[[${communityBounds.ne_lat},${communityBounds.ne_lng}],[${communityBounds.sw_lat},${communityBounds.sw_lng}]]`;
         }
 
         const params = new URLSearchParams(searchParams);

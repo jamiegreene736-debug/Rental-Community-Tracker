@@ -126,10 +126,7 @@ async function scanWindow(propertyId: number, checkIn: string, checkOut: string)
       q: location,
     });
     if (bounds) {
-      params.set("sw_lat", String(bounds.sw_lat));
-      params.set("sw_lng", String(bounds.sw_lng));
-      params.set("ne_lat", String(bounds.ne_lat));
-      params.set("ne_lng", String(bounds.ne_lng));
+      params.set("bounding_box", `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`);
     }
 
     const res = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
