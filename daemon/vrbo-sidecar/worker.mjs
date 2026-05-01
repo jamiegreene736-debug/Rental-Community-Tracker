@@ -612,38 +612,89 @@ async function dumpPageState(label, requestForLog) {
 
 // ───────────────────────── VRBO search ──────────────────────────────
 async function applyVrboBedroomFilter(bedrooms) {
+  const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
+  if (!Number.isFinite(targetBedrooms) || targetBedrooms <= 0) return false;
   try {
-    await page.click('button:has-text("Filters")', { timeout: 3000 });
+    const filterButton = page
+      .locator('button:has-text("Rooms & spaces"), button:has-text("Filters")')
+      .first();
+    await filterButton.click({ timeout: 3000 });
     await page.waitForTimeout(800);
     const inputHandle = await page
-      .locator('input[aria-label*="Minimum bedrooms" i]')
+      .locator(
+        [
+          'input[aria-label*="Minimum bedrooms" i]',
+          'input[aria-label*="Bedrooms" i]',
+          '[role="spinbutton"][aria-label*="Bedroom" i]',
+        ].join(", "),
+      )
       .first()
       .elementHandle();
-    if (!inputHandle) throw new Error("Minimum bedrooms input not found");
 
     let strategyWorked = false;
-    try {
-      await inputHandle.click({ timeout: 2000 });
-      await page.keyboard.press("Meta+A");
-      await page.keyboard.press("Backspace");
-      await page.keyboard.type(String(bedrooms), { delay: 30 });
-      await page.waitForTimeout(200);
-      const after = await inputHandle.inputValue().catch(() => "");
-      if (after === String(bedrooms)) strategyWorked = true;
-    } catch {}
-    if (!strategyWorked) {
-      await inputHandle.evaluate((el, val) => {
-        const setter = Object.getOwnPropertyDescriptor((el.constructor.prototype), "value")?.set;
-        if (setter) setter.call(el, val);
-        else el.value = val;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-      }, String(bedrooms));
-      await page.waitForTimeout(200);
-      const after = await inputHandle.inputValue().catch(() => "");
-      if (after === String(bedrooms)) strategyWorked = true;
+    if (inputHandle) {
+      try {
+        await inputHandle.click({ timeout: 2000 });
+        await page.keyboard.press("Meta+A");
+        await page.keyboard.press("Backspace");
+        await page.keyboard.type(String(targetBedrooms), { delay: 30 });
+        await page.waitForTimeout(200);
+        const after = await inputHandle.evaluate((el) => el.value || el.getAttribute("aria-valuenow") || "").catch(() => "");
+        if (after === String(targetBedrooms)) strategyWorked = true;
+      } catch {}
+      if (!strategyWorked) {
+        await inputHandle.evaluate((el, val) => {
+          const setter = Object.getOwnPropertyDescriptor((el.constructor.prototype), "value")?.set;
+          if (setter) setter.call(el, val);
+          else el.value = val;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }, String(targetBedrooms));
+        await page.waitForTimeout(200);
+        const after = await inputHandle.evaluate((el) => el.value || el.getAttribute("aria-valuenow") || "").catch(() => "");
+        if (after === String(targetBedrooms)) strategyWorked = true;
+      }
     }
-    if (!strategyWorked) throw new Error("input strategies failed");
+    if (!strategyWorked) {
+      strategyWorked = Boolean(await withSoftTimeout(
+        page.evaluate((target) => {
+          function isVisible(el) {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 8 && rect.height > 8 &&
+              rect.bottom >= 0 && rect.right >= 0 &&
+              rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+              style.display !== "none" && style.visibility !== "hidden" &&
+              Number(style.opacity || "1") > 0.05;
+          }
+          function labelOf(el) {
+            return [
+              el.textContent,
+              el.getAttribute?.("aria-label"),
+              el.getAttribute?.("title"),
+              el.getAttribute?.("value"),
+            ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+          }
+          const buttons = Array.from(document.querySelectorAll("button, [role='button']"))
+            .filter((el) => isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+          const inc = buttons.find((el) => {
+            const label = labelOf(el);
+            return /bedroom/i.test(label) && /\b(increase|add|plus|\+)\b/i.test(label);
+          }) ?? buttons.find((el) => {
+            const label = labelOf(el);
+            return /^(?:\+|add)$/i.test(label) &&
+              /bedroom/i.test(labelOf(el.closest("[role='group'], fieldset, section, div") || el.parentElement || el));
+          });
+          if (!inc) return false;
+          for (let i = 0; i < target; i++) inc.click();
+          return true;
+        }, targetBedrooms),
+        3_000,
+        false,
+      ));
+    }
+    if (!strategyWorked) throw new Error("bedroom control not found");
 
     const doneCandidates = await page
       .locator('button:has-text("Done"), button:has-text("Apply"), button:has-text("Show properties"), button:has-text("Show stays")')
@@ -655,10 +706,46 @@ async function applyVrboBedroomFilter(bedrooms) {
       await page.keyboard.press("Escape").catch(() => {});
     }
     await page.waitForTimeout(PAGE_SETTLE_MS);
-    log(`applied bedroom filter (${bedrooms}+BR)`);
+    log(`vrbo_search: applied visible bedroom filter (${targetBedrooms}+BR)`);
     return true;
   } catch (e) {
     log(`vrbo filter UI failed: ${e.message ?? e}`);
+    try {
+      const current = new URL(page.url());
+      current.searchParams.set("minBedrooms", String(targetBedrooms));
+      await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+      await page.waitForTimeout(PAGE_SETTLE_MS);
+      log(`vrbo_search: applied URL bedroom fallback (minBedrooms=${targetBedrooms})`);
+      return true;
+    } catch (fallbackError) {
+      log(`vrbo filter URL fallback failed: ${fallbackError.message ?? fallbackError}`);
+      return false;
+    }
+  }
+}
+
+async function applyBookingBedroomFilter(bedrooms) {
+  const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
+  if (!Number.isFinite(targetBedrooms) || targetBedrooms <= 0) return false;
+  try {
+    const current = new URL(page.url());
+    const filters = current.searchParams
+      .getAll("nflt")
+      .join(";")
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => !/^entire_place_bedroom_count=/i.test(part));
+    filters.push(`entire_place_bedroom_count=${targetBedrooms}`);
+    current.searchParams.delete("nflt");
+    current.searchParams.set("nflt", filters.join(";"));
+    await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS);
+    await dismissObstructions(page, "booking_search_after_bedroom_filter");
+    log(`booking_search: applied bedroom filter (${targetBedrooms}BR) after visible search submit`);
+    return true;
+  } catch (e) {
+    log(`booking bedroom filter failed: ${e.message ?? e}`);
     return false;
   }
 }
@@ -733,15 +820,15 @@ async function processVrboSearch(id, params) {
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "vrbo_search");
   await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
+  await applyVrboBedroomFilter(bedrooms).catch(() => false);
   const state = await dumpPageState("vrbo", { id, ...params });
   if (state && /show us your human side|we can.?t tell if you.?re a human/i.test(state.bodyExcerpt)) {
     throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
   }
-  // PR #301: dropped applyVrboBedroomFilter — Vrbo redesigned the
-  // search page and the "Filters" button no longer exists with the
-  // selector we relied on. The URL filter (now also dropped) was the
-  // backup. We now extract all cards and bucket by BR client-side via
-  // bedroomsExtracted.
+  // Still extract all visible cards and bucket by BR client-side:
+  // VRBO's browser-side filter is useful for relevance and operator
+  // visibility, but the downstream exact-bedroom guard remains the
+  // authoritative protection against mismatched 1BR/2BR rows.
 
   // Compute expected nights from the requested window — we always
   // ask for 7-night (multichannel scanner) but compute robustly so
@@ -975,6 +1062,7 @@ async function processBookingSearch(id, params) {
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "booking_search");
   await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
+  await applyBookingBedroomFilter(bedrooms).catch(() => false);
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
