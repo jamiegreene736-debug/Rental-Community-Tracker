@@ -75,6 +75,17 @@ interface Candidate {
   score: number;
 }
 
+type SidecarQueueStatus = {
+  total: number;
+  pending: number;
+  inProgress: number;
+  completed: number;
+  failed: number;
+  oldestPendingAgeSec: number | null;
+  newestRequestAt: string | null;
+  byOpType?: Record<string, number>;
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function fmtMoney(n: number | string | null | undefined): string {
@@ -160,13 +171,139 @@ function manualOnlyPmForUrl(_url: string | null | undefined): ManualOnlyPm | nul
   return null;
 }
 
+function activeSidecarCount(status: SidecarQueueStatus | null | undefined): number {
+  return Math.max(0, (status?.pending ?? 0) + (status?.inProgress ?? 0));
+}
+
+function sidecarNewestRequestMs(status: SidecarQueueStatus | null | undefined): number | null {
+  if (!status?.newestRequestAt) return null;
+  const ms = Date.parse(status.newestRequestAt);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isSidecarStatusForSearch(
+  status: SidecarQueueStatus | null | undefined,
+  startedAtMs: number | null,
+): boolean {
+  const active = activeSidecarCount(status);
+  if (active <= 0) return false;
+  const newestMs = sidecarNewestRequestMs(status);
+  if (!startedAtMs || !newestMs) return active > 0;
+  return newestMs >= startedAtMs - 15_000;
+}
+
+function sidecarQueueProgressValue(status: SidecarQueueStatus | null | undefined): number {
+  if (!status) return 12;
+  const active = activeSidecarCount(status);
+  const total = Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed);
+  const done = Math.max(0, status.completed + status.failed);
+  if (active <= 0) return done > 0 ? 100 : 12;
+  return Math.max(8, Math.min(96, Math.round((done / total) * 100)));
+}
+
+function sidecarOpSummary(status: SidecarQueueStatus | null | undefined): string {
+  const counts = status?.byOpType ?? {};
+  const labels: Array<[string, string]> = [
+    ["vrbo_search", "Vrbo search"],
+    ["booking_search", "Booking.com search"],
+    ["pm_url_check_batch", "PM batches"],
+    ["pm_url_check", "PM checks"],
+    ["google_serp", "Google discovery"],
+    ["vrbo_photo_scrape", "Vrbo photos"],
+  ];
+  return labels
+    .map(([key, label]) => {
+      const count = counts[key] ?? 0;
+      return count > 0 ? `${label} ${count}` : "";
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(" · ");
+}
+
+function useSidecarQueueStatus(enabled: boolean): { status: SidecarQueueStatus | null; fetched: boolean } {
+  const [state, setState] = useState<{ status: SidecarQueueStatus | null; fetched: boolean }>({
+    status: null,
+    fetched: false,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const response = await fetch("/api/vrbo-sidecar/status", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const status = await response.json() as SidecarQueueStatus;
+        if (!cancelled) setState({ status, fetched: true });
+      } catch {
+        if (!cancelled) setState((previous) => ({ ...previous, fetched: true }));
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, enabled ? 1_500 : 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [enabled]);
+
+  return state;
+}
+
+function SidecarQueueProgress({
+  status,
+  label = "Chrome sidecar verification",
+  forceVisible = false,
+  className = "",
+}: {
+  status: SidecarQueueStatus | null;
+  label?: string;
+  forceVisible?: boolean;
+  className?: string;
+}) {
+  const active = activeSidecarCount(status);
+  if (!forceVisible && active <= 0) return null;
+
+  const total = status ? Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed) : 0;
+  const opSummary = sidecarOpSummary(status);
+  const message = status
+    ? active > 0
+      ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}.`
+      : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
+    : `${label}: waiting for queue status.`;
+
+  return (
+    <div className={`border border-blue-200 bg-blue-50/70 text-blue-900 rounded-md px-3 py-2 text-[11px] space-y-1.5 ${className}`}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="inline-flex items-center gap-2">
+          {active > 0 && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
+          <span>{message}</span>
+        </span>
+        {status?.oldestPendingAgeSec != null && status.pending > 0 && (
+          <span className="tabular-nums text-blue-800/80">
+            oldest {Math.round(status.oldestPendingAgeSec)}s
+          </span>
+        )}
+      </div>
+      <Progress value={sidecarQueueProgressValue(status)} className="h-1.5" />
+    </div>
+  );
+}
+
 // Auto-fill progress bar — gives the operator visual confirmation that
 // the mutation is still running while the server-side find-buy-in scan
 // collects and verifies candidates. Indeterminate in nature: ramps to
 // 95% over the expected cold-cache duration, snaps to 100% only when the
 // mutation completes (parent unmounts this component when autoFilling
 // clears).
-function AutoFillProgress({ slotCount }: { slotCount: number }) {
+function AutoFillProgress({
+  slotCount,
+  sidecarStatus,
+}: {
+  slotCount: number;
+  sidecarStatus: SidecarQueueStatus | null;
+}) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     const start = Date.now();
@@ -179,12 +316,20 @@ function AutoFillProgress({ slotCount }: { slotCount: number }) {
   // not pay two full scans. Cold cache can still be a couple minutes
   // because VRBO + PM sidecar checks share one local worker.
   const expectedSeconds = Math.max(180, 180 + Math.max(0, slotCount - 1) * 15);
-  const value = Math.min(95, Math.round((elapsed / expectedSeconds) * 100));
+  const timedValue = Math.min(95, Math.round((elapsed / expectedSeconds) * 100));
+  const active = activeSidecarCount(sidecarStatus);
+  const value = active > 0
+    ? Math.max(timedValue, sidecarQueueProgressValue(sidecarStatus))
+    : timedValue;
+  const queueText = active > 0
+    ? ` Chrome sidecar: ${sidecarStatus?.inProgress ?? 0} running, ${sidecarStatus?.pending ?? 0} queued.`
+    : "";
   return (
     <div className="mt-2 space-y-1">
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>
           Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"}) — cold-cache scans can take a few minutes
+          {queueText}
         </span>
         <span className="tabular-nums">{elapsed}s</span>
       </div>
@@ -415,6 +560,7 @@ export default function Bookings() {
   // Collapses the 6-click flow (expand → Find → scroll → Record → Save → ...)
   // into a single button per booking.
   const [autoFilling, setAutoFilling] = useState<string | null>(null);
+  const [autoFillStartedAtMs, setAutoFillStartedAtMs] = useState<number | null>(null);
   const autoFillMutation = useMutation({
     mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
       if (!selectedPropertyId) throw new Error("No property selected");
@@ -651,7 +797,6 @@ export default function Bookings() {
             + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
         });
       }
-      setAutoFilling(null);
     },
     onError: (e: any) => {
       const raw = String(e?.message ?? "");
@@ -669,9 +814,29 @@ export default function Bookings() {
           : raw,
         variant: "destructive",
       });
-      setAutoFilling(null);
     },
   });
+
+  const autoFillSidecarQueue = useSidecarQueueStatus(!!autoFilling);
+  const autoFillSidecarActive = !!autoFilling
+    && isSidecarStatusForSearch(autoFillSidecarQueue.status, autoFillStartedAtMs);
+
+  useEffect(() => {
+    if (!autoFilling) return;
+    if (autoFillMutation.isPending || autoFillSidecarActive) return;
+    if (!autoFillSidecarQueue.fetched) return;
+
+    const id = setTimeout(() => {
+      setAutoFilling(null);
+      setAutoFillStartedAtMs(null);
+    }, 3_000);
+    return () => clearTimeout(id);
+  }, [
+    autoFilling,
+    autoFillMutation.isPending,
+    autoFillSidecarActive,
+    autoFillSidecarQueue.fetched,
+  ]);
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -892,6 +1057,11 @@ export default function Bookings() {
                   0,
                 );
                 const channel = r.integration?.platform ?? r.source ?? "direct";
+                const rowAutoFillRunning = autoFilling === r._id
+                  && (autoFillMutation.isPending || autoFillSidecarActive);
+                const rowSidecarOnly = autoFilling === r._id
+                  && !autoFillMutation.isPending
+                  && autoFillSidecarActive;
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
@@ -959,7 +1129,12 @@ export default function Bookings() {
                           <p className="text-[10px] text-muted-foreground">profit</p>
                         </div>
                         <div className="shrink-0">
-                          {r.fullyLinked ? (
+                          {rowAutoFillRunning ? (
+                            <Badge className="bg-blue-600 text-white text-[10px]">
+                              <RefreshCw className="h-2.5 w-2.5 mr-1 animate-spin" />
+                              {rowSidecarOnly ? "Sidecar running" : "Searching"}
+                            </Badge>
+                          ) : r.fullyLinked ? (
                             <Badge className="bg-green-600 text-white text-[10px]">
                               <CheckCircle2 className="h-2.5 w-2.5 mr-1" /> All slots filled
                             </Badge>
@@ -991,21 +1166,27 @@ export default function Bookings() {
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  setAutoFillStartedAtMs(Date.now());
                                   setAutoFilling(r._id);
                                   autoFillMutation.mutate({ reservation: r });
                                 }}
-                                disabled={autoFillMutation.isPending && autoFilling === r._id}
+                                disabled={rowAutoFillRunning}
                                 data-testid={`button-auto-fill-${r._id}`}
                               >
                                 {autoFillMutation.isPending && autoFilling === r._id ? (
                                   <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
+                                ) : rowSidecarOnly ? (
+                                  <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Sidecar verifying…</>
                                 ) : (
                                   <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
                                 )}
                               </Button>
                             </div>
-                            {autoFillMutation.isPending && autoFilling === r._id && (
-                              <AutoFillProgress slotCount={r.slotsTotal - r.slotsFilled} />
+                            {rowAutoFillRunning && (
+                              <AutoFillProgress
+                                slotCount={r.slotsTotal - r.slotsFilled}
+                                sidecarStatus={autoFillSidecarQueue.status}
+                              />
                             )}
                           </div>
                         )}
@@ -1459,6 +1640,7 @@ function LiveSearchSection({
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -1488,6 +1670,12 @@ function LiveSearchSection({
     refetchOnMount: "always",
     placeholderData: (previousData) => previousData,
   });
+  const sidecarQueue = useSidecarQueueStatus(isLoading || isFetching || !!data);
+  const liveSearchSidecarActive = isSidecarStatusForSearch(sidecarQueue.status, searchStartedAtMs);
+  const refreshLiveSearch = () => {
+    setSearchStartedAtMs(Date.now());
+    setRefreshNonce((n) => n + 1);
+  };
 
   const hardErrorDiagnostics = useMemo<FindBuyInDiagnostics | null>(() => {
     if (!isError || data) return null;
@@ -1559,6 +1747,7 @@ function LiveSearchSection({
           isFetching,
           isPlaceholderData,
           dataUpdatedAt: dataUpdatedAt ? new Date(dataUpdatedAt).toISOString() : null,
+          sidecarQueue: sidecarQueue.status,
         },
       },
       response: data ?? null,
@@ -1600,9 +1789,16 @@ function LiveSearchSection({
 
   if (isLoading && !data) {
     return (
-      <div className="border rounded-lg p-6 text-center text-sm text-muted-foreground">
-        <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-        Searching Airbnb (for photo matches), Booking.com, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
+      <div className="border rounded-lg p-6 text-sm text-muted-foreground space-y-4">
+        <div className="text-center">
+          <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
+          Searching Airbnb (for photo matches), Booking.com, Vrbo, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
+        </div>
+        <SidecarQueueProgress
+          status={sidecarQueue.status}
+          label="Chrome sidecar verification"
+          forceVisible
+        />
       </div>
     );
   }
@@ -1621,7 +1817,7 @@ function LiveSearchSection({
             <Button size="sm" variant="outline" onClick={() => copySafeSearchLog("error")}>
               <Copy className="h-3.5 w-3.5 mr-1" /> Copy Safe Log
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
+            <Button size="sm" variant="outline" onClick={refreshLiveSearch}>Retry</Button>
           </span>
         </div>
         {searchDiagnostics && (
@@ -1709,7 +1905,7 @@ function LiveSearchSection({
         </div>
         <div className="flex items-center gap-2">
           <SidecarStatusBadge />
-          <Button size="sm" variant="ghost" onClick={() => setRefreshNonce((n) => n + 1)}>
+          <Button size="sm" variant="ghost" onClick={refreshLiveSearch}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
           </Button>
           <Button size="sm" variant="outline" onClick={() => copySafeSearchLog("success")}>
@@ -1717,18 +1913,19 @@ function LiveSearchSection({
           </Button>
         </div>
       </div>
-      {isFetching && data && (
-        <div className="border border-blue-200 bg-blue-50/70 text-blue-800 rounded-md px-3 py-2 text-[11px] inline-flex items-center gap-2">
-          <RefreshCw className="h-3 w-3 animate-spin" />
-          Refreshing live rates. Keeping the last completed results visible while the sidecar finishes.
-        </div>
+      {(isFetching || liveSearchSidecarActive) && (
+        <SidecarQueueProgress
+          status={sidecarQueue.status}
+          label={isFetching ? "Refreshing live rates" : "Chrome sidecar verification"}
+          forceVisible={isFetching}
+        />
       )}
       {isError && data && (
         <div className="border border-amber-300 bg-amber-50/70 text-amber-800 rounded-md px-3 py-2 text-[11px] flex items-center justify-between gap-2">
           <span>
             Latest refresh failed: {(error as Error).message}. Showing the last completed scan.
           </span>
-          <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setRefreshNonce((n) => n + 1)}>Retry</Button>
+          <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={refreshLiveSearch}>Retry</Button>
         </div>
       )}
       {searchDiagnostics && searchDiagnostics.severity !== "ok" && (

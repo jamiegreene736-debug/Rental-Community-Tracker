@@ -8868,6 +8868,15 @@ export async function registerRoutes(
     return res.json(getStatus());
   });
 
+  // GET /api/vrbo-sidecar/status — public queue counters for the
+  // Operations UI. No URLs, cookies, params, or secrets are exposed;
+  // this only lets the dashboard keep showing progress while the local
+  // Chrome sidecar drains work after the main find-buy-in request returns.
+  app.get("/api/vrbo-sidecar/status", async (_req, res) => {
+    const { getStatus } = await import("./vrbo-sidecar-queue");
+    return res.json(getStatus());
+  });
+
   // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
   //
   // The Chrome extension at ~/Downloads/vrbo-sidecar-cookie-extension/
