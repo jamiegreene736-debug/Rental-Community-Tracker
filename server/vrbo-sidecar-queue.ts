@@ -439,6 +439,14 @@ export function complete(opts: {
   return { ok: true };
 }
 
+function cancelRequest(id: string, reason: string): void {
+  const r = queue.get(id);
+  if (!r || r.status === "completed" || r.status === "failed") return;
+  r.status = "failed";
+  r.error = reason;
+  r.completedAt = nowMs();
+}
+
 export function getResult(id: string): SidecarRequest | null {
   cleanup();
   return queue.get(id) ?? null;
@@ -879,10 +887,12 @@ async function awaitOpResult(opts: {
     }
     await new Promise((res) => setTimeout(res, pollMs));
   }
+  const reason = `wallet budget ${walletMs}ms exceeded waiting for worker`;
+  cancelRequest(id, reason);
   return {
     results: null,
     workerOnline: false,
     durationMs: nowMs() - startedAt,
-    reason: `wallet budget ${walletMs}ms exceeded waiting for worker`,
+    reason,
   };
 }
