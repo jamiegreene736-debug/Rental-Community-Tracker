@@ -117,6 +117,13 @@ async function dismissObstructions(targetPage = page, label = "page") {
           return Boolean(el.disabled) || el.getAttribute?.("aria-disabled") === "true";
         }
 
+        function isDismissLabel(label) {
+          const compact = String(label || "").trim();
+          if (!compact) return false;
+          if (strictCloseRe.test(compact)) return true;
+          return compact.length <= 90 && closeRe.test(compact);
+        }
+
         function clickCandidate(el, kind) {
           const rect = el.getBoundingClientRect();
           const label = labelOf(el).slice(0, 80) || el.tagName.toLowerCase();
@@ -158,9 +165,13 @@ async function dismissObstructions(targetPage = page, label = "page") {
             const label = labelOf(el);
             if (!label) return false;
             if (looksCookie && cookieRe.test(label)) return true;
-            return closeRe.test(label) || strictCloseRe.test(label);
+            return isDismissLabel(label);
           });
-          if (target) return clickCandidate(target, looksCookie ? "cookie-or-consent" : "modal-or-popup");
+          if (target) {
+            const targetLabel = labelOf(target);
+            const kind = looksCookie && cookieRe.test(targetLabel) ? "cookie-or-consent" : "modal-or-popup";
+            return clickCandidate(target, kind);
+          }
         }
 
         const controls = Array.from(document.querySelectorAll(CONTROL_SELECTOR))
@@ -170,7 +181,7 @@ async function dismissObstructions(targetPage = page, label = "page") {
 
         const closeTarget = controls.find((el) => {
           const label = labelOf(el);
-          if (!strictCloseRe.test(label)) return false;
+          if (!isDismissLabel(label)) return false;
           const rect = el.getBoundingClientRect();
           return rect.width <= 96 && rect.height <= 96;
         });
