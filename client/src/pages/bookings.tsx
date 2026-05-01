@@ -1284,6 +1284,8 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
+  fromCache?: boolean;
+  cacheAgeSec?: number;
   // Server-side `cheapest` is the source of truth for Auto-fill. It is
   // already filtered to the verified, date-specific candidates that are
   // safe to attach without running another client-side PM verifier.
@@ -1472,7 +1474,7 @@ function LiveSearchSection({
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
-  const { data, isLoading, isFetching, isError, error } = useQuery<FindBuyInResponse>({
+  const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
     queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, refreshNonce],
     queryFn: () => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
@@ -1553,6 +1555,11 @@ function LiveSearchSection({
         bedrooms: slot.bedrooms,
         checkIn: checkInYmd,
         checkOut: checkOutYmd,
+        uiState: {
+          isFetching,
+          isPlaceholderData,
+          dataUpdatedAt: dataUpdatedAt ? new Date(dataUpdatedAt).toISOString() : null,
+        },
       },
       response: data ?? null,
       error: status === "error" ? error : undefined,
@@ -1641,6 +1648,11 @@ function LiveSearchSection({
     if (isAttachedElsewhere(u.primaryUrl)) return false;
     return !u.listings.some((l) => isAttachedElsewhere(l.url));
   });
+  const lastScanLabel = data?.diagnostics?.generatedAt
+    ? new Date(data.diagnostics.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
+    : dataUpdatedAt
+      ? new Date(dataUpdatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
+      : null;
   const hiddenAlreadyAttachedCount =
     (airbnb.length - availableAirbnb.length)
     + (vrbo.length - availableVrbo.length)
@@ -1682,6 +1694,13 @@ function LiveSearchSection({
           {data?.resortName && (
             <p className="text-[11px] text-muted-foreground mt-0.5">
               Only listings within <b>{data.resortName}</b> are shown.
+            </p>
+          )}
+          {lastScanLabel && (
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Last completed scan {lastScanLabel}
+              {data?.fromCache ? ` · server cache ${data.cacheAgeSec ?? "?"}s old` : ""}
+              {isPlaceholderData || (isFetching && data) ? " · refreshing now" : ""}
             </p>
           )}
         </div>

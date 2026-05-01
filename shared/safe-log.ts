@@ -136,12 +136,15 @@ export function buildSafeErrorLog(
 type BuyInCandidateLogShape = {
   source?: string;
   sourceLabel?: string;
+  title?: string;
   url?: string;
   link?: string;
   bookingLink?: string;
   nightlyPrice?: number;
   totalPrice?: number;
   bedrooms?: number;
+  verified?: string;
+  verifiedReason?: string;
   price?: {
     extracted_total_price?: number;
     extracted_price_per_qualifier?: number;
@@ -166,10 +169,13 @@ function summarizeCandidate(candidate: BuyInCandidateLogShape): Record<string, u
   return sanitizeForChatValue({
     source: candidate.source,
     sourceLabel: candidate.sourceLabel,
+    title: candidate.title,
     urlHost: safeUrlHost(rawUrl),
     bedrooms: candidate.bedrooms,
     totalPrice,
     nightlyPrice,
+    verified: candidate.verified,
+    verifiedReason: candidate.verifiedReason,
     hasImage: Boolean(candidate.image) || Boolean(candidate.images?.length),
   }) as Record<string, unknown>;
 }
@@ -197,9 +203,12 @@ export function buildBuyInSearchDebugLog(input: {
     listingTitle?: string | null;
     bedrooms?: number;
     nights?: number;
+    fromCache?: boolean;
+    cacheAgeSec?: number;
     sources?: Record<string, BuyInCandidateLogShape[]>;
     cheapest?: BuyInCandidateLogShape[];
     totalPricedResults?: number;
+    diagnostics?: Record<string, unknown>;
     debug?: Record<string, unknown>;
   } | null;
   error?: unknown;
@@ -217,11 +226,17 @@ export function buildBuyInSearchDebugLog(input: {
       listingTitle: input.response.listingTitle,
       bedrooms: input.response.bedrooms,
       nights: input.response.nights,
+      fromCache: input.response.fromCache,
+      cacheAgeSec: input.response.cacheAgeSec,
       sourceCounts: Object.fromEntries(
         Object.entries(sources).map(([source, items]) => [source, items.length]),
       ),
+      candidates: Object.fromEntries(
+        Object.entries(sources).map(([source, items]) => [source, items.map(summarizeCandidate)]),
+      ),
       cheapest: (input.response.cheapest ?? []).map(summarizeCandidate),
       totalPricedResults: input.response.totalPricedResults,
+      diagnostics: input.response.diagnostics,
       debug: input.response.debug,
     } : undefined,
     error: input.error ? sanitizeForChatValue(input.error) : undefined,
