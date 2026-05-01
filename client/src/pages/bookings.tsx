@@ -445,7 +445,7 @@ export default function Bookings() {
       const getFindBuyInForBedrooms = (bedrooms: number): Promise<FindBuyInResponse> => {
         const existing = findBuyInCache.get(bedrooms);
         if (existing) return existing;
-        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}`;
+        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}&nocache=1`;
         const promise = apiRequest("GET", url).then((r) => r.json()) as Promise<FindBuyInResponse>;
         findBuyInCache.set(bedrooms, promise);
         return promise;
