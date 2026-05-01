@@ -1317,6 +1317,7 @@ type FindBuyInResponse = {
       yes: number;
       no: number;
       unclear: number;
+      sidecarReasonSummary?: string;
       available: boolean;
     };
     searchLocation?: string;

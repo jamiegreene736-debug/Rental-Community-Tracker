@@ -61,6 +61,169 @@ function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
   ]);
 }
 
+async function dismissObstructions(targetPage = page, label = "page") {
+  if (!targetPage || targetPage.isClosed?.()) return [];
+  const actions = [];
+  for (let pass = 0; pass < 4; pass++) {
+    const action = await withSoftTimeout(
+      targetPage.evaluate(() => {
+        const CONTROL_SELECTOR = "button, a, [role='button'], input[type='button'], input[type='submit'], [aria-label], [title]";
+        const ROOT_SELECTOR = [
+          "[role='dialog']",
+          "[aria-modal='true']",
+          "[class*='modal' i]",
+          "[id*='modal' i]",
+          "[class*='popup' i]",
+          "[id*='popup' i]",
+          "[class*='overlay' i]",
+          "[id*='overlay' i]",
+          "[class*='newsletter' i]",
+          "[id*='newsletter' i]",
+          "[class*='cookie' i]",
+          "[id*='cookie' i]",
+          "[class*='consent' i]",
+          "[id*='consent' i]",
+          "#onetrust-banner-sdk",
+          ".cc-window",
+        ].join(",");
+        const closeRe = /(?:^|\b)(?:close|dismiss|no thanks|not now|skip|maybe later|continue without|×|x)(?:\b|$)/i;
+        const strictCloseRe = /^(?:×|x|close|dismiss)$/i;
+        const cookieRe = /\b(?:accept all|accept cookies|allow all|i agree|agree|reject all|decline|got it|ok)\b/i;
+        const globalCookieRe = /\b(?:accept all|accept cookies|allow all|i agree|reject all|decline)\b/i;
+
+        function isVisible(el) {
+          if (!el || !(el instanceof HTMLElement)) return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 4 || rect.height < 4) return false;
+          if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0.05;
+        }
+
+        function labelOf(el) {
+          return [
+            el.textContent,
+            el.getAttribute?.("aria-label"),
+            el.getAttribute?.("title"),
+            el.getAttribute?.("value"),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+
+        function isDisabled(el) {
+          return Boolean(el.disabled) || el.getAttribute?.("aria-disabled") === "true";
+        }
+
+        function clickCandidate(el, kind) {
+          const rect = el.getBoundingClientRect();
+          const label = labelOf(el).slice(0, 80) || el.tagName.toLowerCase();
+          el.scrollIntoView?.({ block: "center", inline: "center" });
+          el.click();
+          return {
+            clicked: true,
+            kind,
+            label,
+            tag: el.tagName.toLowerCase(),
+            rect: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              w: Math.round(rect.width),
+              h: Math.round(rect.height),
+            },
+          };
+        }
+
+        const roots = Array.from(document.querySelectorAll(ROOT_SELECTOR))
+          .filter(isVisible)
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (br.width * br.height) - (ar.width * ar.height);
+          });
+
+        for (const root of roots) {
+          const rootText = [
+            root.id,
+            root.className,
+            root.getAttribute?.("aria-label"),
+            root.textContent,
+          ].filter(Boolean).join(" ").slice(0, 2000);
+          const looksCookie = /cookie|consent|privacy|gdpr|onetrust/i.test(rootText);
+          const controls = Array.from(root.querySelectorAll(CONTROL_SELECTOR))
+            .filter((el) => isVisible(el) && !isDisabled(el));
+          const target = controls.find((el) => {
+            const label = labelOf(el);
+            if (!label) return false;
+            if (looksCookie && cookieRe.test(label)) return true;
+            return closeRe.test(label) || strictCloseRe.test(label);
+          });
+          if (target) return clickCandidate(target, looksCookie ? "cookie-or-consent" : "modal-or-popup");
+        }
+
+        const controls = Array.from(document.querySelectorAll(CONTROL_SELECTOR))
+          .filter((el) => isVisible(el) && !isDisabled(el));
+        const cookieTarget = controls.find((el) => globalCookieRe.test(labelOf(el)));
+        if (cookieTarget) return clickCandidate(cookieTarget, "cookie-or-consent");
+
+        const closeTarget = controls.find((el) => {
+          const label = labelOf(el);
+          if (!strictCloseRe.test(label)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width <= 96 && rect.height <= 96;
+        });
+        if (closeTarget) return clickCandidate(closeTarget, "global-close");
+
+        return null;
+      }),
+      2_500,
+      null,
+    );
+    if (!action?.clicked) break;
+    actions.push(action);
+    await targetPage.waitForTimeout(400).catch(() => {});
+  }
+
+  const stillBlocked = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      const roots = Array.from(document.querySelectorAll("[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='popup' i], [class*='overlay' i]"));
+      return roots.some((el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 20 && rect.height > 20 && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      });
+    }),
+    1_000,
+    false,
+  );
+  if (stillBlocked) {
+    await targetPage.keyboard.press("Escape").catch(() => {});
+    actions.push({ clicked: true, kind: "escape", label: "Escape" });
+    await targetPage.waitForTimeout(400).catch(() => {});
+  }
+
+  if (actions.length > 0) {
+    log(`${label}: dismissed obstruction(s): ${actions.map((a) => `${a.kind}:${a.label}`).join("; ")}`);
+  }
+  return actions;
+}
+
+function withDismissalReason(result, dismissals) {
+  if (!result || !Array.isArray(dismissals) || dismissals.length === 0) return result;
+  const detail = dismissals
+    .slice(0, 4)
+    .map((a) => `${a.kind}:${a.label}`)
+    .join(", ");
+  const base = result.reason || "Parsed page";
+  return {
+    ...result,
+    reason: `${base}; dismissed obstruction(s): ${detail}`.slice(0, 600),
+  };
+}
+
 function authHeaders() {
   return ADMIN_SECRET ? { "X-Admin-Secret": ADMIN_SECRET } : {};
 }
@@ -433,6 +596,7 @@ async function processVrboSearch(id, params) {
     `&adults=2&sort=PRICE_LOW_TO_HIGH&currency=USD`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "vrbo_search");
   const state = await dumpPageState("vrbo", { id, ...params });
   if (state && /show us your human side|we can.?t tell if you.?re a human/i.test(state.bodyExcerpt)) {
     throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
@@ -588,6 +752,7 @@ async function processVrboPhotoScrape(id, params) {
   await ensureBrowser();
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "vrbo_photo_scrape");
   const state = await dumpPageState("vrbo-photo", { id, ...params });
   if (state && /show us your human side|we can.?t tell if you.?re a human|bot or not/i.test(state.bodyExcerpt)) {
     throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
@@ -668,12 +833,11 @@ async function processBookingSearch(id, params) {
     `&order=price&nflt=${encodeURIComponent("entire_place_bedroom_count=" + bedrooms)}`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "booking_search");
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
   }
-  // Dismiss the genius/sign-in modal if present.
-  await page.click('button[aria-label*="Dismiss" i], [role="dialog"] button:has-text("No, thanks")', { timeout: 1500 }).catch(() => {});
 
   const cards = await page.evaluate((minBd) => {
     const cards = Array.from(document.querySelectorAll('[data-testid="property-card"]'));
@@ -731,8 +895,7 @@ async function processGoogleSerp(id, params) {
   const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${maxResults ?? 20}&hl=en&gl=us`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(2500);
-  // Dismiss consent overlay if present.
-  await page.click('button:has-text("Accept all"), button:has-text("I agree"), button:has-text("Reject all")', { timeout: 1500 }).catch(() => {});
+  await dismissObstructions(page, "google_serp");
   await page.waitForTimeout(800);
   const state = await dumpPageState("google", { id, ...params });
   if (state && /unusual traffic|sorry, but your computer/i.test(state.bodyExcerpt)) {
@@ -793,6 +956,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   const finalUrl = withDateParams(url, checkIn, checkOut);
   await targetPage.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await targetPage.waitForTimeout(PAGE_SETTLE_MS);
+  const dismissals = await dismissObstructions(targetPage, "pm_url_check");
   await normalizePageDisplay(targetPage);
   const platformResult = await targetPage.evaluate(async ({ checkIn, checkOut, bedrooms }) => {
     const nightsBetween = (a, b) => Math.max(
@@ -1057,8 +1221,8 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     }
     return null;
   }, { checkIn, checkOut, bedrooms }).catch(() => null);
-  if (platformResult) return platformResult;
-  return await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
+  if (platformResult) return withDismissalReason(platformResult, dismissals);
+  const genericResult = await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
     const NO_PATTERNS = [
       /not available for these dates/i,
@@ -1139,6 +1303,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       reason: "Page didn't show a clear availability/price signal — possibly login wall or non-standard PM layout",
     };
   }, { checkIn, checkOut, nights: Math.max(1, Math.round((new Date(`${checkOut}T12:00:00Z`).getTime() - new Date(`${checkIn}T12:00:00Z`).getTime()) / 86400000)) });
+  return withDismissalReason(genericResult, dismissals);
 }
 
 async function processPmUrlCheck(id, params) {

@@ -4241,6 +4241,45 @@ export async function registerRoutes(
     };
     const isManualQuoteCandidate = (c: Candidate): boolean =>
       c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0);
+    type SidecarReasonBucket = { count: number; examples: string[] };
+    const sidecarVerifyReasonCounts = new Map<string, SidecarReasonBucket>();
+    const normalizeSidecarVerifyReason = (reason?: string | null): string => {
+      const raw = String(reason || "No reason returned by sidecar");
+      let base = "Other sidecar outcome";
+      if (/bot wall|captcha|access denied|rate-limit|robot|human side/i.test(raw)) {
+        base = "Bot wall / access denied";
+      } else if (/tab error|timeout|net::|navigation|ERR_|fetch failed|closed|crash/i.test(raw)) {
+        base = "Navigation or tab error";
+      } else if (/not available|no availability|sold out|unavailable|booked night|no check-in|minimum/i.test(raw)) {
+        base = "Unavailable or blocked by stay rules";
+      } else if (/did not show a priced .*bedroom|room type|bedroom room/i.test(raw)) {
+        base = "Bedroom-specific room/rate not found";
+      } else if (/generic book\/price signal|no date-specific total|no parseable total/i.test(raw)) {
+        base = "Book/price visible but no date-specific total";
+      } else if (/didn't show a clear availability\/price signal|non-standard PM layout|login wall/i.test(raw)) {
+        base = "No clear availability/price signal";
+      }
+      return /dismissed obstruction/i.test(raw) ? `${base} after popup/overlay dismissal` : base;
+    };
+    const rememberSidecarVerifyReason = (c: Candidate, reason?: string | null) => {
+      const bucketName = normalizeSidecarVerifyReason(reason);
+      const bucket = sidecarVerifyReasonCounts.get(bucketName) ?? { count: 0, examples: [] };
+      bucket.count += 1;
+      if (bucket.examples.length < 3) {
+        const host = (() => {
+          try { return new URL(c.url).hostname.replace(/^www\./, ""); } catch { return c.sourceLabel || c.source; }
+        })();
+        bucket.examples.push(`${host}: ${(c.title || c.url).slice(0, 80)}`);
+      }
+      sidecarVerifyReasonCounts.set(bucketName, bucket);
+    };
+    const formatSidecarReasonSummary = (): string => {
+      const rows = Array.from(sidecarVerifyReasonCounts.entries())
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 5)
+        .map(([label, bucket]) => `${label} (${bucket.count}; e.g. ${bucket.examples.join(" | ")})`);
+      return rows.join("; ");
+    };
     const sidecarVerifyPool = [
       // Prioritize the rows the UI would otherwise label "manual quote"
       // so the operator doesn't have to click each one.
@@ -4294,6 +4333,7 @@ export async function registerRoutes(
               c.verified = r.available;
               c.verifiedReason = r.reason;
               c.verifiedNightlyPrice = r.nightlyPrice ?? null;
+              if (r.available !== "yes") rememberSidecarVerifyReason(c, r.reason);
               // Promote the page-quoted price onto the candidate so the
               // priced filter `nightlyPrice > 0` admits it.
               if (r.available === "yes") {
@@ -4556,6 +4596,7 @@ export async function registerRoutes(
     units.sort((a, b) => a.minNightlyPrice - b.minNightlyPrice);
     const cheapestUnits = units.slice(0, 20);
     const scanElapsedMs = Date.now() - scanStartedAt;
+    const sidecarReasonSummary = formatSidecarReasonSummary();
 
     type SearchDiagnosticStatus = "ok" | "warning" | "error" | "timeout" | "skipped";
     const pricedCount = (items: Candidate[]) => items.filter((c) => c.nightlyPrice > 0 || c.totalPrice > 0).length;
@@ -4589,7 +4630,17 @@ export async function registerRoutes(
         severity: "warning",
         source: "Sidecar rate verifier",
         summary: "No Booking.com/PM detail URLs were verified by the sidecar",
-        detail: "Candidates remain visible for manual review, but none were promoted to verified bookable.",
+        detail: sidecarReasonSummary
+          ? `Candidates remain visible for manual review. Top outcomes: ${sidecarReasonSummary}`
+          : "Candidates remain visible for manual review, but none were promoted to verified bookable.",
+      });
+    }
+    if (sidecarBatchVerifiedUrls.size > 0 && preVerifyYes === 0) {
+      issueList.push({
+        severity: "warning",
+        source: "Sidecar rate verifier",
+        summary: "Sidecar checked detail pages but found no verified date-specific prices",
+        detail: sidecarReasonSummary || "No per-page reason summary was returned by the sidecar.",
       });
     }
     if (sidecarVerifySkippedForBudget > 0) {
@@ -4673,7 +4724,7 @@ export async function registerRoutes(
         verified: preVerifyYes,
         message: sidecarVerifyTargets.length === 0
           ? "No unverified Booking.com/PM detail URLs needed sidecar verification."
-          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}.`,
+          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
       },
     ];
     const diagnosticsSeverity: "ok" | "warning" | "error" = issueList.some((i) => i.severity === "error")
@@ -4713,7 +4764,14 @@ export async function registerRoutes(
           photoMatchLanding: photoMatchLandingDropped,
           targetFilter: targetFilterDropped,
         },
-        verification: { attempted: preVerifyAttempted, yes: preVerifyYes, no: preVerifyNo, unclear: preVerifyUnclear },
+        verification: {
+          attempted: preVerifyAttempted,
+          yes: preVerifyYes,
+          no: preVerifyNo,
+          unclear: preVerifyUnclear,
+          sidecarReasonSummary,
+          sidecarReasonBuckets: Object.fromEntries(sidecarVerifyReasonCounts.entries()),
+        },
       }, null, 2),
     ].join("\n");
     const diagnostics = {
@@ -4789,6 +4847,7 @@ export async function registerRoutes(
           yes: preVerifyYes,
           no: preVerifyNo,
           unclear: preVerifyUnclear,
+          sidecarReasonSummary,
           // Verification path is the sidecar batch — available iff the
           // daemon was online during this find-buy-in.
           available: vrboSidecarOnline || sidecarBatchVerifiedUrls.size > 0,

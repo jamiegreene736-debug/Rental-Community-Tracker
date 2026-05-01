@@ -63,7 +63,15 @@ Before making any changes:
   rate from the PM booking widget automatically. Follow-up safety guard:
   optional sidecar verification now observes a 270s route budget and stops
   early with diagnostics (`skippedForBudget`) instead of risking Railway's
-  ~5-minute edge timeout.
+  ~5-minute edge timeout. Follow-up from Jamie's 2026-05-01 diagnostic
+  report (`25` sidecar checks, `0` verified): the local sidecar now runs a
+  shared `dismissObstructions()` helper after page load for VRBO, Booking,
+  Google, and PM URL checks. It clicks safe close/dismiss/no-thanks/cookie
+  controls, presses Escape if a modal remains, logs what was dismissed, and
+  appends that detail to PM verification reasons. The find-buy-in diagnostic
+  report now summarizes top sidecar failure buckets (unavailable/stay-rule,
+  no date-specific total, no clear signal, bot wall, navigation error, with
+  popup-dismissal noted) so Jamie can paste one report instead of screenshots.
 - 2026-04-30: Codex added operator-facing diagnostics for
   `/api/operations/find-buy-in`. The route now returns a `diagnostics`
   object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM
