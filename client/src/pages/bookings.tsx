@@ -1567,7 +1567,10 @@ function LiveSearchSection({
 
     try {
       await navigator.clipboard.writeText(log);
-      toast({ title: "Safe debug log copied", description: "Raw URLs and secrets were redacted." });
+      if (searchDiagnostics && searchDiagnostics.severity !== "ok") {
+        setDiagnosticsOpen(true);
+      }
+      toast({ title: "Safe debug log copied", description: "Raw URLs and secrets were redacted; cache state is included." });
     } catch {
       toast({ title: "Could not copy debug log", variant: "destructive" });
     }
