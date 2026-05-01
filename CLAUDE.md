@@ -60,7 +60,10 @@ Before making any changes:
   session: find-buy-in now prioritizes unpriced PM rows that would render
   as "manual quote" and pushes them through `checkPmUrlsBatchViaSidecar`
   before returning results, so Chrome gets a chance to extract a live
-  rate from the PM booking widget automatically.
+  rate from the PM booking widget automatically. Follow-up safety guard:
+  optional sidecar verification now observes a 270s route budget and stops
+  early with diagnostics (`skippedForBudget`) instead of risking Railway's
+  ~5-minute edge timeout.
 - 2026-04-30: Codex added operator-facing diagnostics for
   `/api/operations/find-buy-in`. The route now returns a `diagnostics`
   object with per-source status (`Airbnb`, `Vrbo`, `Booking.com`, `PM

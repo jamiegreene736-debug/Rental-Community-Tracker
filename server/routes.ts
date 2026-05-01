@@ -2011,6 +2011,11 @@ export async function registerRoutes(
   type FindBuyInCacheEntry = { value: any; expiresAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
   const FIND_BUY_IN_TTL_MS = 5 * 60_000;
+  // Railway's edge timeout is ~5 min. Keep the handler below that even
+  // when the local sidecar is slow by stopping optional verification work
+  // around 4.5 min and returning partial results + diagnostics.
+  const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
+  const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 12_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
   // = ~360 entries max in steady state, well within memory budget.
@@ -2598,6 +2603,7 @@ export async function registerRoutes(
     console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
     const scanStartedAt = Date.now();
+    const routeRemainingMs = () => Math.max(0, FIND_BUY_IN_ROUTE_BUDGET_MS - (Date.now() - scanStartedAt));
     const sourceErrors: Array<{ source: string; message: string }> = [];
     const sourceTimeouts: Array<{ source: string; ms: number }> = [];
     const noteSourceError = (source: string, error: unknown) => {
@@ -4174,7 +4180,13 @@ export async function registerRoutes(
     // drove Google search like a human) was retired in PR #275. The
     // broad PM finder now uses SearchAPI only, then the sidecar verifies
     // candidate PM URLs directly.
-    const pmSearchApiFinderRaw = await pmSearchApiFinderPromise;
+    const pmFinderBudgetMs = Math.min(30_000, Math.max(0, routeRemainingMs() - 15_000));
+    const pmSearchApiFinderRaw = pmFinderBudgetMs >= 5_000
+      ? await withTimeout(pmSearchApiFinderPromise, pmFinderBudgetMs, [] as Candidate[], "pm-searchapi-finder")
+      : (() => {
+          sourceTimeouts.push({ source: "pm-searchapi-finder", ms: pmFinderBudgetMs });
+          return [] as Candidate[];
+        })();
     const pmDedupeKey = (rawUrl: string): string => {
       try {
         const u = new URL(rawUrl);
@@ -4250,18 +4262,27 @@ export async function registerRoutes(
       if (sidecarVerifyTargets.length >= 25) break;
     }
     const sidecarManualQuoteTargetCount = sidecarVerifyTargets.filter(isManualQuoteCandidate).length;
+    let sidecarVerifySkippedForBudget = 0;
     if (sidecarVerifyTargets.length > 0) {
       try {
         const { checkPmUrlsBatchViaSidecar } = await import("./vrbo-sidecar-queue");
         let sidecarVerifyMs = 0;
         for (let i = 0; i < sidecarVerifyTargets.length; i += 5) {
+          const remainingBeforeBatch = routeRemainingMs();
+          if (remainingBeforeBatch < FIND_BUY_IN_MIN_SIDECAR_BATCH_MS) {
+            sidecarVerifySkippedForBudget = sidecarVerifyTargets.length - i;
+            console.warn(
+              `[find-buy-in] sidecar-batch-verify stopping early with ${sidecarVerifySkippedForBudget} URL(s) unchecked to avoid Railway timeout`,
+            );
+            break;
+          }
           const batchTargets = sidecarVerifyTargets.slice(i, i + 5);
           const batchRes = await checkPmUrlsBatchViaSidecar({
             urls: batchTargets.map((c) => c.url),
             checkIn,
             checkOut,
             bedrooms,
-            walletBudgetMs: 60_000,
+            walletBudgetMs: Math.min(60_000, remainingBeforeBatch),
           });
           sidecarVerifyMs += batchRes.durationMs;
           if (batchRes.workerOnline && batchRes.results.length > 0) {
@@ -4295,7 +4316,7 @@ export async function registerRoutes(
         const no = sidecarVerifyTargets.filter((c) => c.verified === "no").length;
         const unclear = sidecarVerifyTargets.filter((c) => c.verified === "unclear").length;
         console.log(
-          `[find-buy-in] sidecar-batch-verify checked=${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length} manualQuoteTargets=${sidecarManualQuoteTargetCount} yes=${yes} no=${no} unclear=${unclear} (${sidecarVerifyMs}ms)`,
+          `[find-buy-in] sidecar-batch-verify checked=${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length} manualQuoteTargets=${sidecarManualQuoteTargetCount} skippedForBudget=${sidecarVerifySkippedForBudget} yes=${yes} no=${no} unclear=${unclear} (${sidecarVerifyMs}ms)`,
         );
       } catch (e: any) {
         console.error(`[find-buy-in] sidecar-batch-verify error:`, e?.message ?? e);
@@ -4571,6 +4592,14 @@ export async function registerRoutes(
         detail: "Candidates remain visible for manual review, but none were promoted to verified bookable.",
       });
     }
+    if (sidecarVerifySkippedForBudget > 0) {
+      issueList.push({
+        severity: "warning",
+        source: "Sidecar rate verifier",
+        summary: `Skipped ${sidecarVerifySkippedForBudget} sidecar check(s) to avoid the Railway request timeout`,
+        detail: "The unchecked rows remain visible for manual review. Click Refresh to continue from a warmer cache.",
+      });
+    }
     if (cheapest.length === 0) {
       const severity = priced.length === 0 && (airbnbTarget.length + bookingTarget.length + vrboTarget.length + pmTarget.length) === 0 ? "error" : "warning";
       issueList.push({
@@ -4633,7 +4662,7 @@ export async function registerRoutes(
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; direct PM priced=${pricedCount(pmTarget)}.`,
+        message: `stage1=${pmStage1Source}; searchApiFinder=${pmSearchApiFinderCandidates.length}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -4644,7 +4673,7 @@ export async function registerRoutes(
         verified: preVerifyYes,
         message: sidecarVerifyTargets.length === 0
           ? "No unverified Booking.com/PM detail URLs needed sidecar verification."
-          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}.`,
+          : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; manualQuoteChecks=${sidecarManualQuoteTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}.`,
       },
     ];
     const diagnosticsSeverity: "ok" | "warning" | "error" = issueList.some((i) => i.severity === "error")
