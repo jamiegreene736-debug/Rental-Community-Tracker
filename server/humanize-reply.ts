@@ -334,7 +334,9 @@ export function addGuestPersonalTouch(text: string, guestMessage: string): strin
   if (!christmasGiftForFamily || !/\bfamil(?:y|ies)\b/i.test(guestMessage)) return text;
 
   const touch = "That sounds like a really sweet Christmas gift for your family.";
-  if (/sweet Christmas gift for your family/i.test(text)) return text;
+  const upgraded = text.replace(/\bThat sounds like a really sweet Christmas gift\./i, touch);
+  if (upgraded !== text) return upgraded;
+  if (/sweet Christmas gift/i.test(text)) return text;
 
   const { body, sig } = splitSignature(text);
   const trimmedBody = body.trimEnd();
