@@ -343,7 +343,9 @@ function AutoFillProgress({
   slotCount: number;
   sidecarStatus: SidecarQueueStatus | null;
 }) {
+  const { toast } = useToast();
   const [elapsed, setElapsed] = useState(0);
+  const [isStopping, setIsStopping] = useState(false);
   useEffect(() => {
     const start = Date.now();
     const id = setInterval(() => {
@@ -363,14 +365,53 @@ function AutoFillProgress({
   const queueText = active > 0
     ? ` Chrome sidecar: ${sidecarStatus?.inProgress ?? 0} running, ${sidecarStatus?.pending ?? 0} queued.`
     : "";
+  const stopSidecar = async () => {
+    setIsStopping(true);
+    try {
+      const response = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
+        reason: "cancelled by operator from Operations UI",
+      });
+      const result = await response.json();
+      toast({
+        title: "Sidecar stop requested",
+        description: result.cancelled > 0
+          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"}. The active Chrome task should close within a few seconds.`
+          : "No active sidecar jobs were running.",
+      });
+    } catch (e) {
+      toast({
+        title: "Could not stop sidecar",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
   return (
     <div className="mt-2 space-y-1">
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-        <span>
+      <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+        <span className="min-w-0">
           Searching candidates and verifying rates ({slotCount} {slotCount === 1 ? "slot" : "slots"}) — cold-cache scans can take a few minutes
           {queueText}
         </span>
-        <span className="tabular-nums">{elapsed}s</span>
+        <span className="inline-flex shrink-0 items-center gap-2">
+          <span className="tabular-nums">{elapsed}s</span>
+          {active > 0 && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 border-blue-300 bg-white/80 px-2 text-[11px] text-blue-900 hover:bg-blue-100"
+              onClick={stopSidecar}
+              disabled={isStopping}
+            >
+              <XCircle className="h-3.5 w-3.5 mr-1" />
+              {isStopping ? "Stopping" : "Stop"}
+            </Button>
+          )}
+        </span>
       </div>
       <Progress value={value} className="h-1.5" />
     </div>
