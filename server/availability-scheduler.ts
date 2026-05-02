@@ -84,6 +84,7 @@ export async function runFullScanForProperty(
       config,
       resortName,
       manualMinSets: opts.minSets,
+      weeks: 104,
     });
     seasonalWindows = scan.windows;
     const worst = seasonalWindows.reduce((acc, w) => {
@@ -97,7 +98,7 @@ export async function runFullScanForProperty(
     const tight = seasonalWindows.filter((w) => w.verdict === "tight").length;
     const blocked = seasonalWindows.filter((w) => w.verdict === "blocked").length;
     summaries.push(`inventory ${worst?.maxSets ?? 0} sets (${worst?.verdict ?? "blocked"})`);
-    summaries.push(`season-windows ${open} open/${tight} tight/${blocked} blocked`);
+    summaries.push(`weekly-windows ${open} open/${tight} tight/${blocked} blocked`);
   }
 
   if (opts.runSyncBlocks && opts.runInventory && seasonalWindows.length > 0) {
@@ -125,7 +126,7 @@ export async function runFullScanForProperty(
   // Uses the manually-curated BUY_IN_RATES from shared/pricing-rates.ts
   // (cost we PAY per night) × season multiplier, then marks up to hit
   // the target margin after the direct-channel fee. The earlier version
-  // used live Airbnb engine prices as the cost basis, which was wrong —
+  // used live OTA website prices as the cost basis, which was wrong —
   // those are SELL prices already inflated by other hosts' margins.
   if (opts.runPricing) {
     const feeDirect = 0.03;
@@ -236,17 +237,17 @@ async function tick() {
 // Weekly market-rate refresh. Calls the in-process
 // /api/admin/refresh-all-market-rates endpoint, which walks every
 // active static property in PROPERTY_UNIT_NEEDS plus every saved
-// community draft and re-runs the SearchAPI Airbnb-engine 7-night-
-// amortized lookup. Result is one upserted row per (propertyId,
+// community draft and re-runs the sidecar-backed LOW / HIGH /
+// HOLIDAY website-search lookup. Result is one upserted row per (propertyId,
 // bedrooms) in `property_market_rates` — the cost-basis that the
 // Pricing tab feeds into the per-channel floor formula
 // `(buyIn × 1.20) ÷ (1 − channel_fee)`.
 //
-// Cadence: once per 7 days. SearchAPI bills per query and a
-// per-bedroom-count refresh on 12 properties is ~30 calls; weekly is
-// the right balance between freshness and cost. Operators who need a
-// faster refresh can hit `/api/property/:id/refresh-market-rates`
-// directly from the buy-in tracker page.
+// Cadence: once per 7 days. The sidecar serializes all browser work
+// through one Chrome instance; weekly is the right balance between
+// freshness and queue contention. Operators who need a faster refresh
+// can hit `/api/property/:id/refresh-market-rates` directly from the
+// Pricing tab.
 const MARKET_RATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 let _marketRateRefreshRunning = false;
 

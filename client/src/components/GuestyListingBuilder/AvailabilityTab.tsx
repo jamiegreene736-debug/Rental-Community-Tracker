@@ -2,9 +2,10 @@
 //
 // Replaces the old "shopping list of buy-ins" UX with a safety-guarantee
 // seasonal scan: LOW, HIGH, and HOLIDAY samples are checked through the
-// sidecar-backed multi-channel buy-in engine. Windows where we cannot verify
-// enough independent complete buy-in sets can be pushed as unavailable blocks
-// to Guesty's calendar so they cannot be oversold.
+// sidecar-backed multi-channel buy-in engine, then projected across 7-night
+// weekly windows for the 24-month Guesty horizon. Windows where we cannot
+// verify enough independent complete buy-in sets can be pushed as unavailable
+// blocks to Guesty's calendar so they cannot be oversold.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -98,7 +99,7 @@ function fmtShort(iso: string): string {
 // so nothing is silently lost — it just renders as plain text.
 type RunBadges = {
   inventory?: { sets: number; verdict: "open" | "tight" | "blocked" };
-  seasonWindows?: { open: number; tight: number; blocked: number };
+  weeklyWindows?: { open: number; tight: number; blocked: number };
   marketSnapshot?: { seen: number; total: number };
   blocks?: { added: number; removed: number; failed: number };
   rates?: { pushed: number; total: number };
@@ -112,8 +113,8 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
     let m;
     if ((m = p.match(/^inventory\s+(\d+)\s+sets\s+\((open|tight|blocked)\)$/i))) {
       out.inventory = { sets: parseInt(m[1], 10), verdict: m[2].toLowerCase() as "open" | "tight" | "blocked" };
-    } else if ((m = p.match(/^season-windows\s+(\d+)\s+open\/(\d+)\s+tight\/(\d+)\s+blocked$/i))) {
-      out.seasonWindows = { open: parseInt(m[1], 10), tight: parseInt(m[2], 10), blocked: parseInt(m[3], 10) };
+    } else if ((m = p.match(/^(?:weekly-windows|season-windows)\s+(\d+)\s+open\/(\d+)\s+tight\/(\d+)\s+blocked$/i))) {
+      out.weeklyWindows = { open: parseInt(m[1], 10), tight: parseInt(m[2], 10), blocked: parseInt(m[3], 10) };
     } else if ((m = p.match(/^market-snapshot\s+(\d+)\/(\d+)\s+seasons$/i))) {
       out.marketSnapshot = { seen: parseInt(m[1], 10), total: parseInt(m[2], 10) };
     } else if ((m = p.match(/^blocks\s+\+(\d+)\/-(\d+)(?:\/\xD7(\d+))?$/i))) {
@@ -338,7 +339,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     setCtx(null);
     setCandidates(null);
     setError(null);
-    setScanPhase("Starting seasonal sidecar scan");
+    setScanPhase("Starting 24-month sidecar scan");
     setProgress(null);
     setSelectedIdx(null);
     setSyncResult(null);
@@ -394,7 +395,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             collected.push(evt as WindowResult);
             setResults([...collected]);
             setProgress({ done, total });
-            setScanPhase(evt.season ? `${evt.season} sample complete` : "Scanning");
+            setScanPhase(evt.season ? `${evt.season} weekly window scanned` : "Scanning");
           } else if (evt.type === "error") {
             setError(evt.error ?? "Scan failed");
           } else if (evt.type === "done") {
@@ -562,7 +563,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               ⏱ Auto-scan scheduler {schedule?.enabled ? "ON" : "OFF"}
             </div>
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-              When enabled, the server runs seasonal sidecar inventory + price scan + Guesty block + rate sync every{" "}
+              When enabled, the server runs 24-month weekly inventory + price scan + Guesty block + rate sync every{" "}
               <b>{schedule?.intervalHours ?? 24}h</b> in the background.
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
               {schedule?.lastRunStatus && (() => {
@@ -627,13 +628,13 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       Market snapshot: <b>{b.marketSnapshot.seen}/{b.marketSnapshot.total}</b> seasons
                     </span>
                   )}
-                  {b.seasonWindows && (
+                  {b.weeklyWindows && (
                     <span style={chipStyle}>
-                      Seasons: <b style={{ color: "#166534" }}>{b.seasonWindows.open}</b> open
+                      Windows: <b style={{ color: "#166534" }}>{b.weeklyWindows.open}</b> open
                       {" / "}
-                      <b style={{ color: "#92400e" }}>{b.seasonWindows.tight}</b> tight
+                      <b style={{ color: "#92400e" }}>{b.weeklyWindows.tight}</b> tight
                       {" / "}
-                      <b style={{ color: "#991b1b" }}>{b.seasonWindows.blocked}</b> blocked
+                      <b style={{ color: "#991b1b" }}>{b.weeklyWindows.blocked}</b> blocked
                     </span>
                   )}
                   {b.blocks && (
@@ -690,7 +691,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "#6b7280" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runInventory} onChange={(e) => updateSchedule({ runInventory: e.target.checked })} />
-              Seasonal sidecar inventory
+              24-month weekly inventory
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runPricing} onChange={(e) => updateSchedule({ runPricing: e.target.checked })} />
@@ -779,10 +780,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       ) : (
                         <span style={{ color: "#6b7280" }}>
                           {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
-                          {parsed.seasonWindows && <>seasons <b style={{ color: "#166534" }}>{parsed.seasonWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.seasonWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.seasonWindows.blocked}</b> · </>}
+                          {parsed.weeklyWindows && <>windows <b style={{ color: "#166534" }}>{parsed.weeklyWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.weeklyWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.weeklyWindows.blocked}</b> · </>}
                           {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
                           {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
-                          {!parsed.inventory && !parsed.blocks && !parsed.rates && r.summary}
+                          {!parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && r.summary}
                         </span>
                       )}
                     </td>
@@ -848,7 +849,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
-          Season windows: <b>LOW</b> · <b>HIGH</b> · <b>HOLIDAY</b>
+          Weekly windows: <b>LOW</b> · <b>HIGH</b> · <b>HOLIDAY</b>
         </span>
         <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
           Manual block floor:
@@ -870,7 +871,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           disabled={scanning}
           style={{ fontSize: 12 }}
         >
-          {scanning ? "Scanning…" : results.length > 0 ? "↺ Re-scan" : "▶ Run seasonal scan"}
+          {scanning ? "Scanning…" : results.length > 0 ? "↺ Re-scan" : "▶ Run 24-month scan"}
         </button>
         {scanning && (
           <button className="glb-btn" onClick={stopScan} style={{ fontSize: 12 }}>
@@ -879,7 +880,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         )}
         {progress && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
-            {progress.done} / {progress.total} season windows{scanPhase ? ` · ${scanPhase}` : ""}
+            {progress.done} / {progress.total} weekly windows{scanPhase ? ` · ${scanPhase}` : ""}
           </span>
         )}
         <div style={{ flex: 1 }} />
@@ -899,12 +900,12 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, lineHeight: 1.6 }}>
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
-          {" "}A "set" = one listing per unit slot (no reuse). Seasonal samples are <b>blocked</b> below <b>{ctx.blockMinSets ?? ctx.minSets}</b> de-duped set(s) and <b>open</b> at <b>{ctx.openMinSets ?? (ctx.minSets + 2)}</b>.
+          {" "}A "set" = one listing per unit slot (no reuse). Weekly windows are <b>blocked</b> below <b>{ctx.blockMinSets ?? ctx.minSets}</b> de-duped set(s) and <b>open</b> at <b>{ctx.openMinSets ?? (ctx.minSets + 2)}</b>.
         </div>
       )}
       {candidates && (
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, lineHeight: 1.6 }}>
-          <b>Lowest verified seasonal inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
+          <b>Lowest verified weekly inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
             <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> effective options</span>
           ))} · max independent sets: <b>{candidates.baselineSets}</b>
           {candidates.baselineSets < (ctx?.blockMinSets ?? ctx?.minSets ?? 3) && (
@@ -990,7 +991,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         return (
           <div style={{ marginBottom: 24, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
             <div style={{ padding: "8px 12px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Seasonal Sample Summary — blocks pushed to Guesty
+              24-Month Weekly Summary — blocks pushed to Guesty
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
@@ -1043,10 +1044,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Sample-Window Pricing Correlation
+              Weekly Pricing Correlation
             </span>
             <span style={{ fontSize: 11, color: "#6b7280" }}>
-              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked windows skipped.
+              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked weeks skipped.
             </span>
             <div style={{ flex: 1 }} />
             {!pricingRows && (
@@ -1056,7 +1057,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 disabled={pricingBusy}
                 style={{ fontSize: 11 }}
               >
-                {pricingBusy ? "Computing…" : "▶ Compute sample rates"}
+                {pricingBusy ? "Computing…" : "▶ Compute weekly rates"}
               </button>
             )}
             {pricingRows && (
@@ -1064,7 +1065,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 className="glb-btn"
                 onClick={syncWeeklyRates}
                 disabled={ratesSyncBusy || !listingId}
-	                title={!listingId ? "Select a Guesty listing first" : `Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} sample-window rates to Guesty`}
+	                title={!listingId ? "Select a Guesty listing first" : `Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} weekly rates to Guesty`}
                 style={{ fontSize: 11 }}
               >
 	                {ratesSyncBusy ? "Pushing…" : `↑ Push ${pricingRows.filter((r) => r.verdict !== "blocked").length} rates to Guesty`}
@@ -1096,7 +1097,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             }}>
               {ratesSyncResult.ok ? "✓" : "⚠"}
               {" "}<b>On {new Date(ratesSyncResult.syncedAt ?? Date.now()).toLocaleString()}</b>
-	              {" — "}pushed <b>{ratesSyncResult.pushed ?? 0}</b> of <b>{ratesSyncResult.total ?? 0}</b> sample-window rates to Guesty
+	              {" — "}pushed <b>{ratesSyncResult.pushed ?? 0}</b> of <b>{ratesSyncResult.total ?? 0}</b> weekly rates to Guesty
               {ratesSyncResult.failures && ratesSyncResult.failures.length > 0 && (
                 <span style={{ color: "#92400e" }}>, {ratesSyncResult.failures.length} failed</span>
               )}
@@ -1153,7 +1154,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           )}
           {!pricingRows && !pricingBusy && (
             <div style={{ padding: "12px 16px", fontSize: 12, color: "#6b7280", textAlign: "center" }}>
-              Click <b>Compute sample rates</b> to see pricing based on this scan's tightness signal.
+              Click <b>Compute weekly rates</b> to see pricing based on this scan's tightness signal.
             </div>
           )}
         </div>
@@ -1215,7 +1216,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 600 }}>
-                {selected.season ? `${selected.season} sample` : "Window"}: {fmtShort(selected.startDate)} → {fmtShort(selected.endDate)}
+                {selected.season ? `${selected.season} week` : "Window"}: {fmtShort(selected.startDate)} → {fmtShort(selected.endDate)}
                 {selected.nights ? ` (${selected.nights} nights)` : ""}
               </div>
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
@@ -1310,7 +1311,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </div>
           )}
 
-          {/* Legacy static-Airbnb scans included sample URLs. Seasonal sidecar
+          {/* Legacy static-Airbnb scans included sample URLs. Weekly sidecar
               scans primarily return channel counts, but keep this fallback
               visible when old scan payloads are loaded. */}
           {selected.sample && Object.keys(selected.sample).length > 0 ? (
@@ -1338,7 +1339,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 </div>
               ))}
               <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
-                These URLs appear only for the legacy static scan path; seasonal sidecar scans use dated channel counts above.
+                These URLs appear only for the legacy static scan path; weekly sidecar scans use dated channel counts above.
               </div>
             </div>
           ) : selectedChannelRows.length === 0 ? (

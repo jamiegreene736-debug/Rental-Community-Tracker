@@ -2,31 +2,27 @@
 //
 // The Pricing tab's per-channel sell-price floor formula is
 // `(buyIn × 1.20) / (1 - channelFee)`. That formula calibrates well
-// only when `buyIn` is a stable median across comparable units —
-// historically Airbnb-engine 7-night-amortized median per bedroom,
-// returned by `fetchAmortizedNightlyByBR`.
+// only when `buyIn` is a stable median across comparable units.
 //
 // This helper keeps that median as the persisted cost basis (so the
 // sell-price floor doesn't lurch around with one-off cheap deals) AND
 // adds a parallel "live channel snapshot": the cheapest verified
-// nightly across Airbnb / VRBO / Booking for the SAME 7-night
-// 30-day-out window, pulled through the local-Chrome sidecar daemon
-// for VRBO and Booking. The snapshot is ephemeral — returned in the
+// nightly across Airbnb / VRBO / Booking / PM websites for the SAME
+// 7-night window, pulled through the local-Chrome sidecar daemon.
+// The snapshot is ephemeral — returned in the
 // refresh response, surfaced in the Pricing tab, never persisted —
 // so the operator can see when one channel's cheapest is materially
 // below the median basis ("VRBO has $580/n today; basis is $620").
 //
-// When the daemon is offline, sidecar searches return empty and the
-// snapshot collapses to just the Airbnb-engine cheapest. That's the
-// same data the legacy refresh path produced, so this helper is a
-// strict superset.
+// Operator directive 2026-05-02: pricing/availability should use the
+// same website-search methodology as find-buy-in. SearchAPI is used
+// only to discover PM websites; Airbnb, VRBO, Booking.com, and PM
+// rental search pages are driven by sidecar/Chrome.
 
 import { fetchAmortizedNightlyByBR } from "./community-research";
-import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
-import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
-import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
-import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
-import { checkPmUrlsBatchViaSidecar } from "./vrbo-sidecar-queue";
+import { STREAMLINE_SITES } from "./pm-scraper-streamline";
+import { VRP_SITES } from "./pm-scraper-vrp";
+import type { SidecarPmSearchSite } from "./vrbo-sidecar-queue";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking" | "pm";
 export type RegionKey = "hawaii" | "florida";
@@ -63,7 +59,7 @@ export function classifyScanReason(reason: string | undefined | null): ScanWarni
 }
 
 function describeWarning(kind: ScanWarning["kind"], channel: ScanWarning["channel"], season: ScanWarning["season"]): string {
-  const ch = channel === "engine" ? "Airbnb engine" : channel.toUpperCase();
+  const ch = channel === "engine" ? "Airbnb fallback" : channel.toUpperCase();
   switch (kind) {
     case "captcha":    return `${ch} hit a CAPTCHA during the ${season} scan — sidecar daemon may need manual unblock before retrying.`;
     case "blocked":    return `${ch} blocked the ${season} scan (Cloudflare / bot wall) — try again later or rotate the daemon's session.`;
@@ -75,11 +71,10 @@ function describeWarning(kind: ScanWarning["kind"], channel: ScanWarning["channe
 }
 
 // Tax/fee normalization to bring sidecar VRBO + Booking + PM rates onto
-// the same all-in basis as the Airbnb engine.
+// the same all-in basis as Airbnb search-card totals.
 //
-// Airbnb engine returns `extracted_total_price` which already
-// includes Airbnb's guest service fee + state/county taxes — so
-// dividing by 7 nights gives a true all-in nightly.
+// Airbnb search cards are treated as the source of truth for the exact
+// stay window; their totals are already close to all-in for our basis.
 //
 // VRBO sidecar scrapes `$X for Y nights` from the search-card
 // label, which is the listing total + Vrbo service fee BUT
@@ -116,7 +111,7 @@ function applyTaxNormalization(
   channel: ChannelKey,
   region: RegionKey,
 ): number {
-  // Airbnb engine total already inclusive of taxes/fees — leave it.
+  // Airbnb sidecar totals are already the platform-search quote — leave them.
   if (channel === "airbnb") return rate;
   return Math.round(rate * TAX_NORMALIZATION_FACTOR[region]);
 }
@@ -145,19 +140,6 @@ function normalizeHost(rawUrl: string): string | null {
 
 const PM_DISCOVERY_EXCLUDED_HOSTS = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com|whimstay\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com)$/i;
 
-function looksLikePmDetailUrl(rawUrl: string): boolean {
-  try {
-    const u = new URL(rawUrl);
-    const path = u.pathname.toLowerCase().replace(/\/+$/, "");
-    if (!path || path === "") return false;
-    if (/\/(?:search|results?|availability|contact|about|blog|terms|privacy|faq|reviews?|rates?|specials?|deals?)$/i.test(path)) return false;
-    if (/\/(?:vacation-rentals|rentals|properties|bedrooms?|category|collections?)$/i.test(path)) return false;
-    return path.split("/").filter(Boolean).length >= 1;
-  } catch {
-    return false;
-  }
-}
-
 function bedroomTextMatches(haystack: string, bedrooms: number): boolean {
   const text = haystack.toLowerCase();
   const explicit = Array.from(text.matchAll(/\b(\d+)\s*(?:br|bd|bed(?:room)?s?)\b/g))
@@ -167,20 +149,21 @@ function bedroomTextMatches(haystack: string, bedrooms: number): boolean {
   return explicit.includes(bedrooms);
 }
 
-async function discoverPmUrlsViaSearchApi(opts: {
+async function discoverPmSitesViaSearchApi(opts: {
   target: string;
   locality: string;
   bedrooms: number;
   checkIn: string;
   apiKey: string;
-}): Promise<string[]> {
+}): Promise<SidecarPmSearchSite[]> {
   const queries = Array.from(new Set([
-    `"${opts.target}" ${opts.bedrooms} bedroom vacation rental property management book directly`,
+    `"${opts.target}" vacation rentals property management book direct ${opts.locality}`,
+    `"${opts.target}" ${opts.bedrooms} bedroom vacation rentals property manager`,
+    `"${opts.target}" "vacation rentals" "search" "availability"`,
     `"${opts.target}" ${opts.bedrooms}BR condo rental direct booking ${opts.locality}`,
-    `"${opts.target}" "${opts.checkIn.slice(0, 4)}" vacation rental ${opts.bedrooms} bedroom`,
   ]));
-  const seen = new Set<string>();
-  const urls: string[] = [];
+  const seenHosts = new Set<string>();
+  const sites: SidecarPmSearchSite[] = [];
   const batches = await Promise.all(queries.map(async (query) => {
     const params = new URLSearchParams({
       engine: "google",
@@ -202,18 +185,29 @@ async function discoverPmUrlsViaSearchApi(opts: {
   for (const batch of batches) {
     for (const hit of batch) {
       const url = String(hit?.link ?? "");
-      if (!url || seen.has(url)) continue;
-      const host = normalizeHost(url);
-      if (!host || PM_DISCOVERY_EXCLUDED_HOSTS.test(host)) continue;
-      if (!looksLikePmDetailUrl(url)) continue;
+      if (!url) continue;
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        continue;
+      }
+      const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+      if (!host || seenHosts.has(host) || PM_DISCOVERY_EXCLUDED_HOSTS.test(host)) continue;
       const hay = `${String(hit?.title ?? "")} ${String(hit?.snippet ?? "")}`;
       if (!bedroomTextMatches(hay, opts.bedrooms)) continue;
-      seen.add(url);
-      urls.push(url);
-      if (urls.length >= 10) return urls;
+      seenHosts.add(host);
+      sites.push({
+        label: String(hit?.title || host).replace(/\s+/g, " ").slice(0, 60),
+        baseUrl: `${parsed.protocol}//${parsed.hostname}`,
+        // The sidecar starts here, then falls back to finding the
+        // site's rental-search page before entering resort/date/BR.
+        searchUrl: url,
+      });
+      if (sites.length >= 10) return sites;
     }
   }
-  return urls;
+  return sites;
 }
 
 type PmRateSample = {
@@ -255,82 +249,90 @@ async function fetchPmMarketRatesForBedroom(args: {
     .test(`${args.community} ${args.searchName ?? ""} ${args.city} ${args.state}`);
   const isPoipu = /poipu|pili\s*mai/i.test(`${args.community} ${args.searchName ?? ""} ${args.city}`);
 
-  const knownTasks: Array<Promise<void>> = [];
-  if (isPoipu) {
-    knownTasks.push((async () => {
-      const units = await findAvailableSuiteParadiseUnits({ bedrooms: br, checkIn: args.checkIn, checkOut: args.checkOut, resortName: target, limit: 10 });
-      for (const u of units) pushSample({ source: "Suite Paradise", url: u.url, title: u.title, bedrooms: u.bedrooms, nightlyPrice: u.nightlyPrice, totalPrice: u.totalPrice, includesTaxes: false });
-    })());
-  }
-  if (isHawaii) {
-    for (const site of Object.values(VRP_SITES)) {
-      knownTasks.push((async () => {
-        const units = await findAvailableVrpUnits({ site, bedrooms: br, checkIn: args.checkIn, checkOut: args.checkOut, resortName: target, limit: 10 });
-        for (const u of units) pushSample({ source: u.sourceLabel, url: u.url, title: u.name, bedrooms: u.bedrooms, nightlyPrice: u.nightlyPrice, totalPrice: u.totalPrice, includesTaxes: false });
-      })());
-    }
-    knownTasks.push((async () => {
-      const units = await findAvailableGatherVacationsUnits({ bedrooms: br, checkIn: args.checkIn, checkOut: args.checkOut, resortName: target, limit: 10 });
-      for (const u of units) pushSample({ source: "Gather Vacations", url: u.url, title: u.title, bedrooms: u.bedrooms, nightlyPrice: u.nightlyPrice, totalPrice: u.totalPrice, includesTaxes: false });
-    })());
-    for (const site of Object.values(STREAMLINE_SITES)) {
-      knownTasks.push((async () => {
-        const units = await findAvailableStreamlineUnits({ site, bedrooms: br, checkIn: args.checkIn, checkOut: args.checkOut, resortName: target, limit: 10 });
-        for (const u of units) pushSample({ source: site.label, url: u.url, title: u.title, bedrooms: u.bedrooms, nightlyPrice: u.nightlyPrice, totalPrice: u.totalPrice, includesTaxes: true });
-      })());
-    }
-  }
-
-  const knownSettled = await Promise.allSettled(knownTasks);
-  const knownErrors = knownSettled.filter((r): r is PromiseRejectedResult => r.status === "rejected").map((r) => String(r.reason?.message ?? r.reason)).slice(0, 3);
-
   let workerOnline = false;
   let sidecarReason = "";
+  let discoveredSiteCount = 0;
   const apiKey = process.env.SEARCHAPI_API_KEY;
+  const knownSites: SidecarPmSearchSite[] = [];
+  if (isPoipu) {
+    knownSites.push(
+      { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
+      { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
+      { label: VRP_SITES.cbIslandVacations.label, baseUrl: VRP_SITES.cbIslandVacations.baseUrl, searchUrl: "https://www.cbislandvacations.com/browse-all-kauai-vacation-rentals/" },
+      { label: VRP_SITES.pikoProperties.label, baseUrl: VRP_SITES.pikoProperties.baseUrl, searchUrl: "https://pikoproperties.com/rentals/" },
+      { label: VRP_SITES.evrhi.label, baseUrl: VRP_SITES.evrhi.baseUrl, searchUrl: "https://evrhi.com/kauai-rentals/" },
+      { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com", searchUrl: "https://gathervacations.com/vacation-rentals/hawaii/kauai-rentals/" },
+      { label: STREAMLINE_SITES.alekonaKauai.label, baseUrl: STREAMLINE_SITES.alekonaKauai.baseUrl, searchUrl: "https://alekonakauai.com/search-results/" },
+      { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${br}-bedroom/` },
+    );
+  } else if (isHawaii) {
+    knownSites.push(
+      { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
+      { label: VRP_SITES.cbIslandVacations.label, baseUrl: VRP_SITES.cbIslandVacations.baseUrl, searchUrl: "https://www.cbislandvacations.com/browse-all-kauai-vacation-rentals/" },
+      { label: VRP_SITES.evrhi.label, baseUrl: VRP_SITES.evrhi.baseUrl, searchUrl: "https://evrhi.com/kauai-rentals/" },
+      { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${br}-bedroom/` },
+    );
+  }
+
+  let discoveredSites: SidecarPmSearchSite[] = [];
   if (apiKey) {
-    const urls = await discoverPmUrlsViaSearchApi({
+    discoveredSites = await discoverPmSitesViaSearchApi({
       target,
       locality: `${args.city} ${args.state}`,
       bedrooms: br,
       checkIn: args.checkIn,
       apiKey,
     });
-    if (urls.length > 0) {
-      try {
-        for (let i = 0; i < urls.length; i += 5) {
-          const batch = urls.slice(i, i + 5);
-          const r = await checkPmUrlsBatchViaSidecar({
-            urls: batch,
-            checkIn: args.checkIn,
-            checkOut: args.checkOut,
-            bedrooms: br,
-            walletBudgetMs: 75_000,
-          });
-          workerOnline = workerOnline || r.workerOnline;
-          sidecarReason = r.reason;
-          for (const result of r.results) {
-            if (result.available !== "yes") continue;
-            if (typeof result.bedrooms === "number" && result.bedrooms !== br) continue;
-            const total = typeof result.totalPrice === "number" && result.totalPrice > 0
-              ? Math.round(result.totalPrice)
-              : typeof result.nightlyPrice === "number" && result.nightlyPrice > 0
-                ? Math.round(result.nightlyPrice * nights)
-                : 0;
-            if (!(total > 0)) continue;
-            pushSample({
-              source: normalizeHost(result.url) ?? "PM sidecar",
-              url: result.url,
-              title: result.url,
-              bedrooms: result.bedrooms ?? br,
-              nightlyPrice: Math.round(total / nights),
-              totalPrice: total,
-              includesTaxes: true,
-            });
-          }
-        }
-      } catch (e: any) {
-        sidecarReason = e?.message ?? String(e);
+    discoveredSiteCount = discoveredSites.length;
+  }
+
+  const seenHosts = new Set<string>();
+  const sites = [...knownSites, ...discoveredSites].filter((site) => {
+    try {
+      const host = new URL(site.baseUrl).hostname.replace(/^www\./, "").toLowerCase();
+      if (seenHosts.has(host)) return false;
+      seenHosts.add(host);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  if (sites.length > 0) {
+    try {
+      const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
+      const r = await searchPmSitesViaSidecar({
+        sites,
+        searchTerm: target,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        bedrooms: br,
+        perSiteLimit: 3,
+        walletBudgetMs: 105_000,
+        queueBudgetMs: 285_000,
+      });
+      workerOnline = r.workerOnline;
+      sidecarReason = r.reason;
+      for (const c of r.candidates) {
+        if (typeof c.bedrooms === "number" && c.bedrooms !== br) continue;
+        const total = c.totalPrice > 0
+          ? Math.round(c.totalPrice)
+          : c.nightlyPrice > 0
+            ? Math.round(c.nightlyPrice * nights)
+            : 0;
+        if (!(total > 0)) continue;
+        pushSample({
+          source: c.sourceLabel || normalizeHost(c.url) || "PM sidecar",
+          url: c.url,
+          title: c.title || c.url,
+          bedrooms: c.bedrooms ?? br,
+          nightlyPrice: Math.round(total / nights),
+          totalPrice: total,
+          includesTaxes: c.priceIncludesTaxes ?? true,
+        });
       }
+    } catch (e: any) {
+      sidecarReason = e?.message ?? String(e);
     }
   }
 
@@ -341,8 +343,8 @@ async function fetchPmMarketRatesForBedroom(args: {
   const medianNightly = medianOfSorted(normalizedRates);
   const reasonBits: string[] = [];
   if (samples.length > 0) reasonBits.push(`${samples.length} verified PM sample(s)`);
+  reasonBits.push(`${sites.length} PM site(s): ${knownSites.length} known + ${discoveredSiteCount} SearchAPI-discovered`);
   if (sidecarReason) reasonBits.push(sidecarReason);
-  if (knownErrors.length > 0) reasonBits.push(`PM direct scraper errors: ${knownErrors.join("; ")}`);
 
   return {
     br,
@@ -354,13 +356,11 @@ async function fetchPmMarketRatesForBedroom(args: {
 }
 
 export type MultiChannelBuyInResult = {
-  // Per-bedroom rate samples — same shape as
-  // fetchAmortizedNightlyByBR's `ratesByBR` so the persisted-median
-  // computation in the existing refresh endpoint stays unchanged.
-  // Sourced from the Airbnb engine ONLY. These are retained as the
-  // fallback distribution when no verified channel signal is available
-  // for a BR/season; the primary persisted basis is built from the
-  // normalized channel signals below.
+  // Per-bedroom Airbnb.com sidecar rate samples. Same shape as the
+  // legacy `fetchAmortizedNightlyByBR().ratesByBR` so the persisted-
+  // median computation in the existing refresh endpoint stays
+  // unchanged. These are retained as the fallback distribution when
+  // no verified non-Airbnb channel signal is available for a BR/season.
   ratesByBR: Record<number, number[]>;
   // Live channel snapshot — per bedroom, per channel, the cheapest
   // verified nightly that the operator could actually book today.
@@ -413,8 +413,8 @@ export type MultiChannelBuyInResult = {
 };
 
 export async function fetchMultiChannelBuyInByBR(args: {
-  // Same identity tuple `fetchAmortizedNightlyByBR` takes, used for
-  // the Airbnb engine + bbox geofencing.
+  // Identity tuple used for PM discovery/location context and for the
+  // legacy SearchAPI fallback only when `skipSidecar` is explicitly set.
   community: string;
   city: string;
   state: string;
@@ -425,13 +425,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // doesn't pin a `searchName` (drafts).
   searchName?: string;
   bedroomCounts: number[];
-  // PR #282: optional explicit dates. When supplied, the engine + the
-  // sidecar searches all hit this window. When omitted, defaults to
+  // PR #282: optional explicit dates. When supplied, all sidecar
+  // website searches hit this window. When omitted, defaults to
   // the legacy 7-night, 30-day-out window.
   dateOverride?: { checkIn: string; checkOut: string };
   // Optional escape hatch for low-cost probes. Normal pricing and
   // availability scans do not skip sidecar: LOW/HIGH/HOLIDAY all use
-  // VRBO + Booking + PM verification.
+  // Airbnb + VRBO + Booking + PM website searches.
   skipSidecar?: boolean;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
@@ -456,20 +456,21 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const targetDest = args.searchName ?? args.community;
   const nights = nightsBetween(checkIn, checkOut);
 
-  // Fan out everything in parallel. The Airbnb engine doesn't go
-  // through the daemon (single fast SearchAPI call); sidecar VRBO +
-  // Booking searches DO go through the daemon and serialize there
-  // (single Chrome instance), but starting them concurrently still
-  // wins because the Airbnb engine returns immediately while the
-  // daemon works through its queue.
-  const airbnbPromise = fetchAmortizedNightlyByBR(
-    args.community,
-    args.city,
-    args.state,
-    args.streetAddress,
-    args.bboxCenterOverride,
-    args.dateOverride ? { checkIn, checkOut } : undefined,
-  );
+  // Fan out every website search concurrently. The sidecar daemon still
+  // serializes Chrome work, but enqueuing together prevents a slow PM
+  // site from delaying Airbnb/VRBO/Booking submission. SearchAPI is not
+  // used for OTA pricing here; it is only used inside the PM helper to
+  // discover candidate PM domains.
+  const airbnbFallbackPromise = args.skipSidecar
+    ? fetchAmortizedNightlyByBR(
+        args.community,
+        args.city,
+        args.state,
+        args.streetAddress,
+        args.bboxCenterOverride,
+        args.dateOverride ? { checkIn, checkOut } : undefined,
+      )
+    : Promise.resolve({ ratesByBR: {} as Record<number, number[]> });
 
   type SidecarOp = {
     br: number;
@@ -480,6 +481,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     // fees" format, cheapestNightly is already all-in. Skip the
     // per-region tax-normalization multiplier downstream.
     cheapestIncludesTaxes?: boolean;
+    rates?: number[];
     workerOnline: boolean;
     // PR #312: capture the wrapper's `reason` string so the
     // orchestrator can pattern-match for CAPTCHA / bot-block / etc.
@@ -496,9 +498,52 @@ export async function fetchMultiChannelBuyInByBR(args: {
   }>[] = [];
   // When caller asks us to skip sidecar, we still build the channel
   // map but browser-backed entries stay null. Normal pricing refreshes
-  // do not skip sidecar: LOW/HIGH/HOLIDAY all use VRBO + Booking + PM
-  // verification now.
+  // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
+  // Booking + PM website searches now.
   if (!args.skipSidecar) for (const br of args.bedroomCounts) {
+    sidecarOps.push(
+      (async (): Promise<SidecarOp> => {
+        try {
+          const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
+          const r = await searchAirbnbViaSidecar({
+            destination: targetDest,
+            searchTerm: targetDest,
+            checkIn,
+            checkOut,
+            bedrooms: br,
+            walletBudgetMs: 120_000,
+            queueBudgetMs: 285_000,
+          });
+          let cheapest = Infinity;
+          let availableCount = 0;
+          const rates: number[] = [];
+          for (const c of r.candidates) {
+            if (c.bedrooms != null && c.bedrooms !== br) continue;
+            const total = c.totalPrice > 0
+              ? Math.round(c.totalPrice)
+              : c.nightlyPrice > 0
+                ? Math.round(c.nightlyPrice * nights)
+                : 0;
+            if (!(total > 0)) continue;
+            const nightly = Math.round(total / nights);
+            rates.push(nightly);
+            availableCount++;
+            if (nightly < cheapest) cheapest = nightly;
+          }
+          return {
+            br,
+            channel: "airbnb",
+            cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
+            availableCount,
+            rates,
+            workerOnline: r.workerOnline,
+            reason: r.reason,
+          };
+        } catch (e: any) {
+          return { br, channel: "airbnb", cheapestNightly: null, availableCount: 0, rates: [], workerOnline: false, reason: e?.message ?? String(e) };
+        }
+      })(),
+    );
     sidecarOps.push(
       (async (): Promise<SidecarOp> => {
         try {
@@ -515,6 +560,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // property = 90s VRBO + 90s Booking serialized = 180s,
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
+            queueBudgetMs: 285_000,
           });
           if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
           // Filter to listings that actually quote a per-night and
@@ -568,6 +614,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // property = 90s VRBO + 90s Booking serialized = 180s,
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
+            queueBudgetMs: 285_000,
           });
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the
@@ -607,40 +654,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
     }));
   }
 
-  const [airbnbResult, sidecarResults, pmResults] = await Promise.all([
-    airbnbPromise,
+  const [airbnbFallbackResult, sidecarResults, pmResults] = await Promise.all([
+    airbnbFallbackPromise,
     Promise.all(sidecarOps),
     Promise.all(pmOps),
   ]);
-
-  // Sparse-BR retry (PR #288). The initial engine call is unfiltered
-  // by bedroom count — it returns whatever 2BR/3BR/4BR listings sit
-  // inside the bbox, then we bucket by extracted BR. Tight bboxes
-  // (e.g. Kapaa Beachfront's 2.7×2.6km) sometimes return zero 3BR
-  // listings even when 3BR rentals exist nearby. For each BR the
-  // caller asked about, if we got zero samples, fire one targeted
-  // fallback call: bedrooms=N pinned to the engine + 2× wider bbox.
-  // One extra SearchAPI hit per missing BR, only when the cheap
-  // unfiltered pull came up dry — bounded extra cost per refresh.
-  for (const br of args.bedroomCounts) {
-    if ((airbnbResult.ratesByBR[br] ?? []).length > 0) continue;
-    try {
-      const fallback = await fetchAmortizedNightlyByBR(
-        args.community,
-        args.city,
-        args.state,
-        args.streetAddress,
-        args.bboxCenterOverride,
-        args.dateOverride ? { checkIn, checkOut } : undefined,
-        { bedrooms: br, bboxScale: 2 },
-      );
-      const samples = fallback.ratesByBR[br] ?? [];
-      if (samples.length > 0) airbnbResult.ratesByBR[br] = samples;
-    } catch {
-      /* sparse-BR retry failure is non-fatal — caller falls back to
-         BUY_IN_RATES static for any BR that stayed empty. */
-    }
-  }
 
   const region = inferRegion(args.city, args.state);
   const daemonOnline =
@@ -652,14 +670,14 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // of the listing total, returning a $28 nightly that polluted the
   // median for 2BR Hawaii rentals (real basis ~$300+).
   //
-  // Strategy: when the Airbnb engine returns a baseline, drop any
-  // sidecar channel rate that's < SANITY_FLOOR_RATIO of it. Airbnb
-  // is always all-in and engine-validated, so its cheapest sample
-  // is a reasonable lower bound for "what a real rental for these
-  // dates looks like." Anything below half of that is almost
+  // Strategy: when Airbnb.com returns a baseline, drop any other
+  // channel rate that's < SANITY_FLOOR_RATIO of it. Airbnb's sidecar
+  // result cards are date-filtered and all-in enough to serve as a
+  // reasonable lower bound for "what a real rental for these dates
+  // looks like." Anything below half of that is almost
   // certainly a scraper bug.
   //
-  // When Airbnb returned no samples (rare — engine offline), we
+  // When Airbnb returned no samples (daemon offline / no inventory), we
   // can't compute a baseline; pass channel rates through unfiltered
   // and let downstream handle it. Region-tier minimums could be
   // added here later if needed (Hawaii ~$100/n floor, FL ~$40).
@@ -670,16 +688,27 @@ export async function fetchMultiChannelBuyInByBR(args: {
   };
 
   // Build the channel cheapest map, normalized to all-in nightly.
-  // Airbnb engine totals already include service fee + taxes; VRBO +
-  // Booking sidecar scrapes are pre-tax, so we multiply them by the
+  // Airbnb sidecar totals are left as-is; VRBO + Booking sidecar
+  // scrapes are often pre-tax, so we multiply them by the
   // region's combined tax factor (see TAX_NORMALIZATION_FACTOR comment
   // above).
   const channelCheapestByBR: MultiChannelBuyInResult["channelCheapestByBR"] = {};
   const channelAvailableCountsByBR: MultiChannelBuyInResult["channelAvailableCountsByBR"] = {};
+  const ratesByBR: Record<number, number[]> = {};
   for (const br of args.bedroomCounts) {
-    const airbnbSamples = airbnbResult.ratesByBR[br] ?? [];
+    const airbnbSidecar = sidecarResults.find(
+      (r) => r.br === br && r.channel === "airbnb",
+    );
+    const airbnbSamples = airbnbSidecar?.rates?.length
+      ? airbnbSidecar.rates
+      : (airbnbFallbackResult.ratesByBR[br] ?? []);
+    ratesByBR[br] = airbnbSamples;
     const airbnbCheapest =
-      airbnbSamples.length > 0 ? Math.min(...airbnbSamples) : null;
+      airbnbSidecar?.cheapestNightly != null
+        ? airbnbSidecar.cheapestNightly
+        : airbnbSamples.length > 0
+          ? Math.min(...airbnbSamples)
+          : null;
     const vrboSidecar = sidecarResults.find(
       (r) => r.br === br && r.channel === "vrbo",
     );
@@ -713,7 +742,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
         ? pmRates.medianNightly
         : null,
     };
-    const airbnbCount = airbnbSamples.length;
+    const airbnbCount = airbnbSidecar?.availableCount ?? airbnbSamples.length;
     const vrboCount = vrboSidecar?.availableCount ?? 0;
     const bookingCount = bookingSidecar?.availableCount ?? 0;
     const pmCount = pmRates?.sampleCount ?? 0;
@@ -734,7 +763,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // 0 listings for that BR + window).
   //
   // Concrete case from 2026-04-29: Kaha Lani 3BR LOW window had no
-  // Airbnb data at all (engine + sparse-BR retry both empty) and
+  // Airbnb data at all (sidecar returned no priced result cards) and
   // sidecar Booking returned a $58/night (× 1.155 tax = $67 chip)
   // — the Booking scraper's regex matched a discount/per-person
   // rate. The 2BR Airbnb LOW was $256 so the $67 was clearly junk.
@@ -805,7 +834,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   }
 
   return {
-    ratesByBR: airbnbResult.ratesByBR,
+    ratesByBR,
     channelCheapestByBR,
     channelAvailableCountsByBR,
     snapshotCheckIn: checkIn,
@@ -829,9 +858,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
 // "single LOW window × seasonal multipliers" model.
 //
 // LOW/HIGH/HOLIDAY all run the full multichannel path now:
-// Airbnb engine + sidecar VRBO + sidecar Booking + verified PM rates.
-// PM rates include known direct-booking APIs plus SearchAPI-discovered
-// PM detail pages verified through the local Chrome sidecar.
+// sidecar Airbnb + sidecar VRBO + sidecar Booking + PM website-search rates.
+// PM sites include known direct-booking domains plus SearchAPI-discovered
+// PM domains searched through the local Chrome sidecar.
 //
 // Total wall time depends on sidecar queue depth and bedroom counts;
 // the outer deadline below returns partial seasons after 15 minutes.
@@ -933,10 +962,9 @@ function pickSeasonWindow(
 //   sidecar-low → sidecar-high → sidecar-holiday → persisting →
 //   done | error
 //
-// Each season's Airbnb engine returns fast (one SearchAPI call); the
-// sidecar work serializes through the daemon's single Chrome, so the
-// sidecar-* phases account for ~85% of the wall time and the
-// percentages reflect that.
+// Each season queues Airbnb / VRBO / Booking.com / PM website work
+// through the daemon's single Chrome. The sidecar-* phases account
+// for most of the wall time and the percentages reflect that.
 export type RefreshProgressState = {
   propertyId: number;
   startedAt: number;
@@ -1036,17 +1064,17 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   try {
   setPhase("starting", 0, "Starting multi-season scan");
 
-  // All three seasons get the full multichannel scan (Airbnb engine
-  // + sidecar VRBO + Booking). Pre-PR #305 only LOW used the sidecar;
+  // All three seasons get the full multichannel website scan (Airbnb
+  // + VRBO + Booking + PM through sidecar). Pre-PR #305 only LOW used the sidecar;
   // operator wanted HIGH and HOLIDAY medians grounded in real
   // VRBO/Booking observations too. Daemon serializes the sidecar
-  // calls (single Chrome instance), so total wall ≈ N_BRs × 2 channels
+  // calls (single Chrome instance), so total wall ≈ N_BRs × 4 channels
   // × 3 seasons × 90s = 5–18 min for typical 1–2 BR portfolios.
   const lowWindow = pickSeasonWindow(region, "LOW");
   const highWindow = pickSeasonWindow(region, "HIGH");
   const holidayWindow = pickSeasonWindow(region, "HOLIDAY");
 
-  setPhase("airbnb-low", 3, `Scanning Airbnb engine (LOW: ${lowWindow?.checkIn ?? "—"})`);
+  setPhase("airbnb-low", 3, `Queueing Airbnb/VRBO/Booking/PM sidecar scans (LOW: ${lowWindow?.checkIn ?? "—"})`);
 
   const lowPromise = lowWindow
     ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: lowWindow })
@@ -1058,11 +1086,10 @@ export async function fetchMultiChannelBuyInBySeason(args: {
     ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: holidayWindow })
     : Promise.resolve(null);
 
-  // Progress phases as each season's full result resolves. Airbnb
-  // engine pulls usually finish in ~5–10s while the sidecar is still
-  // queued, so these `airbnb-*` markers fire early; the `sidecar-*`
-  // markers represent the season fully done. Percentages tier the
-  // sidecar work since it dominates wall time.
+  // Progress phases as each season's full result resolves. The
+  // `airbnb-*` phase name is retained for client compatibility; all
+  // channels are queued together and the `sidecar-*` markers represent
+  // each season fully done.
   //
   // Order isn't deterministic — daemon dequeues in FIFO order so
   // whichever season was enqueued first finishes first. The percent

@@ -3512,8 +3512,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             </div>
                             {/* Live buy-in summary. One badge per bedroom-count
-                                showing the median nightly the SearchAPI
-                                Airbnb-engine 7-night-amortized lookup found
+                                showing the median nightly the sidecar-backed
+                                LOW-season website search found
                                 (the cost basis the per-channel floor formula
                                 feeds on). "fallback" badges mean we haven't
                                 refreshed for that BR yet — the Pricing tab
@@ -3521,7 +3521,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the verified nightly channel signals (Airbnb / VRBO / Booking / PM) for the LOW-season sample window. Rates are normalized all-in: Airbnb engine totals natively include service fee + taxes; VRBO, Booking, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). Seasonal multipliers handle HIGH/HOLIDAY months.">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the verified nightly channel signals (Airbnb / VRBO / Booking.com / PM) for the LOW-season sample window. Rates are normalized all-in: Airbnb sidecar totals are used as shown; VRBO, Booking.com, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). HIGH and HOLIDAY use their own sidecar medians when available.">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
@@ -3572,7 +3572,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY using the Airbnb engine + sidecar VRBO + sidecar Booking + verified PM website rates. PM rates come from known direct-booking APIs and SearchAPI-discovered PM pages checked through the local Chrome sidecar. Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome), so wall time can be several minutes. Cancellable mid-flight; partial results persist. When sidecar is offline a season falls back to Airbnb/direct PM data where available. Auto-refreshes weekly via the scheduler."
+                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome), so wall time can be several minutes. Cancellable mid-flight; partial results persist. Auto-refreshes weekly via the scheduler."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
                                 </button>
@@ -3698,7 +3698,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Each season samples Airbnb, sidecar VRBO, sidecar Booking, and verified PM website rates where available.">
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Each season samples Airbnb, VRBO, Booking.com, and PM website search-result rates through the Chrome sidecar where available.">
                                     Auto-refresh every 7 days · click ↻ to scan now
                                   </span>
                                 </div>

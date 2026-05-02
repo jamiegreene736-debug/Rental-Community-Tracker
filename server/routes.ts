@@ -7322,7 +7322,6 @@ export async function registerRoutes(
 
     if (mode !== "legacy-static-airbnb") {
       const thresholds = computeAvailabilityThresholds(config.units, minSets);
-      const seasonalTotal = 3;
       emit({
         type: "start",
         mode: "seasonal-sidecar",
@@ -7334,7 +7333,7 @@ export async function registerRoutes(
         minSets: thresholds.blockMinSets,
         openMinSets: thresholds.openMinSets,
         blockMinSets: thresholds.blockMinSets,
-        weeks: seasonalTotal,
+        weeks,
       });
 
       const applyOverride = (window: SeasonalAvailabilityWindow): SeasonalAvailabilityWindow & Record<string, unknown> => {
@@ -7367,6 +7366,7 @@ export async function registerRoutes(
           config,
           resortName,
           manualMinSets: minSets,
+          weeks,
           signal: scanAbort.signal,
           onPhase: (label) => emit({ type: "phase", label }),
           onWindow: emitWindow,
@@ -14331,8 +14331,8 @@ Return ONLY compact JSON with this exact shape:
     res.json({ success: true });
   });
 
-  // Re-run the priced 7-night Airbnb-engine lookup for a saved draft and
-  // write the new low/high back to `estimatedLowRate` / `estimatedHighRate`.
+  // Re-run the sidecar-backed 7-night market-rate lookup for a saved draft
+  // and write the new low/high back to `estimatedLowRate` / `estimatedHighRate`.
   //
   // The draft's `streetAddress` (set on Step 5 of the wizard) is the
   // critical input here: it gets geocoded into a tight bounding box that
@@ -14345,7 +14345,7 @@ Return ONLY compact JSON with this exact shape:
   // falls back to the same name-token filter as /search-units.
   //
   // Returns the per-BR rate sample so the operator can sanity-check
-  // the live engine numbers before they get committed to the draft.
+  // the live website-search numbers before they get committed to the draft.
   app.post("/api/community/:id/refresh-pricing", async (req, res) => {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -14357,12 +14357,13 @@ Return ONLY compact JSON with this exact shape:
 
     // PR #298: drafts get the same multi-channel + per-season scan
     // treatment as static properties. Previously this route only
-    // queried the Airbnb engine for a single LOW window — drafts
-    // missed sidecar VRBO/Booking entirely and only got LOW basis
-    // (no per-season HIGH/HOLIDAY persistence).
+    // queried a legacy Airbnb fallback for a single LOW window —
+    // drafts missed sidecar VRBO/Booking entirely and only got LOW
+    // basis (no per-season HIGH/HOLIDAY persistence).
     //
-    // Critically, drafts pass `draft.name` for BOTH `community` (the
-    // engine q=) AND `searchName` (the sidecar destination). One name
+    // Critically, drafts pass `draft.name` for BOTH `community`
+    // (PM discovery/location context) AND `searchName` (the sidecar
+    // destination). One name
     // means the searchName-vs-community mismatch that bit Kapaa
     // Beachfront in #297 can't happen for drafts by construction —
     // there's no second name to override the first.
@@ -14415,15 +14416,14 @@ Return ONLY compact JSON with this exact shape:
     const startedAt = Date.now();
     setRefreshProgress({ propertyId: -id, startedAt, phase: "starting", percent: 0, label: "Initializing draft scan" });
     const seasonScan = await fetchMultiChannelBuyInBySeason({
-      community: draft.name,        // engine q= : "Kaha Lani Resort Wailua Hawaii"
+      community: draft.name,        // PM discovery/location context
       city: draft.city,
       state: draft.state,
       streetAddress: draft.streetAddress ?? undefined,
-      // No bboxCenterOverride for drafts — let fetchAmortizedNightlyByBR
-      // geocode the streetAddress via Nominatim. Drafts don't have
-      // operator-validated lat/lng yet; the wizard could collect that
-      // in a future enhancement.
-      searchName: draft.name,        // sidecar destination — same as engine q
+      // No bboxCenterOverride for drafts yet. Drafts don't have
+      // operator-validated lat/lng, so the sidecar searches by the
+      // entered resort/community name.
+      searchName: draft.name,        // sidecar destination — same resort name
       bedroomCounts,
       propertyId: -id,               // negative id convention for drafts
     });
@@ -14464,7 +14464,7 @@ Return ONLY compact JSON with this exact shape:
     for (const br of bedroomCounts) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
       // HIGH and HOLIDAY now run the same multichannel path as LOW:
-      // Airbnb, sidecar VRBO, sidecar Booking, and verified PM rates.
+      // Airbnb, VRBO, Booking.com, and PM website-search rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 
@@ -14541,8 +14541,7 @@ Return ONLY compact JSON with this exact shape:
   // properties from `unit-builder-data.ts` (positive integer ids).
   // Resolves the property's community + city/state from the
   // server-side `PROPERTY_UNIT_NEEDS` / `COMMUNITY_SEARCH_LOCATIONS`
-  // maps below, runs the same Airbnb-engine 7-night-amortized lookup
-  // (`fetchAmortizedNightlyByBR`, AGENTS.md Load-Bearing #31), and
+  // maps below, runs the same sidecar-backed 7-night market-rate lookup, and
   // upserts one `property_market_rates` row per bedroom count the
   // property's units actually carry. The Pricing tab reads this
   // table at render time as the cost basis for the per-channel floor
@@ -14576,9 +14575,9 @@ Return ONLY compact JSON with this exact shape:
     // Multi-season multi-channel scan (PR #282).
     //
     // Pulls per-season basis: LOW + HIGH + HOLIDAY. Each season uses
-    // Airbnb engine + sidecar VRBO + sidecar Booking + verified PM
-    // website rates. PM combines known direct-booking APIs with
-    // SearchAPI-discovered PM detail URLs checked through the sidecar.
+    // Airbnb + VRBO + Booking.com website searches, plus PM website
+    // searches. SearchAPI is used only to discover PM company domains;
+    // Chrome sidecar then drives those PM rental-search pages.
     // Total wall can run several minutes because the daemon serializes
     // browser work through the operator's Chrome.
     //
@@ -14603,16 +14602,16 @@ Return ONLY compact JSON with this exact shape:
       state: loc.state,
       streetAddress: loc.streetAddress,
       bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-      // PR #297: align the sidecar's Vrbo/Booking destination with
-      // the engine's q= so all three channels search the same resort.
+      // PR #297: align every sidecar destination with the same
+      // operator-facing resort name so all channels search the same resort.
       // Previously this passed `config.community` (the PROPERTY_UNIT_
       // NEEDS key, e.g. "Kapaa Beachfront") which is a generic
       // neighborhood name. Vrbo's autocomplete returns Kapaa-area
       // listings (Lae Nani, Pono Kai, etc.), missing Kaha Lani Resort
       // entirely. Operator screenshot 2026-04-29 showed Vrbo finds
       // ~12 Kaha Lani Resort listings (including 3BR) when searched
-      // by resort name. Now sidecar uses the same resort-name as
-      // engine (loc.searchName = "Kaha Lani Resort").
+      // by resort name. Now sidecar uses the validated resort name
+      // (loc.searchName = "Kaha Lani Resort").
       searchName: loc.searchName,
       bedroomCounts: wantBedrooms,
       propertyId,
@@ -14667,7 +14666,7 @@ Return ONLY compact JSON with this exact shape:
     for (const br of wantBedrooms) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
       // HIGH and HOLIDAY now run the same multichannel path as LOW:
-      // Airbnb, sidecar VRBO, sidecar Booking, and verified PM rates.
+      // Airbnb, VRBO, Booking.com, and PM website-search rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
 

@@ -193,7 +193,9 @@ export function pickAvailabilitySeasonWindow(args: {
   now.setUTCHours(0, 0, 0, 0);
   const seedMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   const seed = hashString(`${args.propertyId}:${args.region}:${args.season}:${seedMonth}`);
-  const nights = 7 + (seed % 8);
+  // Availability blackouts are written as 7-night windows, so keep the
+  // sidecar sample window exactly 7 nights as well.
+  const nights = 7;
   const minStart = new Date(now);
   minStart.setUTCDate(minStart.getUTCDate() + 30);
 
@@ -247,16 +249,19 @@ export function computeAvailabilityThresholds(
 
   const openCandidatesByBR: Record<number, number> = {};
   const blockCandidatesByBR: Record<number, number> = {};
-  let openMinSets = 1;
-  let blockMinSets = Math.max(1, manualMinSets);
+  // Default rule: block only when we cannot verify at least 3 full
+  // independent buy-in sets (configurable from the UI/scheduler), mark
+  // tight until 2 extra cushion sets are visible, then open. This keeps
+  // the net wide enough to catch unlabeled-but-valid resort listings
+  // while still avoiding the "last pair available" oversell risk.
+  const blockMinSets = Math.max(2, manualMinSets);
+  const openMinSets = blockMinSets + 2;
   for (const [brRaw, required] of Object.entries(requiredByBR)) {
     const br = Number(brRaw);
-    const openCandidates = Math.max(12, required * 10);
-    const blockCandidates = Math.max(6, required * 5);
+    const openCandidates = required * openMinSets;
+    const blockCandidates = required * blockMinSets;
     openCandidatesByBR[br] = openCandidates;
     blockCandidatesByBR[br] = blockCandidates;
-    openMinSets = Math.max(openMinSets, Math.ceil(openCandidates / required));
-    blockMinSets = Math.max(blockMinSets, Math.ceil(blockCandidates / required));
   }
 
   return { requiredByBR, openCandidatesByBR, blockCandidatesByBR, openMinSets, blockMinSets };
@@ -353,11 +358,67 @@ function buildErrorWindow(args: {
   };
 }
 
+function holidayDate(d: Date): boolean {
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return (month === 12 && day >= 20)
+    || (month === 1 && day <= 5)
+    || (month === 7 && day >= 1 && day <= 7)
+    || (month === 11 && day >= 22 && day <= 30)
+    || (month === 3 && day >= 15)
+    || (month === 4 && day <= 5)
+    || (month === 2 && day >= 14 && day <= 17);
+}
+
+function seasonForSevenNightWindow(region: RegionKey, start: Date): SeasonKey {
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() + i);
+    if (holidayDate(d)) return "HOLIDAY";
+  }
+  const yearMonth = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}`;
+  return seasonForMonth(region, yearMonth);
+}
+
+function expandSeasonSamplesToWeekly(args: {
+  samples: SeasonalAvailabilityWindow[];
+  region: RegionKey;
+  weeks: number;
+  now?: Date;
+}): SeasonalAvailabilityWindow[] {
+  const bySeason = new Map<SeasonKey, SeasonalAvailabilityWindow>();
+  for (const sample of args.samples) bySeason.set(sample.season, sample);
+
+  const start = args.now ? new Date(args.now) : new Date();
+  start.setUTCHours(12, 0, 0, 0);
+
+  const windows: SeasonalAvailabilityWindow[] = [];
+  for (let i = 0; i < args.weeks; i++) {
+    const checkIn = new Date(start);
+    checkIn.setUTCDate(checkIn.getUTCDate() + i * 7);
+    const checkOut = new Date(checkIn);
+    checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+    const season = seasonForSevenNightWindow(args.region, checkIn);
+    const template = bySeason.get(season);
+    if (!template) continue;
+    windows.push({
+      ...template,
+      season,
+      startDate: ymd(checkIn),
+      endDate: ymd(checkOut),
+      nights: 7,
+      reason: `${season} sidecar sample ${template.startDate}→${template.endDate} found ${template.maxSets} de-duped set(s); applied to this 7-night week. Block below ${template.blockMinSets}, open at ${template.openMinSets}.`,
+    });
+  }
+  return windows;
+}
+
 export async function scanSeasonalAvailabilityCapacity(args: {
   propertyId: number;
   config: PropertyUnitConfig;
   resortName?: string | null;
   manualMinSets?: number;
+  weeks?: number;
   signal?: AbortSignal;
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
@@ -370,6 +431,7 @@ async function runSeasonalAvailabilityCapacity(args: {
   config: PropertyUnitConfig;
   resortName?: string | null;
   manualMinSets?: number;
+  weeks?: number;
   signal?: AbortSignal;
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
@@ -379,12 +441,13 @@ async function runSeasonalAvailabilityCapacity(args: {
   const region = inferRegion(loc.city, loc.state);
   const thresholds = computeAvailabilityThresholds(args.config.units, args.manualMinSets ?? 1);
   const bedroomCounts = Object.keys(thresholds.requiredByBR).map(Number).sort((a, b) => a - b);
+  const weeks = Math.min(Math.max(args.weeks ?? 104, 1), 104);
   const windows = SEASONS.map((season) => ({
     season,
     window: pickAvailabilitySeasonWindow({ propertyId: args.propertyId, region, season }),
   }));
 
-  const results: SeasonalAvailabilityWindow[] = [];
+  const sampleResults: SeasonalAvailabilityWindow[] = [];
   for (const { season, window } of windows) {
     throwIfAborted(args.signal);
     args.onPhase?.(`Scanning ${season} sample (${window.checkIn} to ${window.checkOut})`);
@@ -404,19 +467,19 @@ async function runSeasonalAvailabilityCapacity(args: {
         dateOverride: { checkIn: window.checkIn, checkOut: window.checkOut },
       });
       const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds });
-      results.push(result);
-      args.onWindow?.(result);
+      sampleResults.push(result);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       const result = buildErrorWindow({ season, window, units: args.config.units, thresholds, error });
-      results.push(result);
-      args.onWindow?.(result);
+      sampleResults.push(result);
     } finally {
       clearInterval(heartbeat);
     }
   }
 
-  results.sort((a, b) => SEASONS.indexOf(a.season) - SEASONS.indexOf(b.season));
+  sampleResults.sort((a, b) => SEASONS.indexOf(a.season) - SEASONS.indexOf(b.season));
+  const results = expandSeasonSamplesToWeekly({ samples: sampleResults, region, weeks });
+  for (const result of results) args.onWindow?.(result);
   return {
     propertyId: args.propertyId,
     community: args.config.community,
