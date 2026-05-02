@@ -678,131 +678,247 @@ export default function Bookings() {
         return promise;
       };
 
-      // Sequential per-slot picking with shared pickedUrls. Multi-unit
-      // reservations (e.g. Amy's 2× 3BR) need DIFFERENT physical units
-      // attached to each slot — same Vrbo URL on both Unit 721 and Unit
-      // 812 means we'd be paying for one listing twice and have nothing
-      // for the second guest's actual unit. The shared find-buy-in cache
-      // (`getFindBuyInForBedrooms`) means both slots see the same ranked
-      // candidate list; without de-duplication, both would pick the
-      // cheapest verified candidate and end up with the same URL.
-      //
-      // Trade-off: slots attach serially so a later slot can skip URLs
-      // already selected by an earlier slot. The expensive scan itself
-      // is cached per bedroom group by getFindBuyInForBedrooms above.
+      // Sequential picking with shared pickedUrls. Multi-unit reservations
+      // need DIFFERENT physical units attached to each slot — same URL on
+      // both Unit 721 and Unit 812 means we'd be paying for one listing
+      // twice and have nothing for the second guest's actual unit.
       const pickedUrls = new Set<string>(
         reservation.slots
           .map((s) => listingUrlKey(s.buyIn?.airbnbListingUrl))
           .filter(Boolean),
       );
-      const results: Array<{
+
+      type AutoFillSearchSummary = {
+        bedrooms: number;
+        scanned: number;
+        priced: number;
+        sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
+      };
+      type AutoFillResult = {
         slot: typeof emptySlots[number];
         picked: (LiveCandidate & { totalPrice: number }) | null;
         created: any;
         skippedReasons: string[];
         airbnbPick: boolean;
-        searchSummary: {
-          bedrooms: number;
-          scanned: number;
-          priced: number;
-          sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
+        searchSummary: AutoFillSearchSummary;
+      };
+
+      const searchSummaryFor = (data: FindBuyInResponse, searchedBedrooms: number): AutoFillSearchSummary => {
+        const sourceCounts = {
+          airbnb: data.sources?.airbnb?.length ?? 0,
+          vrbo: data.sources?.vrbo?.length ?? 0,
+          booking: data.sources?.booking?.length ?? 0,
+          pm: data.sources?.pm?.length ?? 0,
         };
-      }> = [];
+        const allSourceCandidates = [
+          ...(data.sources?.airbnb ?? []),
+          ...(data.sources?.vrbo ?? []),
+          ...(data.sources?.booking ?? []),
+          ...(data.sources?.pm ?? []),
+        ];
+        return {
+          bedrooms: searchedBedrooms,
+          scanned: allSourceCandidates.length,
+          priced: allSourceCandidates.filter((c) => c.totalPrice > 0).length,
+          sourceCounts,
+        };
+      };
+
+      const bedroomFromCandidateText = (c: LiveCandidate): number | null => {
+        const text = `${c.title} ${c.snippet ?? ""} ${c.url}`.toLowerCase();
+        const direct = text.match(/(\d+)\s*(?:br|bd|bdr|bedrooms?)\b/);
+        if (direct) return parseInt(direct[1], 10);
+        const slash = text.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
+        if (slash) return parseInt(slash[1], 10);
+        const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+        for (const [word, count] of Object.entries(words)) {
+          if (new RegExp(`\\b${word}[\\s-]bedroom\\b`).test(text)) return count;
+        }
+        return null;
+      };
+      const candidateBedrooms = (c: LiveCandidate, fallbackBedrooms: number): number => {
+        const explicit = bedroomFromCandidateText(c);
+        if (explicit !== null) return explicit;
+        return typeof c.bedrooms === "number" && Number.isFinite(c.bedrooms)
+          ? c.bedrooms
+          : fallbackBedrooms;
+      };
+      const rankCandidates = (items: LiveCandidate[]): LiveCandidate[] =>
+        [...items].sort((a, b) => {
+          const aRank = a.verified === "yes" ? 0 : 1;
+          const bRank = b.verified === "yes" ? 0 : 1;
+          if (aRank !== bRank) return aRank - bRank;
+          return (a.totalPrice || 999999) - (b.totalPrice || 999999);
+        });
+      const getCandidatePool = async (
+        searchedBedrooms: number,
+        exactBedroomForCombo: boolean,
+      ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
+        const data = await getFindBuyInForBedrooms(searchedBedrooms);
+        const searchSummary = searchSummaryFor(data, searchedBedrooms);
+        const candidates = rankCandidates(
+          (data.cheapest ?? [])
+            .filter((c) => c.totalPrice > 0)
+            .filter((c) => {
+              const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
+              return exactBedroomForCombo
+                ? actualBedrooms === searchedBedrooms
+                : actualBedrooms >= searchedBedrooms;
+            }),
+        );
+        return { data, searchSummary, candidates };
+      };
+
+      const createAndAttachPick = async (
+        slot: typeof emptySlots[number],
+        pick: LiveCandidate,
+        searchedBedrooms: number,
+        searchSummary: AutoFillSearchSummary,
+        comboLabel?: string,
+      ): Promise<AutoFillResult> => {
+        const skippedReasons: string[] = [];
+        const finalCost = pick.totalPrice;
+        const actualBedrooms = candidateBedrooms(pick, searchedBedrooms);
+        const airbnbPick = pick.source === "airbnb";
+        const propertyName =
+          (selectedListingId && listingNameById.get(selectedListingId)) ||
+          `Property ${selectedPropertyId}`;
+        const verifySuffix = pick.verified === "yes"
+          ? ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
+          : "";
+        const comboSuffix = comboLabel
+          ? ` · ${comboLabel}; selected ${actualBedrooms}BR for this slot`
+          : actualBedrooms > slot.bedrooms
+            ? ` · Selected ${actualBedrooms}BR for ${slot.bedrooms}BR slot because larger units can satisfy the bedroom requirement`
+            : "";
+        const tosSuffix = airbnbPick
+          ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
+          : "";
+        const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
+          ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
+          : "";
+        try {
+          const created = await apiRequest("POST", "/api/buy-ins", {
+            propertyId: selectedPropertyId,
+            propertyName,
+            unitId: slot.unitId,
+            unitLabel: slot.unitLabel,
+            checkIn: ci,
+            checkOut: co,
+            costPaid: finalCost.toFixed(2),
+            airbnbConfirmation: null,
+            airbnbListingUrl: pick.url,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}`,
+            status: "active",
+          }).then((r) => r.json());
+          if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
+
+          await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+            buyInId: created.id,
+          }).then((r) => r.json());
+
+          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
+        } catch (e: any) {
+          skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
+      };
+
+      const twoUnitBedroomCombos = (): number[][] => {
+        if (emptySlots.length !== 2) return [];
+        const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
+        if (totalNeeded <= 0) return [];
+        const combos: number[][] = [];
+        const seen = new Set<string>();
+        const addCombo = (combo: number[]) => {
+          if (combo.length !== 2 || combo.some((n) => !Number.isFinite(n) || n <= 0)) return;
+          if (combo[0] + combo[1] !== totalNeeded) return;
+          const key = [...combo].sort((a, b) => b - a).join("+");
+          if (seen.has(key)) return;
+          seen.add(key);
+          combos.push(combo);
+        };
+        addCombo(emptySlots.map((s) => s.bedrooms));
+        const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
+        for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
+          const low = totalNeeded - high;
+          if (low < minLegBedrooms) continue;
+          addCombo([high, low]);
+        }
+        return combos;
+      };
+
+      const pickBestTwoUnitCombo = async (): Promise<{
+        combo: number[];
+        picks: LiveCandidate[];
+        summaries: AutoFillSearchSummary[];
+        totalCost: number;
+      } | null> => {
+        const combos = twoUnitBedroomCombos();
+        if (combos.length === 0) return null;
+        const poolCache = new Map<number, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
+        const poolFor = (bedroomCount: number) => {
+          const existing = poolCache.get(bedroomCount);
+          if (existing) return existing;
+          const promise = getCandidatePool(bedroomCount, true);
+          poolCache.set(bedroomCount, promise);
+          return promise;
+        };
+
+        let best: { combo: number[]; picks: LiveCandidate[]; summaries: AutoFillSearchSummary[]; totalCost: number } | null = null;
+        for (const combo of combos) {
+          const used = new Set(pickedUrls);
+          const picks: LiveCandidate[] = [];
+          const summaries: AutoFillSearchSummary[] = [];
+          for (const bedroomCount of combo) {
+            const pool = await poolFor(bedroomCount);
+            summaries.push(pool.searchSummary);
+            const pick = pool.candidates.find((c) => !used.has(listingUrlKey(c.url)));
+            if (!pick) break;
+            used.add(listingUrlKey(pick.url));
+            picks.push(pick);
+          }
+          if (picks.length !== combo.length) continue;
+          const totalCost = picks.reduce((sum, p) => sum + p.totalPrice, 0);
+          if (!best || totalCost < best.totalCost) {
+            best = { combo, picks, summaries, totalCost };
+          }
+        }
+        return best;
+      };
+
+      const results: AutoFillResult[] = [];
+      const comboChoice = await pickBestTwoUnitCombo();
+      if (comboChoice) {
+        const totalBedrooms = comboChoice.combo.reduce((sum, n) => sum + n, 0);
+        const comboLabel = `Two-unit ${comboChoice.combo.join("+")}BR combo for ${totalBedrooms}BR booking`;
+        for (let i = 0; i < emptySlots.length; i++) {
+          const result = await createAndAttachPick(
+            emptySlots[i],
+            comboChoice.picks[i],
+            comboChoice.combo[i],
+            comboChoice.summaries[i],
+            comboLabel,
+          );
+          if (result.picked?.url) pickedUrls.add(listingUrlKey(result.picked.url));
+          results.push(result);
+        }
+        return { reservation, results };
+      }
+
       for (const slot of emptySlots) {
-        const slotResult = await (async () => {
-          const data = await getFindBuyInForBedrooms(slot.bedrooms);
-          const sourceCounts = {
-            airbnb: data.sources?.airbnb?.length ?? 0,
-            vrbo: data.sources?.vrbo?.length ?? 0,
-            booking: data.sources?.booking?.length ?? 0,
-            pm: data.sources?.pm?.length ?? 0,
-          };
-          const allSourceCandidates = [
-            ...(data.sources?.airbnb ?? []),
-            ...(data.sources?.vrbo ?? []),
-            ...(data.sources?.booking ?? []),
-            ...(data.sources?.pm ?? []),
-          ];
-          const searchSummary = {
-            bedrooms: slot.bedrooms,
-            scanned: allSourceCandidates.length,
-            priced: allSourceCandidates.filter((c) => c.totalPrice > 0).length,
-            sourceCounts,
-          };
-
-          // The server's `cheapest` array is already the verified,
-          // date-specific buyable set from find-buy-in. Do not run the
-          // expensive Browserbase/Sonnet PM verifier here: when Anthropic
-          // rate-limits, that client-side fallback can keep Auto-fill
-          // spinning for many minutes after the sidecar scan is done.
-          // `pickedUrls` carries URLs already attached to earlier slots
-          // in this same auto-fill run so each slot gets a distinct unit.
-          const notAlreadyPicked = (c: LiveCandidate) => !pickedUrls.has(listingUrlKey(c.url));
-          const allCheapest = (data.cheapest ?? []).filter(notAlreadyPicked);
-          const pick =
-            allCheapest.find((c) => c.totalPrice > 0 && c.verified === "yes") ??
-            allCheapest.find((c) => c.totalPrice > 0) ??
-            allCheapest[0] ??
-            null;
-          const skippedReasons: string[] = [];
-
-          if (!pick) {
-            skippedReasons.push("find-buy-in returned no unused cheapest candidates");
-            return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-          }
-
-          const finalCost = pick.totalPrice;
-          const airbnbPick = pick.source === "airbnb";
-          const propertyName =
-            (selectedListingId && listingNameById.get(selectedListingId)) ||
-            `Property ${selectedPropertyId}`;
-          const verifySuffix = pick.verified === "yes"
-            ? ` · Verified by find-buy-in for ${slot.bedrooms}BR ${ci}→${co}`
-            : "";
-          const tosSuffix = airbnbPick
-            ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
-            : "";
-          // PM URL discovered via reverse-image-match against an Airbnb
-          // listing — disclose the anchor + that the PM rate may differ
-          // slightly from the inherited Airbnb price. Both pieces are
-          // important: the anchor URL lets the operator click through
-          // to verify the photos match, and the disclaimer keeps them
-          // from over-relying on the inherited price.
-          const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-            ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
-            : "";
-          // Wrap create+attach in a try/catch — if one slot fails (DB
-          // hiccup, race in attachBuyIn's "same-slot already attached"
-          // check, etc.) we don't want the whole sequential loop to
-          // throw and leave LATER slots without a chance to fill at all.
-          try {
-            const created = await apiRequest("POST", "/api/buy-ins", {
-              propertyId: selectedPropertyId,
-              propertyName,
-              unitId: slot.unitId,
-              unitLabel: slot.unitLabel,
-              checkIn: ci,
-              checkOut: co,
-              costPaid: finalCost.toFixed(2),
-              airbnbConfirmation: null,
-              airbnbListingUrl: pick.url,
-              notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${tosSuffix}${anchorSuffix}`,
-              status: "active",
-            }).then((r) => r.json());
-            if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
-
-            await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
-              buyInId: created.id,
-            }).then((r) => r.json());
-
-            return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
-          } catch (e: any) {
-            skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
-            return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-          }
-        })();
-        // Reserve the picked URL so subsequent slots in this same
-        // auto-fill run skip it and find a different unit.
+        const pool = await getCandidatePool(slot.bedrooms, false);
+        const pick = pool.candidates.find((c) => !pickedUrls.has(listingUrlKey(c.url))) ?? null;
+        const slotResult = pick
+          ? await createAndAttachPick(slot, pick, slot.bedrooms, pool.searchSummary)
+          : {
+              slot,
+              picked: null,
+              created: null,
+              skippedReasons: ["find-buy-in returned no unused cheapest candidates"],
+              airbnbPick: false,
+              searchSummary: pool.searchSummary,
+            };
         if (slotResult.picked?.url) pickedUrls.add(listingUrlKey(slotResult.picked.url));
         results.push(slotResult);
       }
@@ -1368,7 +1484,7 @@ export default function Bookings() {
                                   data-testid={`button-find-buyin-${r._id}-${slot.unitId}`}
                                 >
                                   <Search className="h-3.5 w-3.5 mr-1" />
-                                  Find {slot.bedrooms}BR buy-in
+                                  Find {slot.bedrooms}BR+ buy-in
                                 </Button>
                               )}
                               {/* Per-slot toggle for the inline live-search
@@ -1415,7 +1531,7 @@ export default function Bookings() {
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>
-              Find buy-in for {picker?.slot.unitLabel} <span className="text-muted-foreground font-normal">({picker?.slot.bedrooms} BR)</span>
+              Find buy-in for {picker?.slot.unitLabel} <span className="text-muted-foreground font-normal">({picker?.slot.bedrooms} BR minimum)</span>
             </DialogTitle>
             <DialogDescription>
               {picker && (
@@ -1871,7 +1987,7 @@ function LiveSearchSection({
               <Globe className="h-4 w-4" /> Live search
             </p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Searches Airbnb (telemetry), Booking.com, and PM companies for {slot.bedrooms}BR rentals in the area
+              Searches Airbnb (telemetry), Booking.com, and PM companies for {slot.bedrooms}BR+ rentals in the area
               covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
@@ -1888,7 +2004,7 @@ function LiveSearchSection({
       <div className="border rounded-lg p-6 text-sm text-muted-foreground space-y-4">
         <div className="text-center">
           <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-          Searching Airbnb (for photo matches), Booking.com, Vrbo, and property management companies for the cheapest {slot.bedrooms}BR rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
+          Searching Airbnb (for photo matches), Booking.com, Vrbo, and property management companies for the cheapest {slot.bedrooms}BR+ rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
         </div>
         <SidecarQueueProgress
           status={sidecarQueue.status}
@@ -1989,7 +2105,7 @@ function LiveSearchSection({
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Live results — {data?.resortName ?? data?.community} · {slot.bedrooms}BR · {data?.nights} nights
+            Live results — {data?.resortName ?? data?.community} · {slot.bedrooms}BR+ · {data?.nights} nights
           </p>
           {data?.resortName && (
             <p className="text-[11px] text-muted-foreground mt-0.5">
@@ -3196,6 +3312,11 @@ function LiveRow({
             ) : c.verified === "skipped" ? (
               <Badge className="text-[9px] bg-slate-500 text-white" title={c.verifiedReason ?? undefined}>
                 - Not auto-checked
+              </Badge>
+            ) : null}
+            {c.bedrooms ? (
+              <Badge variant="outline" className="text-[9px]">
+                {c.bedrooms}BR
               </Badge>
             ) : null}
             <p className="font-medium text-sm truncate">{c.title}</p>

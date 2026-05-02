@@ -857,7 +857,7 @@ async function processAirbnbSearch(id, params) {
       const price = parsePrice(fullText);
       if (!price) continue;
       const bedrooms = extractBedrooms(fullText);
-      if (bedrooms !== null && bedrooms !== targetBedrooms) continue;
+      if (bedrooms !== null && bedrooms < targetBedrooms) continue;
       const title =
         clean(a.getAttribute("aria-label")) ||
         clean(card.querySelector("[data-testid*='listing-card-title' i], [id*='title' i], h3, h2")?.textContent) ||
@@ -1543,7 +1543,7 @@ async function processVrboSearch(id, params) {
   // PR #301: drop minBedrooms URL filter — Vrbo's server-side filter
   // is unreliable (returns 5 properties for a regionId+minBedrooms=3
   // search where only 0 are actually 3BR). Pull ALL listings for the
-  // resort and let the helper filter by exact-match bedroom downstream.
+  // resort and let the helper filter by minimum bedroom downstream.
   // Same pattern lets one Vrbo fetch satisfy multiple BR scans —
   // server-side dedup in the queue could later avoid hitting Vrbo
   // multiple times per property.
@@ -1564,7 +1564,7 @@ async function processVrboSearch(id, params) {
   }
   // Still extract all visible cards and bucket by BR client-side:
   // VRBO's browser-side filter is useful for relevance and operator
-  // visibility, but the downstream exact-bedroom guard remains the
+  // visibility, but the downstream minimum-bedroom guard remains the
   // authoritative protection against mismatched 1BR/2BR rows.
 
   // Compute expected nights from the requested window — we always
@@ -1652,7 +1652,7 @@ async function processVrboSearch(id, params) {
         }
       }
       if (!(totalPrice > 0) || !(totalNights > 0)) { drops.noPrice++; continue; }
-      if (bedroomsExtracted !== targetBedrooms) { drops.badBedrooms++; continue; }
+      if (bedroomsExtracted === null || bedroomsExtracted < targetBedrooms) { drops.badBedrooms++; continue; }
 
       out.push({
         url: "https://www.vrbo.com" + propertyPath,
@@ -1851,7 +1851,7 @@ async function processBookingSearch(id, params) {
       const bedrooms = bdMatch ? parseInt(bdMatch[1], 10) : 0;
       if (!url) continue;
       if (!(totalPrice > 0)) continue;
-      if (bedrooms !== minBd) continue;
+      if (bedrooms < minBd) continue;
       out.push({
         url,
         title: title.slice(0, 80),
@@ -3793,7 +3793,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         const fullText = clean(card?.textContent || a.textContent || "");
         if (!looksDetail(url, fullText)) continue;
         const br = extractBedrooms(fullText);
-        if (br !== bedrooms) continue;
+        if (br !== null && br < bedrooms) continue;
         const price = parsePrice(fullText);
         if (!price) continue;
         const title =

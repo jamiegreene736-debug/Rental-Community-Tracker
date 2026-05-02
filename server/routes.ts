@@ -2630,7 +2630,7 @@ export async function registerRoutes(
     const bedroomOk = (text: string): boolean => {
       const b = bedroomFromText(text);
       if (b === null) return true; // unknown — keep for manual review
-      return b === bedrooms;
+      return b >= bedrooms;
     };
 
     const websiteSearchTerm = resortName || community;
@@ -2816,8 +2816,16 @@ export async function registerRoutes(
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
       candidateNightlySignal(c) >= minPlausibleNightly;
     const candidateBedroomSignal = (c: Candidate): number | null => {
+      const explicit = bedroomFromText(candidateHaystack(c));
+      if (explicit !== null) return explicit;
       if (typeof c.bedrooms === "number") return c.bedrooms;
-      return bedroomFromText(candidateHaystack(c));
+      return null;
+    };
+    const rawCandidateBedroomSignal = (c: { title?: string; snippet?: string; url?: string; bedrooms?: number }): number | null => {
+      const explicit = bedroomFromText(`${c.title ?? ""} ${c.snippet ?? ""} ${c.url ?? ""}`);
+      if (explicit !== null) return explicit;
+      if (typeof c.bedrooms === "number") return c.bedrooms;
+      return null;
     };
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (normalizedResortName !== "poipu kai") return true;
@@ -2878,7 +2886,7 @@ export async function registerRoutes(
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
+      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
@@ -3038,8 +3046,8 @@ export async function registerRoutes(
             .map((m) => parseInt(m[1], 10))
             .filter((n) => Number.isFinite(n) && n > 0);
           if (stayNightCounts.some((n) => n !== nights)) return false;
-          const inferred = typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(hay);
-          if (inferred !== null && inferred !== bedrooms) {
+          const inferred = rawCandidateBedroomSignal(c);
+          if (inferred !== null && inferred < bedrooms) {
             wrongBedrooms++;
             return false;
           }
@@ -3057,7 +3065,7 @@ export async function registerRoutes(
             url: withStayDates("airbnb", c.url),
             nightlyPrice: Math.round(nightly),
             totalPrice: Math.round(total),
-            bedrooms: c.bedrooms,
+            bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
             image: c.image,
             snippet: c.snippet,
             verified: "yes",
@@ -3098,11 +3106,14 @@ export async function registerRoutes(
         bookingSidecarCount = r.candidates.length;
         bookingSidecarOnline = r.workerOnline;
         bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
-        const accepted = r.candidates.filter((c) => c.bedrooms === bedrooms);
+        const accepted = r.candidates.filter((c) => {
+          const inferred = rawCandidateBedroomSignal(c);
+          return inferred !== null && inferred >= bedrooms;
+        });
         const dropped = r.candidates.length - accepted.length;
         bookingDropped = { noResort: 0, wrongBedrooms: dropped };
         if (dropped > 0) {
-          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} non-${bedrooms}BR candidates`);
+          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
         }
         return accepted.map((c): Candidate => {
           const total = Number(c.totalPrice || 0) > 0
@@ -3120,7 +3131,7 @@ export async function registerRoutes(
             url: withStayDates("booking", c.url),
             nightlyPrice: nightly,
             totalPrice: total,
-            bedrooms: c.bedrooms,
+            bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
             image: c.image,
             snippet: c.snippet || (total > 0 ? `Booking.com search card showed $${total.toLocaleString()} for the requested stay` : undefined),
             verified: total > 0 ? "yes" : undefined,
@@ -3164,14 +3175,12 @@ export async function registerRoutes(
         });
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
-          const inferred = typeof c.bedrooms === "number"
-            ? c.bedrooms
-            : bedroomFromText(`${c.title} ${c.snippet ?? ""}`);
-          return inferred === bedrooms;
+          const inferred = rawCandidateBedroomSignal(c);
+          return inferred !== null && inferred >= bedrooms;
         });
         const droppedVrbo = r.candidates.length - acceptedVrbo.length;
         if (droppedVrbo > 0) {
-          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} non-${bedrooms}BR or unknown-BR candidates`);
+          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
         }
         vrboGoogleCount = 0;
         vrboSidecarCount = acceptedVrbo.length;
@@ -3182,9 +3191,7 @@ export async function registerRoutes(
         vrboRawCount = r.candidates.length;
         vrboDetailPricedCount = 0;
         return acceptedVrbo.map((c): Candidate => {
-          const inferred = typeof c.bedrooms === "number"
-            ? c.bedrooms
-            : bedroomFromText(`${c.title} ${c.snippet ?? ""}`) ?? undefined;
+          const inferred = rawCandidateBedroomSignal(c) ?? undefined;
           return {
             source: "vrbo" as const,
             sourceLabel: "Vrbo",
@@ -3843,8 +3850,8 @@ export async function registerRoutes(
         return r.candidates
           .filter((c) => {
             const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
-            const inferred = typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(hay);
-            return inferred === bedrooms && (c.totalPrice > 0 || c.nightlyPrice > 0);
+            const inferred = rawCandidateBedroomSignal(c);
+            return inferred !== null && inferred >= bedrooms && (c.totalPrice > 0 || c.nightlyPrice > 0);
           })
           .map((c): Candidate => {
             const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
@@ -3856,7 +3863,7 @@ export async function registerRoutes(
               url: withStayDates("pm", c.url),
               nightlyPrice: Math.round(nightly),
               totalPrice: Math.round(total),
-              bedrooms: c.bedrooms,
+              bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
               image: c.image,
               snippet: c.snippet,
               verified: "yes",
@@ -4086,14 +4093,15 @@ export async function registerRoutes(
     let photoMatchBedroomMismatchDropped = 0;
     let photoMatchLandingDropped = 0;
     for (const anchor of topAirbnb) {
+      const anchorBedrooms = candidateBedroomSignal(anchor) ?? anchor.bedrooms;
       // Bedroom guard — Lens visual similarity does NOT respect bedroom
       // count. A 4BR penthouse anchor was producing 3BR-search rows
       // (Steve Kuykendall, Jun 13-20 2026) at the anchor's $10,670
       // price — operator saw an inflated "cheapest" entry that wasn't
-      // even available because the anchor was the wrong size. Require
-      // the anchor's bedroom count to match the requested count exactly
-      // before any of its photo matches can seed a candidate.
-      if (typeof anchor.bedrooms === "number" && anchor.bedrooms !== bedrooms) {
+      // even available because the anchor was too small. Allow larger
+      // units to satisfy a smaller slot, but never promote anchors
+      // below the requested bedroom count.
+      if (typeof anchorBedrooms === "number" && anchorBedrooms < bedrooms) {
         photoMatchBedroomMismatchDropped += (photoMatchesByUrl.get(anchor.url)?.length ?? 0);
         continue;
       }
@@ -4157,7 +4165,7 @@ export async function registerRoutes(
           // than an unpriced fallback.
           nightlyPrice: anchor.nightlyPrice,
           totalPrice: anchor.totalPrice,
-          bedrooms: anchor.bedrooms,
+          bedrooms: anchorBedrooms,
           image: anchor.image,
           // Honest snippet: anchor confirmed available + priced; PM
           // availability for these dates is NOT verified server-side
@@ -4343,11 +4351,11 @@ export async function registerRoutes(
                 c.bedrooms = r.bedrooms;
               }
               const sidecarBedroomSignal = candidateBedroomSignal(c);
-              if (r.available === "yes" && sidecarBedroomSignal !== bedrooms) {
+              if (r.available === "yes" && sidecarBedroomSignal !== null && sidecarBedroomSignal < bedrooms) {
                 c.verified = sidecarBedroomSignal === null ? "unclear" : "no";
                 c.verifiedReason = sidecarBedroomSignal === null
                   ? `Sidecar found a rate but did not confirm this is a ${bedrooms}BR listing: ${r.reason}`
-                  : `Sidecar detail page identified ${sidecarBedroomSignal}BR, not requested ${bedrooms}BR: ${r.reason}`;
+                  : `Sidecar detail page identified ${sidecarBedroomSignal}BR, below requested ${bedrooms}BR: ${r.reason}`;
                 c.verifiedNightlyPrice = null;
                 rememberSidecarVerifyReason(c, c.verifiedReason);
                 continue;
