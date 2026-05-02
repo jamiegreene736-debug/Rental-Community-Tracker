@@ -1541,6 +1541,22 @@ type LiveUnit = {
   listings: LiveUnitListing[];
 };
 
+type ReverseImageListingMatch = {
+  platformKey: "airbnb" | "vrbo" | "booking" | "pm" | "other";
+  platform: string;
+  domain: string;
+  title: string;
+  url: string;
+  source: string;
+  position: number;
+};
+
+type ReverseImageLookupState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "loaded"; matches: ReverseImageListingMatch[]; fromCache: boolean }
+  | { status: "error"; message: string };
+
 type FindBuyInResponse = {
   community: string;
   resortName?: string | null;
@@ -2090,6 +2106,7 @@ function LiveSearchSection({
                 unit={u}
                 onRecord={(listing) => setRecordTarget(unitToCandidate(u, listing))}
                 highlight
+                showImageSearch
               />
             ))}
           </div>
@@ -2131,7 +2148,7 @@ function LiveSearchSection({
           </div>
           <div className="space-y-2">
             {focusedCheapest.map((c, i) => (
-              <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight />
+              <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight showImageSearch />
             ))}
           </div>
           {additionalCheapest.length > 0 && (
@@ -2897,6 +2914,112 @@ function canRecordLiveResult(item: { verified?: string; totalPrice?: number }): 
   return item.verified === "yes" && (item.totalPrice ?? 0) > 0;
 }
 
+function ReverseImageListingLookup({
+  imageUrl,
+  sourceUrl,
+  title,
+}: {
+  imageUrl?: string;
+  sourceUrl?: string;
+  title: string;
+}) {
+  const [state, setState] = useState<ReverseImageLookupState>({ status: "idle" });
+  const isLoading = state.status === "loading";
+
+  const runLookup = async () => {
+    if (!imageUrl || isLoading) return;
+    setState({ status: "loading" });
+    try {
+      const response = await fetch("/api/operations/reverse-image-listings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          imageUrl,
+          sourceUrl,
+          title,
+          maxResults: 15,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body?.error || `Reverse image lookup failed (${response.status})`);
+      }
+      setState({
+        status: "loaded",
+        matches: Array.isArray(body?.matches) ? body.matches : [],
+        fromCache: body?.fromCache === true,
+      });
+    } catch (e: any) {
+      setState({ status: "error", message: e?.message ?? "Reverse image lookup failed" });
+    }
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-slate-200 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/20">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 px-2 text-[11px]"
+          onClick={runLookup}
+          disabled={!imageUrl || isLoading}
+          title={imageUrl ? "Find other listing sites from this photo" : "No image available for reverse image search"}
+          data-testid="button-reverse-image-listings"
+        >
+          {isLoading ? (
+            <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+          ) : (
+            <Camera className="h-3 w-3 mr-1" />
+          )}
+          {isLoading ? "Searching..." : state.status === "loaded" ? "Refresh listing sites" : "Find listing sites"}
+        </Button>
+        {state.status === "loaded" && (
+          <span className="text-[10px] text-muted-foreground">
+            {state.matches.length} site{state.matches.length === 1 ? "" : "s"}{state.fromCache ? " · cached" : ""}
+          </span>
+        )}
+      </div>
+
+      {state.status === "error" && (
+        <p className="mt-2 text-[11px] text-destructive">{state.message}</p>
+      )}
+
+      {state.status === "loaded" && (
+        <div className="mt-2 rounded-md border bg-background p-1.5">
+          {state.matches.length === 0 ? (
+            <p className="px-1 py-1 text-[11px] text-muted-foreground">No other listing sites found from this image.</p>
+          ) : (
+            <div className="space-y-1">
+              {state.matches.map((m, idx) => (
+                <a
+                  key={`${m.domain}-${idx}`}
+                  href={m.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 rounded px-2 py-1.5 text-[11px] hover:bg-muted/50 transition-colors"
+                  data-testid={`reverse-image-listing-${idx}`}
+                >
+                  <Badge className={`text-[9px] shrink-0 ${sourceBadgeClass(m.platformKey)}`}>
+                    {m.platform}
+                  </Badge>
+                  <span className="w-[110px] shrink-0 truncate font-medium text-muted-foreground" title={m.domain}>
+                    {m.domain}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-foreground" title={m.title}>
+                    {m.title}
+                  </span>
+                  <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One row in the cheapest panel — represents a SINGLE physical unit
 // with possibly multiple channel listings (Airbnb + VRBO + PM site).
 // The row header shows the unit identity (title + bedrooms + thumb).
@@ -2909,10 +3032,12 @@ function UnitRow({
   unit,
   onRecord,
   highlight,
+  showImageSearch,
 }: {
   unit: LiveUnit;
   onRecord: (listing: LiveUnitListing) => void;
   highlight?: boolean;
+  showImageSearch?: boolean;
 }) {
   const verifiedListings = unit.listings.filter((l) => l.verified === "yes" && l.nightlyPrice > 0);
   const otherListings = unit.listings.filter((l) => !(l.verified === "yes" && l.nightlyPrice > 0));
@@ -2935,6 +3060,14 @@ function UnitRow({
           </p>
         </div>
       </div>
+
+      {showImageSearch && (
+        <ReverseImageListingLookup
+          imageUrl={unit.image}
+          sourceUrl={unit.primaryUrl}
+          title={unit.unitTitle}
+        />
+      )}
 
       {/* Per-channel listings — verified bookable on top, then everything
           else (no/unclear/skipped). Each row has its own Open + Record
@@ -2999,7 +3132,17 @@ function UnitRow({
   );
 }
 
-function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () => void; highlight?: boolean }) {
+function LiveRow({
+  c,
+  onRecord,
+  highlight,
+  showImageSearch,
+}: {
+  c: LiveCandidate;
+  onRecord: () => void;
+  highlight?: boolean;
+  showImageSearch?: boolean;
+}) {
   const photoMatches = c.photoMatches ?? [];
   return (
     <div
@@ -3065,6 +3208,13 @@ function LiveRow({ c, onRecord, highlight }: { c: LiveCandidate; onRecord: () =>
           </Button>
         </div>
       </div>
+      {showImageSearch && (
+        <ReverseImageListingLookup
+          imageUrl={c.image}
+          sourceUrl={c.url}
+          title={c.title}
+        />
+      )}
       {/* Reverse-image matches: when this candidate's photo also appears
           on a non-OTA site, surface those URLs so the operator can click
           through to the property-management company that has the same

@@ -2017,7 +2017,19 @@ export async function registerRoutes(
   // path.
   type FindBuyInCacheEntry = { value: any; expiresAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
+  type ReverseImageListingMatch = {
+    platformKey: "airbnb" | "vrbo" | "booking" | "pm" | "other";
+    platform: string;
+    domain: string;
+    title: string;
+    url: string;
+    source: string;
+    position: number;
+  };
+  type ReverseImageListingCacheEntry = { value: { checkedUrl: string; matches: ReverseImageListingMatch[]; rawCount: number }; expiresAt: number };
+  const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
   const FIND_BUY_IN_TTL_MS = 5 * 60_000;
+  const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
   // Railway's edge timeout is ~5 min. Keep the handler below that even
   // when the local sidecar is slow by stopping optional verification work
   // around 4.5 min and returning partial results + diagnostics.
@@ -2031,6 +2043,12 @@ export async function registerRoutes(
     const expired: string[] = [];
     findBuyInCache.forEach((v, k) => { if (v.expiresAt <= now) expired.push(k); });
     for (const k of expired) findBuyInCache.delete(k);
+  }
+  function evictExpiredReverseImageListings(): void {
+    const now = Date.now();
+    const expired: string[] = [];
+    reverseImageListingCache.forEach((v, k) => { if (v.expiresAt <= now) expired.push(k); });
+    for (const k of expired) reverseImageListingCache.delete(k);
   }
 
   // GET /api/operations/find-buy-in?propertyId=X&bedrooms=N&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD
@@ -4893,6 +4911,151 @@ export async function registerRoutes(
     });
     console.log(`[find-buy-in] cached ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
     return res.json(responseBody);
+  });
+
+  // POST /api/operations/reverse-image-listings
+  // On-demand Google Lens lookup for the best buy-in card. Unlike the
+  // find-buy-in photo bridge, this intentionally returns all useful
+  // listing surfaces: OTAs, PM/direct sites, and other rental listing
+  // pages where the same cheapest-unit photo appears.
+  app.post("/api/operations/reverse-image-listings", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const imageUrl = String(req.body?.imageUrl ?? "").trim();
+    const sourceUrl = String(req.body?.sourceUrl ?? "").trim();
+    const sourceTitle = String(req.body?.title ?? "").trim();
+    if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
+
+    try {
+      const parsed = new URL(imageUrl);
+      if (!/^https?:$/.test(parsed.protocol)) return res.status(400).json({ error: "imageUrl must be http(s)" });
+    } catch {
+      return res.status(400).json({ error: "imageUrl must be a valid URL" });
+    }
+
+    const maxResultsRaw = Number(req.body?.maxResults ?? 15);
+    const maxResults = Number.isFinite(maxResultsRaw) ? Math.min(25, Math.max(5, Math.round(maxResultsRaw))) : 15;
+    const cacheKey = imageUrl;
+    evictExpiredReverseImageListings();
+    const cached = reverseImageListingCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json({
+        ...cached.value,
+        matches: cached.value.matches.slice(0, maxResults),
+        fromCache: true,
+      });
+    }
+
+    const classifyDomain = (domain: string): { platformKey: ReverseImageListingMatch["platformKey"]; platform: string } => {
+      const d = domain.toLowerCase();
+      if (/(^|\.)airbnb\./.test(d)) return { platformKey: "airbnb", platform: "Airbnb" };
+      if (/(^|\.)(vrbo|homeaway)\./.test(d)) return { platformKey: "vrbo", platform: "VRBO" };
+      if (/(^|\.)booking\.com$/.test(d)) return { platformKey: "booking", platform: "Booking.com" };
+      if (/(^|\.)expedia\./.test(d)) return { platformKey: "other", platform: "Expedia" };
+      if (/(^|\.)hotels\.com$/.test(d)) return { platformKey: "other", platform: "Hotels.com" };
+      if (/(^|\.)tripadvisor\./.test(d)) return { platformKey: "other", platform: "Tripadvisor" };
+      if (/(^|\.)agoda\./.test(d)) return { platformKey: "other", platform: "Agoda" };
+      if (/(^|\.)vacasa\./.test(d)) return { platformKey: "pm", platform: "Vacasa" };
+      return { platformKey: "pm", platform: "Direct / PM" };
+    };
+
+    const noiseDomain = (domain: string): boolean => {
+      const d = domain.toLowerCase();
+      return /(?:^|\.)(?:google|gstatic|googleusercontent|searchapi|bing|yahoo|duckduckgo|facebook|instagram|pinterest|youtube|youtu|tiktok|twitter|x|threads|linkedin|reddit|wikimedia|wikipedia|imgur|flickr|staticflickr)\./.test(d)
+        || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d);
+    };
+
+    const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string } | null => {
+      try {
+        const u = new URL(rawUrl);
+        if (!/^https?:$/.test(u.protocol)) return null;
+        u.hash = "";
+        for (const key of Array.from(u.searchParams.keys())) {
+          if (/^(utm_|fbclid|gclid|msclkid|source_impression_id|federated_search_id|previous_page_section_name)/i.test(key)) {
+            u.searchParams.delete(key);
+          }
+        }
+        if (/\.(?:jpe?g|png|webp|gif|svg)(?:$|[?#])/i.test(u.pathname)) return null;
+        const domain = u.hostname.replace(/^www\./, "").toLowerCase();
+        if (!domain || noiseDomain(domain)) return null;
+        const pathKey = u.pathname.replace(/\/+$/, "").toLowerCase() || "/";
+        return { url: u.toString(), domain, dedupeKey: `${domain}${pathKey}` };
+      } catch {
+        return null;
+      }
+    };
+
+    const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+      Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
+
+    const searchParams = new URLSearchParams({ engine: "google_lens", url: imageUrl, api_key: apiKey });
+    const searchResp = await fetch(`https://www.searchapi.io/api/v1/search?${searchParams.toString()}`, {
+      headers: { "User-Agent": "NexStay/1.0" },
+    });
+    if (!searchResp.ok) {
+      const errText = await searchResp.text();
+      console.error("[reverse-image-listings] SearchAPI failed:", searchResp.status, errText.slice(0, 500));
+      return res.status(502).json({ error: "Reverse image search failed" });
+    }
+
+    const searchData = await searchResp.json() as any;
+    const lensRows = [
+      ...rowsFrom("visual", searchData?.visual_matches),
+      ...rowsFrom("page", searchData?.pages_with_matching_images),
+      ...rowsFrom("organic", searchData?.organic_results),
+      ...rowsFrom("image", searchData?.image_results),
+      ...rowsFrom("inline", searchData?.inline_images),
+    ];
+
+    const matches: ReverseImageListingMatch[] = [];
+    const seenUrls = new Set<string>();
+    const seenDomains = new Set<string>();
+    const addMatch = (rawUrl: string, rawTitle: string, source: string, position: number): void => {
+      const normalized = normalizeListingUrl(rawUrl);
+      if (!normalized) return;
+      // This UI answers "which websites list this property", so one
+      // representative row per domain is clearer than duplicate URLs.
+      if (seenUrls.has(normalized.dedupeKey) || seenDomains.has(normalized.domain)) return;
+      const classified = classifyDomain(normalized.domain);
+      seenUrls.add(normalized.dedupeKey);
+      seenDomains.add(normalized.domain);
+      matches.push({
+        ...classified,
+        domain: normalized.domain,
+        title: (rawTitle || normalized.domain).replace(/\s+/g, " ").trim().slice(0, 120),
+        url: normalized.url,
+        source,
+        position,
+      });
+    };
+
+    if (sourceUrl) addMatch(sourceUrl, sourceTitle || "Known source", "known-source", 0);
+
+    for (const { source, row, idx } of lensRows) {
+      const rawUrl = String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || "");
+      const rawTitle = String(row?.title || row?.snippet || row?.source?.name || row?.source || "");
+      const position = Number(row?.position ?? idx + 1);
+      addMatch(rawUrl, rawTitle, source, Number.isFinite(position) ? position : idx + 1);
+      if (matches.length >= 25) break;
+    }
+
+    matches.sort((a, b) => {
+      const rank = (m: ReverseImageListingMatch): number => {
+        if (m.source === "known-source") return 0;
+        if (m.platformKey === "airbnb" || m.platformKey === "vrbo" || m.platformKey === "booking") return 1;
+        if (m.platformKey === "pm") return 2;
+        return 3;
+      };
+      return rank(a) - rank(b) || a.position - b.position || a.domain.localeCompare(b.domain);
+    });
+
+    const value = { checkedUrl: imageUrl, matches, rawCount: lensRows.length };
+    reverseImageListingCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + REVERSE_IMAGE_LISTING_TTL_MS,
+    });
+    return res.json({ ...value, matches: matches.slice(0, maxResults), fromCache: false });
   });
 
   // ─── Availability verification ─────────────────────────────────────────
