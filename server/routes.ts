@@ -3805,12 +3805,12 @@ export async function registerRoutes(
           sites: pmSitesForSearch,
           searchTerm: websiteSearchTerm,
           checkIn,
-          checkOut,
-          bedrooms,
-          perSiteLimit: 3,
-          walletBudgetMs: 240_000,
-          queueBudgetMs: 285_000,
-        });
+	          checkOut,
+	          bedrooms,
+	          perSiteLimit: 3,
+	          walletBudgetMs: 105_000,
+	          queueBudgetMs: 285_000,
+	        });
         pmWebsiteSidecarCount = r.candidates.length;
         pmWebsiteSidecarOnline = r.workerOnline;
         pmWebsiteSidecarMs = r.durationMs;
