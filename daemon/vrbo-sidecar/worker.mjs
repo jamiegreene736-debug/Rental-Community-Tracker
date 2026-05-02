@@ -2130,7 +2130,7 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
       ];
       const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)|(?:\b\d{3}[-.\s]?\d{3}[-.\s]?[a-z]{3,}\s*\(?\d{4}\)?)/i;
 
       function isRendered(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -2257,7 +2257,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
       const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)|(?:\b\d{3}[-.\s]?\d{3}[-.\s]?[a-z]{3,}\s*\(?\d{4}\)?)/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
