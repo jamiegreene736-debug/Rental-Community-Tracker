@@ -804,6 +804,13 @@ async function processAirbnbSearch(id, params) {
       if (plausibleNightly) return { nightlyPrice: Math.round(plausibleNightly), totalPrice: Math.round(plausibleNightly * expectedNights) };
       return null;
     }
+    function extractedStayNights(fullText) {
+      const text = clean(fullText);
+      const matches = Array.from(text.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+        .map((m) => parseInt(m[1], 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      return matches.length > 0 ? matches[0] : null;
+    }
     function cardForAnchor(anchor) {
       let el = anchor;
       let best = anchor;
@@ -833,6 +840,8 @@ async function processAirbnbSearch(id, params) {
       seen.add(id);
       const card = cardForAnchor(a);
       const fullText = clean(card.textContent || a.textContent || "");
+      const stayNights = extractedStayNights(fullText);
+      if (stayNights !== null && stayNights !== expectedNights) continue;
       const price = parsePrice(fullText);
       if (!price) continue;
       const bedrooms = extractBedrooms(fullText);
@@ -3772,7 +3781,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         const fullText = clean(card?.textContent || a.textContent || "");
         if (!looksDetail(url, fullText)) continue;
         const br = extractBedrooms(fullText);
-        if (br !== null && br !== bedrooms) continue;
+        if (br !== bedrooms) continue;
         const price = parsePrice(fullText);
         if (!price) continue;
         const title =
@@ -3786,7 +3795,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           title: title.slice(0, 100),
           totalPrice: price.totalPrice,
           nightlyPrice: price.nightlyPrice,
-          bedrooms: br ?? bedrooms,
+          bedrooms: br,
           image: imageFrom(card),
           snippet: fullText.slice(0, 220),
         });
