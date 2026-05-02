@@ -2998,6 +2998,7 @@ export async function registerRoutes(
           checkOut,
           bedrooms,
           walletBudgetMs: 120_000,
+          queueBudgetMs: 285_000,
         });
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
@@ -3066,6 +3067,7 @@ export async function registerRoutes(
           checkOut,
           bedrooms,
           walletBudgetMs: 120_000,
+          queueBudgetMs: 285_000,
         });
         bookingRawCount = r.candidates.length;
         bookingSidecarCount = r.candidates.length;
@@ -3133,6 +3135,7 @@ export async function registerRoutes(
           checkOut,
           bedrooms,
           walletBudgetMs: 120_000,
+          queueBudgetMs: 285_000,
         });
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
@@ -3806,6 +3809,7 @@ export async function registerRoutes(
           bedrooms,
           perSiteLimit: 3,
           walletBudgetMs: 240_000,
+          queueBudgetMs: 285_000,
         });
         pmWebsiteSidecarCount = r.candidates.length;
         pmWebsiteSidecarOnline = r.workerOnline;

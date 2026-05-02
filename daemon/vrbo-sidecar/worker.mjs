@@ -753,7 +753,20 @@ async function processAirbnbSearch(id, params) {
   await dismissObstructions(page, "airbnb_search");
   await fillVisibleSearchField(page, effectiveSearchTerm, "airbnb_search").catch(() => null);
   await clickVisibleSearchSubmit(page, "airbnb_search").catch(() => null);
-  await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
+  const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
+  if (!bedroomFiltered) {
+    try {
+      const current = new URL(page.url());
+      current.searchParams.set("min_bedrooms", String(bedrooms));
+      current.searchParams.set("room_types[]", "Entire home/apt");
+      current.searchParams.set("search_type", "filter_change");
+      await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+      await page.waitForTimeout(PAGE_SETTLE_MS);
+      log(`airbnb_search: applied URL bedroom filter (min_bedrooms=${bedrooms})`);
+    } catch (e) {
+      log(`airbnb_search: URL bedroom fallback failed: ${e?.message ?? e}`);
+    }
+  }
   await page.waitForTimeout(PAGE_SETTLE_MS);
   const state = await dumpPageState("airbnb", { id, ...params });
   if (state && /captcha|access denied|not a robot|robot|unusual traffic/i.test(state.bodyExcerpt)) {

@@ -624,6 +624,7 @@ export async function searchVrboViaSidecar(opts: {
   bedrooms: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  queueBudgetMs?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -643,6 +644,7 @@ export async function searchVrboViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
+    queueBudgetMs: opts.queueBudgetMs,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -695,6 +697,7 @@ export async function searchBookingViaSidecar(opts: {
   bedrooms: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  queueBudgetMs?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -714,6 +717,7 @@ export async function searchBookingViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
+    queueBudgetMs: opts.queueBudgetMs,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -731,6 +735,7 @@ export async function searchAirbnbViaSidecar(opts: {
   bedrooms: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  queueBudgetMs?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -750,6 +755,7 @@ export async function searchAirbnbViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
+    queueBudgetMs: opts.queueBudgetMs,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -795,6 +801,7 @@ export async function searchPmSitesViaSidecar(opts: {
   perSiteLimit?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  queueBudgetMs?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -826,6 +833,7 @@ export async function searchPmSitesViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 120_000,
+    queueBudgetMs: opts.queueBudgetMs,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -1012,6 +1020,7 @@ async function awaitOpResult(opts: {
   enqueueArgs: Parameters<typeof enqueueOp>[0];
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  queueBudgetMs?: number;
 }): Promise<{
   results: SidecarRequest["results"];
   workerOnline: boolean;
@@ -1021,9 +1030,11 @@ async function awaitOpResult(opts: {
   const startedAt = nowMs();
   const pollMs = opts.pollIntervalMs ?? 2000;
   const walletMs = opts.walletBudgetMs ?? 75_000;
+  const queueBudgetMs = opts.queueBudgetMs ?? walletMs;
   const { id } = enqueueOp(opts.enqueueArgs);
+  let activeStartedAt: number | null = null;
 
-  while (nowMs() - startedAt < walletMs) {
+  while (true) {
     const r = getResult(id);
     if (!r) {
       return {
@@ -1033,6 +1044,7 @@ async function awaitOpResult(opts: {
         reason: "request expired before completion (worker likely offline)",
       };
     }
+    const now = nowMs();
     if (r.status === "completed") {
       return {
         results: r.results ?? null,
@@ -1051,14 +1063,29 @@ async function awaitOpResult(opts: {
         reason: r.error || "worker reported failure",
       };
     }
+    if (r.status === "in_progress" && activeStartedAt === null) {
+      activeStartedAt = r.claimedAt ?? now;
+    }
+    if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
+      const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;
+      cancelRequest(id, reason);
+      return {
+        results: null,
+        workerOnline: false,
+        durationMs: now - startedAt,
+        reason,
+      };
+    }
+    if (activeStartedAt !== null && now - activeStartedAt >= walletMs) {
+      const reason = `wallet budget ${walletMs}ms exceeded while worker active`;
+      cancelRequest(id, reason);
+      return {
+        results: null,
+        workerOnline: false,
+        durationMs: now - startedAt,
+        reason,
+      };
+    }
     await new Promise((res) => setTimeout(res, pollMs));
   }
-  const reason = `wallet budget ${walletMs}ms exceeded waiting for worker`;
-  cancelRequest(id, reason);
-  return {
-    results: null,
-    workerOnline: false,
-    durationMs: nowMs() - startedAt,
-    reason,
-  };
 }
