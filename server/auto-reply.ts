@@ -7,7 +7,7 @@ import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "../shared/walking-distance";
-import { humanizeReply } from "./humanize-reply";
+import { humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import type { InsertAutoReplyLog } from "@shared/schema";
 
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
@@ -546,6 +546,11 @@ async function draftReplyWithClaude(params: {
   // softer guidance gets ignored when the question is buried in a
   // multi-part guest message.
   const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
+  const PROXIMITY_CUES = /\b(next to each other|next door|adjacent|side[-\s]?by[-\s]?side|close together|near each other|close to each other|same building|same cluster|together|how far|walk apart|distance between)\b/i;
+  const NON_PROXIMITY_DETAIL_CUES = /\b(bed(?:room)?s?|bath(?:room)?s?|sleeps?|kitchen|pool|hot tub|amenit(?:y|ies)|parking|stairs?|floor|level|elevator|wheelchair|mobility|senior|elderly|check[-\s]?in|check[-\s]?out|discount|refund|price|rate|pet|wifi|wi[-\s]?fi|air conditioning|ac\b)\b/i;
+  const proximityOnlyRaised =
+    PROXIMITY_CUES.test(params.guestMessage) &&
+    !NON_PROXIMITY_DETAIL_CUES.test(params.guestMessage.replace(PROXIMITY_CUES, " "));
   const accessibilityMandate = ACCESSIBILITY_CUES.test(params.guestMessage)
     ? `\n\nACCESSIBILITY / FLOOR-PLAN ASK DETECTED — MANDATORY:
 The guest raised an accessibility, ground-floor, stairs, mobility, or seniors concern. You MUST address it explicitly. Call get_local_property_facts and use this priority:
@@ -644,7 +649,8 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
     // closers, etc. — BEFORE attaching the sign-off so the signature
     // doesn't get touched. ensureSignoff then guarantees the fixed
     // John Carpenter / Reservationist / Magical Island Rentals block.
-    const humanized = humanizeReply(text);
+    const baseHumanized = humanizeReply(text);
+    const humanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
     const finalDraft = ensureSignoff(humanized);
     return { draft: finalDraft, flagReason: null, toolsUsed, error: null };
   }

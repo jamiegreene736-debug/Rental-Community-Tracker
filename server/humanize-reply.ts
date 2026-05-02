@@ -238,9 +238,10 @@ export function humanizeReply(text: string): string {
 
   // Step 1: em-dashes. Replace " — " (spaced) with ", " — that's how
   // Claude uses them ~95% of the time as parenthetical-aside dividers.
-  // Bare "—" without surrounding spaces (rare) collapses to a hyphen.
+  // Bare "—" without surrounding spaces gets the same treatment; otherwise
+  // "close—about" becomes the very robotic-looking "close-about".
   let cleaned = body.replace(EM_DASH_WITH_SPACES, ", ");
-  cleaned = cleaned.replace(EM_DASH_BARE, "-");
+  cleaned = cleaned.replace(EM_DASH_BARE, ", ");
   cleaned = softenStiffWording(cleaned);
 
   // Step 2 + 3: walk paragraphs → sentences. For each sentence:
@@ -294,5 +295,25 @@ export function humanizeReply(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^\s+|\s+$/g, "");
 
+  return sig ? `${cleaned}\n\n${sig.trimStart()}` : cleaned;
+}
+
+export function trimProximityOnlyReply(text: string): string {
+  if (!text) return text;
+  const { body, sig } = splitSignature(text);
+  const detailSentence =
+    /\b(Unit\s+[A-Z]|[1-9]\s*BR\b|[1-9][-\s]?bedroom|bedrooms? total|bathrooms?|sleeps?\s+\d+|full kitchens?|living rooms?|pool|hot tub|amenit(?:y|ies)|AC\b|air conditioning|wi[-\s]?fi|parking)\b/i;
+
+  const paragraphs = body.split(/\n\s*\n/);
+  const cleanedParagraphs: string[] = [];
+  for (const para of paragraphs) {
+    const sentences = splitParagraphSentences(para);
+    if (sentences.length === 0) continue;
+    const kept = sentences.filter((s) => isGreetingLine(s) || !detailSentence.test(s));
+    if (kept.length > 0) cleanedParagraphs.push(kept.join(" "));
+  }
+
+  const cleaned = cleanedParagraphs.join("\n\n").trim();
+  if (!cleaned) return text;
   return sig ? `${cleaned}\n\n${sig.trimStart()}` : cleaned;
 }

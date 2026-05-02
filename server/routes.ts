@@ -24,7 +24,7 @@ import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
-import { humanizeReply } from "./humanize-reply";
+import { humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -2032,11 +2032,11 @@ export async function registerRoutes(
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
   const FIND_BUY_IN_TTL_MS = 5 * 60_000;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
-  // Railway's edge timeout is ~5 min. Keep the handler below that even
-  // when the local sidecar is slow by stopping optional verification work
-  // around 4.5 min and returning partial results + diagnostics.
-  const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
-  const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 12_000;
+  // Railway's edge can return "Application failed to respond" around
+  // 35-40s on this service. Keep find-buy-in comfortably below that:
+  // slow sources become warning diagnostics + audit rows, never blind 502s.
+  const FIND_BUY_IN_ROUTE_BUDGET_MS = 32_000;
+  const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
   // = ~360 entries max in steady state, well within memory budget.
@@ -3936,10 +3936,9 @@ export async function registerRoutes(
     // the slowest source caps at its own timeout and we send back
     // whatever the fast sources produced.
     //
-    // Worst-case combined: vrbo 180s (sidecar search plus sidecar
-    // detail-rate checks dominates the parallel block)
-    // + photo-match phase 5s + PM finder 60s = ~245s total handler
-    // time — comfortably under Railway's 5-min timeout.
+    // Worst-case combined must stay below Railway's edge timeout. These
+    // source promises run in parallel; anything that misses the short wall
+    // budget returns a fallback and is surfaced in diagnostics.
     const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
@@ -3956,11 +3955,11 @@ export async function registerRoutes(
       ]);
     };
     const [airbnb, booking, vrbo, pmGoogle, pmWebsiteSidecarDiscovered, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
-      withTimeout(airbnbPromise, 150_000, [] as Candidate[], "airbnb-sidecar"),
-      withTimeout(bookingPromise, 150_000, [] as Candidate[], "booking-sidecar"),
-      withTimeout(vrboPromise, 180_000, [] as Candidate[], "vrbo"),
-      withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
-      withTimeout(pmWebsiteSidecarPromise, 240_000, [] as Candidate[], "pm-website-sidecar"),
+      withTimeout(airbnbPromise, 25_000, [] as Candidate[], "airbnb-sidecar"),
+      withTimeout(bookingPromise, 25_000, [] as Candidate[], "booking-sidecar"),
+      withTimeout(vrboPromise, 25_000, [] as Candidate[], "vrbo"),
+      withTimeout(pmPromise, 10_000, [] as Candidate[], "pm-google"),
+      withTimeout(pmWebsiteSidecarPromise, 25_000, [] as Candidate[], "pm-website-sidecar"),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
       // 80-95s range even at concurrency=24 (their WP front
@@ -3971,14 +3970,14 @@ export async function registerRoutes(
       // only fires on the first request after a Railway restart.
       // Other scrapers keep their original 30s budget — they're
       // either small inventories or already JSON-backed.
-      withTimeout(spDiscoveryPromise, 120_000, [] as Candidate[], "sp-sitemap"),
-      withTimeout(pkDiscoveryPromise, 120_000, [] as Candidate[], "pk-sitemap"),
-      withTimeout(cbDiscoveryPromise, 120_000, [] as Candidate[], "cb-sitemap"),
-      withTimeout(pikoDiscoveryPromise, 30_000, [] as Candidate[], "piko-sitemap"),
-      withTimeout(evrhiDiscoveryPromise, 30_000, [] as Candidate[], "evrhi-sitemap"),
-      withTimeout(gvDiscoveryPromise, 30_000, [] as Candidate[], "gv-sitemap"),
-      withTimeout(slAlekonaDiscoveryPromise, 30_000, [] as Candidate[], "sl-alekona"),
-      withTimeout(slPrincevilleDiscoveryPromise, 30_000, [] as Candidate[], "sl-princeville"),
+      withTimeout(spDiscoveryPromise, 25_000, [] as Candidate[], "sp-sitemap"),
+      withTimeout(pkDiscoveryPromise, 25_000, [] as Candidate[], "pk-sitemap"),
+      withTimeout(cbDiscoveryPromise, 25_000, [] as Candidate[], "cb-sitemap"),
+      withTimeout(pikoDiscoveryPromise, 12_000, [] as Candidate[], "piko-sitemap"),
+      withTimeout(evrhiDiscoveryPromise, 12_000, [] as Candidate[], "evrhi-sitemap"),
+      withTimeout(gvDiscoveryPromise, 12_000, [] as Candidate[], "gv-sitemap"),
+      withTimeout(slAlekonaDiscoveryPromise, 12_000, [] as Candidate[], "sl-alekona"),
+      withTimeout(slPrincevilleDiscoveryPromise, 12_000, [] as Candidate[], "sl-princeville"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
@@ -4893,6 +4892,8 @@ export async function registerRoutes(
       issues: issueList,
       report: diagnosticsReport,
     };
+    const scanComplete = diagnosticsSeverity === "ok" && sourceTimeouts.length === 0 && sourceErrors.length === 0;
+    const autoFillSafe = scanComplete && cheapest.length > 0;
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
@@ -4965,6 +4966,8 @@ export async function registerRoutes(
         resortName,
       },
       diagnostics,
+      scanComplete,
+      autoFillSafe,
       cheapest,
       cheapestUnits,
       totalPricedResults: priced.length,
@@ -17930,6 +17933,11 @@ ${propertyContext}
     // ask unless explicitly required to.
     const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
     const accessibilityRaised = ACCESSIBILITY_CUES.test(guestMessage);
+    const PROXIMITY_CUES = /\b(next to each other|next door|adjacent|side[-\s]?by[-\s]?side|close together|near each other|close to each other|same building|same cluster|together|how far|walk apart|distance between)\b/i;
+    const NON_PROXIMITY_DETAIL_CUES = /\b(bed(?:room)?s?|bath(?:room)?s?|sleeps?|kitchen|pool|hot tub|amenit(?:y|ies)|parking|stairs?|floor|level|elevator|wheelchair|mobility|senior|elderly|check[-\s]?in|check[-\s]?out|discount|refund|price|rate|pet|wifi|wi[-\s]?fi|air conditioning|ac\b)\b/i;
+    const proximityOnlyRaised =
+      PROXIMITY_CUES.test(guestMessage) &&
+      !NON_PROXIMITY_DETAIL_CUES.test(guestMessage.replace(PROXIMITY_CUES, " "));
     const accessibilityMandate = accessibilityRaised
       ? `🚨 ACCESSIBILITY / FLOOR-PLAN ASK — TOP PRIORITY 🚨
 The guest's message contains an accessibility, ground-floor, stairs, mobility, or seniors concern. Your reply MUST include a sentence that directly addresses it. The reply will be considered INCOMPLETE if it doesn't contain at least one of these words: "stairs", "floor", "level", "ground", "multi-story", "single-level". Do not skip this. Do not bury it. Write it as its own paragraph or sentence near the end of the body, before the sign-off.
@@ -18052,7 +18060,8 @@ Do not include a subject line.`;
       // Humanize: strip the AI tells the prompt can't reliably suppress
       // (em-dashes, "I'm thrilled to help", "Is there anything specific
       // before you book?", etc.). See server/humanize-reply.ts for rules.
-      const humanized = humanizeReply(draftMarkdownClean);
+      const baseHumanized = humanizeReply(draftMarkdownClean);
+      const humanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
 
       // Deterministic accessibility safety net: when the guest's message
       // raised an accessibility / floor-plan / seniors concern but the
