@@ -24,7 +24,7 @@ import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
-import { humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
+import { addGuestPersonalTouch, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -17809,7 +17809,7 @@ ${SIGNATURE}`;
   - Avoid the AI-stock-phrase tells: "absolutely!", "certainly!", "kindly", "rest assured", "please be advised", "in regards to", "going forward", "at your earliest convenience". Real hosts don't talk that way.
   - Avoid internal operations language in guest replies: "flag this with our team", "request this with our team", "when we confirm your reservation", "we'll escalate internally". If a next step is truly needed, say it plainly as "I can add a note to the reservation."
   - Don't end with a sales-y closer like "Looking forward to hosting you!" or "Can't wait to welcome you!" — the signature already closes the message.
-  - When the guest shares a personal reason for the trip, add at most one genuine-sounding human line. Keep it simple and specific ("That sounds like a really sweet Christmas surprise.") and don't let it replace the answer.
+  - When the guest shares a personal reason for the trip, add at most one genuine-sounding human line. Keep it simple and specific ("That sounds like a really sweet Christmas gift for your family.") and don't let it replace the answer.
   - One small aside or parenthetical is fine when it adds warmth. Use it sparingly — at most once per reply.
   - For "are the units next to each other / adjacent / side-by-side?" questions, answer yes/no in the first sentence. Then give the exact distance from the facts. If that is the only question, keep the body to 2-3 sentences. Don't list unit bedroom counts, kitchens, pool, hot tub, or generic resort amenities unless the guest also asked about those details.
 
@@ -17821,7 +17821,7 @@ Examples (same content, different voice):
   HUMAN:    "The two units are about a 3-minute walk apart, easy to move between."
 
   ROBOTIC:  "The two units are about a 3-minute walk apart within Pili Mai, so they're close but not directly adjacent. If proximity is important for your group, let me know and I can flag this with our team to see if we can request units in the same building cluster when we confirm your reservation. What a thoughtful Christmas gift for the family."
-  HUMAN:    "They won't be directly next door to each other, but they are close, about a 3-minute walk apart within Pili Mai. I don't want to overpromise side-by-side units, especially for Christmas week, but they should still be easy for everyone to move between. That sounds like a really sweet Christmas surprise for your family."`;
+  HUMAN:    "They won't be directly next door to each other, but they are close, about a 3-minute walk apart within Pili Mai. I don't want to overpromise side-by-side units, especially for Christmas week, but they should still be easy for everyone to move between. That sounds like a really sweet Christmas gift for your family."`;
 
     const tonePreamble = isHawaii
       ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
@@ -18061,7 +18061,8 @@ Do not include a subject line.`;
       // (em-dashes, "I'm thrilled to help", "Is there anything specific
       // before you book?", etc.). See server/humanize-reply.ts for rules.
       const baseHumanized = humanizeReply(draftMarkdownClean);
-      const humanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
+      const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
+      const humanized = addGuestPersonalTouch(trimmedHumanized, guestMessage);
 
       // Deterministic accessibility safety net: when the guest's message
       // raised an accessibility / floor-plan / seniors concern but the

@@ -49,7 +49,7 @@ const EM_DASH_BARE = /—/g;
 function softenStiffWording(text: string): string {
   return text
     .replace(/\bapproximately\b/gi, "about")
-    .replace(/\bWhat a thoughtful Christmas gift for the family\./gi, "That sounds like a really sweet Christmas surprise for your family.")
+    .replace(/\bWhat a thoughtful Christmas gift for the family\./gi, "That sounds like a really sweet Christmas gift for your family.")
     .replace(/\bsituated\b/gi, "located")
     .replace(/\bwithin the resort grounds\b/gi, "within the resort")
     .replace(/\bWe are\b/g, "We're")
@@ -316,4 +316,25 @@ export function trimProximityOnlyReply(text: string): string {
   const cleaned = cleanedParagraphs.join("\n\n").trim();
   if (!cleaned) return text;
   return sig ? `${cleaned}\n\n${sig.trimStart()}` : cleaned;
+}
+
+export function addGuestPersonalTouch(text: string, guestMessage: string): string {
+  if (!text || !guestMessage) return text;
+
+  // Deterministic warmth for messages like Sandra's: "I'm taking my
+  // family as a Christmas present..." Haiku sometimes nails the facts
+  // but drops this small human acknowledgment, so add it after the
+  // factual answer when the guest clearly shared the personal reason.
+  const christmasGiftForFamily =
+    /\b(christmas|holiday)\b[\s\S]{0,120}\b(present|gift|surprise)\b/i.test(guestMessage) ||
+    /\b(present|gift|surprise)\b[\s\S]{0,120}\b(christmas|holiday)\b/i.test(guestMessage);
+  if (!christmasGiftForFamily || !/\bfamil(?:y|ies)\b/i.test(guestMessage)) return text;
+
+  const touch = "That sounds like a really sweet Christmas gift for your family.";
+  if (/sweet Christmas gift for your family/i.test(text)) return text;
+
+  const { body, sig } = splitSignature(text);
+  const trimmedBody = body.trimEnd();
+  const nextBody = trimmedBody ? `${trimmedBody}\n\n${touch}` : touch;
+  return sig ? `${nextBody}\n\n${sig.trimStart()}` : nextBody;
 }
