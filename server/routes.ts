@@ -2965,6 +2965,10 @@ export async function registerRoutes(
         let wrongBedrooms = 0;
         const accepted = r.candidates.filter((c) => {
           const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
+          const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+            .map((m) => parseInt(m[1], 10))
+            .filter((n) => Number.isFinite(n) && n > 0);
+          if (stayNightCounts.some((n) => n !== nights)) return false;
           const inferred = typeof c.bedrooms === "number" ? c.bedrooms : bedroomFromText(hay);
           if (inferred !== null && inferred !== bedrooms) {
             wrongBedrooms++;
