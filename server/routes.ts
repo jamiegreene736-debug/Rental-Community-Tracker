@@ -2791,15 +2791,24 @@ export async function registerRoutes(
     ): boolean => {
       const hay = candidateHaystack(c);
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
-      const targetSignal = mentionsResort(hay)
-        || websiteSearchProof
+      const visibleResortProof = mentionsResort(hay)
+        || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      // Booking.com and PM websites often broaden a resort-name search to
+      // nearby inventory. Their result cards need visible resort/sub-community
+      // proof before they can enter the Poipu Kai cheapest pool. Airbnb/Vrbo
+      // keep search-page proof because their result cards frequently hide the
+      // exact resort name even for the correct unit.
+      const searchProofCanCarryTarget = websiteSearchProof && (c.source === "airbnb" || c.source === "vrbo");
+      const targetSignal = visibleResortProof
+        || searchProofCanCarryTarget
         || (c.source === "airbnb" && c.inTargetBounds === true)
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
+      if ((c.source === "booking" || c.source === "pm") && !visibleResortProof) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
-      if (!websiteSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
+      if (!searchProofCanCarryTarget && !candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
     };
