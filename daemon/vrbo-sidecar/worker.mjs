@@ -1783,9 +1783,15 @@ async function processBookingSearch(id, params) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
   }
 
-  const cards = await page.evaluate((minBd) => {
+  const expectedNights = nightsBetween(checkIn, checkOut);
+  const cards = await page.evaluate(({ minBd, expectedNights }) => {
     const cards = Array.from(document.querySelectorAll('[data-testid="property-card"]'));
     const out = [];
+    function moneyAmounts(text) {
+      return Array.from(String(text || "").matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
+        .map((m) => Math.round(parseFloat(m[1].replace(/,/g, ""))))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    }
     for (const card of cards) {
       const titleEl = card.querySelector('[data-testid="title"]') ?? card.querySelector("h3, h2");
       const title = titleEl ? titleEl.textContent.trim() : "";
@@ -1795,21 +1801,31 @@ async function processBookingSearch(id, params) {
       const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       // Strip query string for the canonical URL but keep the .html path.
       const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
-      // Booking renders multiple $X numbers inside the price element:
-      // strikethrough original, discount amount ("$28 savings"), and
-      // the actual total. The original regex grabbed the FIRST match
-      // which on discounted listings was the $28 savings badge — bug
-      // surfaced 2026-04-29 with a $28 booking median for a 2BR Hawaii
-      // unit that should be ~$3000+ total. Fix: grab ALL $X matches
-      // and take the LARGEST. The total you'd actually pay is always
-      // the biggest number on the price card.
+      // Booking renders price fragments in two different places. On some
+      // cards [price-and-discounted-price] is only the nightly rate while
+      // the full card text also contains the stay total (e.g.
+      // "Per night $1,028 $7,196 Price"). Prefer the largest plausible
+      // full-card amount for the requested stay; only fall back to the
+      // price element when the full card has no total-like amount.
       const priceEl = card.querySelector('[data-testid="price-and-discounted-price"]');
       const priceText = priceEl ? priceEl.textContent.replace(/\s+/g, " ") : "";
-      const allPrices = Array.from(priceText.matchAll(/\$\s*([\d,]+)/g))
-        .map((m) => parseInt(m[1].replace(/,/g, ""), 10))
-        .filter((n) => Number.isFinite(n) && n > 0);
-      const totalPrice = allPrices.length > 0 ? Math.max(...allPrices) : 0;
       const fullText = (card.textContent || "").replace(/\s+/g, " ");
+      const priceElAmounts = moneyAmounts(priceText);
+      const fullAmounts = moneyAmounts(fullText);
+      const minStayTotal = Math.max(250, expectedNights * 175);
+      const fullStayTotals = fullAmounts.filter((n) => n >= minStayTotal);
+      let totalPrice = fullStayTotals.length > 0
+        ? Math.max(...fullStayTotals)
+        : priceElAmounts.length > 0
+        ? Math.max(...priceElAmounts)
+        : 0;
+      // If we only found an implausibly-low "total" on a 3BR card, it is
+      // almost certainly a nightly/partial-price fragment, not the full
+      // stay total. Drop it rather than ranking a bogus $89/night Hawaii
+      // 3BR above real resort inventory.
+      if (minBd >= 3 && totalPrice > 0 && totalPrice < minStayTotal) {
+        totalPrice = 0;
+      }
       const bdMatch = fullText.match(/(\d+)\s*bedroom/i);
       const bedrooms = bdMatch ? parseInt(bdMatch[1], 10) : 0;
       if (!url) continue;
@@ -1830,7 +1846,7 @@ async function processBookingSearch(id, params) {
       });
     }
     return out;
-  }, bedrooms);
+  }, { minBd: bedrooms, expectedNights });
   log(`booking_search ${id}: ${cards.length} cards`);
   await postResult(id, cards);
 }
