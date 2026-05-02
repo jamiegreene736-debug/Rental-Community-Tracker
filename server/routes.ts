@@ -2789,7 +2789,7 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
-      const websiteSearchProof = /sidecar searched|website search was driven/i.test(c.verifiedReason ?? "");
+      const websiteSearchProof = c.source !== "pm" && /sidecar searched|website search was driven/i.test(c.verifiedReason ?? "");
       const targetSignal = mentionsResort(hay)
         || websiteSearchProof
         || (c.source === "airbnb" && c.inTargetBounds === true)
@@ -3637,9 +3637,13 @@ export async function registerRoutes(
       try {
         const pmSites = [
           { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
-          ...Object.values(VRP_SITES).map((site) => ({ label: site.label, baseUrl: site.baseUrl })),
-          { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com" },
-          ...Object.values(STREAMLINE_SITES).map((site) => ({ label: site.label, baseUrl: site.baseUrl })),
+          { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
+          { label: VRP_SITES.cbIslandVacations.label, baseUrl: VRP_SITES.cbIslandVacations.baseUrl, searchUrl: "https://www.cbislandvacations.com/browse-all-kauai-vacation-rentals/" },
+          { label: VRP_SITES.pikoProperties.label, baseUrl: VRP_SITES.pikoProperties.baseUrl, searchUrl: "https://pikoproperties.com/rentals/" },
+          { label: VRP_SITES.evrhi.label, baseUrl: VRP_SITES.evrhi.baseUrl, searchUrl: "https://evrhi.com/kauai-rentals/" },
+          { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com", searchUrl: "https://gathervacations.com/vacation-rentals/hawaii/kauai-rentals/" },
+          { label: STREAMLINE_SITES.alekonaKauai.label, baseUrl: STREAMLINE_SITES.alekonaKauai.baseUrl, searchUrl: "https://alekonakauai.com/search-results/" },
+          { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${bedrooms}-bedroom/` },
         ];
         const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchPmSitesViaSidecar({

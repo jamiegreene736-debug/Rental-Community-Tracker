@@ -1131,6 +1131,224 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
   return filled;
 }
 
+async function fillPmRentalLocationField(targetPage, searchTerm, label = "pm_rental_location") {
+  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  const filled = await withSoftTimeout(
+    targetPage.evaluate(({ searchTerm }) => {
+      const locationRe = /\b(?:where|destination|location|resort|community|area|city|neighbou?rhood|complex)\b/i;
+      const rentalFormRe = /\b(?:arrival|departure|check[\s_-]*in|check[\s_-]*out|dates?|availability|booking|reservation|guest|bed(?:room)?s?|rentals?|properties|lodging|stays?)\b/i;
+      const badRe = /\b(?:search_block_form|site\s*search|global\s*search|header\s*search|nav\s*search|wp-block-search|enter\s+the\s+terms|keyword|blog|article|faq|email|phone|password|promo|coupon|newsletter|first name|last name|name on card)\b/i;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+          el.getAttribute?.("class"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        const form = el.closest?.("form");
+        if (form) {
+          parts.push(form.getAttribute?.("id"));
+          parts.push(form.getAttribute?.("class"));
+          const formText = clean(form.textContent);
+          if (formText.length <= 500) parts.push(formText);
+        }
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 4; i++, cur = cur.parentElement) {
+          parts.push(cur.getAttribute?.("id"));
+          parts.push(cur.getAttribute?.("class"));
+          const txt = clean(cur.textContent);
+          if (txt.length <= 260) parts.push(txt);
+        }
+        return clean(parts.filter(Boolean).join(" "));
+      }
+
+      function inBadChrome(el) {
+        return Boolean(el.closest?.("header, nav, footer, [class*='header' i], [class*='nav' i], [class*='footer' i], [class*='menu' i], [class*='blog' i], [class*='newsletter' i]"));
+      }
+
+      function setValue(el) {
+        try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+        try { el.focus?.(); } catch {}
+        const tag = el.tagName.toLowerCase();
+        if (tag === "select") {
+          const wanted = clean(searchTerm).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+          const option = Array.from(el.options || []).find((o) => {
+            const hay = clean(`${o.value} ${o.textContent}`).toLowerCase();
+            return wanted.length > 0 && wanted.some((t) => hay.includes(t));
+          });
+          if (!option) return false;
+          el.value = option.value;
+        } else if (el.isContentEditable || el.getAttribute?.("role") === "textbox") {
+          el.textContent = searchTerm;
+        } else if (tag === "input" || tag === "textarea") {
+          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+          if (setter) setter.call(el, searchTerm);
+          else el.value = searchTerm;
+        } else {
+          return false;
+        }
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return true;
+      }
+
+      const controls = Array.from(document.querySelectorAll("input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox']"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el) && !inBadChrome(el))
+        .map((el) => {
+          const ctx = contextOf(el);
+          let score = 0;
+          const type = (el.getAttribute?.("type") || "").toLowerCase();
+          const hasLocationSignal = locationRe.test(ctx);
+          const hasRentalContext = rentalFormRe.test(ctx);
+          if (hasLocationSignal) score += 90;
+          if (hasRentalContext) score += 35;
+          if (/\b(?:search|keyword|terms?)\b/i.test(ctx) && !hasLocationSignal) score -= 90;
+          if (badRe.test(ctx)) score -= 140;
+          if (["date", "number", "email", "tel", "password"].includes(type)) score -= 80;
+          return { el, score, ctx, hasLocationSignal, hasRentalContext };
+        })
+        .filter((x) => x.score >= 90 && x.hasLocationSignal && x.hasRentalContext)
+        .sort((a, b) => b.score - a.score);
+      const target = controls[0]?.el ?? null;
+      if (!target) return null;
+      return setValue(target) ? contextOf(target).slice(0, 100) : null;
+    }, { searchTerm }),
+    3_000,
+    null,
+  );
+  if (filled) log(`${label}: entered rental location in "${filled}"`);
+  return filled;
+}
+
+async function clickPmRentalSearchSubmit(targetPage, label = "pm_rental_search") {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const clicked = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      const goodLabelRe = /\b(?:search availability|check availability|check rates|view rates|show rates|find rentals?|search rentals?|view rentals?|show rentals?|find properties|show properties|update results|apply filters?|apply|book now|reserve)\b/i;
+      const genericSearchRe = /^(?:search|find|submit)$/i;
+      const rentalContextRe = /\b(?:arrival|departure|check[\s_-]*in|check[\s_-]*out|dates?|availability|booking|reservation|guest|bed(?:room)?s?|rentals?|properties|lodging|stays?|destination|location|resort|community|area)\b/i;
+      const badRe = /\b(?:search_block_form|site\s*search|global\s*search|header\s*search|nav\s*search|wp-block-search|enter\s+the\s+terms|keyword|blog|article|faq|newsletter|subscribe|contact|request\s+info|ask\s+a\s+question|question|message|favorite|share|facebook|instagram|owner|management)\b/i;
+
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 8 && rect.height > 8 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return clean([
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" "));
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("id"),
+          el.getAttribute?.("class"),
+          el.getAttribute?.("name"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+        ];
+        const form = el.closest?.("form");
+        if (form) {
+          parts.push(form.getAttribute?.("id"));
+          parts.push(form.getAttribute?.("class"));
+          const formText = clean(form.textContent);
+          if (formText.length <= 700) parts.push(formText);
+        }
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 4; i++, cur = cur.parentElement) {
+          parts.push(cur.getAttribute?.("id"));
+          parts.push(cur.getAttribute?.("class"));
+          const txt = clean(cur.textContent);
+          if (txt.length <= 300) parts.push(txt);
+        }
+        return clean(parts.filter(Boolean).join(" "));
+      }
+
+      function inBadChrome(el) {
+        return Boolean(el.closest?.("header, nav, footer, [class*='header' i], [class*='nav' i], [class*='footer' i], [class*='menu' i], [class*='blog' i], [class*='newsletter' i], [class*='contact' i], [class*='social' i]"));
+      }
+
+      const candidates = Array.from(document.querySelectorAll("button, input[type='submit'], input[type='button'], a, [role='button']"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true" && !inBadChrome(el))
+        .map((el) => {
+          const label = textOf(el);
+          const ctx = contextOf(el);
+          if (badRe.test(label) || badRe.test(ctx)) return null;
+          const specific = goodLabelRe.test(label);
+          const generic = genericSearchRe.test(label);
+          const contextual = rentalContextRe.test(ctx);
+          if (!specific && !(generic && contextual)) return null;
+          let score = 0;
+          if (specific) score += 90;
+          if (generic && contextual) score += 45;
+          if (contextual) score += 35;
+          if (/^(?:search availability|check availability|find rentals?|search rentals?|view rentals?)$/i.test(label)) score += 25;
+          if (/^(?:search|find)$/i.test(label)) score -= 10;
+          return { el, score, label };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+      const target = candidates[0]?.el ?? null;
+      if (!target) return null;
+      const clickedLabel = candidates[0].label.slice(0, 80) || target.tagName.toLowerCase();
+      target.scrollIntoView?.({ block: "center", inline: "center" });
+      target.click?.();
+      return clickedLabel;
+    }),
+    2_000,
+    null,
+  );
+  if (clicked) {
+    log(`${label}: clicked PM rental-search submit "${clicked}"`);
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  }
+  return clicked;
+}
+
 async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter") {
   if (!targetPage || targetPage.isClosed?.()) return null;
   const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
@@ -2981,10 +3199,6 @@ function buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms) {
       ["bedrooms", String(bedrooms)],
       ["beds", String(bedrooms)],
       ["sleeps", "2"],
-      ["search", searchTerm],
-      ["q", searchTerm],
-      ["keyword", searchTerm],
-      ["location", searchTerm],
     ]) {
       if (!u.searchParams.has(key)) u.searchParams.set(key, value);
     }
@@ -3000,6 +3214,22 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
     targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit }) => {
       function clean(raw) {
         return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+      function looksLikeRentalSearchPage() {
+        const href = String(location.href || "").toLowerCase();
+        const title = clean(document.title).toLowerCase();
+        const body = clean(document.body?.innerText || "").toLowerCase();
+        const firstBody = body.slice(0, 25000);
+        const pathSignal = /\b(?:vacation-rentals?|rentals?|properties|search-results|accommodations|lodging|vrp\/search)\b/i.test(href);
+        const rentalSignal =
+          /\b(?:vacation rentals?|properties|lodging|stays?|availability|check[\s_-]*in|arrival|departure|bedrooms?|sleeps?|guests?|nightly|per night|book now|view rates|show rates)\b/i.test(firstBody);
+        const listingSignal =
+          document.querySelectorAll("a[href*='/vrp/unit/'], a[href*='/vacation-rentals/'], a[href*='/rentals/'], a[href*='/properties/']").length > 0 ||
+          /\$\s*[\d,]+|\b(?:bedroom|bedrooms|br|bd)\b/i.test(firstBody);
+        const siteSearchOnly =
+          /\b(?:search results for|enter the terms you wish to search for|site search|search this site)\b/i.test(`${title} ${firstBody}`) &&
+          !/\b(?:vacation rentals?|bedrooms?|sleeps?|check[\s_-]*in|arrival|departure|availability)\b/i.test(firstBody);
+        return (pathSignal || rentalSignal) && listingSignal && !siteSearchOnly;
       }
       function extractBedrooms(raw) {
         const text = clean(raw).toLowerCase();
@@ -3034,6 +3264,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         const img = card.querySelector("img");
         return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       }
+      if (!looksLikeRentalSearchPage()) return [];
       const targetText = clean(searchTerm).toLowerCase();
       const targetTokens = targetText.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
       const anchors = Array.from(document.querySelectorAll("a[href]"));
@@ -3057,8 +3288,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         if (br !== null && br !== bedrooms) continue;
         const lower = `${url} ${fullText}`.toLowerCase();
         if (targetTokens.length > 0 && !targetTokens.some((t) => lower.includes(t))) {
-          // Keep VRP unit URLs even when the card title omits the resort.
-          if (!/\/vrp\/unit\//i.test(url)) continue;
+          continue;
         }
         const title =
           clean(card?.querySelector("h1, h2, h3, [class*='title' i], [data-testid*='title' i]")?.textContent) ||
@@ -3098,6 +3328,10 @@ async function processPmSiteSearch(id, params) {
     }
     let tab = null;
     try {
+      if (!site.searchUrl) {
+        log(`pm_site_search ${id}: ${site.label} skipped; no rental search URL configured`);
+        continue;
+      }
       tab = await context.newPage();
       tabs.add(tab);
       await normalizePageDisplay(tab);
@@ -3105,10 +3339,12 @@ async function processPmSiteSearch(id, params) {
       await tab.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
       await tab.waitForTimeout(PAGE_SETTLE_MS);
       await dismissObstructions(tab, `pm_site_search_${site.label}`);
-      await fillVisibleSearchField(tab, searchTerm, `pm_site_search_${site.label}`).catch(() => null);
-      await applyPmDateInputs(tab, checkIn, checkOut).catch(() => null);
-      await fillBedroomFilter(tab, bedrooms, `pm_site_search_${site.label}`).catch(() => null);
-      await clickVisibleSearchSubmit(tab, `pm_site_search_${site.label}`).catch(() => null);
+      await fillPmRentalLocationField(tab, searchTerm, `pm_site_search_${site.label}`).catch(() => null);
+      const dateEntry = await applyPmDateInputs(tab, checkIn, checkOut).catch(() => null);
+      const bedroomFilled = await fillBedroomFilter(tab, bedrooms, `pm_site_search_${site.label}`).catch(() => null);
+      if (bedroomFilled || !dateEntry?.submitLabel) {
+        await clickPmRentalSearchSubmit(tab, `pm_site_search_${site.label}`).catch(() => null);
+      }
       await withSoftTimeout(tab.waitForLoadState("networkidle", { timeout: 5_000 }), 5_500);
       await tab.waitForTimeout(PAGE_SETTLE_MS);
       const seeds = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit);
@@ -3146,7 +3382,7 @@ async function processPmSiteSearch(id, params) {
           nightlyPrice: Math.round(nightly > 0 ? nightly : total / nightsBetween(checkIn, checkOut)),
           bedrooms: typeof verified.bedrooms === "number" ? verified.bedrooms : seed.bedrooms ?? bedrooms,
           image: seed.image,
-          snippet: `${site.label} website search · ${verified.reason}`.slice(0, 240),
+          snippet: `${site.label} rental search · ${seed.snippet || ""} · ${verified.reason}`.slice(0, 360),
         });
       }
     } catch (e) {
