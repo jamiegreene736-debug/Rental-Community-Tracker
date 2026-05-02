@@ -957,27 +957,27 @@ export default function Bookings() {
         }
       };
 
-      type TwoUnitBedroomCombo = { bedrooms: number[]; includePm: boolean };
+      type TwoUnitBedroomCombo = { bedrooms: number[] };
       const twoUnitBedroomCombos = (): TwoUnitBedroomCombo[] => {
         if (emptySlots.length !== 2) return [];
         const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
         if (totalNeeded <= 0) return [];
         const combos: TwoUnitBedroomCombo[] = [];
         const seen = new Set<string>();
-        const addCombo = (combo: number[], includePm: boolean) => {
+        const addCombo = (combo: number[]) => {
           if (combo.length !== 2 || combo.some((n) => !Number.isFinite(n) || n <= 0)) return;
           if (combo[0] + combo[1] !== totalNeeded) return;
           const key = [...combo].sort((a, b) => b - a).join("+");
           if (seen.has(key)) return;
           seen.add(key);
-          combos.push({ bedrooms: combo, includePm });
+          combos.push({ bedrooms: combo });
         };
-        addCombo(emptySlots.map((s) => s.bedrooms), true);
+        addCombo(emptySlots.map((s) => s.bedrooms));
         const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
         for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
           const low = totalNeeded - high;
           if (low < minLegBedrooms) continue;
-          addCombo([high, low], false);
+          addCombo([high, low]);
         }
         return combos;
       };
@@ -991,11 +991,11 @@ export default function Bookings() {
         const combos = twoUnitBedroomCombos();
         if (combos.length === 0) return null;
         const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const poolFor = (bedroomCount: number, includePm: boolean) => {
-          const key = `${bedroomCount}|${includePm ? "pm" : "ota"}`;
+        const poolFor = (bedroomCount: number) => {
+          const key = `${bedroomCount}|pm`;
           const existing = poolCache.get(key);
           if (existing) return existing;
-          const promise = getCandidatePool(bedroomCount, true, includePm);
+          const promise = getCandidatePool(bedroomCount, true, true);
           poolCache.set(key, promise);
           return promise;
         };
@@ -1006,7 +1006,7 @@ export default function Bookings() {
           const picks: LiveCandidate[] = [];
           const summaries: AutoFillSearchSummary[] = [];
           for (const bedroomCount of combo.bedrooms) {
-            const pool = await poolFor(bedroomCount, combo.includePm);
+            const pool = await poolFor(bedroomCount);
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c));
             if (!pick) break;
@@ -1026,7 +1026,7 @@ export default function Bookings() {
       const comboChoice = await pickBestTwoUnitCombo();
       if (comboChoice) {
         const totalBedrooms = comboChoice.combo.bedrooms.reduce((sum, n) => sum + n, 0);
-        const comboLabel = `Two-unit ${comboChoice.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking${comboChoice.combo.includePm ? "" : " (fast OTA combo search)"}`;
+        const comboLabel = `Two-unit ${comboChoice.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking`;
         for (let i = 0; i < emptySlots.length; i++) {
           const result = await createAndAttachPick(
             emptySlots[i],
