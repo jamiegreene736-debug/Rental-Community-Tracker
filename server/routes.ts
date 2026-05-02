@@ -2578,6 +2578,11 @@ export async function registerRoutes(
         /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n)
       );
     };
+    const mentionsKnownNonPoipuKaiComplex = (haystack: string): boolean => {
+      if (normalizedResortName !== "poipu kai") return false;
+      const n = norm(haystack);
+      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
+    };
     // True if the haystack mentions every significant token of the resort name
     const mentionsResort = (haystack: string): boolean => {
       if (!resortName || resortTokens.length === 0) return true; // no filter
@@ -2805,7 +2810,7 @@ export async function registerRoutes(
       return 0;
     };
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
-      if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
+      if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
       return mentionsResortLoose(haystack);
     };
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
@@ -2818,6 +2823,7 @@ export async function registerRoutes(
       if (normalizedResortName !== "poipu kai") return true;
       if (c.source === "airbnb" && c.inTargetBounds) return true;
       const n = norm(candidateHaystack(c));
+      if (mentionsKnownNonPoipuKaiComplex(n)) return false;
       const hasNamedPoipuKaiComplex =
         /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n)
         || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
@@ -2843,6 +2849,7 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
+      if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
       const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
@@ -2850,6 +2857,8 @@ export async function registerRoutes(
       if (stayNightCounts.some((n) => n !== nights)) return false;
       const visibleResortProof = mentionsResort(hay)
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      const photoMatchProof = normalizedResortName === "poipu kai"
+        && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
       // Booking.com and PM websites often broaden a resort-name search to
       // nearby inventory. Their result cards need visible resort/sub-community
       // proof before they can enter the Poipu Kai cheapest pool. Airbnb/Vrbo
@@ -2858,12 +2867,15 @@ export async function registerRoutes(
       const searchProofHasLocality = normalizedResortName !== "poipu kai" || hasLocalityForPriceFallback(hay);
       const searchProofCanCarryTarget = websiteSearchProof
         && (c.source === "airbnb" || c.source === "vrbo")
-        && searchProofHasLocality;
+        && (normalizedResortName === "poipu kai"
+          ? (visibleResortProof || photoMatchProof || c.inTargetBounds === true)
+          : searchProofHasLocality);
       const pricePlausibleSearchProof = websiteSearchProof
         && (c.source === "booking" || c.source === "pm")
         && hasLocalityForPriceFallback(hay)
         && priceIsPlausibleForTarget(c);
       const targetSignal = visibleResortProof
+        || photoMatchProof
         || searchProofCanCarryTarget
         || pricePlausibleSearchProof
         || (c.source === "airbnb" && c.inTargetBounds === true)
@@ -4925,6 +4937,8 @@ export async function registerRoutes(
     const imageUrl = String(req.body?.imageUrl ?? "").trim();
     const sourceUrl = String(req.body?.sourceUrl ?? "").trim();
     const sourceTitle = String(req.body?.title ?? "").trim();
+    const resortName = String(req.body?.resortName ?? "").trim();
+    const community = String(req.body?.community ?? "").trim();
     if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
 
     try {
@@ -4936,7 +4950,8 @@ export async function registerRoutes(
 
     const maxResultsRaw = Number(req.body?.maxResults ?? 15);
     const maxResults = Number.isFinite(maxResultsRaw) ? Math.min(25, Math.max(5, Math.round(maxResultsRaw))) : 15;
-    const cacheKey = imageUrl;
+    const normalizedContext = `${resortName}|${community}|${sourceUrl}`.toLowerCase();
+    const cacheKey = `${imageUrl}|${normalizedContext}`;
     evictExpiredReverseImageListings();
     const cached = reverseImageListingCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -4963,7 +4978,41 @@ export async function registerRoutes(
     const noiseDomain = (domain: string): boolean => {
       const d = domain.toLowerCase();
       return /(?:^|\.)(?:google|gstatic|googleusercontent|searchapi|bing|yahoo|duckduckgo|facebook|instagram|pinterest|youtube|youtu|tiktok|twitter|x|threads|linkedin|reddit|wikimedia|wikipedia|imgur|flickr|staticflickr)\./.test(d)
-        || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d);
+        || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d)
+        || /(?:^|\.)(?:zillow|realtor|redfin|coldwellbanker|century21|compass|sothebysrealty|sothebys|hawaiilife|homes|trulia|movoto|mls|realtytrac|loopnet|apartments|hotpads|ramaui|emauirealestate)\./.test(d);
+    };
+
+    const normalizeText = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const contextText = normalizeText(`${resortName} ${community} ${sourceTitle}`);
+    const isPoipuKaiContext = /\bpoipu kai\b/.test(contextText);
+    const poipuKaiTextMatch = (haystack: string): boolean => {
+      const n = normalizeText(haystack);
+      return /\bpoipu kai\b/.test(n)
+        || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n));
+    };
+    const wrongPoipuKaiLocation = (haystack: string): boolean => {
+      if (!isPoipuKaiContext) return false;
+      const n = normalizeText(haystack);
+      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
+    };
+    const rentalSurface = (domain: string, haystack: string): boolean => {
+      const d = domain.toLowerCase();
+      if (/(^|\.)airbnb\./.test(d) || /(^|\.)(vrbo|homeaway)\./.test(d) || /(^|\.)booking\.com$/.test(d)) return true;
+      if (/(^|\.)(?:expedia|hotels|tripadvisor|agoda|vacasa)\./.test(d)) return true;
+      const n = normalizeText(`${d} ${haystack}`);
+      return /\b(vacation rental|vacation rentals|rental|rentals|condo|villa|villas|resort|booking|reservation|stay|lodging|suite|paradise|parrish|kauai|island vacations)\b/.test(n);
+    };
+    const contextAllows = (domain: string, haystack: string, source: string, position: number): boolean => {
+      if (wrongPoipuKaiLocation(`${domain} ${haystack}`)) return false;
+      if (!rentalSurface(domain, haystack)) return false;
+      if (!isPoipuKaiContext) return true;
+      if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
+      // Keep the known source and the very top OTA visual matches when
+      // Google Lens gives no text context. Everything else needs visible
+      // Poipu Kai / Regency-style proof so similar-looking Maui/Kona/MLS
+      // interiors do not crowd the panel.
+      const isOta = /(^|\.)airbnb\./.test(domain) || /(^|\.)(vrbo|homeaway)\./.test(domain) || /(^|\.)booking\.com$/.test(domain);
+      return source === "known-source" || (isOta && (source === "visual" || source === "page") && position <= 3);
     };
 
     const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string } | null => {
@@ -5003,23 +5052,30 @@ export async function registerRoutes(
     const lensRows = [
       ...rowsFrom("visual", searchData?.visual_matches),
       ...rowsFrom("page", searchData?.pages_with_matching_images),
+      // Organic rows are weaker than visual/page matches, so the
+      // context gate below requires visible target-resort proof before
+      // they render.
       ...rowsFrom("organic", searchData?.organic_results),
-      ...rowsFrom("image", searchData?.image_results),
-      ...rowsFrom("inline", searchData?.inline_images),
     ];
 
     const matches: ReverseImageListingMatch[] = [];
     const seenUrls = new Set<string>();
     const seenDomains = new Set<string>();
+    const seenPlatforms = new Set<string>();
     const addMatch = (rawUrl: string, rawTitle: string, source: string, position: number): void => {
       const normalized = normalizeListingUrl(rawUrl);
       if (!normalized) return;
+      if (!contextAllows(normalized.domain, `${rawTitle} ${normalized.url}`, source, position)) return;
       // This UI answers "which websites list this property", so one
       // representative row per domain is clearer than duplicate URLs.
-      if (seenUrls.has(normalized.dedupeKey) || seenDomains.has(normalized.domain)) return;
       const classified = classifyDomain(normalized.domain);
+      const platformDedupeKey = classified.platformKey === "airbnb" || classified.platformKey === "vrbo" || classified.platformKey === "booking"
+        ? classified.platformKey
+        : normalized.domain;
+      if (seenUrls.has(normalized.dedupeKey) || seenDomains.has(normalized.domain) || seenPlatforms.has(platformDedupeKey)) return;
       seenUrls.add(normalized.dedupeKey);
       seenDomains.add(normalized.domain);
+      seenPlatforms.add(platformDedupeKey);
       matches.push({
         ...classified,
         domain: normalized.domain,
@@ -5625,7 +5681,10 @@ export async function registerRoutes(
   // SearchAPI Airbnb accepts these as a single bounding_box query param.
   // We also post-filter by GPS coordinates in the returned listings for extra precision.
   const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
-    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
+    // Regency at Poipu Kai only. The previous broader Poipu/Koloa box
+    // overlapped Pili Mai (2611 Kiahuna Plantation Dr), which let inland
+    // Pili Mai rows appear under Poipu Kai buy-in scans.
+    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.466, ne_lat: 21.884, ne_lng: -159.456 },
     "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
     "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
     "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },

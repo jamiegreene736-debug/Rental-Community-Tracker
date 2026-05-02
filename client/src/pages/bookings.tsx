@@ -2107,6 +2107,8 @@ function LiveSearchSection({
                 onRecord={(listing) => setRecordTarget(unitToCandidate(u, listing))}
                 highlight
                 showImageSearch
+                resortName={data?.resortName ?? null}
+                community={data?.community}
               />
             ))}
           </div>
@@ -2148,7 +2150,15 @@ function LiveSearchSection({
           </div>
           <div className="space-y-2">
             {focusedCheapest.map((c, i) => (
-              <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight showImageSearch />
+              <LiveRow
+                key={`cheapest-${i}-${c.url}`}
+                c={c}
+                onRecord={() => setRecordTarget(c)}
+                highlight
+                showImageSearch
+                resortName={data?.resortName ?? null}
+                community={data?.community}
+              />
             ))}
           </div>
           {additionalCheapest.length > 0 && (
@@ -2918,10 +2928,14 @@ function ReverseImageListingLookup({
   imageUrl,
   sourceUrl,
   title,
+  resortName,
+  community,
 }: {
   imageUrl?: string;
   sourceUrl?: string;
   title: string;
+  resortName?: string | null;
+  community?: string;
 }) {
   const [state, setState] = useState<ReverseImageLookupState>({ status: "idle" });
   const isLoading = state.status === "loading";
@@ -2938,6 +2952,8 @@ function ReverseImageListingLookup({
           imageUrl,
           sourceUrl,
           title,
+          resortName,
+          community,
           maxResults: 15,
         }),
       });
@@ -2964,7 +2980,7 @@ function ReverseImageListingLookup({
           className="h-7 px-2 text-[11px]"
           onClick={runLookup}
           disabled={!imageUrl || isLoading}
-          title={imageUrl ? "Find other listing sites from this photo" : "No image available for reverse image search"}
+          title={imageUrl ? "Find other listing sites from the first listing photo" : "No image available for reverse image search"}
           data-testid="button-reverse-image-listings"
         >
           {isLoading ? (
@@ -3033,11 +3049,15 @@ function UnitRow({
   onRecord,
   highlight,
   showImageSearch,
+  resortName,
+  community,
 }: {
   unit: LiveUnit;
   onRecord: (listing: LiveUnitListing) => void;
   highlight?: boolean;
   showImageSearch?: boolean;
+  resortName?: string | null;
+  community?: string;
 }) {
   const verifiedListings = unit.listings.filter((l) => l.verified === "yes" && l.nightlyPrice > 0);
   const otherListings = unit.listings.filter((l) => !(l.verified === "yes" && l.nightlyPrice > 0));
@@ -3066,6 +3086,8 @@ function UnitRow({
           imageUrl={unit.image}
           sourceUrl={unit.primaryUrl}
           title={unit.unitTitle}
+          resortName={resortName}
+          community={community}
         />
       )}
 
@@ -3137,11 +3159,15 @@ function LiveRow({
   onRecord,
   highlight,
   showImageSearch,
+  resortName,
+  community,
 }: {
   c: LiveCandidate;
   onRecord: () => void;
   highlight?: boolean;
   showImageSearch?: boolean;
+  resortName?: string | null;
+  community?: string;
 }) {
   const photoMatches = c.photoMatches ?? [];
   return (
@@ -3213,6 +3239,8 @@ function LiveRow({
           imageUrl={c.image}
           sourceUrl={c.url}
           title={c.title}
+          resortName={resortName}
+          community={community}
         />
       )}
       {/* Reverse-image matches: when this candidate's photo also appears
