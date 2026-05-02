@@ -2810,7 +2810,7 @@ export async function registerRoutes(
       return 0;
     };
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
-      if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
+      if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
       return mentionsResortLoose(haystack);
     };
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
@@ -2859,19 +2859,15 @@ export async function registerRoutes(
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       const photoMatchProof = normalizedResortName === "poipu kai"
         && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
-      // Booking.com and PM websites often broaden a resort-name search to
-      // nearby inventory. Their result cards need visible resort/sub-community
-      // proof before they can enter the Poipu Kai cheapest pool. Airbnb/Vrbo
-      // keep search-page proof because their result cards frequently hide the
-      // exact resort name even for the correct unit.
+      // Search result cards frequently hide the exact resort name even
+      // when the website search itself was driven with the resort, dates,
+      // and bedroom filter. Keep that website-search proof broad and let
+      // the operator verify borderline rows manually, per 2026-05-02
+      // directive after the strict filter dropped every priced source.
       const searchProofHasLocality = normalizedResortName !== "poipu kai" || hasLocalityForPriceFallback(hay);
       const searchProofCanCarryTarget = websiteSearchProof
-        && (c.source === "airbnb" || c.source === "vrbo")
-        && (normalizedResortName === "poipu kai"
-          ? (visibleResortProof || photoMatchProof || c.inTargetBounds === true)
-          : searchProofHasLocality);
+        && searchProofHasLocality;
       const pricePlausibleSearchProof = websiteSearchProof
-        && (c.source === "booking" || c.source === "pm")
         && hasLocalityForPriceFallback(hay)
         && priceIsPlausibleForTarget(c);
       const targetSignal = visibleResortProof
@@ -2881,7 +2877,6 @@ export async function registerRoutes(
         || (c.source === "airbnb" && c.inTargetBounds === true)
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
-      if ((c.source === "booking" || c.source === "pm") && !visibleResortProof && !pricePlausibleSearchProof) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
@@ -4420,7 +4415,7 @@ export async function registerRoutes(
     }
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
-      const kept = items.filter((item) => candidateFitsTarget(item, { requireBedroomProof: true }));
+      const kept = items.filter((item) => candidateFitsTarget(item));
       targetFilterDropped[key] += items.length - kept.length;
       return kept;
     };
@@ -5681,10 +5676,7 @@ export async function registerRoutes(
   // SearchAPI Airbnb accepts these as a single bounding_box query param.
   // We also post-filter by GPS coordinates in the returned listings for extra precision.
   const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
-    // Regency at Poipu Kai only. The previous broader Poipu/Koloa box
-    // overlapped Pili Mai (2611 Kiahuna Plantation Dr), which let inland
-    // Pili Mai rows appear under Poipu Kai buy-in scans.
-    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.466, ne_lat: 21.884, ne_lng: -159.456 },
+    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
     "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
     "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
     "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
