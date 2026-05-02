@@ -2609,7 +2609,8 @@ export async function registerRoutes(
       return b === bedrooms;
     };
 
-    console.log(`[find-buy-in] resort="${resortName}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
+    const websiteSearchTerm = resortName || community;
+    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
     const scanStartedAt = Date.now();
     const routeRemainingMs = () => Math.max(0, FIND_BUY_IN_ROUTE_BUDGET_MS - (Date.now() - scanStartedAt));
@@ -2789,7 +2790,7 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
-      const websiteSearchProof = c.source !== "pm" && /sidecar searched|website search was driven/i.test(c.verifiedReason ?? "");
+      const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
       const targetSignal = mentionsResort(hay)
         || websiteSearchProof
         || (c.source === "airbnb" && c.inTargetBounds === true)
@@ -2936,7 +2937,7 @@ export async function registerRoutes(
         const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchAirbnbViaSidecar({
           destination: searchLocation,
-          searchTerm: searchLocation,
+          searchTerm: websiteSearchTerm,
           checkIn,
           checkOut,
           bedrooms,
@@ -3000,7 +3001,7 @@ export async function registerRoutes(
         const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchBookingViaSidecar({
           destination: searchLocation,
-          searchTerm: searchLocation,
+          searchTerm: websiteSearchTerm,
           checkIn,
           checkOut,
           bedrooms,
@@ -3062,7 +3063,7 @@ export async function registerRoutes(
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const targetSearchTerm = searchLocation;
+      const targetSearchTerm = websiteSearchTerm;
       try {
         const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchVrboViaSidecar({
@@ -3644,12 +3645,77 @@ export async function registerRoutes(
       }
     })();
 
+    // SearchAPI is used for PM *site/search-page discovery only*. The
+    // sidecar then drives each PM site's own rental-search UI with the
+    // resort name, stay dates, and bedroom count; priced result cards are
+    // trusted directly. No PM listing-detail click is needed for pricing.
+    const pmSearchApiSiteDiscoveryPromise: Promise<Array<{ label: string; baseUrl: string; searchUrl: string }>> = (async () => {
+      try {
+        const target = websiteSearchTerm;
+        const locality = searchLocation.replace(/,/g, " ");
+        const queries = Array.from(new Set([
+          `"${target}" vacation rentals property management book direct ${locality}`,
+          `"${target}" ${bedrooms} bedroom vacation rentals property manager`,
+          `"${target}" "vacation rentals" "search" "availability"`,
+        ]));
+        const otaDomains = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com)$/i;
+        const seen = new Set<string>();
+        const sites: Array<{ label: string; baseUrl: string; searchUrl: string }> = [];
+        const batches = await Promise.all(queries.map(async (query) => {
+          try {
+            const params = new URLSearchParams({
+              engine: "google",
+              q: query,
+              num: "10",
+              api_key: apiKey,
+            });
+            const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!r.ok) {
+              noteSourceError("PM SearchAPI site discovery", `HTTP ${r.status}`);
+              return [];
+            }
+            const data = await r.json() as any;
+            return Array.isArray(data?.organic_results) ? data.organic_results : [];
+          } catch (e: any) {
+            noteSourceError("PM SearchAPI site discovery", e);
+            return [];
+          }
+        }));
+        for (const hit of batches.flat()) {
+          const link = String(hit?.link ?? "");
+          if (!link) continue;
+          let u: URL;
+          try { u = new URL(link); } catch { continue; }
+          const host = u.hostname.replace(/^www\./, "");
+          if (otaDomains.test(host) || seen.has(host)) continue;
+          seen.add(host);
+          sites.push({
+            label: String(hit?.title || host).replace(/\s+/g, " ").slice(0, 60),
+            baseUrl: `${u.protocol}//${u.hostname}`,
+            searchUrl: link,
+          });
+          if (sites.length >= 10) break;
+        }
+        if (sites.length > 0) {
+          console.log(`[find-buy-in] pm SearchAPI site discovery found ${sites.length} PM site(s) for "${target}"`);
+        }
+        return sites;
+      } catch (e: any) {
+        console.error(`[find-buy-in] PM SearchAPI site discovery error:`, e?.message ?? e);
+        noteSourceError("PM SearchAPI site discovery", e);
+        return [];
+      }
+    })();
+
     let pmWebsiteSidecarCount = 0;
     let pmWebsiteSidecarOnline = false;
     let pmWebsiteSidecarMs = 0;
     let pmWebsiteSidecarReason = "";
     const pmWebsiteSidecarPromise: Promise<Candidate[]> = (async () => {
       try {
+        const discoveredPmSites = await pmSearchApiSiteDiscoveryPromise.catch(() => []);
         const pmSites = [
           { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
           { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
@@ -3660,10 +3726,21 @@ export async function registerRoutes(
           { label: STREAMLINE_SITES.alekonaKauai.label, baseUrl: STREAMLINE_SITES.alekonaKauai.baseUrl, searchUrl: "https://alekonakauai.com/search-results/" },
           { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${bedrooms}-bedroom/` },
         ];
+        const seenPmHosts = new Set<string>();
+        const pmSitesForSearch = [...pmSites, ...discoveredPmSites].filter((site) => {
+          try {
+            const host = new URL(site.baseUrl).hostname.replace(/^www\./, "");
+            if (seenPmHosts.has(host)) return false;
+            seenPmHosts.add(host);
+            return true;
+          } catch {
+            return false;
+          }
+        });
         const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchPmSitesViaSidecar({
-          sites: pmSites,
-          searchTerm: searchLocation,
+          sites: pmSitesForSearch,
+          searchTerm: websiteSearchTerm,
           checkIn,
           checkOut,
           bedrooms,
@@ -3695,7 +3772,7 @@ export async function registerRoutes(
               snippet: c.snippet,
               verified: "yes",
               verifiedNightlyPrice: Math.round(nightly),
-              verifiedReason: "Property-manager website search was driven by the sidecar with resort, dates, and bedroom filters, then the listing page returned a date-specific quote",
+              verifiedReason: "Property-manager sidecar searched the PM rental search page with the resort, dates, and bedroom filter, then scraped this priced search-result card",
             };
           });
       } catch (e: any) {
@@ -4116,17 +4193,12 @@ export async function registerRoutes(
         .map(([label, bucket]) => `${label} (${bucket.count}; e.g. ${bucket.examples.join(" | ")})`);
       return rows.join("; ");
     };
-    const sidecarVerifyPool = [
-      // Booking search/google-hotels rows are detail-page discovery only.
-      // Verify them before broad PM rows so Booking.com doesn't sit in
-      // the UI without an automatic verification state.
-      ...booking.filter((candidate) => candidate.source === "booking" && !candidate.verified),
-      // Then check every unpriced PM row the UI would otherwise keep as unverified.
-      ...pm.filter((candidate) => isAutoWidgetCheckCandidate(candidate) && !candidate.verified),
-      ...pmGoogle,
-      ...photoMatchPmCandidates,
-      ...pmSearchApiFinderCandidates,
-    ];
+    // Current operator rule: pricing comes from search-result pages only.
+    // Airbnb, Vrbo, Booking.com, and PM sites are not clicked through to
+    // listing-detail pages for availability/rate confirmation. Rows that
+    // don't already have a visible search-result price stay visible as
+    // skipped/unverified context, but never join the cheapest pool.
+    const sidecarVerifyPool: Candidate[] = [];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
       if (!c.url || c.verified || sidecarVerifySeen.has(key)) continue;
@@ -4578,7 +4650,7 @@ export async function registerRoutes(
       },
       {
         source: "Booking.com",
-        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com detail page produced a bedroom-matching rate"),
+        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate"),
         raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
         kept: bookingTarget.length,
         priced: pricedCount(bookingTarget),
@@ -4593,7 +4665,7 @@ export async function registerRoutes(
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
         durationMs: pmWebsiteSidecarMs,
-        message: `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; sidecarRateChecks=${sidecarBatchVerifiedUrls.size}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; direct PM priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`,
+        message: `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; direct PM search-result priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -4603,7 +4675,7 @@ export async function registerRoutes(
         priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
         verified: preVerifyYes,
         message: sidecarVerifyTargets.length === 0
-          ? "No unverified Booking.com/PM detail URLs needed sidecar verification."
+          ? "Skipped by design: search-result pages are the source of truth for rates and availability."
           : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
       },
     ];
@@ -4670,7 +4742,7 @@ export async function registerRoutes(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (websiteSidecar=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
-      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar + sidecar detail verify) `
+      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
       + `pm=${pm.length}/${pmRawCount}+websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}/online=${pmWebsiteSidecarOnline}/${pmWebsiteSidecarMs}ms${pmWebsiteSidecarReason ? "; " + pmWebsiteSidecarReason : ""} +${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (website sidecar primary; legacy API/search disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
@@ -4710,7 +4782,7 @@ export async function registerRoutes(
         { label: "Princeville Vacation Rentals",  count: slPrincevilleDiscovered.length },
         { label: "Google site-search (other PMs)",count: pmGoogle.filter((c) => !seenPmUrls.has(c.url)).length },
         { label: "SearchAPI PM finder",            count: pmSearchApiFinderCandidates.length },
-        { label: "Sidecar rate checks",            count: sidecarBatchVerifiedUrls.size },
+        { label: "Detail rate checks",             count: sidecarBatchVerifiedUrls.size },
       ],
       debug: {
         rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
@@ -4728,9 +4800,9 @@ export async function registerRoutes(
           no: preVerifyNo,
           unclear: preVerifyUnclear,
           sidecarReasonSummary,
-          // Verification path is the sidecar batch — available iff the
-          // daemon was online during this find-buy-in.
-          available: vrboSidecarOnline || sidecarBatchVerifiedUrls.size > 0,
+          // Sidecar availability means at least one live website search
+          // source was driven through the local Chrome worker.
+          available: airbnbSidecarOnline || vrboSidecarOnline || bookingSidecarOnline || pmWebsiteSidecarOnline,
         },
         searchLocation,
         vrboDestination,

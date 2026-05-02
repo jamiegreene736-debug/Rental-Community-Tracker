@@ -714,6 +714,25 @@ async function dumpPageState(label, requestForLog) {
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
+async function primeOtaHomepageSearch(homeUrl, searchTerm, label) {
+  if (!searchTerm) return false;
+  try {
+    await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await page.waitForTimeout(1_200);
+    await dismissObstructions(page, `${label}_home`);
+    const filled = await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null);
+    if (filled) {
+      await clickVisibleSearchSubmit(page, `${label}_home`).catch(() => null);
+      await page.waitForTimeout(1_200);
+      log(`${label}: primed public homepage search with "${searchTerm}"`);
+      return true;
+    }
+  } catch (e) {
+    log(`${label}: homepage search prime skipped: ${e?.message ?? e}`);
+  }
+  return false;
+}
+
 async function processAirbnbSearch(id, params) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
@@ -722,6 +741,7 @@ async function processAirbnbSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
+  await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search");
   const url =
     `https://www.airbnb.com/s/${encodeURIComponent(effectiveSearchTerm)}/homes` +
     `?query=${encodeURIComponent(effectiveSearchTerm)}` +
@@ -1498,6 +1518,7 @@ async function processVrboSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
+  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search");
   // PR #301: drop minBedrooms URL filter — Vrbo's server-side filter
   // is unreliable (returns 5 properties for a regionId+minBedrooms=3
   // search where only 0 are actually 3BR). Pull ALL listings for the
@@ -1742,6 +1763,7 @@ async function processBookingSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
+  await primeOtaHomepageSearch("https://www.booking.com/", effectiveSearchTerm, "booking_search");
   // Booking.com supports `nflt=entire_place_bedroom_count%3D${bedrooms}`
   // for the bedroom filter (URL-encoded "entire_place_bedroom_count=N"),
   // sorted by price: `&order=price`.
@@ -3510,6 +3532,84 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   return preparedGeneric;
 }
 
+async function ensurePmRentalSearchPage(targetPage, site, label = "pm_site_search") {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const found = await withSoftTimeout(
+    targetPage.evaluate(({ baseUrl }) => {
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+      function sameHost(raw) {
+        try {
+          const base = new URL(baseUrl);
+          const u = new URL(raw, baseUrl);
+          return u.hostname.replace(/^www\./, "") === base.hostname.replace(/^www\./, "");
+        } catch {
+          return false;
+        }
+      }
+      function looksRentalSearchPage() {
+        const href = String(location.href || "").toLowerCase();
+        const title = clean(document.title).toLowerCase();
+        const body = clean(document.body?.innerText || "").toLowerCase();
+        const firstBody = body.slice(0, 22000);
+        const siteSearchOnly =
+          /\b(?:search results for|enter the terms you wish to search for|site search|search this site)\b/i.test(`${title} ${firstBody}`) &&
+          !/\b(?:vacation rentals?|bedrooms?|sleeps?|check[\s_-]*in|arrival|departure|availability|book now|view rates)\b/i.test(firstBody);
+        const rentalControls = /\b(?:arrival|departure|check[\s_-]*in|check[\s_-]*out|dates?|availability|bedrooms?|guests?|show filters|search availability|find a property)\b/i.test(firstBody);
+        const rentalPath = /\b(?:vacation-rentals?|rentals?|properties|search-results|accommodations|lodging|vrp\/search)\b/i.test(href);
+        const listingSignals =
+          document.querySelectorAll("a[href*='/vrp/unit/'], a[href*='/vacation-rentals/'], a[href*='/rentals/'], a[href*='/properties/'], [class*='property' i], [class*='rental' i]").length > 2 ||
+          /\$\s*[\d,]+|\b(?:bedroom|bedrooms|br|bd)\b/i.test(firstBody);
+        const collectionSignal = /\b(?:results?|properties|list view|map view|show filters|clear search|view all .{0,40} rentals|browse all|sort by)\b/i.test(firstBody);
+        const detailPath = /\/(?:vrp\/unit|unit|property|properties|vacation-rentals|rentals)\/[^/?#]*(?:\d|unit|condo|villa|home|suite)[^/?#]*$/i.test(href);
+        if (detailPath && !collectionSignal) return false;
+        return !siteSearchOnly && (rentalControls || (rentalPath && listingSignals && collectionSignal));
+      }
+      if (looksRentalSearchPage()) return { url: location.href, current: true, reason: "current page looks like rental search" };
+
+      const badRe = /\b(?:property management|owner|owners?|management|about|who we are|blog|news|faq|contact|privacy|terms|login|sign in|favorite|share|deals?|experience|restaurants?|activities?|weddings?|real estate|sales?)\b/i;
+      const goodRe = /\b(?:vacation rentals?|rentals?|browse rentals?|find a property|properties|search rentals?|availability|lodging|accommodations?|places to stay|all rentals?)\b/i;
+      const pathGoodRe = /\/(?:vacation-rentals?|rentals?|properties|search-results|accommodations?|lodging|vrp\/search)(?:\/|$)/i;
+      const candidates = Array.from(document.querySelectorAll("a[href]"))
+        .map((a) => {
+          const href = a.getAttribute("href") || "";
+          let url = "";
+          try { url = new URL(href, baseUrl).toString(); } catch { return null; }
+          if (!url || !sameHost(url)) return null;
+          const text = clean([
+            a.textContent,
+            a.getAttribute?.("aria-label"),
+            a.getAttribute?.("title"),
+          ].filter(Boolean).join(" "));
+          const path = new URL(url).pathname;
+          const hay = `${text} ${path}`.toLowerCase();
+          if (badRe.test(hay)) return null;
+          let score = 0;
+          if (goodRe.test(text)) score += 80;
+          if (pathGoodRe.test(path)) score += 70;
+          if (/\b(?:search|availability|all|browse|find)\b/i.test(hay)) score += 20;
+          if (/\b(?:poipu|kauai|hawaii)\b/i.test(hay)) score += 10;
+          if (score <= 0) return null;
+          return { url, text: text.slice(0, 80), score };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+      return candidates[0] ? { ...candidates[0], current: false, reason: "best rental-search link" } : null;
+    }, { baseUrl: site.baseUrl || site.searchUrl }),
+    4_000,
+    null,
+  ).catch(() => null);
+
+  if (found?.url && !found.current) {
+    log(`${label}: opening rental search page "${found.text || found.url}" (${found.reason})`);
+    await targetPage.goto(found.url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    await dismissObstructions(targetPage, `${label}_rental_search_page`).catch(() => {});
+  }
+  return found;
+}
+
 function buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms) {
   const start = site.searchUrl || site.baseUrl;
   try {
@@ -3535,12 +3635,58 @@ function buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms) {
   }
 }
 
-async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limit) {
+async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limit, expectedNights) {
   const baseUrl = site.baseUrl;
   return withSoftTimeout(
-    targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit }) => {
+    targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit, expectedNights }) => {
       function clean(raw) {
         return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+      function parseAmount(raw) {
+        const n = parseFloat(String(raw || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+        return Number.isFinite(n) ? n : 0;
+      }
+      function parsePrice(raw) {
+        const text = clean(raw);
+        const totalMatch =
+          text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|for\s+\d+\s+nights?)/i) ||
+          text.match(/total(?:\s+before\s+taxes)?\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+        if (totalMatch) {
+          const total = parseAmount(totalMatch[1]);
+          if (total > 0) return { totalPrice: Math.round(total), nightlyPrice: Math.round(total / expectedNights) };
+        }
+        const nightlyMatch =
+          text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/|per|a\s+)?\s*(?:night|nt|nightly)/i) ||
+          text.match(/(?:from|starting(?:\s+at)?)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+        if (nightlyMatch) {
+          const nightly = parseAmount(nightlyMatch[1]);
+          if (nightly > 0) return { nightlyPrice: Math.round(nightly), totalPrice: Math.round(nightly * expectedNights) };
+        }
+        const amounts = Array.from(text.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
+          .map((m) => parseAmount(m[1]))
+          .filter((n) => n > 0)
+          .sort((a, b) => a - b);
+        if (amounts.length === 1 && amounts[0] >= Math.max(250, expectedNights * 80)) {
+          return {
+            totalPrice: Math.round(amounts[0]),
+            nightlyPrice: Math.round(amounts[0] / expectedNights),
+          };
+        }
+        const plausibleNightly = amounts.find((n) => n >= 50 && n <= 5000);
+        if (plausibleNightly) {
+          return {
+            nightlyPrice: Math.round(plausibleNightly),
+            totalPrice: Math.round(plausibleNightly * expectedNights),
+          };
+        }
+        const plausibleTotal = amounts.find((n) => n >= Math.max(250, expectedNights * 80));
+        if (plausibleTotal) {
+          return {
+            totalPrice: Math.round(plausibleTotal),
+            nightlyPrice: Math.round(plausibleTotal / expectedNights),
+          };
+        }
+        return null;
       }
       function looksLikeRentalSearchPage() {
         const href = String(location.href || "").toLowerCase();
@@ -3592,8 +3738,6 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       }
       if (!looksLikeRentalSearchPage()) return [];
-      const targetText = clean(searchTerm).toLowerCase();
-      const targetTokens = targetText.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
       const anchors = Array.from(document.querySelectorAll("a[href]"));
       const out = [];
       const seen = new Set();
@@ -3613,10 +3757,8 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         if (!looksDetail(url, fullText)) continue;
         const br = extractBedrooms(fullText);
         if (br !== null && br !== bedrooms) continue;
-        const lower = `${url} ${fullText}`.toLowerCase();
-        if (targetTokens.length > 0 && !targetTokens.some((t) => lower.includes(t))) {
-          continue;
-        }
+        const price = parsePrice(fullText);
+        if (!price) continue;
         const title =
           clean(card?.querySelector("h1, h2, h3, [class*='title' i], [data-testid*='title' i]")?.textContent) ||
           clean(a.textContent) ||
@@ -3626,14 +3768,16 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         out.push({
           url,
           title: title.slice(0, 100),
-          bedrooms: br ?? undefined,
+          totalPrice: price.totalPrice,
+          nightlyPrice: price.nightlyPrice,
+          bedrooms: br ?? bedrooms,
           image: imageFrom(card),
           snippet: fullText.slice(0, 220),
         });
         if (out.length >= limit) break;
       }
       return out;
-    }, { baseUrl, searchTerm, bedrooms: Number.parseInt(String(bedrooms ?? ""), 10), limit }),
+    }, { baseUrl, searchTerm, bedrooms: Number.parseInt(String(bedrooms ?? ""), 10), limit, expectedNights }),
     5_000,
     [],
   );
@@ -3666,6 +3810,7 @@ async function processPmSiteSearch(id, params) {
       await tab.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
       await tab.waitForTimeout(PAGE_SETTLE_MS);
       await dismissObstructions(tab, `pm_site_search_${site.label}`);
+      await ensurePmRentalSearchPage(tab, site, `pm_site_search_${site.label}`);
       await fillPmRentalLocationField(tab, searchTerm, `pm_site_search_${site.label}`).catch(() => null);
       const dateEntry = await applyPmDateInputs(tab, checkIn, checkOut).catch(() => null);
       const bedroomFilled = await fillBedroomFilter(tab, bedrooms, `pm_site_search_${site.label}`).catch(() => null);
@@ -3674,42 +3819,21 @@ async function processPmSiteSearch(id, params) {
       }
       await withSoftTimeout(tab.waitForLoadState("networkidle", { timeout: 5_000 }), 5_500);
       await tab.waitForTimeout(PAGE_SETTLE_MS);
-      const seeds = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit);
-      log(`pm_site_search ${id}: ${site.label} seeds=${seeds.length}`);
-      for (const seed of seeds) {
-        if (!hasBudget(6_000)) {
-          log(`pm_site_search ${id}: stopping seed checks for ${site.label}; budget nearly exhausted`);
-          break;
-        }
-        const remainingMs = Math.max(1_000, deadline - Date.now());
-        const verified = await withSoftTimeout(
-          scrapePmUrl(tab, seed.url, checkIn, checkOut, bedrooms),
-          Math.min(18_000, remainingMs),
-          {
-            available: "unclear",
-            nightlyPrice: null,
-            totalPrice: null,
-            reason: "detail verify timed out before PM website search budget",
-          },
-        ).catch((e) => ({
-          available: "unclear",
-          nightlyPrice: null,
-          totalPrice: null,
-          reason: `detail verify error: ${e?.message ?? e}`,
-        }));
-        if (verified.available !== "yes") continue;
-        const total = Number(verified.totalPrice || 0);
-        const nightly = Number(verified.nightlyPrice || (total > 0 ? Math.round(total / nightsBetween(checkIn, checkOut)) : 0));
+      const cards = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit, nightsBetween(checkIn, checkOut));
+      log(`pm_site_search ${id}: ${site.label} priced result cards=${cards.length}`);
+      for (const card of cards) {
+        const total = Number(card.totalPrice || 0);
+        const nightly = Number(card.nightlyPrice || (total > 0 ? Math.round(total / nightsBetween(checkIn, checkOut)) : 0));
         if (!(total > 0) && !(nightly > 0)) continue;
         out.push({
-          url: seed.url,
-          title: seed.title,
+          url: card.url,
+          title: card.title,
           sourceLabel: site.label,
           totalPrice: Math.round(total > 0 ? total : nightly * nightsBetween(checkIn, checkOut)),
           nightlyPrice: Math.round(nightly > 0 ? nightly : total / nightsBetween(checkIn, checkOut)),
-          bedrooms: typeof verified.bedrooms === "number" ? verified.bedrooms : seed.bedrooms ?? bedrooms,
-          image: seed.image,
-          snippet: `${site.label} rental search · ${seed.snippet || ""} · ${verified.reason}`.slice(0, 360),
+          bedrooms: card.bedrooms ?? bedrooms,
+          image: card.image,
+          snippet: `${site.label} rental search result · ${card.snippet || ""}`.slice(0, 360),
         });
       }
     } catch (e) {

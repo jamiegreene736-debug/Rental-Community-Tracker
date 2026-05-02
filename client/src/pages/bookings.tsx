@@ -959,10 +959,11 @@ export default function Bookings() {
         <div>
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
-            Bookings · Buy-in tracking · Live search across Airbnb (telemetry), Booking.com, and PM companies (with reverse-image matches)
+            Bookings · Buy-in tracking · Live sidecar search across Airbnb, VRBO, Booking.com, and PM rental sites
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <SidecarStatusBadge />
           <Button
             variant="outline"
             size="sm"
@@ -1636,14 +1637,12 @@ function sourceBadgeClass(src: string) {
   }
 }
 
-// Local-Mac sidecar status indicator. The buy-in tool delegates VRBO
-// (and soon Booking + PM) scrapes to a daemon running on the
+// Local-Mac sidecar status indicator. The buy-in tool delegates Airbnb,
+// VRBO, Booking.com, and PM website searches to a daemon running on the
 // operator's Mac, which drives their real Chrome via CDP. When the
 // Mac is asleep / Claude Code closed without the daemon installed /
-// daemon crashed, find-buy-in falls back to its existing 8 paths
-// gracefully — but the operator should know they're getting the
-// fallback experience, not the rich one. Polls /heartbeat every 30s
-// while the buy-in panel is mounted.
+// daemon crashed, the operator should know immediately. Polls /heartbeat
+// every 30s anywhere Operations is mounted.
 function SidecarStatusBadge() {
   const [state, setState] = useState<{
     isOnline: boolean | null;
@@ -1681,14 +1680,14 @@ function SidecarStatusBadge() {
   if (state.isOnline) {
     return (
       <Badge
-        className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300 cursor-help"
+        className="gap-1 text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300 cursor-help"
         title={
           state.ageMs != null
-            ? `Local Mac sidecar polled ${Math.round(state.ageMs / 1000)}s ago — VRBO (and soon Booking/PM) drives through your real Chrome.`
+            ? `Local Mac sidecar polled ${Math.round(state.ageMs / 1000)}s ago. Airbnb, VRBO, Booking.com, and PM searches drive through your real Chrome.`
             : "Local Mac sidecar online."
         }
       >
-        🟢 Local sidecar online
+        <CheckCircle2 className="h-3 w-3" /> Sidecar live
       </Badge>
     );
   }
@@ -1699,10 +1698,10 @@ function SidecarStatusBadge() {
     : "Local Mac daemon never connected. find-buy-in is using server-side fallbacks. Install instructions: ~/Downloads/vrbo-sidecar/README.md";
   return (
     <Badge
-      className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400 cursor-help"
+      className="gap-1 text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400 cursor-help"
       title={tooltip}
     >
-      ⚠ Can't reach Mac sidecar — fallback mode
+      <AlertCircle className="h-3 w-3" /> Sidecar offline
     </Badge>
   );
 }
