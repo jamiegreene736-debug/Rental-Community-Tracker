@@ -1356,7 +1356,7 @@ async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter")
   const filled = await withSoftTimeout(
     targetPage.evaluate(({ targetBedrooms }) => {
       const bedroomRe = /\b(?:bedroom|bedrooms|beds|br|bd)\b/i;
-      const badRe = /\b(?:bath|guest|adult|child|pet|price|email|phone)\b/i;
+      const badRe = /\b(?:bath|baths|bathrooms?|guest|guests|adult|adults|child|children|kids|pet|pets|price|email|phone|tel)\b/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -1421,7 +1421,7 @@ async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter")
           const ctx = contextOf(el);
           let score = 0;
           if (bedroomRe.test(ctx)) score += 80;
-          if (badRe.test(ctx)) score -= 80;
+          if (badRe.test(ctx)) score -= 120;
           return { el, score, ctx };
         })
         .filter((x) => x.score > 0)
@@ -1433,12 +1433,12 @@ async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter")
 
       const buttons = Array.from(document.querySelectorAll("button, [role='button'], a"))
         .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
-      const openFilter = buttons.find((el) => /\b(filter|rooms|guests|beds?)\b/i.test(textOf(el)) && bedroomRe.test(contextOf(el)))
+      const openFilter = buttons.find((el) => /\b(filter|rooms|beds?)\b/i.test(textOf(el)) && bedroomRe.test(contextOf(el)) && !badRe.test(`${textOf(el)} ${contextOf(el)}`))
         ?? buttons.find((el) => /\b(filter|rooms|guests)\b/i.test(textOf(el)));
       if (openFilter) openFilter.click();
       const plus = buttons.find((el) => {
         const hay = `${textOf(el)} ${contextOf(el)}`;
-        return bedroomRe.test(hay) && /\b(?:increase|add|plus|\+)\b/i.test(hay);
+        return bedroomRe.test(hay) && !badRe.test(hay) && /\b(?:increase|add|plus|\+)\b/i.test(hay);
       });
       if (plus) {
         for (let i = 0; i < targetBedrooms; i++) plus.click();
@@ -2130,7 +2130,7 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
       ];
       const buttonSelector = "button, a, input[type='button'], input[type='submit'], [role='button']";
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)/i;
 
       function isRendered(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -2257,7 +2257,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       const dateValueRe = /(?:mm\/dd|dd\/mm|yyyy|arrival|departure|check|date)/i;
       const submitRe = /\b(?:search|check availability|check rates|view rates|show rates|update|apply|submit|book now|reserve|select dates|continue)\b/i;
       const openerRe = /\b(?:check availability|check rates|view rates|show rates|book now|reserve|select dates|availability|rates)\b/i;
-      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b/i;
+      const badDateActionRe = /\b(?:clear|reset|cancel|close|search results|view search results|skip to main content|overview|photos?|visit owner|owner'?s website|external website|facebook|instagram|social|share|contact|call|phone|tel|request\s+info|ask\s+a\s+question|question|inquir(?:y|e)|enquir(?:y|e)|message|newsletter|subscribe|save\s+to\s+my\s+rentals|my\s+rentals|favorites?|terms|privacy|cookies?|policy|map|directions)\b|(?:\+?\d[\d().\-\s]{6,}\d)/i;
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;

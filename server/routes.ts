@@ -3653,7 +3653,7 @@ export async function registerRoutes(
           checkOut,
           bedrooms,
           perSiteLimit: 3,
-          walletBudgetMs: 150_000,
+          walletBudgetMs: 240_000,
         });
         pmWebsiteSidecarCount = r.candidates.length;
         pmWebsiteSidecarOnline = r.workerOnline;
@@ -3722,7 +3722,7 @@ export async function registerRoutes(
       withTimeout(bookingPromise, 150_000, [] as Candidate[], "booking-sidecar"),
       withTimeout(vrboPromise, 180_000, [] as Candidate[], "vrbo"),
       withTimeout(pmPromise, 60_000, [] as Candidate[], "pm-google"),
-      withTimeout(pmWebsiteSidecarPromise, 180_000, [] as Candidate[], "pm-website-sidecar"),
+      withTimeout(pmWebsiteSidecarPromise, 240_000, [] as Candidate[], "pm-website-sidecar"),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
       // 80-95s range even at concurrency=24 (their WP front
