@@ -37,6 +37,6 @@ ENV NODE_ENV=production
 #   2. Seed the volume from /app/photos-seed using `cp -Rn` — non-clobber,
 #      so scraped photos from prior boots are preserved while any
 #      newly-committed seed photos still land on fresh volumes.
-#   3. Run drizzle db:push (Load-Bearing #15).
-#   4. Start the server.
-CMD ["sh", "-c", "mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; npm run db:push && node dist/index.cjs"]
+#   3. Start the server. Schema changes should be applied intentionally outside
+#      container boot so Railway never hangs on an interactive data-loss prompt.
+CMD ["sh", "-c", "mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; node dist/index.cjs"]

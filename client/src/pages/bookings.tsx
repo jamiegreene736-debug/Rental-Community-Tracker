@@ -898,6 +898,11 @@ export default function Bookings() {
         includePm = true,
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
         const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
+        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
+        if (!safeForAutoFill) {
+          const detail = data.diagnostics?.summary || "The live scan returned partial results or warnings.";
+          throw new Error(`Auto-fill stopped before attaching buy-ins: ${detail} Open the slot's live search to review the audit results manually.`);
+        }
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
           .map((unit) => {
@@ -1082,18 +1087,28 @@ export default function Bookings() {
         return { reservation, results };
       }
 
+      const plannedPicks: Array<{
+        slot: typeof emptySlots[number];
+        pick: LiveCandidate | null;
+        searchSummary: AutoFillSearchSummary;
+      }> = [];
+      const plannedIdentities = new Set(pickedIdentities);
       for (const slot of emptySlots) {
         const pool = await getCandidatePool(slot.bedrooms, false);
-        const pick = pool.candidates.find((c) => !hasUsedListingIdentity(pickedIdentities, c)) ?? null;
-        const slotResult = pick
-          ? await createAndAttachPick(slot, pick, slot.bedrooms, pool.searchSummary)
+        const pick = pool.candidates.find((c) => !hasUsedListingIdentity(plannedIdentities, c)) ?? null;
+        if (pick) addUsedListingIdentity(plannedIdentities, pick);
+        plannedPicks.push({ slot, pick, searchSummary: pool.searchSummary });
+      }
+      for (const planned of plannedPicks) {
+        const slotResult = planned.pick
+          ? await createAndAttachPick(planned.slot, planned.pick, planned.slot.bedrooms, planned.searchSummary)
           : {
-              slot,
+              slot: planned.slot,
               picked: null,
               created: null,
               skippedReasons: ["find-buy-in returned no unused cheapest candidates"],
               airbnbPick: false,
-              searchSummary: pool.searchSummary,
+              searchSummary: planned.searchSummary,
             };
         results.push(slotResult);
       }
@@ -1871,6 +1886,8 @@ type FindBuyInResponse = {
     pm: LiveCandidate[];
   };
   diagnostics?: FindBuyInDiagnostics;
+  scanComplete?: boolean;
+  autoFillSafe?: boolean;
   cheapest: LiveCandidate[];
   // Same units as `cheapest` but grouped: when the same physical unit
   // is listed across multiple channels (Airbnb + VRBO + a PM site, all
@@ -2242,6 +2259,8 @@ function LiveSearchSection({
   const focusedCheapest = availableCheapest.slice(0, 1);
   const additionalCheapest = availableCheapest.slice(1);
   const hasFocusedRecommendation = focusedCheapestUnits.length > 0 || focusedCheapest.length > 0;
+  const recommendationsReady = (data?.autoFillSafe ?? data?.diagnostics?.severity === "ok") && !isFetching && !isPlaceholderData;
+  const hasCurrentFocusedRecommendation = hasFocusedRecommendation && recommendationsReady;
   const lastScanLabel = data?.diagnostics?.generatedAt
     ? new Date(data.diagnostics.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
     : dataUpdatedAt
@@ -2377,7 +2396,7 @@ function LiveSearchSection({
           When the verify pass came back empty, show a clear "no
           verified options" state rather than promoting un-verified
           inherited-price rows. */}
-      {availableCheapestUnits.length > 0 ? (
+      {recommendationsReady && availableCheapestUnits.length > 0 ? (
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
           <div className="mb-2 flex items-start justify-between gap-3">
             <div>
@@ -2424,7 +2443,7 @@ function LiveSearchSection({
             </details>
           )}
         </div>
-      ) : availableCheapest.length > 0 ? (
+      ) : recommendationsReady && availableCheapest.length > 0 ? (
         // Backwards-compat fallback for old deploys that don't return
         // cheapestUnits — render the flat list as before.
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
@@ -2476,7 +2495,9 @@ function LiveSearchSection({
             No verified bookable options
           </p>
           <p className="text-[11px] text-amber-700/90">
-            {data?.debug?.verification?.available === false
+            {hasFocusedRecommendation && !recommendationsReady
+              ? "This scan is still refreshing or completed with warnings, so verified candidates are audit-only for now. Auto-fill will not attach from this result. Open the diagnostics log or refresh once the slow source settles."
+              : data?.debug?.verification?.available === false
               ? "No source returned a live priced, verified option during this scan. All scanned options are listed below with their automatic verification state."
               : data?.debug?.verification?.attempted
                 ? `Tried to verify ${data.debug.verification.attempted} top-priced candidates: ${data.debug.verification.yes} bookable, ${data.debug.verification.no} unavailable, ${data.debug.verification.unclear} unclear. Browse all scanned options below.`
@@ -2489,14 +2510,14 @@ function LiveSearchSection({
           picks `cheapest[0]` (the highlighted ⭐ row) — this table is the
           audit trail so the operator can see what else was scanned and
           override with one click. */}
-      <details open={!hasFocusedRecommendation}>
+      <details open={!hasCurrentFocusedRecommendation}>
         <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
           <Badge className="text-[10px] bg-slate-100 text-slate-700 border border-slate-300">
             All scanned options
           </Badge>
           <span>
             {availableAirbnb.length + availableVrbo.length + availableBooking.length + availablePm.length} rows
-            {hasFocusedRecommendation ? " hidden below the best pick" : ""}
+            {hasCurrentFocusedRecommendation ? " hidden below the best pick" : ""}
           </span>
         </summary>
         <div className="mt-1.5">
@@ -2520,10 +2541,10 @@ function LiveSearchSection({
           server-side. Booking.com + PM Companies are the direct-bookable
           channels — both ALWAYS open. */}
       {[
-        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: !hasFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: !hasFocusedRecommendation && availableVrbo.length > 0 },
-        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: !hasFocusedRecommendation },
-        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: !hasFocusedRecommendation },
+        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: !hasCurrentFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
+        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: !hasCurrentFocusedRecommendation && availableVrbo.length > 0 },
+        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: !hasCurrentFocusedRecommendation },
+        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: !hasCurrentFocusedRecommendation },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">

@@ -10,5 +10,6 @@ attached_assets
 AGENTS.md
 CLAUDE.md
 tests
+test-artifacts
 scripts
 *.log
