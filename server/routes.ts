@@ -2791,6 +2791,10 @@ export async function registerRoutes(
     ): boolean => {
       const hay = candidateHaystack(c);
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
+      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+        .map((m) => parseInt(m[1], 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (stayNightCounts.some((n) => n !== nights)) return false;
       const visibleResortProof = mentionsResort(hay)
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       // Booking.com and PM websites often broaden a resort-name search to

@@ -806,10 +806,9 @@ async function processAirbnbSearch(id, params) {
     }
     function extractedStayNights(fullText) {
       const text = clean(fullText);
-      const matches = Array.from(text.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+      return Array.from(text.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
         .map((m) => parseInt(m[1], 10))
         .filter((n) => Number.isFinite(n) && n > 0);
-      return matches.length > 0 ? matches[0] : null;
     }
     function cardForAnchor(anchor) {
       let el = anchor;
@@ -841,7 +840,7 @@ async function processAirbnbSearch(id, params) {
       const card = cardForAnchor(a);
       const fullText = clean(card.textContent || a.textContent || "");
       const stayNights = extractedStayNights(fullText);
-      if (stayNights !== null && stayNights !== expectedNights) continue;
+      if (stayNights.some((n) => n !== expectedNights)) continue;
       const price = parsePrice(fullText);
       if (!price) continue;
       const bedrooms = extractBedrooms(fullText);
