@@ -1847,6 +1847,11 @@ function LiveSearchSection({
     if (isAttachedElsewhere(u.primaryUrl)) return false;
     return !u.listings.some((l) => isAttachedElsewhere(l.url));
   });
+  const focusedCheapestUnits = availableCheapestUnits.slice(0, 1);
+  const additionalCheapestUnits = availableCheapestUnits.slice(1);
+  const focusedCheapest = availableCheapest.slice(0, 1);
+  const additionalCheapest = availableCheapest.slice(1);
+  const hasFocusedRecommendation = focusedCheapestUnits.length > 0 || focusedCheapest.length > 0;
   const lastScanLabel = data?.diagnostics?.generatedAt
     ? new Date(data.diagnostics.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
     : dataUpdatedAt
@@ -1984,17 +1989,22 @@ function LiveSearchSection({
           inherited-price rows. */}
       {availableCheapestUnits.length > 0 ? (
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
-            <TrendingDown className="h-3.5 w-3.5" />
-            Cheapest {availableCheapestUnits.length} {availableCheapestUnits.length === 1 ? "unit" : "units"} — buy these
-            {data?.debug?.verification?.attempted ? (
-              <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
-                · verified bookable for {checkInYmd} → {checkOutYmd}
-              </span>
-            ) : null}
-          </p>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold text-green-700 uppercase tracking-wide flex items-center gap-1.5">
+                <TrendingDown className="h-3.5 w-3.5" />
+                Best option for {slot.unitLabel}
+              </p>
+              <p className="text-[11px] text-green-700/80 mt-0.5">
+                Showing the cheapest verified unit first
+                {additionalCheapestUnits.length > 0 ? ` · ${additionalCheapestUnits.length} more available below` : ""}
+                {data?.debug?.verification?.attempted ? ` · bookable for ${checkInYmd} → ${checkOutYmd}` : ""}
+              </p>
+            </div>
+            <Badge className="text-[10px] bg-green-600 text-white shrink-0">Focused</Badge>
+          </div>
           <div className="space-y-2">
-            {availableCheapestUnits.map((u, i) => (
+            {focusedCheapestUnits.map((u, i) => (
               <UnitRow
                 key={`unit-${i}-${u.primaryUrl}`}
                 unit={u}
@@ -2003,25 +2013,60 @@ function LiveSearchSection({
               />
             ))}
           </div>
+          {additionalCheapestUnits.length > 0 && (
+            <details className="mt-2 rounded-md border border-green-200 bg-white/60 dark:bg-background/40">
+              <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-green-800 flex items-center justify-between gap-2">
+                <span>Show {additionalCheapestUnits.length} more verified option{additionalCheapestUnits.length === 1 ? "" : "s"}</span>
+                <span className="text-green-700/70">audit only</span>
+              </summary>
+              <div className="border-t border-green-100 p-2 space-y-2 max-h-[520px] overflow-y-auto">
+                {additionalCheapestUnits.map((u, i) => (
+                  <UnitRow
+                    key={`unit-more-${i}-${u.primaryUrl}`}
+                    unit={u}
+                    onRecord={(listing) => setRecordTarget(unitToCandidate(u, listing))}
+                  />
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       ) : availableCheapest.length > 0 ? (
         // Backwards-compat fallback for old deploys that don't return
         // cheapestUnits — render the flat list as before.
         <div className="border-2 border-green-500 rounded-lg p-3 bg-green-50/50 dark:bg-green-950/20">
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide flex items-center gap-1.5">
-            <TrendingDown className="h-3.5 w-3.5" />
-            Cheapest {availableCheapest.length} — buy these
-            {data?.debug?.verification?.attempted ? (
-              <span className="text-[10px] font-normal text-green-700/80 normal-case tracking-normal ml-1">
-                · {data.debug.verification.yes} verified bookable for {checkInYmd} → {checkOutYmd}
-              </span>
-            ) : null}
-          </p>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold text-green-700 uppercase tracking-wide flex items-center gap-1.5">
+                <TrendingDown className="h-3.5 w-3.5" />
+                Best option for {slot.unitLabel}
+              </p>
+              <p className="text-[11px] text-green-700/80 mt-0.5">
+                Showing the cheapest verified option first
+                {additionalCheapest.length > 0 ? ` · ${additionalCheapest.length} more available below` : ""}
+                {data?.debug?.verification?.attempted ? ` · ${data.debug.verification.yes} verified for ${checkInYmd} → ${checkOutYmd}` : ""}
+              </p>
+            </div>
+            <Badge className="text-[10px] bg-green-600 text-white shrink-0">Focused</Badge>
+          </div>
           <div className="space-y-2">
-            {availableCheapest.map((c, i) => (
+            {focusedCheapest.map((c, i) => (
               <LiveRow key={`cheapest-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} highlight />
             ))}
           </div>
+          {additionalCheapest.length > 0 && (
+            <details className="mt-2 rounded-md border border-green-200 bg-white/60 dark:bg-background/40">
+              <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-green-800 flex items-center justify-between gap-2">
+                <span>Show {additionalCheapest.length} more verified option{additionalCheapest.length === 1 ? "" : "s"}</span>
+                <span className="text-green-700/70">audit only</span>
+              </summary>
+              <div className="border-t border-green-100 p-2 space-y-2 max-h-[520px] overflow-y-auto">
+                {additionalCheapest.map((c, i) => (
+                  <LiveRow key={`cheapest-more-${i}-${c.url}`} c={c} onRecord={() => setRecordTarget(c)} />
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       ) : (
         <div className="border-2 border-dashed border-amber-400 rounded-lg p-3 bg-amber-50/50 dark:bg-amber-950/20">
@@ -2043,16 +2088,29 @@ function LiveSearchSection({
           picks `cheapest[0]` (the highlighted ⭐ row) — this table is the
           audit trail so the operator can see what else was scanned and
           override with one click. */}
-      <ScannedOptionsTable
-        airbnb={availableAirbnb}
-        vrbo={availableVrbo}
-        booking={availableBooking}
-        pm={availablePm}
-        autoPickUrl={availableCheapestUnits[0]?.primaryUrl ?? availableCheapest[0]?.url}
-        checkIn={checkInYmd}
-        checkOut={checkOutYmd}
-        onRecord={(c) => setRecordTarget(c)}
-      />
+      <details open={!hasFocusedRecommendation}>
+        <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
+          <Badge className="text-[10px] bg-slate-100 text-slate-700 border border-slate-300">
+            All scanned options
+          </Badge>
+          <span>
+            {availableAirbnb.length + availableVrbo.length + availableBooking.length + availablePm.length} rows
+            {hasFocusedRecommendation ? " hidden below the best pick" : ""}
+          </span>
+        </summary>
+        <div className="mt-1.5">
+          <ScannedOptionsTable
+            airbnb={availableAirbnb}
+            vrbo={availableVrbo}
+            booking={availableBooking}
+            pm={availablePm}
+            autoPickUrl={availableCheapestUnits[0]?.primaryUrl ?? availableCheapest[0]?.url}
+            checkIn={checkInYmd}
+            checkOut={checkOutYmd}
+            onRecord={(c) => setRecordTarget(c)}
+          />
+        </div>
+      </details>
 
       {/* By-source sections.
           Airbnb stays as telemetry + photo source (the reverse-image PM
@@ -2061,10 +2119,10 @@ function LiveSearchSection({
           server-side. Booking.com + PM Companies are the direct-bookable
           channels — both ALWAYS open. */}
       {[
-        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: availableVrbo.length > 0 },
-        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: true },
-        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: true },
+        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: !hasFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
+        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: !hasFocusedRecommendation && availableVrbo.length > 0 },
+        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: !hasFocusedRecommendation },
+        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: !hasFocusedRecommendation },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
