@@ -203,6 +203,7 @@ export type SidecarPropertyCandidate = {
   totalPrice: number;
   nightlyPrice: number;
   bedrooms?: number;
+  bedroomSource?: "search-card" | "detail-page" | "unknown";
   sourceLabel?: string;
   image?: string;
   snippet?: string;

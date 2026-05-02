@@ -3793,7 +3793,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         const fullText = clean(card?.textContent || a.textContent || "");
         if (!looksDetail(url, fullText)) continue;
         const br = extractBedrooms(fullText);
-        if (br !== null && br < bedrooms) continue;
+        if (br === null || br < bedrooms) continue;
         const price = parsePrice(fullText);
         if (!price) continue;
         const title =
@@ -3808,6 +3808,7 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           totalPrice: price.totalPrice,
           nightlyPrice: price.nightlyPrice,
           bedrooms: br,
+          bedroomSource: "search-card",
           image: imageFrom(card),
           snippet: fullText.slice(0, 220),
         });
@@ -3873,7 +3874,8 @@ async function processPmSiteSearch(id, params) {
           sourceLabel: site.label,
           totalPrice: Math.round(total > 0 ? total : nightly * nightsBetween(checkIn, checkOut)),
           nightlyPrice: Math.round(nightly > 0 ? nightly : total / nightsBetween(checkIn, checkOut)),
-          bedrooms: card.bedrooms ?? bedrooms,
+          bedrooms: card.bedrooms,
+          bedroomSource: card.bedroomSource,
           image: card.image,
           snippet: `${site.label} rental search result · ${card.snippet || ""}`.slice(0, 360),
         });

@@ -2691,6 +2691,7 @@ export async function registerRoutes(
       verified?: "yes" | "no" | "unclear" | "skipped";
       verifiedNightlyPrice?: number | null;
       verifiedReason?: string;
+      bedroomSource?: "search-card" | "detail-page" | "unknown";
     };
 
     const asNum = (v: unknown): number => {
@@ -2828,6 +2829,8 @@ export async function registerRoutes(
       if (typeof c.bedrooms === "number") return c.bedrooms;
       return null;
     };
+    const rawCandidateExplicitBedroomSignal = (c: { title?: string; snippet?: string; url?: string }): number | null =>
+      bedroomFromText(`${c.title ?? ""} ${c.snippet ?? ""} ${c.url ?? ""}`);
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (normalizedResortName !== "poipu kai") return true;
       if (c.source === "airbnb" && c.inTargetBounds) return true;
@@ -3855,13 +3858,21 @@ export async function registerRoutes(
         pmWebsiteSidecarReason = r.reason;
         return r.candidates
           .filter((c) => {
-            const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
-            const inferred = rawCandidateBedroomSignal(c);
+            const explicit = rawCandidateExplicitBedroomSignal(c);
+            const sourceBedroom = (c as any).bedroomSource === "search-card" && typeof c.bedrooms === "number"
+              ? c.bedrooms
+              : null;
+            const inferred = explicit ?? sourceBedroom;
             return inferred !== null && inferred >= bedrooms && (c.totalPrice > 0 || c.nightlyPrice > 0);
           })
           .map((c): Candidate => {
             const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
             const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
+            const explicit = rawCandidateExplicitBedroomSignal(c);
+            const sourceBedroom = (c as any).bedroomSource === "search-card" && typeof c.bedrooms === "number"
+              ? c.bedrooms
+              : undefined;
+            const candidateBedrooms = explicit ?? sourceBedroom;
             return {
               source: "pm",
               sourceLabel: c.sourceLabel || "Property manager",
@@ -3869,7 +3880,8 @@ export async function registerRoutes(
               url: withStayDates("pm", c.url),
               nightlyPrice: Math.round(nightly),
               totalPrice: Math.round(total),
-              bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
+              bedrooms: candidateBedrooms,
+              bedroomSource: (c as any).bedroomSource === "search-card" ? "search-card" : undefined,
               image: c.image,
               snippet: c.snippet,
               verified: "yes",
