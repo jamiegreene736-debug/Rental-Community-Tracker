@@ -3435,9 +3435,15 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
     const hasAvailableDatesSignal = /\byour dates are available\b/i.test(text);
     const hasDateSpecificPrice = hasDateSignal && (totalN || (reserveBtn && nightlyForSelectedStay) || (hasAvailableDatesSignal && totalN));
     const path = window.location.pathname;
+    const pathSegments = path.split("/").filter(Boolean);
+    const lastPathSegment = pathSegments[pathSegments.length - 1] || "";
+    const collectionText = `${document.title || ""} ${text}`;
+    const pathLooksCollection =
+      /\/bedrooms?\//i.test(path) ||
+      /^(?:search|search-results|properties|rentals?|vacation-rentals?|[a-z0-9-]+-rentals?|[a-z0-9-]+-vacation-rentals?)$/i.test(lastPathSegment);
     const isCollectionSearchPage =
-      (/\/bedrooms?\//i.test(path) || /\/(?:search|vacation-rentals|rentals)\/?$/i.test(path)) &&
-      /\b(?:results?|properties|list view|map view|show filters|clear search)\b/i.test(text);
+      pathLooksCollection &&
+      /\b(?:results?|properties|list view|map view|show filters|clear search|view all .{0,40} rentals)\b/i.test(collectionText);
     if (hasDateSpecificPrice && isCollectionSearchPage) {
       return {
         available: "unclear",
