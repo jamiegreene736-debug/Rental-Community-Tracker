@@ -2016,7 +2016,9 @@ export async function registerRoutes(
   // again to retry" hint becomes literally instant on the cache-hit
   // path.
   type FindBuyInCacheEntry = { value: any; expiresAt: number };
+  type FindBuyInInFlightEntry = { promise: Promise<any>; startedAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
+  const findBuyInInFlight = new Map<string, FindBuyInInFlightEntry>();
   type ReverseImageListingMatch = {
     platformKey: "airbnb" | "vrbo" | "booking" | "pm" | "other";
     platform: string;
@@ -2527,6 +2529,36 @@ export async function registerRoutes(
         console.log(`[find-buy-in] cache hit ${cacheKey} (age ${ageSec}s)`);
         return res.json({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
       }
+      const inFlight = findBuyInInFlight.get(cacheKey);
+      if (inFlight) {
+        console.log(`[find-buy-in] in-flight join ${cacheKey}`);
+        try {
+          const value = await inFlight.promise;
+          const ageSec = Math.max(0, Math.round((Date.now() - inFlight.startedAt) / 1000));
+          return res.json({ ...value, fromCache: true, fromInFlight: true, cacheAgeSec: ageSec });
+        } catch (e: any) {
+          console.warn(`[find-buy-in] in-flight join failed ${cacheKey}:`, e?.message ?? e);
+          findBuyInInFlight.delete(cacheKey);
+        }
+      }
+    }
+
+    let resolveInFlight: ((value: any) => void) | null = null;
+    let rejectInFlight: ((reason?: unknown) => void) | null = null;
+    let inFlightSettled = false;
+    if (!noCache) {
+      const promise = new Promise<any>((resolve, reject) => {
+        resolveInFlight = resolve;
+        rejectInFlight = reject;
+      });
+      promise.catch(() => {});
+      findBuyInInFlight.set(cacheKey, { promise, startedAt: Date.now() });
+      res.on("close", () => {
+        if (inFlightSettled) return;
+        inFlightSettled = true;
+        findBuyInInFlight.delete(cacheKey);
+        rejectInFlight?.(new Error(`find-buy-in request closed before completing ${cacheKey}`));
+      });
     }
 
     const config = PROPERTY_UNIT_NEEDS[propertyId];
@@ -4946,6 +4978,11 @@ export async function registerRoutes(
       value: responseBody,
       expiresAt: Date.now() + cacheTtlMs,
     });
+    if (!inFlightSettled) {
+      inFlightSettled = true;
+      resolveInFlight?.(responseBody);
+      findBuyInInFlight.delete(cacheKey);
+    }
     console.log(`[find-buy-in] cached ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
     return res.json(responseBody);
   });

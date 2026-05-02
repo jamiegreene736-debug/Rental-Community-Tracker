@@ -51,6 +51,59 @@ function listingUrlKey(url: string | null | undefined): string {
   }
 }
 
+function normalizedIdentityText(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGenericRentalTitle(title: string): boolean {
+  const t = normalizedIdentityText(title);
+  if (!t) return true;
+  if (/^(?:condo|apartment|townhouse|home|house|villa|rental unit|guest suite|loft|cottage|bungalow|place)\s+in\s+[a-z ]+$/.test(t)) return true;
+  if (/^(?:beautiful|lovely|spacious|modern|luxury|elegant)?\s*(?:\d+\s*(?:br|bedroom)\s*)?(?:condo|apartment|townhouse|home|house|villa|rental)$/.test(t)) return true;
+  return false;
+}
+
+function titleFromBuyInNotes(notes: string | null | undefined): string {
+  const raw = String(notes ?? "");
+  const firstClause = raw.split(" · ")[0] ?? raw;
+  const dash = firstClause.indexOf(" — ");
+  if (dash >= 0) return firstClause.slice(dash + 3).trim();
+  const bought = firstClause.match(/^Bought via .+? — (.+)$/i);
+  return bought?.[1]?.trim() ?? "";
+}
+
+function urlsFromText(text: string | null | undefined): string[] {
+  const raw = String(text ?? "");
+  return [...raw.matchAll(/https?:\/\/[^\s)]+/g)].map((m) => m[0]);
+}
+
+function buyInIdentityKeys(row: Pick<BuyIn, "airbnbListingUrl" | "notes">): Set<string> {
+  const keys = new Set<string>();
+  const primaryKey = listingUrlKey(row.airbnbListingUrl);
+  if (primaryKey) keys.add(`url:${primaryKey}`);
+  for (const url of urlsFromText(row.notes)) {
+    const key = listingUrlKey(url);
+    if (key) keys.add(`url:${key}`);
+  }
+  const titleKey = normalizedIdentityText(titleFromBuyInNotes(row.notes));
+  if (titleKey.length >= 12 && !isGenericRentalTitle(titleKey)) {
+    keys.add(`title:${titleKey}`);
+  }
+  return keys;
+}
+
+function identitySetsOverlap(a: Set<string>, b: Set<string>): boolean {
+  for (const key of a) {
+    if (b.has(key)) return true;
+  }
+  return false;
+}
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -230,17 +283,18 @@ export class DatabaseStorage implements IStorage {
     }
 
     // Refuse if another slot in the same reservation already points to
-    // the same listing URL. Multi-unit reservations need distinct
-    // physical units; attaching the same PM/OTA listing twice would make
-    // the P&L look filled while only one actual buy-in exists.
-    const existingListingKey = listingUrlKey(existing.airbnbListingUrl);
-    if (existingListingKey) {
+    // the same physical listing. Multi-unit reservations need distinct
+    // units; the identity set covers normalized URL, URL(s) embedded in
+    // auto-fill notes (photo-match anchors), and specific non-generic
+    // listing titles.
+    const existingIdentity = buyInIdentityKeys(existing);
+    if (existingIdentity.size > 0) {
       const sameListing = currentAttachments.find(
-        (b) => b.id !== buyInId && listingUrlKey(b.airbnbListingUrl) === existingListingKey,
+        (b) => b.id !== buyInId && identitySetsOverlap(buyInIdentityKeys(b), existingIdentity),
       );
       if (sameListing) {
         throw new Error(
-          `Reservation ${reservationId} already has buy-in ${sameListing.id} attached for this listing URL on unit "${sameListing.unitId}" — choose a different physical unit`,
+          `Reservation ${reservationId} already has buy-in ${sameListing.id} attached for the same physical listing on unit "${sameListing.unitId}" — choose a different unit`,
         );
       }
     }

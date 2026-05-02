@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -224,6 +224,7 @@ function listingIdentityKeys(item: {
   title?: string | null;
   image?: string | null;
   airbnbAnchorUrl?: string | null;
+  alternateUrls?: Array<string | null | undefined>;
   photoMatches?: Array<{ url?: string | null }>;
 }): string[] {
   const keys = new Set<string>();
@@ -232,6 +233,11 @@ function listingIdentityKeys(item: {
 
   const anchorKey = listingUrlKey(item.airbnbAnchorUrl);
   if (anchorKey) keys.add(`url:${anchorKey}`);
+
+  for (const alternateUrl of item.alternateUrls ?? []) {
+    const alternateKey = listingUrlKey(alternateUrl);
+    if (alternateKey) keys.add(`url:${alternateKey}`);
+  }
 
   const imgKey = imageUrlKey(item.image);
   if (imgKey) keys.add(`image:${imgKey}`);
@@ -769,6 +775,7 @@ export default function Bookings() {
   // into a single button per booking.
   const [autoFilling, setAutoFilling] = useState<string | null>(null);
   const [autoFillStartedAtMs, setAutoFillStartedAtMs] = useState<number | null>(null);
+  const autoFillRunRef = useRef<string | null>(null);
   const autoFillMutation = useMutation({
     mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
       if (!selectedPropertyId) throw new Error("No property selected");
@@ -892,8 +899,35 @@ export default function Bookings() {
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
         const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
+        const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
+          .map((unit) => {
+            const listing = [...(unit.listings ?? [])]
+              .filter((l) => l.totalPrice > 0)
+              .sort((a, b) => {
+                const aRank = a.verified === "yes" ? 0 : 1;
+                const bRank = b.verified === "yes" ? 0 : 1;
+                if (aRank !== bRank) return aRank - bRank;
+                return (a.totalPrice || 999999) - (b.totalPrice || 999999);
+              })[0];
+            if (!listing) return null;
+            return {
+              source: listing.channel,
+              sourceLabel: listing.channelLabel,
+              title: unit.unitTitle,
+              url: listing.url,
+              nightlyPrice: listing.nightlyPrice,
+              totalPrice: listing.totalPrice,
+              bedrooms: listing.bedrooms ?? unit.bedrooms,
+              image: unit.image,
+              alternateUrls: (unit.listings ?? []).map((l) => l.url).filter(Boolean),
+              verified: listing.verified,
+              verifiedReason: listing.verifiedReason,
+            } satisfies LiveCandidate;
+          })
+          .filter((c): c is LiveCandidate => c !== null);
+        const sourceCandidates = unitCandidates.length > 0 ? unitCandidates : (data.cheapest ?? []);
         const candidates = rankCandidates(
-          (data.cheapest ?? [])
+          sourceCandidates
             .filter((c) => c.totalPrice > 0)
             .filter((c) => {
               const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
@@ -923,6 +957,7 @@ export default function Bookings() {
           skippedReasons.push(`${slot.unitLabel}: skipped duplicate physical listing`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
         }
+        addUsedListingIdentity(pickedIdentities, pick);
         const verifySuffix = pick.verified === "yes"
           ? ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
           : "";
@@ -957,7 +992,6 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
-          addUsedListingIdentity(pickedIdentities, pick);
           return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
         } catch (e: any) {
           skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
@@ -1066,6 +1100,7 @@ export default function Bookings() {
       return { reservation, results };
     },
     onSuccess: ({ reservation, results }) => {
+      autoFillRunRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       setAutoFilling(null);
@@ -1128,6 +1163,7 @@ export default function Bookings() {
       }
     },
     onError: (e: any) => {
+      autoFillRunRef.current = null;
       setAutoFilling(null);
       setAutoFillStartedAtMs(null);
       const raw = String(e?.message ?? "");
@@ -1158,6 +1194,7 @@ export default function Bookings() {
     if (!autoFillSidecarQueue.fetched) return;
 
     const id = setTimeout(() => {
+      autoFillRunRef.current = null;
       setAutoFilling(null);
       setAutoFillStartedAtMs(null);
     }, 3_000);
@@ -1498,12 +1535,14 @@ export default function Bookings() {
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  if (autoFillRunRef.current || autoFillMutation.isPending || autoFilling) return;
+                                  autoFillRunRef.current = r._id;
                                   closeSlotSearchesForReservation(r);
                                   setAutoFillStartedAtMs(Date.now());
                                   setAutoFilling(r._id);
                                   autoFillMutation.mutate({ reservation: r });
                                 }}
-                                disabled={rowAutoFillRunning}
+                                disabled={rowAutoFillRunning || autoFillMutation.isPending || !!autoFilling}
                                 data-testid={`button-auto-fill-${r._id}`}
                               >
                                 {autoFillMutation.isPending && autoFilling === r._id ? (
@@ -1753,6 +1792,10 @@ type LiveCandidate = {
   // Airbnb candidates server-side. Zero-length when no matches were
   // found OR the candidate isn't in the top-N pool.
   photoMatches?: Array<{ url: string; title: string; domain: string }>;
+  // When this candidate is derived from a grouped physical unit, keep
+  // every known listing URL in the cluster so Auto-fill can avoid
+  // choosing the same unit again through another channel.
+  alternateUrls?: string[];
   // For PM candidates surfaced via reverse-image match against an
   // Airbnb listing: the anchor's URL + price. Auto-fill annotates the
   // buy-in note with these so the operator knows the price is a proxy
@@ -3833,6 +3876,7 @@ function RecordBuyInDialog({
       title: candidate.title,
       image: candidate.image,
       airbnbAnchorUrl: candidate.airbnbAnchorUrl,
+      alternateUrls: candidate.alternateUrls,
       photoMatches: candidate.photoMatches,
     }));
     if (candidateKeys.size === 0) return null;
