@@ -262,6 +262,7 @@ export type SidecarRequest = {
   createdAt: number;
   claimedAt?: number;
   completedAt?: number;
+  cancelled?: boolean;
 };
 
 // Backward-compat alias — old code imported this name when the queue
@@ -497,7 +498,32 @@ function cancelRequest(id: string, reason: string): void {
   if (!r || r.status === "completed" || r.status === "failed") return;
   r.status = "failed";
   r.error = reason;
+  r.cancelled = true;
   r.completedAt = nowMs();
+}
+
+export function cancelActiveAndPendingRequests(reason = "cancelled by operator"): {
+  cancelled: number;
+  pending: number;
+  inProgress: number;
+} {
+  cleanup();
+  let cancelled = 0;
+  let pending = 0;
+  let inProgress = 0;
+  for (const r of queue.values()) {
+    if (r.status !== "pending" && r.status !== "in_progress") continue;
+    if (r.status === "pending") pending++;
+    if (r.status === "in_progress") inProgress++;
+    cancelRequest(r.id, reason);
+    cancelled++;
+  }
+  return { cancelled, pending, inProgress };
+}
+
+export function isCancellationRequested(id: string): boolean {
+  const r = queue.get(id);
+  return Boolean(r?.cancelled);
 }
 
 export function getResult(id: string): SidecarRequest | null {

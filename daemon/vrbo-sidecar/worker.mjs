@@ -594,6 +594,12 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
       body: JSON.stringify(id ? { id } : {}),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json().catch(() => ({}));
+    if (id && data?.cancelled) {
+      log(`${label}: server cancelled request ${id}; closing active Chrome task`);
+      await teardownBrowser(`server cancelled ${id}`);
+      return false;
+    }
     return true;
   } catch (e) {
     if (!/404|fetch failed|AbortError/i.test(e?.message ?? "")) {
@@ -607,7 +613,7 @@ function startBusyHeartbeat(label, id = null) {
   void sendHeartbeat(`start ${label}`, true, id);
   const interval = setInterval(() => {
     void sendHeartbeat(`busy ${label}`, true, id);
-  }, HEARTBEAT_BUSY_MS);
+  }, Math.min(HEARTBEAT_BUSY_MS, 5_000));
   interval.unref?.();
   return () => clearInterval(interval);
 }
@@ -1763,6 +1769,8 @@ async function processBookingSearch(id, params) {
       const title = titleEl ? titleEl.textContent.trim() : "";
       const link = card.querySelector('a[href*="/hotel/"]');
       const href = link ? link.getAttribute("href") || "" : "";
+      const img = card.querySelector("img");
+      const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       // Strip query string for the canonical URL but keep the .html path.
       const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
       // Booking renders multiple $X numbers inside the price element:
@@ -1795,6 +1803,8 @@ async function processBookingSearch(id, params) {
         // so we just publish total + a best-effort per-night.
         nightlyPrice: 0, // filled in by caller using its known night count
         bedrooms: bedrooms || undefined,
+        image,
+        snippet: fullText.slice(0, 220),
       });
     }
     return out;

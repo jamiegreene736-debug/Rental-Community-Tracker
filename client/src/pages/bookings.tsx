@@ -23,7 +23,7 @@ import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
-  ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText,
+  ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -262,6 +262,8 @@ function SidecarQueueProgress({
   forceVisible?: boolean;
   className?: string;
 }) {
+  const { toast } = useToast();
+  const [isStopping, setIsStopping] = useState(false);
   const active = activeSidecarCount(status);
   if (!forceVisible && active <= 0) return null;
 
@@ -272,6 +274,30 @@ function SidecarQueueProgress({
       ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}.`
       : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
     : `${label}: waiting for queue status.`;
+
+  const stopSidecar = async () => {
+    setIsStopping(true);
+    try {
+      const response = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
+        reason: "cancelled by operator from Operations UI",
+      });
+      const result = await response.json();
+      toast({
+        title: "Sidecar stop requested",
+        description: result.cancelled > 0
+          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"}. The active Chrome task should close within a few seconds.`
+          : "No active sidecar jobs were running.",
+      });
+    } catch (e) {
+      toast({
+        title: "Could not stop sidecar",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsStopping(false);
+    }
+  };
 
   return (
     <div className={`border border-blue-200 bg-blue-50/70 text-blue-900 rounded-md px-3 py-2 text-[11px] space-y-1.5 ${className}`}>
@@ -284,6 +310,19 @@ function SidecarQueueProgress({
           <span className="tabular-nums text-blue-800/80">
             oldest {Math.round(status.oldestPendingAgeSec)}s
           </span>
+        )}
+        {active > 0 && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 shrink-0 border-blue-300 bg-white/80 text-[11px] text-blue-900 hover:bg-blue-100"
+            onClick={stopSidecar}
+            disabled={isStopping}
+          >
+            <XCircle className="h-3.5 w-3.5 mr-1" />
+            {isStopping ? "Stopping" : "Stop"}
+          </Button>
         )}
       </div>
       <Progress value={sidecarQueueProgressValue(status)} className="h-1.5" />

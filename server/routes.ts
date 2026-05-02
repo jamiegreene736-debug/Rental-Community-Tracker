@@ -3016,17 +3016,32 @@ export async function registerRoutes(
         if (dropped > 0) {
           console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} non-${bedrooms}BR candidates`);
         }
-        return accepted.map((c): Candidate => ({
-          source: "booking",
-          sourceLabel: "Booking.com",
-          title: c.title.slice(0, 100),
-          url: withStayDates("booking", c.url),
-          nightlyPrice: 0,
-          totalPrice: 0,
-          bedrooms: c.bedrooms,
-          image: c.image,
-          snippet: c.snippet || (c.totalPrice > 0 ? `Booking search card showed $${c.totalPrice.toLocaleString()} before detail verification` : undefined),
-        }));
+        return accepted.map((c): Candidate => {
+          const total = Number(c.totalPrice || 0) > 0
+            ? Math.round(Number(c.totalPrice))
+            : Math.round(Number(c.nightlyPrice || 0) * nights);
+          const nightly = Number(c.nightlyPrice || 0) > 0
+            ? Math.round(Number(c.nightlyPrice))
+            : total > 0
+            ? Math.round(total / Math.max(1, nights))
+            : 0;
+          return {
+            source: "booking",
+            sourceLabel: "Booking.com",
+            title: c.title.slice(0, 100),
+            url: withStayDates("booking", c.url),
+            nightlyPrice: nightly,
+            totalPrice: total,
+            bedrooms: c.bedrooms,
+            image: c.image,
+            snippet: c.snippet || (total > 0 ? `Booking.com search card showed $${total.toLocaleString()} for the requested stay` : undefined),
+            verified: total > 0 ? "yes" : undefined,
+            verifiedNightlyPrice: nightly > 0 ? nightly : undefined,
+            verifiedReason: total > 0
+              ? "Booking.com sidecar searched booking.com with the resort, dates, and bedroom filter and scraped this priced result card"
+              : undefined,
+          };
+        });
       } catch (e: any) {
         console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
         noteSourceError("Booking.com sidecar search", e);
@@ -4568,7 +4583,7 @@ export async function registerRoutes(
         kept: bookingTarget.length,
         priced: pricedCount(bookingTarget),
         verified: verifiedYesCount(bookingTarget),
-        message: `${bookingSidecarCount} Booking.com website sidecar search card(s). Detail verification is required before pricing is trusted.`,
+        message: `${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering.`,
       },
       {
         source: "PM companies",
@@ -8937,9 +8952,12 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/admin/vrbo-sidecar/heartbeat", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
     const body = (req.body ?? {}) as { id?: unknown };
-    const { stampHeartbeat } = await import("./vrbo-sidecar-queue");
+    const { stampHeartbeat, isCancellationRequested } = await import("./vrbo-sidecar-queue");
     stampHeartbeat(typeof body.id === "string" ? body.id : undefined);
-    return res.json({ ok: true });
+    return res.json({
+      ok: true,
+      cancelled: typeof body.id === "string" ? isCancellationRequested(body.id) : false,
+    });
   });
 
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
@@ -8993,6 +9011,21 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
     return res.json(getStatus());
+  });
+
+  // POST /api/vrbo-sidecar/cancel — operator-facing panic button for
+  // the Operations UI. Closing the browser tab does not stop the Mac
+  // LaunchAgent; this marks pending/running queue work as cancelled.
+  // The worker sees the cancellation on its heartbeat and tears down
+  // the active Chrome task within a few seconds.
+  app.post("/api/vrbo-sidecar/cancel", async (req, res) => {
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 200)
+      : "cancelled by operator from Operations UI";
+    const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+    const result = cancelActiveAndPendingRequests(reason);
+    return res.json({ ok: true, ...result });
   });
 
   // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
