@@ -50,6 +50,9 @@ function softenStiffWording(text: string): string {
   return text
     .replace(/\bapproximately\b/gi, "about")
     .replace(/\bWhat a thoughtful Christmas gift for the family\./gi, "That sounds like a really sweet Christmas gift for your family.")
+    .replace(/\bThey won't be directly next door(?: to each other)?,\s+the two units are\b/gi, "They won't be directly next door to each other, but the two units are")
+    .replace(/\bThey aren't directly next door(?: to each other)?,\s+the two units are\b/gi, "They aren't directly next door to each other, but the two units are")
+    .replace(/\bThey are not directly next door(?: to each other)?,\s+the two units are\b/gi, "They aren't directly next door to each other, but the two units are")
     .replace(/\bsituated\b/gi, "located")
     .replace(/\bwithin the resort grounds\b/gi, "within the resort")
     .replace(/\bWe are\b/g, "We're")

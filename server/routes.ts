@@ -17821,7 +17821,7 @@ Examples (same content, different voice):
   HUMAN:    "The two units are about a 3-minute walk apart, easy to move between."
 
   ROBOTIC:  "The two units are about a 3-minute walk apart within Pili Mai, so they're close but not directly adjacent. If proximity is important for your group, let me know and I can flag this with our team to see if we can request units in the same building cluster when we confirm your reservation. What a thoughtful Christmas gift for the family."
-  HUMAN:    "They won't be directly next door to each other, but they are close, about a 3-minute walk apart within Pili Mai. I don't want to overpromise side-by-side units, especially for Christmas week, but they should still be easy for everyone to move between. That sounds like a really sweet Christmas gift for your family."`;
+  HUMAN:    "They won't be directly next door to each other, but the two units are about a 3-minute walk apart within Pili Mai. That sounds like a really sweet Christmas gift for your family."`;
 
     const tonePreamble = isHawaii
       ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
