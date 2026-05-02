@@ -8428,6 +8428,145 @@ export async function registerRoutes(
     return true;
   }
 
+  app.post("/api/admin/vrbo-sidecar/visual-date-controls", async (req: Request, res: Response) => {
+    if (!checkAdminSecret(req, res)) return;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return res.status(503).json({ ok: false, error: "ANTHROPIC_API_KEY not configured" });
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const screenshotRaw = typeof body.screenshotBase64 === "string" ? body.screenshotBase64 : "";
+    const screenshotBase64 = screenshotRaw.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
+    const candidatesRaw = Array.isArray(body.candidates) ? body.candidates : [];
+    const checkIn = typeof body.checkIn === "string" ? body.checkIn : "";
+    const checkOut = typeof body.checkOut === "string" ? body.checkOut : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      return res.status(400).json({ ok: false, error: "checkIn and checkOut required (YYYY-MM-DD)" });
+    }
+    if (!screenshotBase64 || screenshotBase64.length > 7_000_000) {
+      return res.status(400).json({ ok: false, error: "screenshotBase64 required and must be under 7MB" });
+    }
+
+    const clean = (raw: unknown, max = 180) =>
+      String(raw ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+    const candidates = candidatesRaw
+      .map((raw: any) => ({
+        id: clean(raw?.id, 32),
+        tag: clean(raw?.tag, 24),
+        type: clean(raw?.type, 24),
+        role: clean(raw?.role, 40),
+        text: clean(raw?.text, 120),
+        placeholder: clean(raw?.placeholder, 80),
+        ariaLabel: clean(raw?.ariaLabel, 100),
+        title: clean(raw?.title, 100),
+        name: clean(raw?.name, 80),
+        domId: clean(raw?.domId, 80),
+        context: clean(raw?.context, 260),
+        rect: raw?.rect && typeof raw.rect === "object"
+          ? {
+              x: Number(raw.rect.x) || 0,
+              y: Number(raw.rect.y) || 0,
+              w: Number(raw.rect.w) || 0,
+              h: Number(raw.rect.h) || 0,
+            }
+          : null,
+      }))
+      .filter((c) => c.id)
+      .slice(0, 80);
+
+    if (candidates.length === 0) {
+      return res.status(400).json({ ok: false, error: "at least one candidate control required" });
+    }
+
+    const candidateList = candidates
+      .map((c) => [
+        `id=${c.id}`,
+        `tag=${c.tag}${c.type ? `/${c.type}` : ""}`,
+        c.role ? `role=${c.role}` : "",
+        c.rect ? `rect=${Math.round(c.rect.x)},${Math.round(c.rect.y)},${Math.round(c.rect.w)}x${Math.round(c.rect.h)}` : "",
+        c.text ? `text="${c.text}"` : "",
+        c.placeholder ? `placeholder="${c.placeholder}"` : "",
+        c.ariaLabel ? `aria="${c.ariaLabel}"` : "",
+        c.title ? `title="${c.title}"` : "",
+        c.name ? `name="${c.name}"` : "",
+        c.domId ? `domId="${c.domId}"` : "",
+        c.context ? `context="${c.context}"` : "",
+      ].filter(Boolean).join(" | "))
+      .join("\n");
+
+    const prompt = `You are helping a browser automation sidecar fill vacation-rental search dates.
+
+Requested dates:
+- Arrival/check-in: ${checkIn}
+- Departure/check-out: ${checkOut}
+
+Current page:
+- URL: ${clean(body.url, 240)}
+- Title: ${clean(body.title, 160)}
+
+The screenshot shows the current viewport. The candidate list below contains clickable/fillable DOM elements with screen rectangles. Choose the element IDs for the visible arrival/check-in field, departure/check-out field, optional single date-range field, and search/availability submit button.
+
+Rules:
+- Prefer actual visible input boxes labeled Arrival, Check in, Check-in, Departure, Check out, or Check-out.
+- If separate arrival and departure boxes are visible, return checkInId and checkOutId and leave rangeId null.
+- If only one combined date range box is visible, return rangeId and leave checkInId/checkOutId null.
+- For submitId, choose the visible Search, Search Availability, Check Availability, Check Rates, Apply, or Update button near the date fields.
+- Do not choose phone numbers, Contact, Share, favorites, map/list view, filters, newsletter, or nav links.
+- Return null for any ID you cannot confidently identify.
+
+Candidate elements:
+${candidateList}
+
+Return ONLY compact JSON with this exact shape:
+{"checkInId":string|null,"checkOutId":string|null,"rangeId":string|null,"submitId":string|null,"confidence":number,"reason":string}`;
+
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 400,
+          temperature: 0,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: screenshotBase64 } },
+              { type: "text", text: prompt },
+            ],
+          }],
+        }),
+      });
+      const upstream = await resp.text();
+      if (!resp.ok) {
+        return res.status(502).json({ ok: false, error: `Anthropic ${resp.status}: ${upstream.slice(0, 240)}` });
+      }
+      let json: any = null;
+      try { json = JSON.parse(upstream); } catch {}
+      const text = json?.content?.find?.((part: any) => part?.type === "text")?.text ?? json?.content?.[0]?.text ?? "";
+      const match = String(text).match(/\{[\s\S]*\}/);
+      if (!match) return res.status(502).json({ ok: false, error: "Anthropic returned no JSON", raw: String(text).slice(0, 240) });
+      const parsed = JSON.parse(match[0]);
+      const ids = new Set(candidates.map((c) => c.id));
+      const idOrNull = (value: unknown) => typeof value === "string" && ids.has(value) ? value : null;
+      const plan = {
+        checkInId: idOrNull(parsed.checkInId),
+        checkOutId: idOrNull(parsed.checkOutId),
+        rangeId: idOrNull(parsed.rangeId),
+        submitId: idOrNull(parsed.submitId),
+        confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
+        reason: clean(parsed.reason, 180),
+        candidateCount: candidates.length,
+      };
+      return res.json({ ok: true, plan });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/admin/guesty/session-status
   //
   // Returns booleans + metadata about the cached session state. Never

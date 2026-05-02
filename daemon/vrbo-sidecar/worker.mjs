@@ -2172,11 +2172,20 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
         return dateValueNeedles(value, iso).some((needle) => needle && current.includes(needle));
       }
 
+      function hasJqueryDatepicker(el) {
+        try {
+          const jq = window.jQuery || window.$;
+          return Boolean(jq?.fn?.datepicker && jq(el)?.hasClass?.("hasDatepicker"));
+        } catch {
+          return false;
+        }
+      }
+
       function setInputValue(el, value, iso) {
         if (!el) return false;
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
-        if (tag === "input" && type !== "hidden" && el.readOnly && isRendered(el)) return false;
+        if (tag === "input" && type !== "hidden" && el.readOnly && isRendered(el) && !hasJqueryDatepicker(el)) return false;
         const nextValue = tag === "input" && type === "date" ? iso : value;
         try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
         try { el.focus?.(); } catch {}
@@ -2232,6 +2241,292 @@ async function fillKnownPmDatePairs(targetPage, checkIn, checkOut) {
     5_000,
     null,
   );
+}
+
+async function askVisualDateControlModel(targetPage, checkIn, checkOut) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  const candidates = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      const selector = [
+        "input",
+        "textarea",
+        "select",
+        "[contenteditable='true']",
+        "[role='textbox']",
+        "button",
+        "a",
+        "[role='button']",
+        "label",
+        "[aria-label]",
+        "[title]",
+      ].join(",");
+      const usefulRe = /\b(?:arrival|departure|arrive|depart|check[\s_-]*in|check[\s_-]*out|date|dates|calendar|availability|search|book|reserve|guest|bedroom|filter)\b/i;
+      const badContainerRe = /\b(?:footer|social|share|newsletter|cookie|privacy|terms)\b/i;
+
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function textOf(el) {
+        return clean([
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" "));
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("data-test"),
+          el.getAttribute?.("class"),
+        ];
+        const id = el.getAttribute?.("id");
+        if (id) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label) parts.push(label.textContent);
+        }
+        const wrappingLabel = el.closest?.("label");
+        if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 3; i++, cur = cur.parentElement) {
+          parts.push(cur.getAttribute?.("aria-label"));
+          parts.push(cur.getAttribute?.("class"));
+          const txt = clean(cur.textContent);
+          if (txt.length <= 260) parts.push(txt);
+        }
+        return clean(parts.filter(Boolean).join(" "));
+      }
+
+      const out = [];
+      let seq = 0;
+      for (const el of Array.from(document.querySelectorAll(selector))) {
+        if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+        const rect = el.getBoundingClientRect();
+        const ctx = contextOf(el);
+        const label = textOf(el);
+        const hay = `${label} ${ctx}`;
+        if (!usefulRe.test(hay)) continue;
+        if (badContainerRe.test(ctx) && !/\b(?:arrival|departure|check|date|search availability)\b/i.test(hay)) continue;
+        const visualId = `v${seq++}`;
+        el.setAttribute("data-sidecar-visual-id", visualId);
+        out.push({
+          id: visualId,
+          tag: el.tagName.toLowerCase(),
+          type: clean(el.getAttribute?.("type")).slice(0, 24),
+          role: clean(el.getAttribute?.("role")).slice(0, 40),
+          text: label.slice(0, 120),
+          placeholder: clean(el.getAttribute?.("placeholder")).slice(0, 80),
+          ariaLabel: clean(el.getAttribute?.("aria-label")).slice(0, 100),
+          title: clean(el.getAttribute?.("title")).slice(0, 100),
+          name: clean(el.getAttribute?.("name")).slice(0, 80),
+          domId: clean(el.getAttribute?.("id")).slice(0, 80),
+          context: ctx.slice(0, 260),
+          rect: {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+          },
+        });
+        if (out.length >= 80) break;
+      }
+      return out;
+    }),
+    4_000,
+    [],
+  ).catch(() => []);
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  const screenshot = await withSoftTimeout(
+    targetPage.screenshot({ type: "jpeg", quality: 58, fullPage: false }),
+    5_000,
+    null,
+  ).catch(() => null);
+  if (!screenshot) return null;
+
+  const response = await withSoftTimeout(
+    fetch(`${SERVER}/api/admin/vrbo-sidecar/visual-date-controls`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        url: targetPage.url(),
+        title: await targetPage.title().catch(() => ""),
+        checkIn,
+        checkOut,
+        screenshotBase64: screenshot.toString("base64"),
+        candidates,
+      }),
+    }),
+    15_000,
+    null,
+  ).catch(() => null);
+  if (!response?.ok) {
+    if (response) {
+      const text = await response.text().catch(() => "");
+      log(`pm_visual_date_fallback: model unavailable HTTP ${response.status}: ${text.slice(0, 160)}`);
+    }
+    return null;
+  }
+  const data = await response.json().catch(() => null);
+  return data?.plan ?? null;
+}
+
+async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
+  const plan = await askVisualDateControlModel(targetPage, checkIn, checkOut);
+  if (!plan || typeof plan !== "object") return null;
+  const confidence = Number(plan.confidence ?? 0);
+  if (Number.isFinite(confidence) && confidence < 0.35) return null;
+
+  return withSoftTimeout(
+    targetPage.evaluate(({ plan, checkIn, checkOut }) => {
+      const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
+      const [coutY, coutM, coutD] = String(checkOut).split("-").map((p) => parseInt(p, 10));
+      const checkInHuman = `${cinM}/${cinD}/${cinY}`;
+      const checkOutHuman = `${coutM}/${coutD}/${coutY}`;
+      const rangeHuman = `${checkInHuman} - ${checkOutHuman}`;
+
+      function clean(raw) {
+        return String(raw || "").replace(/\s+/g, " ").trim();
+      }
+
+      function find(id) {
+        if (!id || typeof id !== "string") return null;
+        return document.querySelector(`[data-sidecar-visual-id="${CSS.escape(id)}"]`);
+      }
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 2 && rect.height > 2 &&
+          style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+      }
+
+      function contextOf(el) {
+        const parts = [
+          el.getAttribute?.("name"),
+          el.getAttribute?.("id"),
+          el.getAttribute?.("placeholder"),
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("class"),
+          clean(el.textContent).slice(0, 80),
+        ];
+        return clean(parts.filter(Boolean).join(" ")).slice(0, 80);
+      }
+
+      function valueNeedles(value, iso) {
+        const needles = [value, iso].filter(Boolean).map(String);
+        const [y, m, d] = String(iso || "").split("-").map((p) => parseInt(p, 10));
+        if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+          needles.push(`${m}/${d}/${y}`);
+          needles.push(`${String(m).padStart(2, "0")}/${String(d).padStart(2, "0")}/${y}`);
+        }
+        return needles.map((s) => s.toLowerCase());
+      }
+
+      function valueWasApplied(el, value, iso) {
+        const tag = el.tagName.toLowerCase();
+        const current = String(el.isContentEditable || el.getAttribute?.("role") === "textbox"
+          ? (el.textContent || "")
+          : tag === "select"
+          ? (el.value || el.selectedOptions?.[0]?.textContent || "")
+          : (el.value || el.getAttribute?.("value") || "")).toLowerCase();
+        if (!current.trim()) return false;
+        return valueNeedles(value, iso).some((needle) => needle && current.includes(needle));
+      }
+
+      function setValue(el, value, iso) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute?.("type") || "").toLowerCase();
+        const nextValue = tag === "input" && type === "date" ? iso : value;
+        try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+        try { el.focus?.(); } catch {}
+        try {
+          const jq = window.jQuery || window.$;
+          if (jq?.fn?.datepicker && jq(el)?.hasClass?.("hasDatepicker")) {
+            jq(el).datepicker("setDate", value);
+            jq(el).trigger("input").trigger("change").trigger("blur");
+          }
+        } catch {}
+        if (tag === "select") return valueWasApplied(el, nextValue, iso);
+        if (el.isContentEditable || el.getAttribute?.("role") === "textbox") {
+          el.textContent = nextValue;
+        } else {
+          const proto = Object.getPrototypeOf(el);
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) setter.call(el, nextValue);
+          else el.value = nextValue;
+          el.setAttribute?.("value", nextValue);
+        }
+        for (const name of ["input", "change", "blur"]) {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
+        return valueWasApplied(el, nextValue, iso);
+      }
+
+      function activate(el) {
+        if (!el || !(el instanceof HTMLElement) || !isVisible(el)) return null;
+        const label = clean([el.textContent, el.getAttribute?.("aria-label"), el.getAttribute?.("title"), el.getAttribute?.("value")].filter(Boolean).join(" ")).slice(0, 80) || el.tagName.toLowerCase();
+        el.scrollIntoView?.({ block: "center", inline: "center" });
+        const init = { bubbles: true, cancelable: true, view: window };
+        try { el.dispatchEvent(new PointerEvent("pointerdown", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("mousedown", init)); } catch {}
+        try { el.dispatchEvent(new PointerEvent("pointerup", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("mouseup", init)); } catch {}
+        try { el.dispatchEvent(new MouseEvent("click", init)); } catch { el.click?.(); }
+        return label;
+      }
+
+      const filled = [];
+      const addFill = (role, id, value, iso) => {
+        const el = find(id);
+        if (!el) return;
+        if (setValue(el, value, iso)) {
+          filled.push({ role, label: `visual ${contextOf(el)}`, visible: isVisible(el) });
+        }
+      };
+
+      if (plan.rangeId) {
+        addFill("range", plan.rangeId, rangeHuman, checkIn);
+      } else {
+        addFill("checkin", plan.checkInId, checkInHuman, checkIn);
+        addFill("checkout", plan.checkOutId, checkOutHuman, checkOut);
+      }
+
+      const complete =
+        filled.some((f) => f.role === "range") ||
+        (filled.some((f) => f.role === "checkin") && filled.some((f) => f.role === "checkout"));
+      const submitLabel = complete ? activate(find(plan.submitId)) : null;
+      return {
+        filled,
+        submitLabel,
+        openedLabel: null,
+        controlCount: Number(plan.candidateCount || 0),
+        visualReason: clean(plan.reason).slice(0, 160),
+      };
+    }, { plan, checkIn, checkOut }),
+    7_000,
+    null,
+  ).catch(() => null);
 }
 
 async function applyPmDateInputs(targetPage, checkIn, checkOut) {
@@ -2362,10 +2657,19 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         return dateValueNeedles(value, iso).some((needle) => needle && current.includes(needle));
       }
 
+      function hasJqueryDatepicker(el) {
+        try {
+          const jq = window.jQuery || window.$;
+          return Boolean(jq?.fn?.datepicker && jq(el)?.hasClass?.("hasDatepicker"));
+        } catch {
+          return false;
+        }
+      }
+
       function setValue(el, value, iso) {
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
-        if (tag === "input" && type !== "hidden" && el.readOnly && isVisible(el)) return false;
+        if (tag === "input" && type !== "hidden" && el.readOnly && isVisible(el) && !hasJqueryDatepicker(el)) return false;
         const nextValue = tag === "input" && type === "date" ? iso : value;
         try { el.focus?.(); } catch {}
         if (tag === "select") {
@@ -2563,6 +2867,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       filled,
       submitLabel: next?.submitLabel ?? prev?.submitLabel ?? null,
       openedLabel: prev?.openedLabel ?? next?.openedLabel ?? null,
+      visualReason: next?.visualReason ?? prev?.visualReason ?? null,
     };
   };
   const knownPair = await fillKnownPmDatePairs(targetPage, checkIn, checkOut);
@@ -2590,6 +2895,11 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
     result = mergeDateEntry(result, knownPairRetry);
   }
   if (!hasCompleteDateEntry(result)) {
+    await dismissObstructions(targetPage, "pm_date_entry_visual_fallback");
+    const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
+    result = mergeDateEntry(result, visual);
+  }
+  if (!hasCompleteDateEntry(result)) {
     await dismissObstructions(targetPage, "pm_date_entry_calendar_fallback");
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, calendar);
@@ -2607,7 +2917,8 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
       `${result?.filled?.length ? ` roles=${result.filled.map((f) => f.role).join("+")}` : ""}` +
       `${entryComplete ? " complete=true" : filledCount > 0 ? " complete=false" : ""}` +
       `${result?.openedLabel ? ` opened="${result.openedLabel}"` : ""}` +
-      `${result?.submitLabel ? ` clicked="${result.submitLabel}"` : ""}`,
+      `${result?.submitLabel ? ` clicked="${result.submitLabel}"` : ""}` +
+      `${result?.visualReason ? ` visual="${result.visualReason}"` : ""}`,
     );
     if (entryComplete || result?.submitLabel || result?.openedLabel) {
       if (result?.submitLabel || result?.openedLabel) {
