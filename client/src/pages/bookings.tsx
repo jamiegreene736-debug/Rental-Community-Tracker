@@ -397,6 +397,7 @@ function AutoFillProgress({
           {queueText}
         </span>
         <span className="inline-flex shrink-0 items-center gap-2">
+          <SidecarStatusBadge />
           <span className="tabular-nums">{elapsed}s</span>
           {active > 0 && (
             <Button
