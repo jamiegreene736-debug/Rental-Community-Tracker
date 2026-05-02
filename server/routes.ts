@@ -36,6 +36,7 @@ import {
   fetchAmortizedNightlyByBR,
   medianRate,
 } from "./community-research";
+import { BUY_IN_RATES, getCommunityRegion } from "@shared/pricing-rates";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -2673,6 +2674,29 @@ export async function registerRoutes(
       if (typeof v === "string") return Number(v.replace(/[^\d.]/g, "")) || 0;
       return 0;
     };
+    const marketRateRows = await storage.getPropertyMarketRates(propertyId).catch((e: any) => {
+      console.warn(`[find-buy-in] price plausibility skipped DB market-rate lookup for property ${propertyId}:`, e?.message ?? e);
+      return [];
+    });
+    const marketRate = marketRateRows.find((r) => Number(r.bedrooms) === bedrooms);
+    const livePlausibilityRate = Math.max(
+      asNum(marketRate?.medianNightlyHigh),
+      asNum(marketRate?.highNightly),
+      asNum(marketRate?.medianNightly),
+      asNum(marketRate?.lowNightly),
+    );
+    const staticPlausibilityRate = asNum((BUY_IN_RATES[community] as Record<string, unknown> | undefined)?.[`${bedrooms}BR`]);
+    const communityRegion = getCommunityRegion(community);
+    const fallbackPlausibilityRate = bedrooms * (communityRegion === "florida" ? 80 : 270);
+    const expectedNightlyForPlausibility = livePlausibilityRate || staticPlausibilityRate || fallbackPlausibilityRate;
+    // Price is a sanity signal, not identity proof. Keep the floor wide:
+    // it catches obviously-wrong broad-search rows like $89/night Hawaii
+    // 3BRs, while preserving plausible bargains that don't spell out the
+    // exact resort name in the visible OTA card.
+    const minPlausibleNightly = Math.max(
+      communityRegion === "florida" ? 35 : 75,
+      Math.round(expectedNightlyForPlausibility * 0.35),
+    );
 
     // ── URL quality: keep only links that lead directly to a specific unit.
     // Clicking a buy-in link should land on that unit's page, not a search
@@ -2757,6 +2781,17 @@ export async function registerRoutes(
 
     const candidateHaystack = (c: Candidate): string =>
       `${c.title} ${c.snippet ?? ""} ${c.url}`;
+    const candidateNightlySignal = (c: Candidate): number => {
+      if (Number.isFinite(c.nightlyPrice) && c.nightlyPrice > 0) return c.nightlyPrice;
+      if (Number.isFinite(c.totalPrice) && c.totalPrice > 0) return Math.round(c.totalPrice / Math.max(1, nights));
+      return 0;
+    };
+    const hasLocalityForPriceFallback = (haystack: string): boolean => {
+      if (normalizedResortName === "poipu kai") return /\b(poipu|koloa|kauai)\b/.test(norm(haystack));
+      return mentionsResortLoose(haystack);
+    };
+    const priceIsPlausibleForTarget = (c: Candidate): boolean =>
+      candidateNightlySignal(c) >= minPlausibleNightly;
     const candidateBedroomSignal = (c: Candidate): number | null => {
       if (typeof c.bedrooms === "number") return c.bedrooms;
       return bedroomFromText(candidateHaystack(c));
@@ -2803,16 +2838,21 @@ export async function registerRoutes(
       // keep search-page proof because their result cards frequently hide the
       // exact resort name even for the correct unit.
       const searchProofCanCarryTarget = websiteSearchProof && (c.source === "airbnb" || c.source === "vrbo");
+      const pricePlausibleSearchProof = websiteSearchProof
+        && (c.source === "booking" || c.source === "pm")
+        && hasLocalityForPriceFallback(hay)
+        && priceIsPlausibleForTarget(c);
       const targetSignal = visibleResortProof
         || searchProofCanCarryTarget
+        || pricePlausibleSearchProof
         || (c.source === "airbnb" && c.inTargetBounds === true)
         || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
-      if ((c.source === "booking" || c.source === "pm") && !visibleResortProof) return false;
+      if ((c.source === "booking" || c.source === "pm") && !visibleResortProof && !pricePlausibleSearchProof) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms !== bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
-      if (!searchProofCanCarryTarget && !candidateIsPoipuKaiCondoLike(c)) return false;
+      if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
     };
@@ -4750,6 +4790,11 @@ export async function registerRoutes(
       generatedAt: new Date().toISOString(),
       elapsedMs: scanElapsedMs,
       request: { propertyId, community, resortName, bedrooms, checkIn, checkOut, nights },
+      pricePlausibility: {
+        expectedNightly: expectedNightlyForPlausibility,
+        minPlausibleNightly,
+        source: livePlausibilityRate > 0 ? "property-market-rates" : staticPlausibilityRate > 0 ? "static-buy-in-rates" : "regional-fallback",
+      },
       sources: diagnosticSources,
       issues: issueList,
       report: diagnosticsReport,
