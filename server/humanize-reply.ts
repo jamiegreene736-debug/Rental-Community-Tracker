@@ -11,7 +11,7 @@
 // with the dangling fragment "If you have any specific questions
 // about the layout, amenities, or".
 //
-// Three transforms:
+// Four transforms:
 //
 //   1) Em-dashes (—) → commas. Airbnb's title guidelines specifically
 //      recommend commas / single slashes; em-dashes are also one of
@@ -31,6 +31,12 @@
 //      "Let me know if…", "Looking forward to…", "Can't wait to…",
 //      "Feel free to…", "Don't hesitate to…", "Hope this helps!".
 //
+//   4) Light body-level style cleanup for common stiff hospitality
+//      wording ("approximately" → "about", "we are" → "we're") and
+//      internal-ops phrases guests should not see ("flag this with
+//      our team"). This is intentionally conservative: no synonym
+//      roulette, just phrases we've seen make drafts sound like a bot.
+//
 // What this does NOT do: re-shuffle sentence structure, swap
 // vocabulary for synonyms, or any of the AI-detection-evasion tricks
 // open-source humanizers run. Those tend to scramble meaning. Goal
@@ -39,6 +45,28 @@
 
 const EM_DASH_WITH_SPACES = /\s+—\s+/g;
 const EM_DASH_BARE = /—/g;
+
+function softenStiffWording(text: string): string {
+  return text
+    .replace(/\bapproximately\b/gi, "about")
+    .replace(/\bWhat a thoughtful Christmas gift for the family\./gi, "That sounds like a really sweet Christmas surprise for your family.")
+    .replace(/\bsituated\b/gi, "located")
+    .replace(/\bwithin the resort grounds\b/gi, "within the resort")
+    .replace(/\bWe are\b/g, "We're")
+    .replace(/\bwe are\b/g, "we're")
+    .replace(/\bYou are\b/g, "You're")
+    .replace(/\byou are\b/g, "you're")
+    .replace(/\bThey are\b/g, "They're")
+    .replace(/\bthey are\b/g, "they're")
+    .replace(/\bThat is\b/g, "That's")
+    .replace(/\bthat is\b/g, "that's")
+    .replace(/\bThere is\b/g, "There's")
+    .replace(/\bthere is\b/g, "there's")
+    .replace(/\bIt is\b/g, "It's")
+    .replace(/\bit is\b/g, "it's")
+    .replace(/\bdo not\b/gi, "don't")
+    .replace(/\bcannot\b/gi, "can't");
+}
 
 // FLUFF_SENTENCE_TRIGGERS — sentences whose FIRST words match these
 // are pure social filler. Strip the prefix up to the first sentence
@@ -57,6 +85,9 @@ const FLUFF_SENTENCE_TRIGGERS: ReadonlyArray<RegExp> = [
   /^(Absolutely|Certainly|Of course|Naturally)\s*[!.]/i,
   /^Rest assured/i,
   /^Please be advised/i,
+  /^If (proximity|being close|being near|having the units close|having the units near|having them close|having them near|adjacency|side[-\s]?by[-\s]?side|next to each other)\b/i,
+  /^I can (flag|note|request) (this|it)\b/i,
+  /^We can (flag|note|request) (this|it)\b/i,
   // Excitement-as-opener.
   /^(We'?re|I'?m) (so |really |very |truly )?(excited|thrilled|delighted|happy|stoked|pumped) to (have|host|welcome|see)/i,
   /^(So )?excited to (have|host|welcome|see)/i,
@@ -210,6 +241,7 @@ export function humanizeReply(text: string): string {
   // Bare "—" without surrounding spaces (rare) collapses to a hyphen.
   let cleaned = body.replace(EM_DASH_WITH_SPACES, ", ");
   cleaned = cleaned.replace(EM_DASH_BARE, "-");
+  cleaned = softenStiffWording(cleaned);
 
   // Step 2 + 3: walk paragraphs → sentences. For each sentence:
   //   - If it starts with a CLOSING trigger, stop processing
