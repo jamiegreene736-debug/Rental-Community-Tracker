@@ -181,6 +181,82 @@ function listingUrlKey(url: string | null | undefined): string {
   }
 }
 
+function normalizedIdentityText(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function imageUrlKey(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    u.search = "";
+    return `${u.hostname.replace(/^www\./, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return String(url).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function isGenericRentalTitle(title: string): boolean {
+  const t = normalizedIdentityText(title);
+  if (!t) return true;
+  if (/^(?:condo|apartment|townhouse|home|house|villa|rental unit|guest suite|loft|cottage|bungalow|place)\s+in\s+[a-z ]+$/.test(t)) return true;
+  if (/^(?:beautiful|lovely|spacious|modern|luxury|elegant)?\s*(?:\d+\s*(?:br|bedroom)\s*)?(?:condo|apartment|townhouse|home|house|villa|rental)$/.test(t)) return true;
+  return false;
+}
+
+function titleFromBuyInNotes(notes: string | null | undefined): string {
+  const raw = String(notes ?? "");
+  const firstClause = raw.split(" · ")[0] ?? raw;
+  const dash = firstClause.indexOf(" — ");
+  if (dash >= 0) return firstClause.slice(dash + 3).trim();
+  const bought = firstClause.match(/^Bought via .+? — (.+)$/i);
+  return bought?.[1]?.trim() ?? "";
+}
+
+function listingIdentityKeys(item: {
+  url?: string | null;
+  title?: string | null;
+  image?: string | null;
+  airbnbAnchorUrl?: string | null;
+  photoMatches?: Array<{ url?: string | null }>;
+}): string[] {
+  const keys = new Set<string>();
+  const urlKey = listingUrlKey(item.url);
+  if (urlKey) keys.add(`url:${urlKey}`);
+
+  const anchorKey = listingUrlKey(item.airbnbAnchorUrl);
+  if (anchorKey) keys.add(`url:${anchorKey}`);
+
+  const imgKey = imageUrlKey(item.image);
+  if (imgKey) keys.add(`image:${imgKey}`);
+
+  const titleKey = normalizedIdentityText(item.title);
+  if (titleKey.length >= 12 && !isGenericRentalTitle(titleKey)) {
+    keys.add(`title:${titleKey}`);
+  }
+
+  for (const match of item.photoMatches ?? []) {
+    const matchKey = listingUrlKey(match.url);
+    if (matchKey) keys.add(`url:${matchKey}`);
+  }
+
+  return [...keys];
+}
+
+function hasUsedListingIdentity(used: Set<string>, item: Parameters<typeof listingIdentityKeys>[0]): boolean {
+  return listingIdentityKeys(item).some((key) => used.has(key));
+}
+
+function addUsedListingIdentity(used: Set<string>, item: Parameters<typeof listingIdentityKeys>[0]) {
+  for (const key of listingIdentityKeys(item)) used.add(key);
+}
+
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
@@ -730,11 +806,14 @@ export default function Bookings() {
       // need DIFFERENT physical units attached to each slot — same URL on
       // both Unit 721 and Unit 812 means we'd be paying for one listing
       // twice and have nothing for the second guest's actual unit.
-      const pickedUrls = new Set<string>(
-        reservation.slots
-          .map((s) => listingUrlKey(s.buyIn?.airbnbListingUrl))
-          .filter(Boolean),
-      );
+      const pickedIdentities = new Set<string>();
+      for (const slot of reservation.slots) {
+        if (!slot.buyIn) continue;
+        addUsedListingIdentity(pickedIdentities, {
+          url: slot.buyIn.airbnbListingUrl,
+          title: titleFromBuyInNotes(slot.buyIn.notes),
+        });
+      }
 
       type AutoFillSearchSummary = {
         bedrooms: number;
@@ -832,6 +911,10 @@ export default function Bookings() {
         const propertyName =
           (selectedListingId && listingNameById.get(selectedListingId)) ||
           `Property ${selectedPropertyId}`;
+        if (hasUsedListingIdentity(pickedIdentities, pick)) {
+          skippedReasons.push(`${slot.unitLabel}: skipped duplicate physical listing`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
         const verifySuffix = pick.verified === "yes"
           ? ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
           : "";
@@ -866,6 +949,7 @@ export default function Bookings() {
             buyInId: created.id,
           }).then((r) => r.json());
 
+          addUsedListingIdentity(pickedIdentities, pick);
           return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
         } catch (e: any) {
           skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
@@ -918,15 +1002,15 @@ export default function Bookings() {
 
         let best: { combo: TwoUnitBedroomCombo; picks: LiveCandidate[]; summaries: AutoFillSearchSummary[]; totalCost: number } | null = null;
         for (const combo of combos) {
-          const used = new Set(pickedUrls);
+          const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
           const summaries: AutoFillSearchSummary[] = [];
           for (const bedroomCount of combo.bedrooms) {
             const pool = await poolFor(bedroomCount, combo.includePm);
             summaries.push(pool.searchSummary);
-            const pick = pool.candidates.find((c) => !used.has(listingUrlKey(c.url)));
+            const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c));
             if (!pick) break;
-            used.add(listingUrlKey(pick.url));
+            addUsedListingIdentity(used, pick);
             picks.push(pick);
           }
           if (picks.length !== combo.bedrooms.length) continue;
@@ -951,7 +1035,6 @@ export default function Bookings() {
             comboChoice.summaries[i],
             comboLabel,
           );
-          if (result.picked?.url) pickedUrls.add(listingUrlKey(result.picked.url));
           results.push(result);
         }
         return { reservation, results };
@@ -959,7 +1042,7 @@ export default function Bookings() {
 
       for (const slot of emptySlots) {
         const pool = await getCandidatePool(slot.bedrooms, false);
-        const pick = pool.candidates.find((c) => !pickedUrls.has(listingUrlKey(c.url))) ?? null;
+        const pick = pool.candidates.find((c) => !hasUsedListingIdentity(pickedIdentities, c)) ?? null;
         const slotResult = pick
           ? await createAndAttachPick(slot, pick, slot.bedrooms, pool.searchSummary)
           : {
@@ -970,7 +1053,6 @@ export default function Bookings() {
               airbnbPick: false,
               searchSummary: pool.searchSummary,
             };
-        if (slotResult.picked?.url) pickedUrls.add(listingUrlKey(slotResult.picked.url));
         results.push(slotResult);
       }
       return { reservation, results };
@@ -3744,12 +3826,23 @@ function RecordBuyInDialog({
   const [listingUrl, setListingUrl] = useState(candidate.url);
   const [notes, setNotes] = useState("");
   const duplicateSlot = useMemo(() => {
-    const key = listingUrlKey(listingUrl);
-    if (!key) return null;
+    const candidateKeys = new Set(listingIdentityKeys({
+      url: listingUrl,
+      title: candidate.title,
+      image: candidate.image,
+      airbnbAnchorUrl: candidate.airbnbAnchorUrl,
+      photoMatches: candidate.photoMatches,
+    }));
+    if (candidateKeys.size === 0) return null;
     return reservation.slots.find(
-      (s) => s.unitId !== slot.unitId && listingUrlKey(s.buyIn?.airbnbListingUrl) === key,
+      (s) => s.unitId !== slot.unitId
+        && s.buyIn
+        && listingIdentityKeys({
+          url: s.buyIn.airbnbListingUrl,
+          title: titleFromBuyInNotes(s.buyIn.notes),
+        }).some((key) => candidateKeys.has(key)),
     ) ?? null;
-  }, [listingUrl, reservation.slots, slot.unitId]);
+  }, [candidate, listingUrl, reservation.slots, slot.unitId]);
 
   const toDateOnly = (s: string | undefined): string => {
     if (!s) return "";
