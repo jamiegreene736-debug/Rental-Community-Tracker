@@ -599,11 +599,10 @@ export default function Bookings() {
     | { buyIn: BuyIn; reservation: GuestyReservation }
     | null
   >(null);
-  // Slots whose inline live-search panel is expanded. Auto-fill flips
-  // every slot it touched into this set so the operator sees the
-  // scanned-options table for each slot inline (per operator request:
-  // "auto-fill should also show me the tables"). Operators can also
-  // toggle any slot manually via the chevron button.
+  // Slots whose inline live-search panel is expanded. Operators can open
+  // these manually for an audit search after Auto-fill finishes. Auto-fill
+  // itself keeps them closed so it does not launch a second, unrelated
+  // live search after the buy-ins are already attached.
   const [expandedSlots, setExpandedSlots] = useState<Set<string>>(new Set());
   const slotKey = (reservationId: string, unitId: string) => `${reservationId}__${unitId}`;
   const toggleSlotSearch = (reservationId: string, unitId: string) => {
@@ -612,6 +611,15 @@ export default function Bookings() {
       const k = slotKey(reservationId, unitId);
       if (next.has(k)) next.delete(k);
       else next.add(k);
+      return next;
+    });
+  };
+  const closeSlotSearchesForReservation = (reservation: GuestyReservation) => {
+    setExpandedSlots((prev) => {
+      const next = new Set(prev);
+      for (const slot of reservation.slots) {
+        next.delete(slotKey(reservation._id, slot.unitId));
+      }
       return next;
     });
   };
@@ -1060,17 +1068,8 @@ export default function Bookings() {
     onSuccess: ({ reservation, results }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      // Per operator request: auto-fill should also surface the live-
-      // search table for each slot it touched, so the operator can see
-      // what was scanned and override the auto-pick if needed. Flip the
-      // expanded-search bit for every slot in this reservation.
-      setExpandedSlots((prev) => {
-        const next = new Set(prev);
-        for (const r of results) {
-          next.add(slotKey(reservation._id, r.slot.unitId));
-        }
-        return next;
-      });
+      setAutoFilling(null);
+      setAutoFillStartedAtMs(null);
       const filled = results.filter((r) => r.picked);
       const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
       const payout = reservation.money?.hostPayout ?? 0;
@@ -1100,7 +1099,7 @@ export default function Bookings() {
         toast({
           title: "No verified priced candidates",
           description: scanned > 0
-            ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates. The scanned-options table is open below.`
+            ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates. Click a slot's chevron to audit the live results.`
             : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the live search.",
         });
       } else if (zeroCostFills.length === filled.length) {
@@ -1129,6 +1128,8 @@ export default function Bookings() {
       }
     },
     onError: (e: any) => {
+      setAutoFilling(null);
+      setAutoFillStartedAtMs(null);
       const raw = String(e?.message ?? "");
       // Railway returns a 502 JSON envelope when the find-buy-in
       // handler exceeds its edge timeout. Translate that into an
@@ -1497,6 +1498,7 @@ export default function Bookings() {
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  closeSlotSearchesForReservation(r);
                                   setAutoFillStartedAtMs(Date.now());
                                   setAutoFilling(r._id);
                                   autoFillMutation.mutate({ reservation: r });
@@ -1621,9 +1623,9 @@ export default function Bookings() {
                                 </Button>
                               )}
                               {/* Per-slot toggle for the inline live-search
-                                  panel. Auto-fill flips this on for every
-                                  slot it touches; operators can also open
-                                  it manually to compare alternatives. */}
+                                  panel. This starts a fresh audit search,
+                                  so Auto-fill leaves it closed after attaching
+                                  picks. */}
                               <Button
                                 size="sm"
                                 variant="ghost"
