@@ -2791,7 +2791,7 @@ export async function registerRoutes(
     ): boolean => {
       const hay = candidateHaystack(c);
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
-      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
         .filter((n) => Number.isFinite(n) && n > 0);
       if (stayNightCounts.some((n) => n !== nights)) return false;
@@ -2965,7 +2965,7 @@ export async function registerRoutes(
         let wrongBedrooms = 0;
         const accepted = r.candidates.filter((c) => {
           const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
-          const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+          const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
             .map((m) => parseInt(m[1], 10))
             .filter((n) => Number.isFinite(n) && n > 0);
           if (stayNightCounts.some((n) => n !== nights)) return false;

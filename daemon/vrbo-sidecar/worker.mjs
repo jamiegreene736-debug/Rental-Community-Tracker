@@ -806,7 +806,7 @@ async function processAirbnbSearch(id, params) {
     }
     function extractedStayNights(fullText) {
       const text = clean(fullText);
-      return Array.from(text.matchAll(/\bfor\s+(\d+)\s+nights?\b/gi))
+      return Array.from(text.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
         .filter((n) => Number.isFinite(n) && n > 0);
     }
