@@ -591,7 +591,7 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
     const r = await fetch(`${SERVER}/api/admin/vrbo-sidecar/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(id ? { id } : {}),
+      body: JSON.stringify(id ? { id, stage: label } : {}),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json().catch(() => ({}));
@@ -3840,6 +3840,7 @@ async function processPmSiteSearch(id, params) {
         log(`pm_site_search ${id}: ${site.label} skipped; no rental search URL configured`);
         continue;
       }
+      await sendHeartbeat(`PM websites: opening ${site.label}`, true, id);
       tab = await context.newPage();
       tabs.add(tab);
       await normalizePageDisplay(tab);
@@ -3847,15 +3848,19 @@ async function processPmSiteSearch(id, params) {
       await tab.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
       await tab.waitForTimeout(PAGE_SETTLE_MS);
       await dismissObstructions(tab, `pm_site_search_${site.label}`);
+      await sendHeartbeat(`PM websites: finding rental search on ${site.label}`, true, id);
       await ensurePmRentalSearchPage(tab, site, `pm_site_search_${site.label}`);
+      await sendHeartbeat(`PM websites: entering dates on ${site.label}`, true, id);
       await fillPmRentalLocationField(tab, searchTerm, `pm_site_search_${site.label}`).catch(() => null);
       const dateEntry = await applyPmDateInputs(tab, checkIn, checkOut).catch(() => null);
       const bedroomFilled = await fillBedroomFilter(tab, bedrooms, `pm_site_search_${site.label}`).catch(() => null);
       if (bedroomFilled || !dateEntry?.submitLabel) {
+        await sendHeartbeat(`PM websites: submitting ${site.label}`, true, id);
         await clickPmRentalSearchSubmit(tab, `pm_site_search_${site.label}`).catch(() => null);
       }
       await withSoftTimeout(tab.waitForLoadState("networkidle", { timeout: 5_000 }), 5_500);
       await tab.waitForTimeout(PAGE_SETTLE_MS);
+      await sendHeartbeat(`PM websites: reading results from ${site.label}`, true, id);
       const cards = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit, nightsBetween(checkIn, checkOut));
       log(`pm_site_search ${id}: ${site.label} priced result cards=${cards.length}`);
       for (const card of cards) {

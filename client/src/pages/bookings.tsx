@@ -84,6 +84,30 @@ type SidecarQueueStatus = {
   oldestPendingAgeSec: number | null;
   newestRequestAt: string | null;
   byOpType?: Record<string, number>;
+  activeRequests?: Array<{
+    id: string;
+    status: string;
+    opType: string;
+    label: string;
+    stage?: string;
+    bedrooms?: number;
+    destination?: string;
+    siteCount?: number;
+    ageSec: number;
+    activeSec?: number;
+  }>;
+  pendingRequests?: Array<{
+    id: string;
+    status: string;
+    opType: string;
+    label: string;
+    stage?: string;
+    bedrooms?: number;
+    destination?: string;
+    siteCount?: number;
+    ageSec: number;
+    activeSec?: number;
+  }>;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -202,10 +226,28 @@ function sidecarQueueProgressValue(status: SidecarQueueStatus | null | undefined
 }
 
 function sidecarOpSummary(status: SidecarQueueStatus | null | undefined): string {
+  const activeStages = (status?.activeRequests ?? [])
+    .map((r) => {
+      const stage = r.stage || r.label;
+      const seconds = typeof r.activeSec === "number" ? ` ${r.activeSec}s` : "";
+      return `${stage}${seconds}`;
+    })
+    .filter(Boolean);
+  const pendingStages = (status?.pendingRequests ?? [])
+    .map((r) => r.label)
+    .filter(Boolean);
+  if (activeStages.length > 0) {
+    const next = pendingStages.length > 0
+      ? ` · next: ${pendingStages.slice(0, 3).join(", ")}${pendingStages.length > 3 ? ` +${pendingStages.length - 3}` : ""}`
+      : "";
+    return `now: ${activeStages.slice(0, 2).join(" · ")}${next}`;
+  }
   const counts = status?.byOpType ?? {};
   const labels: Array<[string, string]> = [
+    ["airbnb_search", "Airbnb search"],
     ["vrbo_search", "Vrbo search"],
     ["booking_search", "Booking.com search"],
+    ["pm_site_search", "PM websites"],
     ["pm_url_check_batch", "PM batches"],
     ["pm_url_check", "PM checks"],
     ["google_serp", "Google discovery"],
@@ -362,8 +404,9 @@ function AutoFillProgress({
   const value = active > 0
     ? Math.max(timedValue, sidecarQueueProgressValue(sidecarStatus))
     : timedValue;
+  const stageText = sidecarOpSummary(sidecarStatus);
   const queueText = active > 0
-    ? ` Chrome sidecar: ${sidecarStatus?.inProgress ?? 0} running, ${sidecarStatus?.pending ?? 0} queued.`
+    ? ` Chrome sidecar: ${sidecarStatus?.inProgress ?? 0} running, ${sidecarStatus?.pending ?? 0} queued${stageText ? ` - ${stageText}` : ""}.`
     : "";
   const stopSidecar = async () => {
     setIsStopping(true);
@@ -668,13 +711,18 @@ export default function Bookings() {
       // Fix: one call per (bedrooms) group, shared across all slots
       // with that bedroom count. Bonus: half the API spend for
       // multi-unit reservations.
-      const findBuyInCache = new Map<number, Promise<FindBuyInResponse>>();
-      const getFindBuyInForBedrooms = (bedrooms: number): Promise<FindBuyInResponse> => {
-        const existing = findBuyInCache.get(bedrooms);
+      const findBuyInCache = new Map<string, Promise<FindBuyInResponse>>();
+      const getFindBuyInForBedrooms = (
+        bedrooms: number,
+        opts: { includePm?: boolean } = {},
+      ): Promise<FindBuyInResponse> => {
+        const includePm = opts.includePm !== false;
+        const key = `${bedrooms}|${includePm ? "pm" : "ota"}`;
+        const existing = findBuyInCache.get(key);
         if (existing) return existing;
-        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}&nocache=1`;
+        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}${includePm ? "" : "&includePm=0"}`;
         const promise = apiRequest("GET", url).then((r) => r.json()) as Promise<FindBuyInResponse>;
-        findBuyInCache.set(bedrooms, promise);
+        findBuyInCache.set(key, promise);
         return promise;
       };
 
@@ -753,8 +801,9 @@ export default function Bookings() {
       const getCandidatePool = async (
         searchedBedrooms: number,
         exactBedroomForCombo: boolean,
+        includePm = true,
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
-        const data = await getFindBuyInForBedrooms(searchedBedrooms);
+        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
         const candidates = rankCandidates(
           (data.cheapest ?? [])
@@ -824,61 +873,63 @@ export default function Bookings() {
         }
       };
 
-      const twoUnitBedroomCombos = (): number[][] => {
+      type TwoUnitBedroomCombo = { bedrooms: number[]; includePm: boolean };
+      const twoUnitBedroomCombos = (): TwoUnitBedroomCombo[] => {
         if (emptySlots.length !== 2) return [];
         const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
         if (totalNeeded <= 0) return [];
-        const combos: number[][] = [];
+        const combos: TwoUnitBedroomCombo[] = [];
         const seen = new Set<string>();
-        const addCombo = (combo: number[]) => {
+        const addCombo = (combo: number[], includePm: boolean) => {
           if (combo.length !== 2 || combo.some((n) => !Number.isFinite(n) || n <= 0)) return;
           if (combo[0] + combo[1] !== totalNeeded) return;
           const key = [...combo].sort((a, b) => b - a).join("+");
           if (seen.has(key)) return;
           seen.add(key);
-          combos.push(combo);
+          combos.push({ bedrooms: combo, includePm });
         };
-        addCombo(emptySlots.map((s) => s.bedrooms));
+        addCombo(emptySlots.map((s) => s.bedrooms), true);
         const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
         for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
           const low = totalNeeded - high;
           if (low < minLegBedrooms) continue;
-          addCombo([high, low]);
+          addCombo([high, low], false);
         }
         return combos;
       };
 
       const pickBestTwoUnitCombo = async (): Promise<{
-        combo: number[];
+        combo: TwoUnitBedroomCombo;
         picks: LiveCandidate[];
         summaries: AutoFillSearchSummary[];
         totalCost: number;
       } | null> => {
         const combos = twoUnitBedroomCombos();
         if (combos.length === 0) return null;
-        const poolCache = new Map<number, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const poolFor = (bedroomCount: number) => {
-          const existing = poolCache.get(bedroomCount);
+        const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
+        const poolFor = (bedroomCount: number, includePm: boolean) => {
+          const key = `${bedroomCount}|${includePm ? "pm" : "ota"}`;
+          const existing = poolCache.get(key);
           if (existing) return existing;
-          const promise = getCandidatePool(bedroomCount, true);
-          poolCache.set(bedroomCount, promise);
+          const promise = getCandidatePool(bedroomCount, true, includePm);
+          poolCache.set(key, promise);
           return promise;
         };
 
-        let best: { combo: number[]; picks: LiveCandidate[]; summaries: AutoFillSearchSummary[]; totalCost: number } | null = null;
+        let best: { combo: TwoUnitBedroomCombo; picks: LiveCandidate[]; summaries: AutoFillSearchSummary[]; totalCost: number } | null = null;
         for (const combo of combos) {
           const used = new Set(pickedUrls);
           const picks: LiveCandidate[] = [];
           const summaries: AutoFillSearchSummary[] = [];
-          for (const bedroomCount of combo) {
-            const pool = await poolFor(bedroomCount);
+          for (const bedroomCount of combo.bedrooms) {
+            const pool = await poolFor(bedroomCount, combo.includePm);
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((c) => !used.has(listingUrlKey(c.url)));
             if (!pick) break;
             used.add(listingUrlKey(pick.url));
             picks.push(pick);
           }
-          if (picks.length !== combo.length) continue;
+          if (picks.length !== combo.bedrooms.length) continue;
           const totalCost = picks.reduce((sum, p) => sum + p.totalPrice, 0);
           if (!best || totalCost < best.totalCost) {
             best = { combo, picks, summaries, totalCost };
@@ -890,13 +941,13 @@ export default function Bookings() {
       const results: AutoFillResult[] = [];
       const comboChoice = await pickBestTwoUnitCombo();
       if (comboChoice) {
-        const totalBedrooms = comboChoice.combo.reduce((sum, n) => sum + n, 0);
-        const comboLabel = `Two-unit ${comboChoice.combo.join("+")}BR combo for ${totalBedrooms}BR booking`;
+        const totalBedrooms = comboChoice.combo.bedrooms.reduce((sum, n) => sum + n, 0);
+        const comboLabel = `Two-unit ${comboChoice.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking${comboChoice.combo.includePm ? "" : " (fast OTA combo search)"}`;
         for (let i = 0; i < emptySlots.length; i++) {
           const result = await createAndAttachPick(
             emptySlots[i],
             comboChoice.picks[i],
-            comboChoice.combo[i],
+            comboChoice.combo.bedrooms[i],
             comboChoice.summaries[i],
             comboLabel,
           );

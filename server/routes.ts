@@ -2517,7 +2517,8 @@ export async function registerRoutes(
     // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
-    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}`;
+    const includePm = req.query.includePm !== "0" && req.query.pm !== "0";
+    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}`;
     const noCache = req.query.nocache === "1";
     if (!noCache) {
       const cached = findBuyInCache.get(cacheKey);
@@ -3230,7 +3231,7 @@ export async function registerRoutes(
     const pmPromise: Promise<Candidate[]> = (async () => {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Operator directive after Google 403s on PM-domain queries.
-      if (!PM_GOOGLE_DISCOVERY_ENABLED) {
+      if (!includePm || !PM_GOOGLE_DISCOVERY_ENABLED) {
         return [];
       }
       try {
@@ -3676,7 +3677,7 @@ export async function registerRoutes(
     // long-tail PM pages that the per-domain Stage 2 search may miss.
     // Sidecar/Chrome is deliberately NOT used for Google search.
     const pmSearchApiFinderPromise: Promise<Candidate[]> = (async () => {
-      if (!PM_GOOGLE_DISCOVERY_ENABLED) return [];
+      if (!includePm || !PM_GOOGLE_DISCOVERY_ENABLED) return [];
       try {
         const target = resortName ?? community;
         const locality = searchLocation.replace(/,/g, " ");
@@ -3745,6 +3746,7 @@ export async function registerRoutes(
     // resort name, stay dates, and bedroom count; priced result cards are
     // trusted directly. No PM listing-detail click is needed for pricing.
     const pmSearchApiSiteDiscoveryPromise: Promise<Array<{ label: string; baseUrl: string; searchUrl: string }>> = (async () => {
+      if (!includePm) return [];
       try {
         const target = websiteSearchTerm;
         const locality = searchLocation.replace(/,/g, " ");
@@ -3809,6 +3811,10 @@ export async function registerRoutes(
     let pmWebsiteSidecarMs = 0;
     let pmWebsiteSidecarReason = "";
     const pmWebsiteSidecarPromise: Promise<Candidate[]> = (async () => {
+      if (!includePm) {
+        pmWebsiteSidecarReason = "Skipped for fast OTA-only combo search";
+        return [];
+      }
       try {
         const discoveredPmSites = await pmSearchApiSiteDiscoveryPromise.catch(() => []);
         const pmSites = [
@@ -4756,13 +4762,17 @@ export async function registerRoutes(
       },
       {
         source: "PM companies",
-        status: sourceStatus(["pm-website-sidecar", "pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate"),
+        status: includePm
+          ? sourceStatus(["pm-website-sidecar", "pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate")
+          : "skipped",
         raw: pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length,
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
         durationMs: pmWebsiteSidecarMs,
-        message: `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; direct PM search-result priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`,
+        message: includePm
+          ? `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; direct PM search-result priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`
+          : "Skipped for fast OTA-only combo search.",
       },
       {
         source: "Sidecar rate verifier",
@@ -9314,9 +9324,12 @@ Return ONLY compact JSON with this exact shape:
   // not look like "can't reach sidecar."
   app.post("/api/admin/vrbo-sidecar/heartbeat", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const body = (req.body ?? {}) as { id?: unknown };
+    const body = (req.body ?? {}) as { id?: unknown; stage?: unknown };
     const { stampHeartbeat, isCancellationRequested } = await import("./vrbo-sidecar-queue");
-    stampHeartbeat(typeof body.id === "string" ? body.id : undefined);
+    stampHeartbeat(
+      typeof body.id === "string" ? body.id : undefined,
+      typeof body.stage === "string" ? body.stage : undefined,
+    );
     return res.json({
       ok: true,
       cancelled: typeof body.id === "string" ? isCancellationRequested(body.id) : false,

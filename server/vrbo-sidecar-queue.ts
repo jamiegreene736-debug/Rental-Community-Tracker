@@ -263,6 +263,21 @@ export type SidecarRequest = {
   claimedAt?: number;
   completedAt?: number;
   cancelled?: boolean;
+  stage?: string;
+  stageUpdatedAt?: number;
+};
+
+export type SidecarStatusRequest = {
+  id: string;
+  status: SidecarRequest["status"];
+  opType: SidecarOpType;
+  label: string;
+  stage?: string;
+  bedrooms?: number;
+  destination?: string;
+  siteCount?: number;
+  ageSec: number;
+  activeSec?: number;
 };
 
 // Backward-compat alias — old code imported this name when the queue
@@ -290,12 +305,16 @@ function nowMs(): number {
   return Date.now();
 }
 
-export function stampHeartbeat(id?: string): void {
+export function stampHeartbeat(id?: string, stage?: string): void {
   lastWorkerPollAt = nowMs();
   if (!id) return;
   const r = queue.get(id);
   if (r?.status === "in_progress") {
     r.claimedAt = lastWorkerPollAt;
+    if (stage && typeof stage === "string") {
+      r.stage = stage.replace(/\s+/g, " ").trim().slice(0, 140);
+      r.stageUpdatedAt = lastWorkerPollAt;
+    }
   }
 }
 
@@ -540,6 +559,8 @@ export function getStatus(): {
   oldestPendingAgeSec: number | null;
   newestRequestAt: string | null;
   byOpType: Record<SidecarOpType, number>;
+  activeRequests: SidecarStatusRequest[];
+  pendingRequests: SidecarStatusRequest[];
 } {
   cleanup();
   let pending = 0,
@@ -562,6 +583,63 @@ export function getStatus(): {
     guesty_disconnect_channel: 0,
   };
   const now = nowMs();
+  const describeRequest = (r: SidecarRequest): SidecarStatusRequest => {
+    const ageSec = Math.max(0, Math.round((now - r.createdAt) / 1000));
+    const activeSec = r.claimedAt ? Math.max(0, Math.round((now - r.claimedAt) / 1000)) : undefined;
+    const p = r.params as Partial<
+      SidecarAirbnbParams
+      & SidecarVrboParams
+      & SidecarBookingParams
+      & SidecarPmSiteSearchParams
+      & SidecarPmUrlCheckParams
+      & SidecarPmUrlCheckBatchParams
+      & SidecarVrboPhotoScrapeParams
+      & SidecarPhotoUploadParams
+      & SidecarGuestyDisconnectParams
+    >;
+    const bedrooms = typeof p.bedrooms === "number" && Number.isFinite(p.bedrooms) ? p.bedrooms : undefined;
+    const destination = typeof p.searchTerm === "string" && p.searchTerm.trim()
+      ? p.searchTerm.trim().slice(0, 80)
+      : typeof p.destination === "string"
+        ? p.destination.trim().slice(0, 80)
+        : undefined;
+    const siteCount = Array.isArray((p as SidecarPmSiteSearchParams).sites)
+      ? (p as SidecarPmSiteSearchParams).sites.length
+      : Array.isArray((p as SidecarPmUrlCheckBatchParams).urls)
+        ? (p as SidecarPmUrlCheckBatchParams).urls.length
+        : undefined;
+    const br = bedrooms ? ` ${bedrooms}BR` : "";
+    const label = (() => {
+      switch (r.opType) {
+        case "airbnb_search": return `Airbnb${br} search`;
+        case "vrbo_search": return `VRBO${br} search`;
+        case "booking_search": return `Booking.com${br} search`;
+        case "pm_site_search": return `PM websites${br}${siteCount ? ` (${siteCount} sites)` : ""}`;
+        case "pm_url_check_batch": return `PM rate checks${siteCount ? ` (${siteCount} pages)` : ""}`;
+        case "pm_url_check": return "PM rate check";
+        case "google_serp": return "Google discovery";
+        case "vrbo_photo_scrape": return "VRBO photo scrape";
+        case "vrbo_upload_photos": return "VRBO photo upload";
+        case "booking_upload_photos": return "Booking.com photo upload";
+        case "guesty_disconnect_channel": return `Guesty ${p.channel ?? ""} disconnect`.trim();
+        default: return r.opType;
+      }
+    })();
+    return {
+      id: r.id,
+      status: r.status,
+      opType: r.opType,
+      label,
+      stage: r.stage,
+      bedrooms,
+      destination,
+      siteCount,
+      ageSec,
+      activeSec,
+    };
+  };
+  const activeRequests: SidecarStatusRequest[] = [];
+  const pendingRequests: SidecarStatusRequest[] = [];
   for (const r of queue.values()) {
     if (r.status === "pending") {
       pending++;
@@ -569,7 +647,13 @@ export function getStatus(): {
       if (oldestPendingAge === null || age > oldestPendingAge)
         oldestPendingAge = age;
     }
-    if (r.status === "in_progress") inProgress++;
+    if (r.status === "in_progress") {
+      inProgress++;
+      activeRequests.push(describeRequest(r));
+    }
+    if (r.status === "pending") {
+      pendingRequests.push(describeRequest(r));
+    }
     if (r.status === "completed") completed++;
     if (r.status === "failed") failed++;
     if (r.createdAt > newestAt) newestAt = r.createdAt;
@@ -584,6 +668,8 @@ export function getStatus(): {
     oldestPendingAgeSec: oldestPendingAge,
     newestRequestAt: newestAt > 0 ? new Date(newestAt).toISOString() : null,
     byOpType,
+    activeRequests: activeRequests.sort((a, b) => (b.activeSec ?? 0) - (a.activeSec ?? 0)).slice(0, 5),
+    pendingRequests: pendingRequests.sort((a, b) => b.ageSec - a.ageSec).slice(0, 8),
   };
 }
 
