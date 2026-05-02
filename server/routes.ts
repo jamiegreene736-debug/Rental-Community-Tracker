@@ -2787,7 +2787,7 @@ export async function registerRoutes(
       return 0;
     };
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
-      if (normalizedResortName === "poipu kai") return /\b(poipu|koloa|kauai)\b/.test(norm(haystack));
+      if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
       return mentionsResortLoose(haystack);
     };
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
@@ -2837,7 +2837,10 @@ export async function registerRoutes(
       // proof before they can enter the Poipu Kai cheapest pool. Airbnb/Vrbo
       // keep search-page proof because their result cards frequently hide the
       // exact resort name even for the correct unit.
-      const searchProofCanCarryTarget = websiteSearchProof && (c.source === "airbnb" || c.source === "vrbo");
+      const searchProofHasLocality = normalizedResortName !== "poipu kai" || hasLocalityForPriceFallback(hay);
+      const searchProofCanCarryTarget = websiteSearchProof
+        && (c.source === "airbnb" || c.source === "vrbo")
+        && searchProofHasLocality;
       const pricePlausibleSearchProof = websiteSearchProof
         && (c.source === "booking" || c.source === "pm")
         && hasLocalityForPriceFallback(hay)
