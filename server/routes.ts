@@ -5364,27 +5364,19 @@ export async function registerRoutes(
       const n = normalizeText(haystack);
       return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
-    const productSurface = (domain: string, haystack: string): boolean => {
-      const n = normalizeText(`${domain} ${haystack}`);
-      return /\b(sofa|sofas|couch|sectional|sleeper|futon|daybed|mattress|upholstery|fabric sofa|furniture|furnishings|showroom|flexsteel|ashley furniture|living room furniture|home furniture|item|product|cart|store|shop)\b/.test(n);
-    };
     const rentalSurface = (domain: string, haystack: string): boolean => {
       const d = domain.toLowerCase();
       if (/(^|\.)airbnb\./.test(d) || /(^|\.)(vrbo|homeaway)\./.test(d) || /(^|\.)booking\.com$/.test(d)) return true;
       if (/(^|\.)(?:expedia|hotels|tripadvisor|agoda|vacasa)\./.test(d)) return true;
       const n = normalizeText(`${d} ${haystack}`);
-      const compactDomain = d.replace(/[^a-z0-9]+/g, "");
-      const rentalDomainHint = /(stay|stays|vacation|rental|rentals|villa|villas|resort|condo|suite|paradise|kauai|poipu|koloa|beach|island|lodg|hotel|booking)/.test(compactDomain);
-      return rentalDomainHint
-        || /\b(vacation rental|vacation rentals|rental|rentals|condo|villa|villas|resort|booking|reservation|stay|stays|lodging|suite|paradise|parrish|kauai|poipu|koloa|island vacations)\b/.test(n);
+      return /\b(vacation rental|vacation rentals|rental|rentals|condo|villa|villas|resort|booking|reservation|stay|lodging|suite|paradise|parrish|kauai|island vacations)\b/.test(n);
     };
     const contextAllows = (domain: string, haystack: string, source: string, position: number): boolean => {
       const highConfidenceVisual = source === "visual" && position <= 3;
-      if (productSurface(domain, haystack)) return false;
       if (wrongPoipuKaiLocation(`${domain} ${haystack}`) && !highConfidenceVisual) return false;
-      if (!rentalSurface(domain, haystack)) return false;
+      if (!rentalSurface(domain, haystack) && !highConfidenceVisual) return false;
       if (!isPoipuKaiContext) return true;
-      if (poipuKaiTextMatch(`${domain} ${haystack}`) && position <= 10) return true;
+      if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
       // Google Images/Lens often surfaces the owner site as an exact
       // top visual match without repeating the resort name in the title.
       // Let those first few visual hits through, then require context for
