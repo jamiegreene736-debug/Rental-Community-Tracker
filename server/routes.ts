@@ -2219,7 +2219,12 @@ export async function registerRoutes(
     };
 
     select(audited[0], "main");
-    select(audited.find((photo) => photo.category === "Living Areas"), "living-room");
+    select(
+      audited.find((photo) =>
+        photo.category === "Living Areas" &&
+        !selectedKeys.has(normalizeListingSurfaceKey(photo.url))),
+      "living-room",
+    );
     if (selectedKeys.size === 0) {
       select(audited.find((photo) => !photo.skippedReason), "main");
     }
@@ -5367,19 +5372,20 @@ export async function registerRoutes(
       return /\b(vacation rental|vacation rentals|rental|rentals|condo|villa|villas|resort|booking|reservation|stay|lodging|suite|paradise|parrish|kauai|island vacations)\b/.test(n);
     };
     const contextAllows = (domain: string, haystack: string, source: string, position: number): boolean => {
-      if (wrongPoipuKaiLocation(`${domain} ${haystack}`)) return false;
+      const highConfidenceVisual = source === "visual" && position <= 3;
+      if (wrongPoipuKaiLocation(`${domain} ${haystack}`) && !highConfidenceVisual) return false;
       if (!rentalSurface(domain, haystack)) return false;
       if (!isPoipuKaiContext) return true;
       if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
-      // Keep the known source and the very top OTA visual matches when
-      // Google Lens gives no text context. Everything else needs visible
-      // Poipu Kai / Regency-style proof so similar-looking Maui/Kona/MLS
-      // interiors do not crowd the panel.
+      // Google Images/Lens often surfaces the owner site as an exact
+      // top visual match without repeating the resort name in the title.
+      // Let those first few visual hits through, then require context for
+      // the broader "similar living room" rows below them.
       const isOta = /(^|\.)airbnb\./.test(domain) || /(^|\.)(vrbo|homeaway)\./.test(domain) || /(^|\.)booking\.com$/.test(domain);
-      return source === "known-source" || (isOta && (source === "visual" || source === "page") && position <= 3);
+      return source === "known-source" || highConfidenceVisual || (isOta && (source === "visual" || source === "page") && position <= 3);
     };
 
-    const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string } | null => {
+    const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string; pathSpecificity: number } | null => {
       try {
         const u = new URL(rawUrl);
         if (!/^https?:$/.test(u.protocol)) return null;
@@ -5393,7 +5399,10 @@ export async function registerRoutes(
         const domain = u.hostname.replace(/^www\./, "").toLowerCase();
         if (!domain || noiseDomain(domain)) return null;
         const pathKey = u.pathname.replace(/\/+$/, "").toLowerCase() || "/";
-        return { url: u.toString(), domain, dedupeKey: `${domain}${pathKey}` };
+        const pathSpecificity = pathKey === "/"
+          ? 0
+          : pathKey.split("/").filter(Boolean).length + Math.min(4, pathKey.length / 40);
+        return { url: u.toString(), domain, dedupeKey: `${domain}${pathKey}`, pathSpecificity };
       } catch {
         return null;
       }
@@ -5422,31 +5431,38 @@ export async function registerRoutes(
       ...rowsFrom("organic", searchData?.organic_results),
     ];
 
-    const matches: ReverseImageListingMatch[] = [];
-    const seenUrls = new Set<string>();
-    const seenDomains = new Set<string>();
-    const seenPlatforms = new Set<string>();
+    type ScoredReverseImageListingMatch = ReverseImageListingMatch & { score: number };
+    const bestBySurface = new Map<string, ScoredReverseImageListingMatch>();
     const addMatch = (rawUrl: string, rawTitle: string, source: string, position: number): void => {
       const normalized = normalizeListingUrl(rawUrl);
       if (!normalized) return;
       if (!contextAllows(normalized.domain, `${rawTitle} ${normalized.url}`, source, position)) return;
       // This UI answers "which websites list this property", so one
       // representative row per domain is clearer than duplicate URLs.
+      // Score candidates before deduping so owner-site homepage hits can be
+      // replaced by the same domain's exact listing page when Google returns
+      // both, as it does in the browser Lens flow.
       const classified = classifyDomain(normalized.domain);
-      const platformDedupeKey = classified.platformKey === "airbnb" || classified.platformKey === "vrbo" || classified.platformKey === "booking"
+      const surfaceKey = classified.platformKey === "airbnb" || classified.platformKey === "vrbo" || classified.platformKey === "booking"
         ? classified.platformKey
         : normalized.domain;
-      if (seenUrls.has(normalized.dedupeKey) || seenDomains.has(normalized.domain) || seenPlatforms.has(platformDedupeKey)) return;
-      seenUrls.add(normalized.dedupeKey);
-      seenDomains.add(normalized.domain);
-      seenPlatforms.add(platformDedupeKey);
-      matches.push({
+      const score =
+        (source === "known-source" ? 100_000 : 0) +
+        (source === "visual" ? 10_000 : source === "page" ? 5_000 : source === "organic" ? 1_000 : 0) +
+        (source === "visual" && position <= 3 ? 3_000 : 0) +
+        (classified.platformKey === "pm" ? 500 : 0) +
+        normalized.pathSpecificity * 80 -
+        position;
+      const existing = bestBySurface.get(surfaceKey);
+      if (existing && existing.score >= score) return;
+      bestBySurface.set(surfaceKey, {
         ...classified,
         domain: normalized.domain,
         title: (rawTitle || normalized.domain).replace(/\s+/g, " ").trim().slice(0, 120),
         url: normalized.url,
         source,
         position,
+        score,
       });
     };
 
@@ -5457,8 +5473,10 @@ export async function registerRoutes(
       const rawTitle = String(row?.title || row?.snippet || row?.source?.name || row?.source || "");
       const position = Number(row?.position ?? idx + 1);
       addMatch(rawUrl, rawTitle, source, Number.isFinite(position) ? position : idx + 1);
-      if (matches.length >= 25) break;
     }
+
+    const matches: ReverseImageListingMatch[] = Array.from(bestBySurface.values())
+      .map(({ score, ...match }) => match);
 
     matches.sort((a, b) => {
       const rank = (m: ReverseImageListingMatch): number => {
@@ -5527,9 +5545,18 @@ export async function registerRoutes(
         scraped = await scrapeAirbnbPropertyImagesFallback(sourceUrl);
       }
       const auditedPhotos = await auditBuyInListingPhotos(scraped);
-      const selectedPhotos = auditedPhotos.filter((photo): photo is BuyInListingPhotoAudit & { role: NonNullable<BuyInListingPhotoAudit["role"]> } =>
-        photo.searched && !!photo.role,
-      );
+      const candidatePhotos = auditedPhotos
+        .filter((photo): photo is BuyInListingPhotoAudit & { role: NonNullable<BuyInListingPhotoAudit["role"]> } =>
+          !!photo.role && !photo.skippedReason,
+        )
+        .sort((a, b) => {
+          const rank = (role: NonNullable<BuyInListingPhotoAudit["role"]>): number =>
+            role === "main" ? 0 : role === "living-room" ? 1 : 2;
+          return rank(a.role) - rank(b.role);
+        });
+      for (const photo of candidatePhotos) {
+        photo.searched = false;
+      }
       const sourceDomain = domainFromUrl(sourceUrl);
       const sourceTitle = [
         buyIn.unitLabel,
@@ -5543,7 +5570,9 @@ export async function registerRoutes(
       const port = process.env.PORT || "5000";
       const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
 
-      for (const photo of selectedPhotos) {
+      for (const photo of candidatePhotos) {
+        photo.searched = true;
+        const photoMatches: BuyInListingSiteMatch[] = [];
         try {
           const response = await fetch(lookupEndpoint, {
             method: "POST",
@@ -5572,13 +5601,15 @@ export async function registerRoutes(
             const key = `${match.platformKey}|${match.domain}|${normalizeListingSurfaceKey(match.url)}`;
             if (seen.has(key)) continue;
             seen.add(key);
-            matches.push({
+            const decoratedMatch = {
               ...match,
               matchedPhotoUrl: photo.url,
               matchedPhotoRole: photo.role,
               matchedPhotoLabel: photo.label,
               matchedPhotoCategory: photo.category,
-            });
+            };
+            photoMatches.push(decoratedMatch);
+            matches.push(decoratedMatch);
           }
         } catch (e: any) {
           photo.skippedReason = e?.name === "AbortError"
@@ -5586,15 +5617,25 @@ export async function registerRoutes(
             : `Reverse search failed: ${e?.message ?? String(e)}`;
           photo.searched = false;
         }
+        // Mirror the manual workflow: try the exact first Airbnb photo and
+        // stop once it finds an owner/direct site. Secondary living-room
+        // photos are only a fallback, because they create many "similar
+        // room" false positives.
+        if (photoMatches.some((match) => match.platformKey === "pm")) break;
       }
 
       matches.sort((a, b) => {
         const rank = (m: BuyInListingSiteMatch): number => {
-          if (m.platformKey === "airbnb" || m.platformKey === "vrbo" || m.platformKey === "booking") return 0;
-          if (m.platformKey === "pm") return 1;
+          if (m.platformKey === "pm") return 0;
+          if (m.platformKey === "airbnb" || m.platformKey === "vrbo" || m.platformKey === "booking") return 1;
           return 2;
         };
-        return rank(a) - rank(b) || a.position - b.position || a.domain.localeCompare(b.domain);
+        const roleRank = (role: NonNullable<BuyInListingPhotoAudit["role"]>): number =>
+          role === "main" ? 0 : role === "living-room" ? 1 : 2;
+        return rank(a) - rank(b)
+          || roleRank(a.matchedPhotoRole) - roleRank(b.matchedPhotoRole)
+          || a.position - b.position
+          || a.domain.localeCompare(b.domain);
       });
 
       const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;

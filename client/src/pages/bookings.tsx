@@ -1980,7 +1980,8 @@ function BuyInListingSitesDialog({
   });
   const photos = data?.photos ?? [];
   const searchedPhotos = photos.filter((photo) => photo.searched);
-  const skippedPhotos = photos.filter((photo) => !photo.searched);
+  const skippedPhotos = photos.filter((photo) => photo.skippedReason);
+  const backupPhotos = photos.filter((photo) => !photo.searched && !photo.skippedReason);
   const matches = data?.matches ?? [];
 
   return (
@@ -2026,6 +2027,7 @@ function BuyInListingSitesDialog({
                 <div className="text-xs text-muted-foreground">
                   {searchedPhotos.length} photo{searchedPhotos.length === 1 ? "" : "s"} searched
                   {skippedPhotos.length > 0 ? ` · ${skippedPhotos.length} skipped` : ""}
+                  {backupPhotos.length > 0 ? ` · ${backupPhotos.length} held as backup` : ""}
                   {data.fromCache ? " · cached" : ""}
                 </div>
                 <Button
