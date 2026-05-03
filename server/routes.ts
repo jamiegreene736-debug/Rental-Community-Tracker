@@ -2673,6 +2673,17 @@ export async function registerRoutes(
     const routeRemainingMs = () => Math.max(0, FIND_BUY_IN_ROUTE_BUDGET_MS - (Date.now() - scanStartedAt));
     const sourceErrors: Array<{ source: string; message: string }> = [];
     const sourceTimeouts: Array<{ source: string; ms: number }> = [];
+    const makeSidecarAbort = (label: string) => {
+      const controller = new AbortController();
+      return {
+        signal: controller.signal,
+        abort: () => {
+          if (!controller.signal.aborted) {
+            controller.abort(`${label} timed out before find-buy-in completed`);
+          }
+        },
+      };
+    };
     const noteSourceError = (source: string, error: unknown) => {
       const raw = error instanceof Error ? error.message : String(error ?? "unknown error");
       sourceErrors.push({ source, message: raw.slice(0, 600) });
@@ -3057,6 +3068,7 @@ export async function registerRoutes(
     let airbnbSidecarOnline = false;
     let airbnbSidecarMs = 0;
     let airbnbSidecarReason = "";
+    const airbnbSidecarAbort = makeSidecarAbort("airbnb-sidecar");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
         const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -3068,6 +3080,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
+          signal: airbnbSidecarAbort.signal,
         });
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
@@ -3126,6 +3139,7 @@ export async function registerRoutes(
     let bookingPricedCount = 0;
     let bookingSidecarCount = 0;
     let bookingSidecarOnline = false;
+    const bookingSidecarAbort = makeSidecarAbort("booking-sidecar");
     const bookingPromise: Promise<Candidate[]> = (async () => {
       try {
         const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -3137,6 +3151,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
+          signal: bookingSidecarAbort.signal,
         });
         bookingRawCount = r.candidates.length;
         bookingSidecarCount = r.candidates.length;
@@ -3196,6 +3211,7 @@ export async function registerRoutes(
     let vrboSidecarOnline = false;
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
+    const vrboSidecarAbort = makeSidecarAbort("vrbo");
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = websiteSearchTerm;
       try {
@@ -3208,6 +3224,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
+          signal: vrboSidecarAbort.signal,
         });
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
@@ -3845,6 +3862,7 @@ export async function registerRoutes(
     let pmWebsiteSidecarOnline = false;
     let pmWebsiteSidecarMs = 0;
     let pmWebsiteSidecarReason = "";
+    const pmWebsiteSidecarAbort = makeSidecarAbort("pm-website-sidecar");
     const pmWebsiteSidecarPromise: Promise<Candidate[]> = (async () => {
       if (!includePm) {
         pmWebsiteSidecarReason = "Skipped for fast OTA-only combo search";
@@ -3883,6 +3901,7 @@ export async function registerRoutes(
 	          perSiteLimit: 3,
 	          walletBudgetMs: 105_000,
 	          queueBudgetMs: 285_000,
+	          signal: pmWebsiteSidecarAbort.signal,
 	        });
         pmWebsiteSidecarCount = r.candidates.length;
         pmWebsiteSidecarOnline = r.workerOnline;
@@ -3939,7 +3958,7 @@ export async function registerRoutes(
     // Worst-case combined must stay below Railway's edge timeout. These
     // source promises run in parallel; anything that misses the short wall
     // budget returns a fallback and is surfaced in diagnostics.
-    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
+    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T, label: string, onTimeout?: () => void): Promise<T> => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
         p.finally(() => {
@@ -3948,6 +3967,7 @@ export async function registerRoutes(
         new Promise<T>((resolve) =>
           timeout = setTimeout(() => {
             console.warn(`[find-buy-in] ${label} timed out after ${ms}ms — using fallback`);
+            try { onTimeout?.(); } catch {}
             sourceTimeouts.push({ source: label, ms });
             resolve(fallback);
           }, ms),
@@ -3955,11 +3975,11 @@ export async function registerRoutes(
       ]);
     };
     const [airbnb, booking, vrbo, pmGoogle, pmWebsiteSidecarDiscovered, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
-      withTimeout(airbnbPromise, 25_000, [] as Candidate[], "airbnb-sidecar"),
-      withTimeout(bookingPromise, 25_000, [] as Candidate[], "booking-sidecar"),
-      withTimeout(vrboPromise, 25_000, [] as Candidate[], "vrbo"),
+      withTimeout(airbnbPromise, 25_000, [] as Candidate[], "airbnb-sidecar", airbnbSidecarAbort.abort),
+      withTimeout(bookingPromise, 25_000, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
+      withTimeout(vrboPromise, 25_000, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
       withTimeout(pmPromise, 10_000, [] as Candidate[], "pm-google"),
-      withTimeout(pmWebsiteSidecarPromise, 25_000, [] as Candidate[], "pm-website-sidecar"),
+      withTimeout(pmWebsiteSidecarPromise, 25_000, [] as Candidate[], "pm-website-sidecar", pmWebsiteSidecarAbort.abort),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
       // 80-95s range even at concurrency=24 (their WP front
@@ -17992,6 +18012,7 @@ Hard rules:
 - Do NOT mention internal workflow, operations, Guesty, logs, or that there was no message.
 - Do NOT call the units "combined" or call this a portfolio listing. Say "your reservation includes two nearby units" or "the property includes two nearby units."
 - Do NOT write "We look forward to hosting you!" yourself; the app adds that approved first-contact closer after the body.
+- Do NOT add a second closer like "I'm here if you have questions", "feel free to reach out", or "let me know if anything comes up."
 - If a detail is not in the property facts, leave it out.
 
 Length target: 4-6 sentences of body text (excluding greeting + signature). Keep it natural and guest-facing.

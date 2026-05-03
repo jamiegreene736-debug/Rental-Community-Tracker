@@ -712,6 +712,7 @@ export async function searchVrboViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -732,6 +733,7 @@ export async function searchVrboViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
+    signal: opts.signal,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -746,6 +748,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   maxPhotos?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   photos: string[];
   workerOnline: boolean;
@@ -767,6 +770,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 90_000,
+    signal: opts.signal,
   });
   return {
     photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
@@ -785,6 +789,7 @@ export async function searchBookingViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -805,6 +810,7 @@ export async function searchBookingViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
+    signal: opts.signal,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -823,6 +829,7 @@ export async function searchAirbnbViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -843,6 +850,7 @@ export async function searchAirbnbViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
+    signal: opts.signal,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -857,6 +865,7 @@ export async function googleSerpViaSidecar(opts: {
   maxResults?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   hits: SidecarSerpHit[];
   workerOnline: boolean;
@@ -870,6 +879,7 @@ export async function googleSerpViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
+    signal: opts.signal,
   });
   return {
     hits: (r.results ?? []) as SidecarSerpHit[],
@@ -889,6 +899,7 @@ export async function searchPmSitesViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -921,6 +932,7 @@ export async function searchPmSitesViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 120_000,
     queueBudgetMs: opts.queueBudgetMs,
+    signal: opts.signal,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -937,6 +949,7 @@ export async function checkPmUrlViaSidecar(opts: {
   bedrooms?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   result: SidecarPmUrlCheckResult | null;
   workerOnline: boolean;
@@ -955,6 +968,7 @@ export async function checkPmUrlViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
+    signal: opts.signal,
   });
   return {
     result: (r.results as SidecarPmUrlCheckResult | undefined) ?? null,
@@ -976,6 +990,7 @@ export async function checkPmUrlsBatchViaSidecar(opts: {
   bedrooms?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   results: SidecarPmUrlCheckBatchResult;
   workerOnline: boolean;
@@ -1003,6 +1018,7 @@ export async function checkPmUrlsBatchViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     // Default 60s — daemon does up to 5 in parallel ≈ 20-30s typical.
     walletBudgetMs: opts.walletBudgetMs ?? 60_000,
+    signal: opts.signal,
   });
   return {
     results: (r.results as SidecarPmUrlCheckBatchResult | undefined) ?? [],
@@ -1028,6 +1044,7 @@ export async function uploadPhotosToChannelViaSidecar(opts: {
   photos: Array<{ url: string; caption?: string }>;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   result: SidecarPhotoUploadResult | null;
   workerOnline: boolean;
@@ -1050,6 +1067,7 @@ export async function uploadPhotosToChannelViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 5 * 60_000,
+    signal: opts.signal,
   });
   return {
     result: (r.results as SidecarPhotoUploadResult | undefined) ?? null,
@@ -1071,6 +1089,7 @@ export async function disconnectGuestyChannelViaSidecar(opts: {
   channel: "vrbo" | "booking";
   pollIntervalMs?: number;
   walletBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   result: SidecarGuestyDisconnectResult | null;
   workerOnline: boolean;
@@ -1092,6 +1111,7 @@ export async function disconnectGuestyChannelViaSidecar(opts: {
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 4 * 60_000,
+    signal: opts.signal,
   });
   return {
     result: (r.results as SidecarGuestyDisconnectResult | undefined) ?? null,
@@ -1108,6 +1128,7 @@ async function awaitOpResult(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
+  signal?: AbortSignal;
 }): Promise<{
   results: SidecarRequest["results"];
   workerOnline: boolean;
@@ -1118,61 +1139,95 @@ async function awaitOpResult(opts: {
   const pollMs = opts.pollIntervalMs ?? 2000;
   const walletMs = opts.walletBudgetMs ?? 75_000;
   const queueBudgetMs = opts.queueBudgetMs ?? walletMs;
+  const abortReason = (): string => {
+    const raw = opts.signal?.reason;
+    if (raw instanceof Error) return raw.message;
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+    return "caller aborted sidecar request";
+  };
+  if (opts.signal?.aborted) {
+    return {
+      results: null,
+      workerOnline: false,
+      durationMs: nowMs() - startedAt,
+      reason: abortReason(),
+    };
+  }
   const { id } = enqueueOp(opts.enqueueArgs);
   let activeStartedAt: number | null = null;
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    cancelRequest(id, abortReason());
+  };
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
 
-  while (true) {
-    const r = getResult(id);
-    if (!r) {
-      return {
-        results: null,
-        workerOnline: false,
-        durationMs: nowMs() - startedAt,
-        reason: "request expired before completion (worker likely offline)",
-      };
+  try {
+    if (opts.signal?.aborted) onAbort();
+    while (true) {
+      if (aborted || opts.signal?.aborted) {
+        if (!aborted) onAbort();
+        return {
+          results: null,
+          workerOnline: false,
+          durationMs: nowMs() - startedAt,
+          reason: abortReason(),
+        };
+      }
+      const r = getResult(id);
+      if (!r) {
+        return {
+          results: null,
+          workerOnline: false,
+          durationMs: nowMs() - startedAt,
+          reason: "request expired before completion (worker likely offline)",
+        };
+      }
+      const now = nowMs();
+      if (r.status === "completed") {
+        return {
+          results: r.results ?? null,
+          workerOnline: true,
+          durationMs: nowMs() - startedAt,
+          reason: `worker returned ${
+            Array.isArray(r.results) ? r.results.length : r.results ? "1" : "0"
+          } result(s)`,
+        };
+      }
+      if (r.status === "failed") {
+        return {
+          results: null,
+          workerOnline: true,
+          durationMs: nowMs() - startedAt,
+          reason: r.error || "worker reported failure",
+        };
+      }
+      if (r.status === "in_progress" && activeStartedAt === null) {
+        activeStartedAt = r.claimedAt ?? now;
+      }
+      if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
+        const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;
+        cancelRequest(id, reason);
+        return {
+          results: null,
+          workerOnline: false,
+          durationMs: now - startedAt,
+          reason,
+        };
+      }
+      if (activeStartedAt !== null && now - activeStartedAt >= walletMs) {
+        const reason = `wallet budget ${walletMs}ms exceeded while worker active`;
+        cancelRequest(id, reason);
+        return {
+          results: null,
+          workerOnline: false,
+          durationMs: now - startedAt,
+          reason,
+        };
+      }
+      await new Promise((res) => setTimeout(res, pollMs));
     }
-    const now = nowMs();
-    if (r.status === "completed") {
-      return {
-        results: r.results ?? null,
-        workerOnline: true,
-        durationMs: nowMs() - startedAt,
-        reason: `worker returned ${
-          Array.isArray(r.results) ? r.results.length : r.results ? "1" : "0"
-        } result(s)`,
-      };
-    }
-    if (r.status === "failed") {
-      return {
-        results: null,
-        workerOnline: true,
-        durationMs: nowMs() - startedAt,
-        reason: r.error || "worker reported failure",
-      };
-    }
-    if (r.status === "in_progress" && activeStartedAt === null) {
-      activeStartedAt = r.claimedAt ?? now;
-    }
-    if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
-      const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;
-      cancelRequest(id, reason);
-      return {
-        results: null,
-        workerOnline: false,
-        durationMs: now - startedAt,
-        reason,
-      };
-    }
-    if (activeStartedAt !== null && now - activeStartedAt >= walletMs) {
-      const reason = `wallet budget ${walletMs}ms exceeded while worker active`;
-      cancelRequest(id, reason);
-      return {
-        results: null,
-        workerOnline: false,
-        durationMs: now - startedAt,
-        reason,
-      };
-    }
-    await new Promise((res) => setTimeout(res, pollMs));
+  } finally {
+    opts.signal?.removeEventListener("abort", onAbort);
   }
 }
