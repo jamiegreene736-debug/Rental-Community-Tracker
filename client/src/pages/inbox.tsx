@@ -1033,6 +1033,8 @@ export default function InboxPage() {
       if (isSystemPost(p)) return false;
       return !isHostPost(p);
     });
+    const guestMessage = String(lastGuestPost?.body ?? lastGuestPost?.text ?? "").trim();
+    const isWelcomeDraft = isInitialContact && !guestMessage;
     // Build property-specific context so the AI can answer "how many
     // bedrooms per unit?" / "how far apart are the units?" / "is
     // parking free?" with facts instead of hand-waves. Non-blocking:
@@ -1052,7 +1054,7 @@ export default function InboxPage() {
       "";
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
-        guestMessage: lastGuestPost?.body ?? lastGuestPost?.text ?? "",
+        guestMessage,
         guestName: selectedConv.guestName,
         propertyName: selectedConv.listingNickname,
         propertyContext: ctx?.text ?? null,
@@ -1071,6 +1073,7 @@ export default function InboxPage() {
         checkOut: (selectedConv as any).conversationCheckOut ?? null,
         guestsCount: (selectedConv as any).conversationGuests ?? null,
         isInitialContact,
+        isWelcomeDraft,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);

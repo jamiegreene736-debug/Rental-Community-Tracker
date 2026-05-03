@@ -17722,8 +17722,8 @@ CONSTRAINTS
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel, isInitialContact } = req.body as {
-      guestMessage: string;
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel, isInitialContact, isWelcomeDraft } = req.body as {
+      guestMessage?: string;
       propertyName?: string;
       guestName?: string;
       checkIn?: string;
@@ -17757,9 +17757,16 @@ CONSTRAINTS
       // The closer is added deterministically after humanization so
       // first-contact drafts always end with the approved hospitality line.
       isInitialContact?: boolean;
+      // True when the inbox only has Guesty's reservation-confirmation
+      // log and no actual guest-authored message. In that case the AI
+      // should draft a host-initiated welcome note from the booking +
+      // property facts instead of erroring on an empty guestMessage.
+      isWelcomeDraft?: boolean;
     };
 
-    if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
+    const guestMessageText = String(guestMessage ?? "").trim();
+    const welcomeDraft = !!isWelcomeDraft || (!guestMessageText && !!isInitialContact);
+    if (!guestMessageText && !welcomeDraft) return res.status(400).json({ error: "guestMessage is required" });
 
     // Friendly platform name for the payment-timing policy. Guesty
     // uses raw keys like "airbnb2" / "homeaway2" / "bookingCom" — map
@@ -17936,12 +17943,12 @@ ${propertyContext}
     // counts but skip the "stairs?" / "ground floor?" / "seniors"
     // ask unless explicitly required to.
     const ACCESSIBILITY_CUES = /\b(downstair|down\s*stair|ground\s*floor|first\s*floor|main\s*floor|stairs?\b|stair[-\s]?free|elevator|wheelchair|mobility|accessib|senior|elderly|grand(?:parent|ma|pa|mother|father)|cane|walker|knee|hip|surgery|disabilit|step[-\s]?free|single[-\s]?level|one[-\s]?(?:floor|level))\b/i;
-    const accessibilityRaised = ACCESSIBILITY_CUES.test(guestMessage);
+    const accessibilityRaised = ACCESSIBILITY_CUES.test(guestMessageText);
     const PROXIMITY_CUES = /\b(next to each other|next door|adjacent|side[-\s]?by[-\s]?side|close together|near each other|close to each other|same building|same cluster|together|how far|walk apart|distance between)\b/i;
     const NON_PROXIMITY_DETAIL_CUES = /\b(bed(?:room)?s?|bath(?:room)?s?|sleeps?|kitchen|pool|hot tub|amenit(?:y|ies)|parking|stairs?|floor|level|elevator|wheelchair|mobility|senior|elderly|check[-\s]?in|check[-\s]?out|discount|refund|price|rate|pet|wifi|wi[-\s]?fi|air conditioning|ac\b)\b/i;
     const proximityOnlyRaised =
-      PROXIMITY_CUES.test(guestMessage) &&
-      !NON_PROXIMITY_DETAIL_CUES.test(guestMessage.replace(PROXIMITY_CUES, " "));
+      PROXIMITY_CUES.test(guestMessageText) &&
+      !NON_PROXIMITY_DETAIL_CUES.test(guestMessageText.replace(PROXIMITY_CUES, " "));
     const accessibilityMandate = accessibilityRaised
       ? `🚨 ACCESSIBILITY / FLOOR-PLAN ASK — TOP PRIORITY 🚨
 The guest's message contains an accessibility, ground-floor, stairs, mobility, or seniors concern. Your reply MUST include a sentence that directly addresses it. The reply will be considered INCOMPLETE if it doesn't contain at least one of these words: "stairs", "floor", "level", "ground", "multi-story", "single-level". Do not skip this. Do not bury it. Write it as its own paragraph or sentence near the end of the body, before the sign-off.
@@ -17964,11 +17971,37 @@ Do not roll it into a generic "let me know if you have questions" closer.
 `
       : "";
 
-    const userPrompt = `${accessibilityMandate}${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
+    const userPrompt = welcomeDraft
+      ? `${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
+Property: ${propertyName || "our property"}
+
+There is no guest-authored message in this conversation yet. The only inbox item is Guesty's automated reservation confirmation. Draft an initial welcome message from the host.
+
+Write a helpful, warm, BRIEF welcome note. Polite but to the point. NO conversational fluff.
+
+Structure:
+1. A one-line greeting ("Aloha [Name],").
+2. Confirm their reservation is all set for the property. If check-in and check-out are known, you may mention those dates once.
+3. Explain that this listing is made up of multiple nearby units when the property facts say there is more than one unit. Mention the total bedroom setup and the approximate walking distance between units when available.
+4. Add 1-2 grounded resort/community details from the property facts, such as beachfront location, pool, hot tub, parking, kitchens, air conditioning, or beach access. Do not invent anything not in the facts.
+5. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+
+Hard rules:
+- Do NOT say "Thanks for reaching out" or imply the guest asked a question. They did not.
+- Do NOT ask the guest a question.
+- Do NOT mention internal workflow, operations, Guesty, logs, or that there was no message.
+- Do NOT call the units "combined" or call this a portfolio listing. Say "your reservation includes two nearby units" or "the property includes two nearby units."
+- Do NOT write "We look forward to hosting you!" yourself; the app adds that approved first-contact closer after the body.
+- If a detail is not in the property facts, leave it out.
+
+Length target: 4-6 sentences of body text (excluding greeting + signature). Keep it natural and guest-facing.
+
+Do not include a subject line.`
+      : `${accessibilityMandate}${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
 Property: ${propertyName || "our property"}
 
 Guest message:
-"${guestMessage}"
+"${guestMessageText}"
 
 Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational fluff.
 
@@ -18066,7 +18099,7 @@ Do not include a subject line.`;
       // before you book?", etc.). See server/humanize-reply.ts for rules.
       const baseHumanized = humanizeReply(draftMarkdownClean);
       const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
-      const humanized = addGuestPersonalTouch(trimmedHumanized, guestMessage);
+      const humanized = addGuestPersonalTouch(trimmedHumanized, guestMessageText);
 
       // Deterministic accessibility safety net: when the guest's message
       // raised an accessibility / floor-plan / seniors concern but the
