@@ -5505,8 +5505,18 @@ export async function registerRoutes(
         return res.json({ ...cached.value, buyInId: id, fromCache: true });
       }
 
-      let scraped = await scrapeListingPhotos(sourceUrl);
+      const isAirbnbSource = /airbnb\.com\/rooms\//i.test(sourceUrl);
+      let scrapeError: string | null = null;
+      let scraped = isAirbnbSource ? await scrapeAirbnbPropertyImagesFallback(sourceUrl) : [];
       if (scraped.length === 0) {
+        try {
+          scraped = await scrapeListingPhotos(sourceUrl);
+        } catch (err: any) {
+          scrapeError = err?.message ?? String(err);
+          console.warn(`[buy-in listing-sites] browser scrape failed for ${sourceUrl}: ${scrapeError}`);
+        }
+      }
+      if (scraped.length === 0 && !isAirbnbSource) {
         scraped = await scrapeAirbnbPropertyImagesFallback(sourceUrl);
       }
       const auditedPhotos = await auditBuyInListingPhotos(scraped);
@@ -5590,7 +5600,9 @@ export async function registerRoutes(
         rawCount,
         generatedAt: new Date().toISOString(),
         ...(scraped.length === 0
-          ? { message: "No listing photos could be extracted from the source page." }
+          ? { message: scrapeError
+            ? "No listing photos could be extracted without browser support for this source page."
+            : "No listing photos could be extracted from the source page." }
           : searchedCount === 0
           ? { message: "Listing photos were found, but all were classified as shared/exterior/amenity-style photos and skipped." }
           : {}),
