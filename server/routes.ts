@@ -2251,17 +2251,24 @@ export async function registerRoutes(
         ...(Array.isArray(property?.images) ? property.images : []),
         ...(Array.isArray(property?.photos) ? property.photos : []),
       ];
-      const urls = rows
-        .map((row: any) => typeof row === "string"
+      const seen = new Set<string>();
+      const photos: ScrapedPhoto[] = [];
+      for (const row of rows) {
+        const url = typeof row === "string"
           ? row
-          : row?.url ?? row?.image ?? row?.large ?? row?.thumbnail ?? row?.picture_url ?? row?.original)
-        .filter((url: unknown): url is string => typeof url === "string" && /^https?:\/\//i.test(url));
-      return Array.from(new Set(urls)).map((url) => ({
-        url,
-        title: "Airbnb listing photo",
-        source: "Airbnb",
-        sourceLink: sourceUrl,
-      }));
+          : row?.link ?? row?.url ?? row?.image ?? row?.large ?? row?.thumbnail ?? row?.picture_url ?? row?.original;
+        if (typeof url !== "string" || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+        seen.add(url);
+        photos.push({
+          url,
+          title: typeof row?.caption === "string" && row.caption.trim()
+            ? row.caption.trim()
+            : "Airbnb listing photo",
+          source: "Airbnb",
+          sourceLink: sourceUrl,
+        });
+      }
+      return photos;
     } catch {
       return [];
     }
