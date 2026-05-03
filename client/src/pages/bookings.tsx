@@ -871,6 +871,9 @@ export default function Bookings() {
       };
       const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
       const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ci) || !/^\d{4}-\d{2}-\d{2}$/.test(co)) {
+        throw new Error("Auto-fill needs valid check-in/check-out dates before it can search.");
+      }
 
       // Deduplicate find-buy-in calls. When a reservation has multiple
       // empty slots with the SAME bedrooms (Amy Vanbuskirk's 2x 3BR
@@ -894,7 +897,14 @@ export default function Bookings() {
         const key = `${bedrooms}|${includePm ? "pm" : "ota"}`;
         const existing = findBuyInCache.get(key);
         if (existing) return existing;
-        const url = `/api/operations/find-buy-in?propertyId=${selectedPropertyId}&bedrooms=${bedrooms}&checkIn=${ci}&checkOut=${co}${includePm ? "" : "&includePm=0"}`;
+        const params = new URLSearchParams({
+          propertyId: String(selectedPropertyId),
+          bedrooms: String(bedrooms),
+          checkIn: ci,
+          checkOut: co,
+        });
+        if (!includePm) params.set("includePm", "0");
+        const url = `/api/operations/find-buy-in?${params.toString()}`;
         const promise = apiRequest("GET", url).then((r) => r.json()) as Promise<FindBuyInResponse>;
         findBuyInCache.set(key, promise);
         return promise;
@@ -1038,6 +1048,10 @@ export default function Bookings() {
       ): Promise<AutoFillResult> => {
         const skippedReasons: string[] = [];
         const finalCost = pick.totalPrice;
+        if (!Number.isFinite(finalCost) || finalCost <= 0) {
+          skippedReasons.push(`${slot.unitLabel}: skipped invalid price`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
         const actualBedrooms = candidateBedrooms(pick, searchedBedrooms);
         const airbnbPick = pick.source === "airbnb";
         const propertyName =
@@ -4324,7 +4338,7 @@ function RecordBuyInDialog({
         bedrooms: slot.bedrooms,
         checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
         checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
-        costPaid: Number(costPaid),
+        costPaid: Number(costPaid).toFixed(2),
         airbnbConfirmation: confirmation || null,
         airbnbListingUrl: listingUrl || null,
         notes: notes || `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
@@ -4335,7 +4349,7 @@ function RecordBuyInDialog({
       const attach = await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
         buyInId: created.id,
       }).then((r) => r.json());
-      if (!attach?.success) throw new Error(attach?.error || "Attach failed");
+      if (!attach?.id) throw new Error(attach?.error || "Attach failed");
       return created;
     },
     onSuccess: () => {

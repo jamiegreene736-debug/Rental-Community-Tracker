@@ -1918,7 +1918,11 @@ export async function registerRoutes(
 
   app.post("/api/buy-ins", async (req, res) => {
     try {
-      const parsed = insertBuyInSchema.safeParse(req.body);
+      const body = { ...req.body };
+      if (typeof body.costPaid === "number" && Number.isFinite(body.costPaid)) {
+        body.costPaid = body.costPaid.toFixed(2);
+      }
+      const parsed = insertBuyInSchema.safeParse(body);
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid buy-in data", details: parsed.error.flatten() });
       }
@@ -3188,10 +3192,11 @@ export async function registerRoutes(
         && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
       // Search result cards frequently hide the exact resort name even
       // when the website search itself was driven with the resort, dates,
-      // and bedroom filter. Keep that website-search proof broad and let
-      // the operator verify borderline rows manually, per 2026-05-02
-      // directive after the strict filter dropped every priced source.
-      const searchProofHasLocality = normalizedResortName !== "poipu kai" || hasLocalityForPriceFallback(hay);
+      // and bedroom filter. Still require a visible target signal before
+      // the card can be auto-picked. Without this, a "Pili Mai" sidecar
+      // search can keep broad Kauai cards from Princeville/Kapaa/Kilauea
+      // simply because Airbnb/Booking returned them on the search page.
+      const searchProofHasLocality = hasLocalityForPriceFallback(hay);
       const searchProofCanCarryTarget = websiteSearchProof
         && searchProofHasLocality;
       const pricePlausibleSearchProof = websiteSearchProof
