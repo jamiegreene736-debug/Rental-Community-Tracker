@@ -135,6 +135,8 @@ const CLOSING_TRIGGERS: ReadonlyArray<RegExp> = [
   /^Hope (this|that) helps\b/i,
   /^Feel free to\b/i,
   /^Don'?t hesitate to\b/i,
+  /^I'?m here if\b/i,
+  /^We'?re here if\b/i,
   /^Please (feel free|don'?t hesitate|let (me|us) know)\b/i,
 ];
 
