@@ -5384,7 +5384,7 @@ export async function registerRoutes(
       if (wrongPoipuKaiLocation(`${domain} ${haystack}`) && !highConfidenceVisual) return false;
       if (!rentalSurface(domain, haystack)) return false;
       if (!isPoipuKaiContext) return true;
-      if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
+      if (poipuKaiTextMatch(`${domain} ${haystack}`) && position <= 10) return true;
       // Google Images/Lens often surfaces the owner site as an exact
       // top visual match without repeating the resort name in the title.
       // Let those first few visual hits through, then require context for
