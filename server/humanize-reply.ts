@@ -343,3 +343,16 @@ export function addGuestPersonalTouch(text: string, guestMessage: string): strin
   const nextBody = trimmedBody ? `${trimmedBody}\n\n${touch}` : touch;
   return sig ? `${nextBody}\n\n${sig.trimStart()}` : nextBody;
 }
+
+export function addInitialContactCloser(text: string, isInitialContact?: boolean): string {
+  if (!text || !isInitialContact) return text;
+
+  const closer = "We look forward to hosting you!";
+  const upgraded = text.replace(/\bWe look forward to hosting you[.!]?/i, closer);
+  if (upgraded !== text) return upgraded;
+
+  const { body, sig } = splitSignature(text);
+  const trimmedBody = body.trimEnd();
+  const nextBody = trimmedBody ? `${trimmedBody}\n\n${closer}` : closer;
+  return sig ? `${nextBody}\n\n${sig.trimStart()}` : nextBody;
+}

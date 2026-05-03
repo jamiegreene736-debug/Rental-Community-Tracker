@@ -1016,19 +1016,22 @@ export default function InboxPage() {
       // Some Guesty accounts surface log posts with no module.type
       // but a recognizable canned body — catch those too.
       const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
-      if (body === "new guest inquiry" || body === "new inquiry" || body === "new reservation request") return true;
+      if (body === "new guest inquiry" || body === "new inquiry" || body === "new reservation request" || body.startsWith("new guest reservation")) return true;
       return false;
     };
+    const isHostPost = (p: any): boolean =>
+      p.authorType === "host" ||
+      p.authorRole === "host" ||
+      p.senderType === "host" ||
+      p.direction === "outbound" ||
+      p.direction === "out" ||
+      p.direction === "outgoing" ||
+      p.isIncoming === false;
+    const conversationalPosts = sortedAsc.filter((p: any) => !isSystemPost(p));
+    const isInitialContact = !conversationalPosts.some(isHostPost);
     const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
       if (isSystemPost(p)) return false;
-      const isHost =
-        p.authorType === "host" ||
-        p.authorRole === "host" ||
-        p.senderType === "host" ||
-        p.direction === "outbound" ||
-        p.direction === "out" ||
-        p.isIncoming === false;
-      return !isHost;
+      return !isHostPost(p);
     });
     // Build property-specific context so the AI can answer "how many
     // bedrooms per unit?" / "how far apart are the units?" / "is
@@ -1067,6 +1070,7 @@ export default function InboxPage() {
         checkIn: (selectedConv as any).conversationCheckIn ?? null,
         checkOut: (selectedConv as any).conversationCheckOut ?? null,
         guestsCount: (selectedConv as any).conversationGuests ?? null,
+        isInitialContact,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);

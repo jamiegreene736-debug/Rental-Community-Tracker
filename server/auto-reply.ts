@@ -7,7 +7,7 @@ import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "../shared/walking-distance";
-import { addGuestPersonalTouch, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
+import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import type { InsertAutoReplyLog } from "@shared/schema";
 
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
@@ -235,6 +235,18 @@ function isIncomingPost(p: any): boolean {
   return false;
 }
 
+function isSystemPost(p: any): boolean {
+  const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
+  if (moduleType === "log" || moduleType === "system" || moduleType === "internal" || moduleType === "note") return true;
+  const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
+  return (
+    body === "new guest inquiry" ||
+    body === "new inquiry" ||
+    body === "new reservation request" ||
+    body.startsWith("new guest reservation")
+  );
+}
+
 function isHostPost(p: any): boolean {
   if (p.isIncoming === false) return true;
   if (p.direction === "outgoing" || p.direction === "out" || p.direction === "outbound") return true;
@@ -259,6 +271,7 @@ function isHostPost(p: any): boolean {
 // on the very next guest message that arrives.
 function pickPostToReplyTo(posts: GuestyPost[] | undefined): GuestyPost | null {
   if (!posts || posts.length === 0) return null;
+  const conversational = posts.filter((p) => !isSystemPost(p));
 
   const ts = (p: any): number => {
     const v = p.createdAt ?? p.sentAt ?? p.postedAt;
@@ -266,13 +279,13 @@ function pickPostToReplyTo(posts: GuestyPost[] | undefined): GuestyPost | null {
     return Number.isFinite(t) ? t : 0;
   };
 
-  const incoming = posts.filter(isIncomingPost);
+  const incoming = conversational.filter(isIncomingPost);
   if (incoming.length === 0) return null;
   incoming.sort((a, b) => ts(b) - ts(a));
   const latestIncoming = incoming[0];
   if (!latestIncoming?._id) return null;
 
-  const host = posts.filter(isHostPost);
+  const host = conversational.filter(isHostPost);
   if (host.length === 0) return latestIncoming;
   host.sort((a, b) => ts(b) - ts(a));
   const latestHost = host[0];
@@ -534,6 +547,7 @@ async function draftReplyWithClaude(params: {
   listingId?: string;
   reservationId?: string;
   channel?: string;
+  isInitialContact?: boolean;
 }): Promise<DraftResult> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
@@ -651,8 +665,9 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
     // John Carpenter / Reservationist / Magical Island Rentals block.
     const baseHumanized = humanizeReply(text);
     const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
-    const humanized = addGuestPersonalTouch(trimmedHumanized, params.guestMessage);
-    const finalDraft = ensureSignoff(humanized);
+    const withPersonalTouch = addGuestPersonalTouch(trimmedHumanized, params.guestMessage);
+    const withInitialCloser = addInitialContactCloser(withPersonalTouch, !!params.isInitialContact);
+    const finalDraft = ensureSignoff(withInitialCloser);
     return { draft: finalDraft, flagReason: null, toolsUsed, error: null };
   }
 
@@ -682,6 +697,8 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         const posts = thread?.posts ?? conv.posts ?? [];
         const latest = pickPostToReplyTo(posts);
         if (!latest || !latest._id) continue;
+        const conversationalPosts = posts.filter((p) => !isSystemPost(p));
+        const isInitialContact = !conversationalPosts.some(isHostPost);
 
         // Dedupe — skip if we've already logged this post
         const existing = await storage.getAutoReplyLogByTriggerPostId(latest._id);
@@ -733,6 +750,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             guestMessage, guestName: guestName ?? undefined,
             listingId: listingId ?? undefined, reservationId: reservationId ?? undefined,
             channel: channel ?? undefined,
+            isInitialContact,
           });
           replyDraft = result.draft;
           toolsUsedJson = JSON.stringify(result.toolsUsed);
@@ -745,6 +763,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             guestMessage, guestName: guestName ?? undefined,
             listingId: listingId ?? undefined, reservationId: reservationId ?? undefined,
             channel: channel ?? undefined,
+            isInitialContact,
           });
           replyDraft = result.draft;
           toolsUsedJson = JSON.stringify(result.toolsUsed);

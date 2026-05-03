@@ -24,7 +24,7 @@ import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
-import { addGuestPersonalTouch, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
+import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -17722,7 +17722,7 @@ CONSTRAINTS
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel, isInitialContact } = req.body as {
       guestMessage: string;
       propertyName?: string;
       guestName?: string;
@@ -17753,6 +17753,10 @@ CONSTRAINTS
       // empty string falls back to a generic "the booking platform"
       // phrasing.
       channel?: string;
+      // True when the current conversation has no prior host reply.
+      // The closer is added deterministically after humanization so
+      // first-contact drafts always end with the approved hospitality line.
+      isInitialContact?: boolean;
     };
 
     if (!guestMessage) return res.status(400).json({ error: "guestMessage is required" });
@@ -18112,7 +18116,8 @@ Do not include a subject line.`;
         return `${humanized.trimEnd()}\n\n${fallback}`;
       })();
 
-      res.json({ draft });
+      const finalDraft = addInitialContactCloser(draft, !!isInitialContact);
+      res.json({ draft: finalDraft });
     } catch (err: any) {
       console.error(`[ai-draft] exception: ${err.message}`);
       res.status(500).json({ error: "AI draft failed", message: err.message });
