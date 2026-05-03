@@ -38,7 +38,7 @@ const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 
-const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 10_000);
+const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
@@ -4051,7 +4051,8 @@ async function main() {
     // close succession (e.g. pre-verifying 3-6 PM URLs) and the
     // operator's wallet budget can't absorb 60s × N idle waits.
     // After an idle tick (queue empty), wait the full POLL_IDLE_MS
-    // (default 10s) so the operator isn't waiting on a full-minute poll.
+    // (default 1s) so find-buy-in doesn't spend its server budget
+    // waiting for the daemon to notice fresh work.
     await new Promise((r) => setTimeout(r, wasBusy ? POLL_BUSY_MS : POLL_IDLE_MS));
   }
 }

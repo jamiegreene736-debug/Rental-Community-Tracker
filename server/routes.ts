@@ -2015,7 +2015,7 @@ export async function registerRoutes(
   // requests within TTL return immediately, and the operator's "click
   // again to retry" hint becomes literally instant on the cache-hit
   // path.
-  type FindBuyInCacheEntry = { value: any; expiresAt: number };
+  type FindBuyInCacheEntry = { value: any; expiresAt: number; createdAt: number };
   type FindBuyInInFlightEntry = { promise: Promise<any>; startedAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
   const findBuyInInFlight = new Map<string, FindBuyInInFlightEntry>();
@@ -2032,10 +2032,14 @@ export async function registerRoutes(
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
   const FIND_BUY_IN_TTL_MS = 5 * 60_000;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
-  // Railway's edge can return "Application failed to respond" around
-  // 35-40s on this service. Keep find-buy-in comfortably below that:
-  // slow sources become warning diagnostics + audit rows, never blind 502s.
-  const FIND_BUY_IN_ROUTE_BUDGET_MS = 32_000;
+  // Railway's edge can return "Application failed to respond" when a
+  // long handler stays silent. find-buy-in is allowed to run longer
+  // because the local Chrome sidecar drains one queue item at a time;
+  // the route writes harmless JSON whitespace while waiting so the edge
+  // sees the app is still alive, then ends with the real JSON body.
+  const FIND_BUY_IN_ROUTE_BUDGET_MS = 210_000;
+  const FIND_BUY_IN_RESPONSE_KEEPALIVE_MS = 15_000;
+  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 190_000;
   const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
@@ -2516,32 +2520,71 @@ export async function registerRoutes(
       return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
     }
 
+    const config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config) return res.status(404).json({ error: "Property not in config" });
+
     // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
     const includePm = req.query.includePm !== "0" && req.query.pm !== "0";
     const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}`;
     const noCache = req.query.nocache === "1";
+    const nodeRes = res as any;
+    let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+    let responseSettled = false;
+    const startResponseKeepAlive = () => {
+      if (keepAliveTimer || nodeRes.writableEnded || nodeRes.destroyed) return;
+      keepAliveTimer = setInterval(() => {
+        if (nodeRes.writableEnded || nodeRes.destroyed) return;
+        if (!nodeRes.headersSent) {
+          nodeRes.status(200);
+          nodeRes.setHeader("Content-Type", "application/json; charset=utf-8");
+        }
+        nodeRes.write(" ");
+      }, FIND_BUY_IN_RESPONSE_KEEPALIVE_MS);
+      keepAliveTimer.unref?.();
+    };
+    const stopResponseKeepAlive = () => {
+      if (!keepAliveTimer) return;
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    };
+    const sendFindBuyInJson = (body: any) => {
+      responseSettled = true;
+      stopResponseKeepAlive();
+      if (nodeRes.headersSent) {
+        return nodeRes.end(JSON.stringify(body));
+      }
+      return nodeRes.json(body);
+    };
+    const requestAbort = new AbortController();
+    nodeRes.on("close", () => {
+      stopResponseKeepAlive();
+      if (responseSettled) return;
+      requestAbort.abort(`find-buy-in client disconnected before completion ${cacheKey}`);
+    });
     if (!noCache) {
       const cached = findBuyInCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
-        const ageSec = Math.round((Date.now() - (cached.expiresAt - FIND_BUY_IN_TTL_MS)) / 1000);
+        const ageSec = Math.round((Date.now() - cached.createdAt) / 1000);
         console.log(`[find-buy-in] cache hit ${cacheKey} (age ${ageSec}s)`);
-        return res.json({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
+        return sendFindBuyInJson({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
       }
       const inFlight = findBuyInInFlight.get(cacheKey);
       if (inFlight) {
         console.log(`[find-buy-in] in-flight join ${cacheKey}`);
+        startResponseKeepAlive();
         try {
           const value = await inFlight.promise;
           const ageSec = Math.max(0, Math.round((Date.now() - inFlight.startedAt) / 1000));
-          return res.json({ ...value, fromCache: true, fromInFlight: true, cacheAgeSec: ageSec });
+          return sendFindBuyInJson({ ...value, fromCache: true, fromInFlight: true, cacheAgeSec: ageSec });
         } catch (e: any) {
           console.warn(`[find-buy-in] in-flight join failed ${cacheKey}:`, e?.message ?? e);
           findBuyInInFlight.delete(cacheKey);
         }
       }
     }
+    startResponseKeepAlive();
 
     let resolveInFlight: ((value: any) => void) | null = null;
     let rejectInFlight: ((reason?: unknown) => void) | null = null;
@@ -2553,16 +2596,13 @@ export async function registerRoutes(
       });
       promise.catch(() => {});
       findBuyInInFlight.set(cacheKey, { promise, startedAt: Date.now() });
-      res.on("close", () => {
+      nodeRes.on("close", () => {
         if (inFlightSettled) return;
         inFlightSettled = true;
         findBuyInInFlight.delete(cacheKey);
         rejectInFlight?.(new Error(`find-buy-in request closed before completing ${cacheKey}`));
       });
     }
-
-    const config = PROPERTY_UNIT_NEEDS[propertyId];
-    if (!config) return res.status(404).json({ error: "Property not in config" });
 
     const community = config.community;
     const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
@@ -2675,13 +2715,23 @@ export async function registerRoutes(
     const sourceTimeouts: Array<{ source: string; ms: number }> = [];
     const makeSidecarAbort = (label: string) => {
       const controller = new AbortController();
+      const abort = (reason = `${label} timed out before find-buy-in completed`) => {
+        if (!controller.signal.aborted) {
+          controller.abort(reason);
+        }
+      };
+      if (requestAbort.signal.aborted) {
+        abort(String(requestAbort.signal.reason ?? "find-buy-in client disconnected"));
+      } else {
+        requestAbort.signal.addEventListener(
+          "abort",
+          () => abort(String(requestAbort.signal.reason ?? "find-buy-in client disconnected")),
+          { once: true },
+        );
+      }
       return {
         signal: controller.signal,
-        abort: () => {
-          if (!controller.signal.aborted) {
-            controller.abort(`${label} timed out before find-buy-in completed`);
-          }
-        },
+        abort,
       };
     };
     const noteSourceError = (source: string, error: unknown) => {
@@ -3974,12 +4024,16 @@ export async function registerRoutes(
         ),
       ]);
     };
+    const sidecarSourceBudgetMs = Math.min(
+      FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS,
+      Math.max(25_000, routeRemainingMs() - 10_000),
+    );
     const [airbnb, booking, vrbo, pmGoogle, pmWebsiteSidecarDiscovered, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
-      withTimeout(airbnbPromise, 25_000, [] as Candidate[], "airbnb-sidecar", airbnbSidecarAbort.abort),
-      withTimeout(bookingPromise, 25_000, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
-      withTimeout(vrboPromise, 25_000, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
+      withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-sidecar", airbnbSidecarAbort.abort),
+      withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
+      withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
       withTimeout(pmPromise, 10_000, [] as Candidate[], "pm-google"),
-      withTimeout(pmWebsiteSidecarPromise, 25_000, [] as Candidate[], "pm-website-sidecar", pmWebsiteSidecarAbort.abort),
+      withTimeout(pmWebsiteSidecarPromise, sidecarSourceBudgetMs, [] as Candidate[], "pm-website-sidecar", pmWebsiteSidecarAbort.abort),
       // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
       // Parrish Kauai's cold-cache walk consistently lands in the
       // 80-95s range even at concurrency=24 (their WP front
@@ -4992,22 +5046,30 @@ export async function registerRoutes(
       cheapestUnits,
       totalPricedResults: priced.length,
     };
-    // Populate the result cache so the next click within 5 min for
-    // the exact same (propertyId, bedrooms, checkIn, checkOut) tuple
-    // returns instantly. Eviction runs lazily on each set.
+    // Populate the result cache only when the scan itself is trustworthy.
+    // Partial/timeout diagnostics must be a fresh retry every time; caching
+    // them is how Auto-fill can immediately replay a stale "0 scanned rows"
+    // result after the sidecar has already recovered.
     evictExpiredFindBuyIn();
-    const cacheTtlMs = priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000;
-    findBuyInCache.set(cacheKey, {
-      value: responseBody,
-      expiresAt: Date.now() + cacheTtlMs,
-    });
+    const cacheTtlMs = scanComplete
+      ? (priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000)
+      : 0;
+    if (cacheTtlMs > 0) {
+      findBuyInCache.set(cacheKey, {
+        value: responseBody,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + cacheTtlMs,
+      });
+    } else {
+      findBuyInCache.delete(cacheKey);
+    }
     if (!inFlightSettled) {
       inFlightSettled = true;
       resolveInFlight?.(responseBody);
       findBuyInInFlight.delete(cacheKey);
     }
-    console.log(`[find-buy-in] cached ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
-    return res.json(responseBody);
+    console.log(`[find-buy-in] ${cacheTtlMs > 0 ? "cached" : "not caching"} ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
+    return sendFindBuyInJson(responseBody);
   });
 
   // POST /api/operations/reverse-image-listings
