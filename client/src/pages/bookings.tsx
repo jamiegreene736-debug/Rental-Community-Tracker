@@ -65,6 +65,28 @@ interface GuestyReservation {
   fullyLinked: boolean;
 }
 
+type AutoFillSearchSummary = {
+  bedrooms: number;
+  scanned: number;
+  priced: number;
+  sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
+};
+
+type AutoFillComboOption = {
+  label: string;
+  bedrooms: number[];
+  totalCost: number | null;
+  selected: boolean;
+  unavailableReason?: string;
+  picks: Array<{
+    bedrooms: number;
+    sourceLabel: string;
+    title: string;
+    totalPrice: number;
+    url: string;
+  }>;
+};
+
 interface Candidate {
   buyIn: BuyIn;
   buyInNights: number;
@@ -116,6 +138,15 @@ function fmtMoney(n: number | string | null | undefined): string {
   const v = typeof n === "string" ? parseFloat(n) : (n ?? 0);
   if (!v && v !== 0) return "—";
   return `$${v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { credentials: "include", signal });
+  if (!res.ok) {
+    const text = sanitizeForChatText((await res.text()) || res.statusText, { maxLength: 4_000 });
+    throw new Error(`${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
 }
 
 // Accepts both pure date strings ("2026-10-17") and full ISO timestamps
@@ -226,8 +257,12 @@ function listingIdentityKeys(item: {
   airbnbAnchorUrl?: string | null;
   alternateUrls?: Array<string | null | undefined>;
   photoMatches?: Array<{ url?: string | null }>;
+  identityKeys?: Array<string | null | undefined>;
 }): string[] {
   const keys = new Set<string>();
+  for (const identityKey of item.identityKeys ?? []) {
+    if (identityKey) keys.add(identityKey);
+  }
   const urlKey = listingUrlKey(item.url);
   if (urlKey) keys.add(`url:${urlKey}`);
 
@@ -252,7 +287,7 @@ function listingIdentityKeys(item: {
     if (matchKey) keys.add(`url:${matchKey}`);
   }
 
-  return [...keys];
+  return Array.from(keys);
 }
 
 function hasUsedListingIdentity(used: Set<string>, item: Parameters<typeof listingIdentityKeys>[0]): boolean {
@@ -544,6 +579,46 @@ function AutoFillProgress({
   );
 }
 
+function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
+  if (options.length === 0) return null;
+  const selected = options.find((option) => option.selected);
+  return (
+    <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-medium text-emerald-900">
+          Cheapest combination{selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}
+        </p>
+        {selected && <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>}
+      </div>
+      <div className="mt-2 space-y-1">
+        {options.map((option) => (
+          <div
+            key={option.label}
+            className={`grid grid-cols-[1fr_auto] gap-3 rounded border px-2 py-1.5 ${
+              option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
+            }`}
+          >
+            <div className="min-w-0">
+              <p className="font-medium text-foreground">
+                {option.label}
+                {option.selected && <span className="ml-1 text-emerald-700">selected</span>}
+              </p>
+              <p className="truncate text-[11px] text-muted-foreground">
+                {option.totalCost == null
+                  ? option.unavailableReason ?? "Not enough verified options"
+                  : option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
+              </p>
+            </div>
+            <div className="text-right font-semibold tabular-nums">
+              {option.totalCost == null ? "—" : fmtMoney(option.totalCost)}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function nightsBetween(a: string | undefined | null, b: string | undefined | null): number {
   if (!a || !b) return 1;
   const da = new Date(a);
@@ -621,6 +696,9 @@ export default function Bookings() {
     });
   };
   const closeSlotSearchesForReservation = (reservation: GuestyReservation) => {
+    if (selectedPropertyId) {
+      void queryClient.cancelQueries({ queryKey: ["/api/operations/find-buy-in", selectedPropertyId] });
+    }
     setExpandedSlots((prev) => {
       const next = new Set(prev);
       for (const slot of reservation.slots) {
@@ -629,6 +707,7 @@ export default function Bookings() {
       return next;
     });
   };
+  const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
 
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
@@ -830,12 +909,6 @@ export default function Bookings() {
         });
       }
 
-      type AutoFillSearchSummary = {
-        bedrooms: number;
-        scanned: number;
-        priced: number;
-        sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
-      };
       type AutoFillResult = {
         slot: typeof emptySlots[number];
         picked: (LiveCandidate & { totalPrice: number }) | null;
@@ -905,7 +978,7 @@ export default function Bookings() {
         }
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
-          .map((unit) => {
+          .map((unit): LiveCandidate | null => {
             const listing = [...(unit.listings ?? [])]
               .filter((l) => l.totalPrice > 0)
               .sort((a, b) => {
@@ -915,6 +988,13 @@ export default function Bookings() {
                 return (a.totalPrice || 999999) - (b.totalPrice || 999999);
               })[0];
             if (!listing) return null;
+            const alternateUrls = (unit.listings ?? []).map((l) => l.url).filter(Boolean);
+            const identityKeys = listingIdentityKeys({
+              url: listing.url,
+              title: unit.unitTitle,
+              image: unit.image,
+              alternateUrls,
+            });
             return {
               source: listing.channel,
               sourceLabel: listing.channelLabel,
@@ -924,10 +1004,11 @@ export default function Bookings() {
               totalPrice: listing.totalPrice,
               bedrooms: listing.bedrooms ?? unit.bedrooms,
               image: unit.image,
-              alternateUrls: (unit.listings ?? []).map((l) => l.url).filter(Boolean),
+              alternateUrls,
+              identityKeys,
               verified: listing.verified,
               verifiedReason: listing.verifiedReason,
-            } satisfies LiveCandidate;
+            };
           })
           .filter((c): c is LiveCandidate => c !== null);
         const sourceCandidates = unitCandidates.length > 0 ? unitCandidates : (data.cheapest ?? []);
@@ -977,6 +1058,15 @@ export default function Bookings() {
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
           ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
           : "";
+        const sameUnitEvidenceUrls = Array.from(new Set([
+          ...(pick.alternateUrls ?? []),
+          pick.airbnbAnchorUrl,
+          ...(pick.photoMatches ?? []).map((m) => m.url),
+          pick.image,
+        ].filter((u): u is string => !!u && listingUrlKey(u) !== listingUrlKey(pick.url)))).slice(0, 8);
+        const identitySuffix = sameUnitEvidenceUrls.length > 0
+          ? ` · Same-unit evidence: ${sameUnitEvidenceUrls.join(" ")}`
+          : "";
         try {
           const created = await apiRequest("POST", "/api/buy-ins", {
             propertyId: selectedPropertyId,
@@ -988,7 +1078,7 @@ export default function Bookings() {
             costPaid: finalCost.toFixed(2),
             airbnbConfirmation: null,
             airbnbListingUrl: pick.url,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}`,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${identitySuffix}`,
             status: "active",
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -1029,14 +1119,33 @@ export default function Bookings() {
         return combos;
       };
 
-      const pickBestTwoUnitCombo = async (): Promise<{
+      type EvaluatedCombo = {
         combo: TwoUnitBedroomCombo;
         picks: LiveCandidate[];
         summaries: AutoFillSearchSummary[];
-        totalCost: number;
-      } | null> => {
+        totalCost: number | null;
+        unavailableReason?: string;
+      };
+      const comboOptionFrom = (evaluated: EvaluatedCombo, selected = false): AutoFillComboOption => ({
+        label: evaluated.combo.bedrooms.map((b) => `${b}BR`).join(" + "),
+        bedrooms: evaluated.combo.bedrooms,
+        totalCost: evaluated.totalCost,
+        selected,
+        unavailableReason: evaluated.unavailableReason,
+        picks: evaluated.picks.map((pick, index) => ({
+          bedrooms: evaluated.combo.bedrooms[index],
+          sourceLabel: pick.sourceLabel,
+          title: pick.title,
+          totalPrice: pick.totalPrice,
+          url: pick.url,
+        })),
+      });
+      const evaluateTwoUnitCombos = async (): Promise<{
+        best: EvaluatedCombo | null;
+        options: AutoFillComboOption[];
+      }> => {
         const combos = twoUnitBedroomCombos();
-        if (combos.length === 0) return null;
+        if (combos.length === 0) return { best: null, options: [] };
         const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
         const poolFor = (bedroomCount: number) => {
           const key = `${bedroomCount}|pm`;
@@ -1047,30 +1156,48 @@ export default function Bookings() {
           return promise;
         };
 
-        let best: { combo: TwoUnitBedroomCombo; picks: LiveCandidate[]; summaries: AutoFillSearchSummary[]; totalCost: number } | null = null;
+        const evaluatedCombos: EvaluatedCombo[] = [];
+        let best: EvaluatedCombo | null = null;
         for (const combo of combos) {
           const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
           const summaries: AutoFillSearchSummary[] = [];
+          let unavailableReason = "";
           for (const bedroomCount of combo.bedrooms) {
             const pool = await poolFor(bedroomCount);
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c));
-            if (!pick) break;
+            if (!pick) {
+              unavailableReason = `No unused verified ${bedroomCount}BR option`;
+              break;
+            }
             addUsedListingIdentity(used, pick);
             picks.push(pick);
           }
-          if (picks.length !== combo.bedrooms.length) continue;
-          const totalCost = picks.reduce((sum, p) => sum + p.totalPrice, 0);
-          if (!best || totalCost < best.totalCost) {
-            best = { combo, picks, summaries, totalCost };
+          const totalCost = picks.length === combo.bedrooms.length
+            ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
+            : null;
+          const evaluated: EvaluatedCombo = {
+            combo,
+            picks,
+            summaries,
+            totalCost,
+            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
+          };
+          evaluatedCombos.push(evaluated);
+          if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
+            best = evaluated;
           }
         }
-        return best;
+        return {
+          best,
+          options: evaluatedCombos.map((option) => comboOptionFrom(option, option === best)),
+        };
       };
 
       const results: AutoFillResult[] = [];
-      const comboChoice = await pickBestTwoUnitCombo();
+      const comboEvaluation = await evaluateTwoUnitCombos();
+      const comboChoice = comboEvaluation.best;
       if (comboChoice) {
         const totalBedrooms = comboChoice.combo.bedrooms.reduce((sum, n) => sum + n, 0);
         const comboLabel = `Two-unit ${comboChoice.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking`;
@@ -1084,7 +1211,7 @@ export default function Bookings() {
           );
           results.push(result);
         }
-        return { reservation, results };
+        return { reservation, results, comboOptions: comboEvaluation.options };
       }
 
       const plannedPicks: Array<{
@@ -1112,14 +1239,17 @@ export default function Bookings() {
             };
         results.push(slotResult);
       }
-      return { reservation, results };
+      return { reservation, results, comboOptions: comboEvaluation.options };
     },
-    onSuccess: ({ reservation, results }) => {
+    onSuccess: ({ reservation, results, comboOptions }) => {
       autoFillRunRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       setAutoFilling(null);
       setAutoFillStartedAtMs(null);
+      if (comboOptions.length > 0) {
+        setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
+      }
       const filled = results.filter((r) => r.picked);
       const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
       const payout = reservation.money?.hostPayout ?? 0;
@@ -1130,6 +1260,12 @@ export default function Bookings() {
       const estProfit = payout - existingCost - totalCost;
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
       const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
+      const selectedCombo = comboOptions.find((option) => option.selected);
+      const comboSummary = comboOptions.length > 0
+        ? ` · Compared ${comboOptions
+            .map((option) => `${option.label}: ${option.totalCost == null ? option.unavailableReason ?? "unavailable" : fmtMoney(option.totalCost)}`)
+            .join("; ")}${selectedCombo ? ` · Selected ${selectedCombo.label}` : ""}`
+        : "";
       if (filled.length === 0) {
         const uniqueSummaries = Array.from(
           new Map(results.map((r) => [r.searchSummary.bedrooms, r.searchSummary])).values(),
@@ -1158,9 +1294,10 @@ export default function Bookings() {
           title: hasVrboPick
             ? `Attached ${filled.length} Vrbo link${filled.length > 1 ? "s" : ""} for review`
             : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} for review`,
-          description: hasVrboPick
+          description: (hasVrboPick
             ? `A source returned a review link without a usable price. Re-run live search before confirming with the guest.`
-            : `A PM source returned a link without a usable price. Re-run live search before confirming with the guest.`
+            : `A PM source returned a link without a usable price. Re-run live search before confirming with the guest.`)
+            + comboSummary
             + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
       } else {
@@ -1171,6 +1308,7 @@ export default function Bookings() {
             : `Filled ${filled.length} / ${results.length} units`,
           description:
             `Total buy-in cost: $${totalCost.toLocaleString()} · Est. profit: $${estProfit.toLocaleString()}`
+            + comboSummary
             + (zeroCostFills.length > 0 ? ` · ${zeroCostFills.length} attached without live price — review before confirming` : "")
             + (airbnbPickCount > 0 ? ` · ⚠️ ${airbnbPickCount} Airbnb URL${airbnbPickCount > 1 ? "s" : ""} attached (TOS prohibits sublet — see slot notes)` : "")
             + (skipped.length ? ` · No PM/Booking/Airbnb candidate for: ${skipped.join(", ")} (open Find buy-in for those)` : ""),
@@ -1446,6 +1584,7 @@ export default function Bookings() {
                 const rowSidecarOnly = autoFilling === r._id
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
+                const comboOptions = lastAutoFillCombos[r._id] ?? [];
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
@@ -1577,6 +1716,7 @@ export default function Bookings() {
                             )}
                           </div>
                         )}
+                        {comboOptions.length > 0 && <ComboComparisonPanel options={comboOptions} />}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
                           return (
@@ -1811,6 +1951,10 @@ type LiveCandidate = {
   // every known listing URL in the cluster so Auto-fill can avoid
   // choosing the same unit again through another channel.
   alternateUrls?: string[];
+  // Precomputed identity keys from a grouped physical unit. These
+  // supplement URL/image/title matching when Auto-fill compares
+  // combination candidates.
+  identityKeys?: string[];
   // For PM candidates surfaced via reverse-image match against an
   // Airbnb listing: the anchor's URL + price. Auto-fill annotates the
   // buy-in note with these so the operator knows the price is a proxy
@@ -2048,6 +2192,7 @@ function LiveSearchSection({
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
+  const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -2059,20 +2204,25 @@ function LiveSearchSection({
   };
   const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+  useEffect(() => {
+    if (!slot.buyIn) return;
+    setSearchEnabled(false);
+    void queryClient.cancelQueries({ queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd] });
+  }, [slot.buyIn?.id, propertyId, slot.bedrooms, checkInYmd, checkOutYmd]);
 
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
     queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, refreshNonce],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
-      return apiRequest(
-        "GET",
+      return apiGetJson<FindBuyInResponse>(
         `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${noCache}`,
-      ).then((r) => r.json());
+        signal,
+      );
     },
-    enabled: !!checkInYmd && !!checkOutYmd,
+    enabled: searchEnabled && !!checkInYmd && !!checkOutYmd,
     staleTime: 0,
     refetchOnMount: "always",
     placeholderData: (previousData) => previousData,
@@ -2186,10 +2336,34 @@ function LiveSearchSection({
               covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
-          <Button size="sm" onClick={() => setEnabled(true)} data-testid="button-run-live-search">
+          <Button size="sm" onClick={() => setSearchEnabled(true)} data-testid="button-run-live-search">
             <Search className="h-3.5 w-3.5 mr-1.5" /> Search now
           </Button>
         </div>
+      </div>
+    );
+  }
+
+  if (!searchEnabled && slot.buyIn) {
+    return (
+      <div className="border rounded-lg p-4 text-sm bg-background flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <p className="font-medium text-sm">Buy-in attached</p>
+          <p className="text-xs text-muted-foreground truncate">
+            {fmtMoney(slot.buyIn.costPaid)} · {sourceLabelForUrl(slot.buyIn.airbnbListingUrl)}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setSearchStartedAtMs(Date.now());
+            setRefreshNonce((n) => n + 1);
+            setSearchEnabled(true);
+          }}
+        >
+          <Search className="h-3.5 w-3.5 mr-1" /> Run audit search
+        </Button>
       </div>
     );
   }
@@ -3899,6 +4073,7 @@ function RecordBuyInDialog({
       airbnbAnchorUrl: candidate.airbnbAnchorUrl,
       alternateUrls: candidate.alternateUrls,
       photoMatches: candidate.photoMatches,
+      identityKeys: candidate.identityKeys,
     }));
     if (candidateKeys.size === 0) return null;
     return reservation.slots.find(
