@@ -5374,7 +5374,7 @@ export async function registerRoutes(
     const contextAllows = (domain: string, haystack: string, source: string, position: number): boolean => {
       const highConfidenceVisual = source === "visual" && position <= 3;
       if (wrongPoipuKaiLocation(`${domain} ${haystack}`) && !highConfidenceVisual) return false;
-      if (!rentalSurface(domain, haystack)) return false;
+      if (!rentalSurface(domain, haystack) && !highConfidenceVisual) return false;
       if (!isPoipuKaiContext) return true;
       if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
       // Google Images/Lens often surfaces the owner site as an exact
