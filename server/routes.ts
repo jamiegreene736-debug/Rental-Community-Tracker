@@ -38,7 +38,7 @@ import {
 } from "./community-research";
 import { BUY_IN_RATES, getCommunityRegion } from "@shared/pricing-rates";
 import { checkCommunityType } from "@shared/community-type";
-import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage } from "./photo-labeler";
+import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
@@ -770,6 +770,25 @@ async function scrapeListingPhotos(
     if (photoUrls.length === 0) {
       photoUrls = await page.evaluate(() => {
         const candidates: string[] = [];
+        const push = (value: string | null | undefined) => {
+          if (value && value.startsWith("http")) candidates.push(value);
+        };
+        const pushSrcset = (value: string | null | undefined) => {
+          if (!value) return;
+          const options = value.split(",")
+            .map((part) => {
+              const [url, widthToken] = part.trim().split(/\s+/);
+              const width = widthToken?.endsWith("w") ? parseInt(widthToken, 10) : 0;
+              return { url, width: Number.isFinite(width) ? width : 0 };
+            })
+            .filter((part) => part.url?.startsWith("http"));
+          const best = options.reduce((a, b) => (b.width > a.width ? b : a), options[0]);
+          push(best?.url);
+        };
+
+        document.querySelectorAll('meta[property="og:image"], meta[name="twitter:image"], link[rel="image_src"]').forEach(el => {
+          push(el.getAttribute("content") || el.getAttribute("href"));
+        });
 
         // JSON-LD structured data often has image arrays
         document.querySelectorAll('script[type="application/ld+json"]').forEach(el => {
@@ -778,8 +797,8 @@ async function scrapeListingPhotos(
               if (!obj || typeof obj !== "object") return;
               const imgs = obj.image ? (Array.isArray(obj.image) ? obj.image : [obj.image]) : [];
               imgs.forEach((img: any) => {
-                if (typeof img === "string") candidates.push(img);
-                else if (img?.url) candidates.push(img.url);
+                if (typeof img === "string") push(img);
+                else if (img?.url) push(img.url);
               });
               Object.values(obj).forEach(v => pickImgs(v));
             }
@@ -790,7 +809,8 @@ async function scrapeListingPhotos(
         // img tags — collect src / data-src
         document.querySelectorAll("img").forEach(img => {
           const src = img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || "";
-          if (src.startsWith("http")) candidates.push(src);
+          push(src);
+          pushSrcset(img.getAttribute("srcset") || img.getAttribute("data-srcset"));
         });
 
         return [...new Set(candidates)];
@@ -2030,6 +2050,35 @@ export async function registerRoutes(
   };
   type ReverseImageListingCacheEntry = { value: { checkedUrl: string; matches: ReverseImageListingMatch[]; rawCount: number }; expiresAt: number };
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
+  type BuyInListingPhotoAudit = {
+    url: string;
+    role: "main" | "living-room" | "interior" | null;
+    label: string | null;
+    category: string | null;
+    confidence: number | null;
+    searched: boolean;
+    skippedReason: string | null;
+  };
+  type BuyInListingSiteMatch = ReverseImageListingMatch & {
+    matchedPhotoUrl: string;
+    matchedPhotoRole: NonNullable<BuyInListingPhotoAudit["role"]>;
+    matchedPhotoLabel: string | null;
+    matchedPhotoCategory: string | null;
+  };
+  type BuyInListingSitesCacheEntry = {
+    value: {
+      buyInId: number;
+      sourceUrl: string;
+      sourceLabel: string;
+      photos: BuyInListingPhotoAudit[];
+      matches: BuyInListingSiteMatch[];
+      rawCount: number;
+      generatedAt: string;
+      message?: string;
+    };
+    expiresAt: number;
+  };
+  const buyInListingSitesCache = new Map<string, BuyInListingSitesCacheEntry>();
   const FIND_BUY_IN_TTL_MS = 5 * 60_000;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
   // Railway's edge can return "Application failed to respond" when a
@@ -2056,6 +2105,167 @@ export async function registerRoutes(
     reverseImageListingCache.forEach((v, k) => { if (v.expiresAt <= now) expired.push(k); });
     for (const k of expired) reverseImageListingCache.delete(k);
   }
+  function evictExpiredBuyInListingSites(): void {
+    const now = Date.now();
+    const expired: string[] = [];
+    buyInListingSitesCache.forEach((v, k) => { if (v.expiresAt <= now) expired.push(k); });
+    for (const k of expired) buyInListingSitesCache.delete(k);
+  }
+
+  const normalizeListingSurfaceKey = (rawUrl: string | null | undefined): string => {
+    if (!rawUrl) return "";
+    try {
+      const u = new URL(rawUrl);
+      u.hash = "";
+      for (const key of Array.from(u.searchParams.keys())) {
+        if (/^(utm_|fbclid|gclid|msclkid|source_impression_id|federated_search_id|previous_page_section_name|check_?in|check_?out|arrival|departure|startDate|endDate|adults|group_adults)/i.test(key)) {
+          u.searchParams.delete(key);
+        }
+      }
+      return `${u.hostname.replace(/^www\./, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase() || "/"}`;
+    } catch {
+      return String(rawUrl).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+    }
+  };
+
+  const domainFromUrl = (rawUrl: string | null | undefined): string => {
+    try {
+      return new URL(String(rawUrl ?? "")).hostname.replace(/^www\./, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+
+  const listingSourceLabel = (rawUrl: string): string => {
+    const host = domainFromUrl(rawUrl);
+    if (/airbnb\./.test(host)) return "Airbnb";
+    if (/(vrbo|homeaway)\./.test(host)) return "Vrbo";
+    if (/booking\.com$/.test(host)) return "Booking.com";
+    return host || "listing";
+  };
+
+  const uniqueScrapedPhotos = (photos: ScrapedPhoto[]): ScrapedPhoto[] => {
+    const seen = new Set<string>();
+    const out: ScrapedPhoto[] = [];
+    for (const photo of photos) {
+      if (!photo.url || !/^https?:\/\//i.test(photo.url)) continue;
+      const key = normalizeListingSurfaceKey(photo.url);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(photo);
+    }
+    return out;
+  };
+
+  const mapLimited = async <T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> => {
+    const results: R[] = new Array(items.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(Math.max(1, limit), Math.max(1, items.length)) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index], index);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  };
+
+  const PRIVATE_INTERIOR_CATEGORIES = new Set(["Living Areas", "Bedrooms", "Kitchen", "Dining", "Bathrooms"]);
+  const SHARED_PHOTO_CATEGORIES = new Set(["Building Exterior", "Views", "Outdoor & Lanai", "Other", "Reject"]);
+  const SHARED_PHOTO_WORDS = /\b(pool|spa|hot[ -]?tub|beach|ocean|view|resort|grounds|garden|landscap|exterior|building|aerial|drone|map|clubhouse|tennis|pickleball|bbq|grill|parking|garage|fitness|gym|lobby|front desk|logo|icon|sprite|avatar|profile|amenity|amenities)\b/i;
+
+  const auditBuyInListingPhotos = async (photos: ScrapedPhoto[]): Promise<BuyInListingPhotoAudit[]> => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const sample = uniqueScrapedPhotos(photos).slice(0, 10);
+    const audited = await mapLimited(sample, anthropicKey ? 3 : 1, async (photo) => {
+      const label = anthropicKey
+        ? await labelPhotoFromUrl(photo.url, "unit", anthropicKey).catch(() => null)
+        : null;
+      const category = label?.category ?? null;
+      const categoryAllowed = category ? PRIVATE_INTERIOR_CATEGORIES.has(category) : false;
+      const categoryShared = category ? SHARED_PHOTO_CATEGORIES.has(category) : false;
+      const heuristicShared = SHARED_PHOTO_WORDS.test(`${photo.url} ${photo.title} ${photo.source}`);
+      const skippedReason = categoryShared
+        ? `${category} skipped to avoid community/shared-photo false matches`
+        : !categoryAllowed && label
+        ? `${category || "Photo"} skipped to avoid non-private-photo matches`
+        : !label && heuristicShared
+        ? "Skipped by filename/source heuristic as likely shared amenity or exterior"
+        : null;
+      return {
+        url: photo.url,
+        role: null,
+        label: label?.label ?? null,
+        category,
+        confidence: label?.confidence ?? null,
+        searched: false,
+        skippedReason,
+      } satisfies BuyInListingPhotoAudit;
+    });
+
+    const selectedKeys = new Set<string>();
+    const select = (photo: BuyInListingPhotoAudit | undefined, role: NonNullable<BuyInListingPhotoAudit["role"]>) => {
+      if (!photo || photo.skippedReason) return false;
+      const key = normalizeListingSurfaceKey(photo.url);
+      if (!key || selectedKeys.has(key)) return false;
+      selectedKeys.add(key);
+      photo.role = role;
+      photo.searched = true;
+      return true;
+    };
+
+    select(audited[0], "main");
+    select(audited.find((photo) => photo.category === "Living Areas"), "living-room");
+    if (selectedKeys.size === 0) {
+      select(audited.find((photo) => !photo.skippedReason), "main");
+    }
+    if (selectedKeys.size < 2) {
+      select(audited.find((photo) => !photo.skippedReason && !selectedKeys.has(normalizeListingSurfaceKey(photo.url))), "interior");
+    }
+    return audited;
+  };
+
+  const scrapeAirbnbPropertyImagesFallback = async (sourceUrl: string): Promise<ScrapedPhoto[]> => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    const match = sourceUrl.match(/airbnb\.com\/rooms\/(?:plus\/)?(\d+)/i);
+    if (!apiKey || !match) return [];
+    try {
+      const params = new URLSearchParams({
+        engine: "airbnb_property",
+        property_id: match[1],
+        adults: "2",
+        currency: "USD",
+        api_key: apiKey,
+      });
+      const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!resp.ok) return [];
+      const data = await resp.json() as any;
+      const property = data?.property ?? data;
+      const rows = [
+        ...(Array.isArray(property?.images) ? property.images : []),
+        ...(Array.isArray(property?.photos) ? property.photos : []),
+      ];
+      const urls = rows
+        .map((row: any) => typeof row === "string"
+          ? row
+          : row?.url ?? row?.image ?? row?.large ?? row?.thumbnail ?? row?.picture_url ?? row?.original)
+        .filter((url: unknown): url is string => typeof url === "string" && /^https?:\/\//i.test(url));
+      return Array.from(new Set(urls)).map((url) => ({
+        url,
+        title: "Airbnb listing photo",
+        source: "Airbnb",
+        sourceLink: sourceUrl,
+      }));
+    } catch {
+      return [];
+    }
+  };
 
   // GET /api/operations/find-buy-in?propertyId=X&bedrooms=N&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD
   // Response:
@@ -5259,6 +5469,141 @@ export async function registerRoutes(
       expiresAt: Date.now() + REVERSE_IMAGE_LISTING_TTL_MS,
     });
     return res.json({ ...value, matches: matches.slice(0, maxResults), fromCache: false });
+  });
+
+  // POST /api/buy-ins/:id/listing-sites
+  // Attached buy-in row action: scrape the source listing's own gallery,
+  // skip shared community/exterior/amenity photos, then run Lens on the
+  // main private photo plus a living-room/private-interior fallback. This
+  // answers "where else is this exact buy-in unit listed?" without using
+  // our community folders, which are intentionally noisy for reverse search.
+  app.post("/api/buy-ins/:id/listing-sites", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid buy-in id" });
+
+    try {
+      const buyIn = await storage.getBuyIn(id);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      const sourceUrl = String(buyIn.airbnbListingUrl ?? "").trim();
+      if (!sourceUrl) return res.status(400).json({ error: "Buy-in has no listing URL to scan" });
+      try {
+        const parsed = new URL(sourceUrl);
+        if (!/^https?:$/.test(parsed.protocol)) throw new Error("unsupported protocol");
+      } catch {
+        return res.status(400).json({ error: "Buy-in listing URL is invalid" });
+      }
+
+      const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
+      const sourceKey = normalizeListingSurfaceKey(sourceUrl);
+      const cacheKey = `buy-in-sites:${sourceKey}`;
+      evictExpiredBuyInListingSites();
+      const cached = buyInListingSitesCache.get(cacheKey);
+      if (useCache && cached && cached.expiresAt > Date.now()) {
+        return res.json({ ...cached.value, buyInId: id, fromCache: true });
+      }
+
+      let scraped = await scrapeListingPhotos(sourceUrl);
+      if (scraped.length === 0) {
+        scraped = await scrapeAirbnbPropertyImagesFallback(sourceUrl);
+      }
+      const auditedPhotos = await auditBuyInListingPhotos(scraped);
+      const selectedPhotos = auditedPhotos.filter((photo): photo is BuyInListingPhotoAudit & { role: NonNullable<BuyInListingPhotoAudit["role"]> } =>
+        photo.searched && !!photo.role,
+      );
+      const sourceDomain = domainFromUrl(sourceUrl);
+      const sourceTitle = [
+        buyIn.unitLabel,
+        buyIn.propertyName,
+        buyIn.notes?.split(" · ")[0] ?? "",
+      ].filter(Boolean).join(" · ");
+
+      const matches: BuyInListingSiteMatch[] = [];
+      const seen = new Set<string>();
+      let rawCount = 0;
+      const port = process.env.PORT || "5000";
+      const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
+
+      for (const photo of selectedPhotos) {
+        try {
+          const response = await fetch(lookupEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageUrl: photo.url,
+              sourceUrl,
+              title: sourceTitle,
+              resortName: buyIn.propertyName,
+              community: buyIn.propertyName,
+              maxResults: 25,
+            }),
+            signal: AbortSignal.timeout(75_000),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            photo.skippedReason = body?.error ? `Reverse search failed: ${body.error}` : `Reverse search failed (${response.status})`;
+            photo.searched = false;
+            continue;
+          }
+          rawCount += Number(body?.rawCount ?? 0) || 0;
+          for (const match of Array.isArray(body?.matches) ? body.matches as ReverseImageListingMatch[] : []) {
+            if (match.source === "known-source") continue;
+            if (normalizeListingSurfaceKey(match.url) === sourceKey) continue;
+            if (domainFromUrl(match.url) === sourceDomain) continue;
+            const key = `${match.platformKey}|${match.domain}|${normalizeListingSurfaceKey(match.url)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            matches.push({
+              ...match,
+              matchedPhotoUrl: photo.url,
+              matchedPhotoRole: photo.role,
+              matchedPhotoLabel: photo.label,
+              matchedPhotoCategory: photo.category,
+            });
+          }
+        } catch (e: any) {
+          photo.skippedReason = e?.name === "AbortError"
+            ? "Reverse search timed out for this photo"
+            : `Reverse search failed: ${e?.message ?? String(e)}`;
+          photo.searched = false;
+        }
+      }
+
+      matches.sort((a, b) => {
+        const rank = (m: BuyInListingSiteMatch): number => {
+          if (m.platformKey === "airbnb" || m.platformKey === "vrbo" || m.platformKey === "booking") return 0;
+          if (m.platformKey === "pm") return 1;
+          return 2;
+        };
+        return rank(a) - rank(b) || a.position - b.position || a.domain.localeCompare(b.domain);
+      });
+
+      const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;
+      const value = {
+        buyInId: id,
+        sourceUrl,
+        sourceLabel: listingSourceLabel(sourceUrl),
+        photos: auditedPhotos,
+        matches: matches.slice(0, 25),
+        rawCount,
+        generatedAt: new Date().toISOString(),
+        ...(scraped.length === 0
+          ? { message: "No listing photos could be extracted from the source page." }
+          : searchedCount === 0
+          ? { message: "Listing photos were found, but all were classified as shared/exterior/amenity-style photos and skipped." }
+          : {}),
+      };
+      buyInListingSitesCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + REVERSE_IMAGE_LISTING_TTL_MS,
+      });
+      return res.json({ ...value, fromCache: false });
+    } catch (err: any) {
+      console.error("[buy-in listing-sites] error:", err);
+      return res.status(500).json({ error: err?.message ?? "Failed to scan listing sites" });
+    }
   });
 
   // ─── Availability verification ─────────────────────────────────────────

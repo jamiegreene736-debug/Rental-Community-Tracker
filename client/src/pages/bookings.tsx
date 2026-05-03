@@ -680,6 +680,10 @@ export default function Bookings() {
     | { buyIn: BuyIn; reservation: GuestyReservation }
     | null
   >(null);
+  const [listingSitesTarget, setListingSitesTarget] = useState<
+    | { buyIn: BuyIn; reservation: GuestyReservation; slot: SlotInfo }
+    | null
+  >(null);
   // Slots whose inline live-search panel is expanded. Operators can open
   // these manually for an audit search after Auto-fill finishes. Auto-fill
   // itself keeps them closed so it does not launch a second, unrelated
@@ -1796,6 +1800,18 @@ export default function Bookings() {
                                       {parseFloat(String(slot.buyIn.costPaid ?? 0)) === 0 ? "Verify rate" : "Re-verify"}
                                     </Button>
                                   )}
+                                  {slot.buyIn.airbnbListingUrl && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => slot.buyIn && setListingSitesTarget({ buyIn: slot.buyIn, reservation: r, slot })}
+                                      data-testid={`button-listing-sites-${r._id}-${slot.unitId}`}
+                                      title="Scan this listing's private photos for other websites"
+                                    >
+                                      <Globe className="h-3.5 w-3.5 mr-1" />
+                                      Find sites
+                                    </Button>
+                                  )}
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -1893,6 +1909,13 @@ export default function Bookings() {
           onClose={() => setVerifyTarget(null)}
         />
       )}
+      {listingSitesTarget && (
+        <BuyInListingSitesDialog
+          buyIn={listingSitesTarget.buyIn}
+          unitLabel={listingSitesTarget.slot.unitLabel}
+          onClose={() => setListingSitesTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1926,6 +1949,178 @@ function CandidateList({
         slot={slot}
       />
     </div>
+  );
+}
+
+function photoRoleLabel(role: BuyInListingSitePhoto["role"]): string {
+  if (role === "living-room") return "Living room";
+  if (role === "interior") return "Interior";
+  if (role === "main") return "Main";
+  return "Skipped";
+}
+
+function BuyInListingSitesDialog({
+  buyIn,
+  unitLabel,
+  onClose,
+}: {
+  buyIn: BuyIn;
+  unitLabel: string;
+  onClose: () => void;
+}) {
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const { data, isLoading, isFetching, isError, error } = useQuery<BuyInListingSitesResponse>({
+    queryKey: ["/api/buy-ins", buyIn.id, "listing-sites", refreshNonce],
+    queryFn: () => apiRequest(
+      "POST",
+      `/api/buy-ins/${buyIn.id}/listing-sites${refreshNonce > 0 ? "?nocache=1" : ""}`,
+      refreshNonce > 0 ? { nocache: true } : {},
+    ).then((r) => r.json()),
+    staleTime: 12 * 60 * 60_000,
+  });
+  const photos = data?.photos ?? [];
+  const searchedPhotos = photos.filter((photo) => photo.searched);
+  const skippedPhotos = photos.filter((photo) => !photo.searched);
+  const matches = data?.matches ?? [];
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Find sites for {unitLabel}</DialogTitle>
+          <DialogDescription>
+            {buyIn.airbnbListingUrl ? (
+              <a
+                href={buyIn.airbnbListingUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline inline-flex items-center gap-1"
+              >
+                Source listing on {sourceLabelForUrl(buyIn.airbnbListingUrl)}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            ) : (
+              "No source listing URL attached"
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          {(isLoading || isFetching) && !data && (
+            <div className="rounded-lg border p-6 text-sm text-muted-foreground text-center">
+              <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
+              Scanning listing photos and checking matching websites…
+            </div>
+          )}
+
+          {isError && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 inline mr-1" />
+              {(error as Error).message}
+            </div>
+          )}
+
+          {data && (
+            <>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-xs text-muted-foreground">
+                  {searchedPhotos.length} photo{searchedPhotos.length === 1 ? "" : "s"} searched
+                  {skippedPhotos.length > 0 ? ` · ${skippedPhotos.length} skipped` : ""}
+                  {data.fromCache ? " · cached" : ""}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRefreshNonce((n) => n + 1)}
+                  disabled={isFetching}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isFetching ? "animate-spin" : ""}`} />
+                  Refresh
+                </Button>
+              </div>
+
+              {data.message && (
+                <div className="rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900">
+                  {data.message}
+                </div>
+              )}
+
+              {photos.length > 0 && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {photos.slice(0, 8).map((photo, idx) => (
+                    <div key={`${photo.url}-${idx}`} className={`rounded-md border overflow-hidden ${photo.searched ? "bg-background" : "bg-muted/30 opacity-75"}`}>
+                      <div className="aspect-video bg-muted">
+                        <img src={photo.url} alt="" className="h-full w-full object-cover" />
+                      </div>
+                      <div className="p-2 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <Badge variant={photo.searched ? "default" : "outline"} className="text-[9px]">
+                            {photoRoleLabel(photo.role)}
+                          </Badge>
+                          {photo.confidence != null && (
+                            <span className="text-[9px] text-muted-foreground">{Math.round(photo.confidence * 100)}%</span>
+                          )}
+                        </div>
+                        <p className="text-[11px] font-medium truncate" title={photo.label ?? photo.category ?? ""}>
+                          {photo.label ?? photo.category ?? "Photo"}
+                        </p>
+                        {photo.skippedReason && (
+                          <p className="text-[10px] text-muted-foreground line-clamp-2" title={photo.skippedReason}>
+                            {photo.skippedReason}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="rounded-lg border overflow-hidden">
+                <div className="px-3 py-2 border-b bg-muted/30 flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Matching websites
+                  </p>
+                  <span className="text-[11px] text-muted-foreground">
+                    {matches.length} found
+                  </span>
+                </div>
+                {matches.length === 0 ? (
+                  <p className="p-4 text-sm text-muted-foreground">
+                    No other listing sites found from the selected private photos.
+                  </p>
+                ) : (
+                  <div className="divide-y">
+                    {matches.map((match, idx) => (
+                      <a
+                        key={`${match.domain}-${idx}`}
+                        href={match.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors"
+                        data-testid={`buy-in-listing-site-${idx}`}
+                      >
+                        <Badge className={`text-[9px] shrink-0 ${sourceBadgeClass(match.platformKey)}`}>
+                          {match.platform}
+                        </Badge>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate" title={match.title}>{match.title}</p>
+                          <p className="text-[11px] text-muted-foreground truncate">
+                            {match.domain}
+                            {match.matchedPhotoRole ? ` · ${photoRoleLabel(match.matchedPhotoRole)}` : ""}
+                            {match.matchedPhotoLabel ? ` · ${match.matchedPhotoLabel}` : ""}
+                          </p>
+                        </div>
+                        <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2002,6 +2197,10 @@ type ReverseImageListingMatch = {
   url: string;
   source: string;
   position: number;
+  matchedPhotoUrl?: string;
+  matchedPhotoRole?: "main" | "living-room" | "interior";
+  matchedPhotoLabel?: string | null;
+  matchedPhotoCategory?: string | null;
 };
 
 type ReverseImageLookupState =
@@ -2009,6 +2208,28 @@ type ReverseImageLookupState =
   | { status: "loading" }
   | { status: "loaded"; matches: ReverseImageListingMatch[]; fromCache: boolean }
   | { status: "error"; message: string };
+
+type BuyInListingSitePhoto = {
+  url: string;
+  role: "main" | "living-room" | "interior" | null;
+  label: string | null;
+  category: string | null;
+  confidence: number | null;
+  searched: boolean;
+  skippedReason: string | null;
+};
+
+type BuyInListingSitesResponse = {
+  buyInId: number;
+  sourceUrl: string;
+  sourceLabel: string;
+  photos: BuyInListingSitePhoto[];
+  matches: ReverseImageListingMatch[];
+  rawCount: number;
+  generatedAt: string;
+  message?: string;
+  fromCache?: boolean;
+};
 
 type FindBuyInResponse = {
   community: string;
