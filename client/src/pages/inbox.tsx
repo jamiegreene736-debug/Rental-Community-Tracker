@@ -172,10 +172,13 @@ interface GuestyReservation {
   source?: string;
   confirmationCode?: string;
   nightsCount?: number;
+  createdAt?: string;
+  confirmedAt?: string;
 }
 
 const TRIGGER_OPTIONS = [
   { value: "booking_confirmed",    label: "When booking is confirmed" },
+  { value: "days_after_booking",   label: "X days after booking" },
   { value: "days_before_checkin",  label: "X days before check-in" },
   { value: "day_of_checkin",       label: "Day of check-in" },
   { value: "days_before_checkout", label: "X days before check-out" },
@@ -199,9 +202,7 @@ This confirms your reservation at {property_name} for {check_in_date} through {c
 
 Confirmation code: {confirmation_code}
 
-What to expect: this is a bundled stay, and the listing photos are representative sample photos. Your assigned units will match the bedroom count and resort/community standard, but the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. We will send final unit/access details closer to arrival.
-
-If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.
+This stay is set up as two units that are minutes from each other. We will send more details about the unit setup in a follow-up message.
 
 We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
 
@@ -209,15 +210,17 @@ Thanks,
 VacationRentalExpertz`,
   },
   {
-    name: "30-Day What To Expect",
-    trigger: "days_before_checkin",
-    daysOffset: 30,
+    name: "1-Week Representative Units Follow-Up",
+    trigger: "days_after_booking",
+    daysOffset: 7,
     isActive: true,
     body: `Hi {guest_name},
 
-Your stay at {property_name} is about a month away, so I wanted to share a quick reminder of what to expect.
+I wanted to follow up with a little more detail about what to expect for your stay at {property_name}.
 
-The listing photos are representative sample photos for this bundled stay. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.
+This is a bundled stay made up of two nearby units that are minutes from each other. The listing photos are representative sample photos, so the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.
+
+If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.
 
 Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.
 
@@ -301,6 +304,7 @@ VacationRentalExpertz`,
 function triggerLabel(trigger: string, daysOffset: number): string {
   switch (trigger) {
     case "booking_confirmed": return "On booking confirmation";
+    case "days_after_booking": return `${daysOffset} day${daysOffset > 1 ? "s" : ""} after booking`;
     case "days_before_checkin": return daysOffset === 0 ? "Day of check-in" : `${daysOffset} day${daysOffset > 1 ? "s" : ""} before check-in`;
     case "day_of_checkin": return "Day of check-in";
     case "days_before_checkout": return `${daysOffset} day${daysOffset > 1 ? "s" : ""} before check-out`;
@@ -513,9 +517,7 @@ function buildBookingConfirmationBody(args: {
     if (total > 0) lines.push(`Remaining balance: ${formatMoney(balance)}`);
   }
   lines.push(``);
-  lines.push(`What to expect: this is a bundled stay, and the listing photos are representative sample photos. Your assigned units will match the bedroom count and resort/community standard, but the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. We will send final unit/access details closer to arrival.`);
-  lines.push(``);
-  lines.push(`If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.`);
+  lines.push(`This stay is set up as two units that are minutes from each other. We will send more details about the unit setup in a follow-up message.`);
   lines.push(``);
   lines.push(`We will send your detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.`);
   lines.push(``);
@@ -525,7 +527,7 @@ function buildBookingConfirmationBody(args: {
   return lines.join("\n");
 }
 
-function buildThirtyDayExpectationsBody(args: {
+function buildRepresentativeUnitsFollowUpBody(args: {
   guestFirstName: string;
   propertyName: string;
   checkInIso?: string;
@@ -533,11 +535,13 @@ function buildThirtyDayExpectationsBody(args: {
   const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
-    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is about a month away, so I wanted to share a quick reminder of what to expect.`,
+    `I wanted to follow up with a little more detail about what to expect for your stay${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   lines.push(``);
-  lines.push(`The listing photos are representative sample photos for this bundled stay. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.`);
+  lines.push(`This is a bundled stay made up of two nearby units that are minutes from each other. The listing photos are representative sample photos, so the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.`);
+  lines.push(``);
+  lines.push(`If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.`);
   lines.push(``);
   lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
   lines.push(``);
@@ -871,7 +875,7 @@ function TemplateEditor({
   const [daysOffset, setDaysOffset] = useState(template?.daysOffset ?? 0);
   const [body, setBody] = useState(template?.body ?? "");
   const [isActive, setIsActive] = useState(template?.isActive ?? true);
-  const needsDays = trigger === "days_before_checkin" || trigger === "days_before_checkout" || trigger === "days_after_checkout";
+  const needsDays = trigger === "days_after_booking" || trigger === "days_before_checkin" || trigger === "days_before_checkout" || trigger === "days_after_checkout";
 
   const insertTag = (tag: string) => setBody(b => b + tag);
 
@@ -1160,7 +1164,7 @@ export default function InboxPage() {
     bookingTotal,
     totalPaid,
   }: {
-    kind: "booking" | "thirty-day" | "local-tips" | "day-before" | "post-stay";
+    kind: "booking" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
@@ -1173,8 +1177,8 @@ export default function InboxPage() {
     const units = arrivalDetails?.units ?? [];
     const body = kind === "booking"
       ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
-      : kind === "thirty-day"
-        ? buildThirtyDayExpectationsBody({ guestFirstName, propertyName, checkInIso })
+      : kind === "representative-follow-up"
+        ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
         : kind === "local-tips"
           ? buildLocalTipsBody({ guestFirstName, propertyName, units })
           : kind === "day-before"
@@ -2360,6 +2364,7 @@ export default function InboxPage() {
                             const checkOutIso = res?.checkOutDateLocalized ?? res?.checkOut;
                             const checkInDate = parseStayDate(checkInIso);
                             const checkOutDate = parseStayDate(checkOutIso);
+                            const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
                             const postBodies = posts
                               .filter((p: any) => isHostPost(p))
                               .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""));
@@ -2411,19 +2416,19 @@ export default function InboxPage() {
                                 title: "Booking confirmation / receipt",
                                 due: null as Date | null,
                                 dueLabel: "At booking",
-                                sent: wasSent(/reservation.+confirmed|booking.+confirmed|booking total|paid to date/i),
+                                sent: wasSent(/reservation.+confirmed|booking.+confirmed|booking total|paid to date|two units.+minutes/i),
                                 detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
                                 testId: "button-draft-booking-confirmation",
                                 onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
                               },
                               {
-                                title: "30-day sample photos / what to expect",
-                                due: checkInDate ? addDays(checkInDate, -30) : null,
-                                dueLabel: "30 days before arrival",
-                                sent: wasSent(/sample photos|what to expect|representative sample photos/i),
-                                detail: "Sets expectations before unit assignment",
-                                testId: "button-draft-thirty-day-expectations",
-                                onClick: () => draftStayTemplate({ kind: "thirty-day", ...draftCommon }),
+                                title: "1-week representative units follow-up",
+                                due: bookingDate ? addDays(bookingDate, 7) : null,
+                                dueLabel: "1 week after booking",
+                                sent: wasSent(/representative sample photos|full refund and cancel|not what you expected|bundled stay made up of two/i),
+                                detail: "Explains sample photos and refund option",
+                                testId: "button-draft-representative-follow-up",
+                                onClick: () => draftStayTemplate({ kind: "representative-follow-up", ...draftCommon }),
                               },
                               {
                                 title: "14-day arrival details",
