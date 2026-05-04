@@ -362,6 +362,18 @@ export default function AddSingleListing() {
             const retry = await retryRes.json();
             const retryPhotos = Array.isArray(retry.photos) ? retry.photos.slice(0, 25) : [];
             setUnit1Photos(retryPhotos);
+            // CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+            // fetch-unit-photos returns `facts: { bedrooms?, bathrooms? }`
+            // alongside photos (added in Load-Bearing #34's fold-in).
+            // If the retry recovered facts the find-clean-unit scrape
+            // missed, fold them into zillowFacts so the wizard shows
+            // real BR/BA on Step 2 instead of "?".
+            if (retry.facts && (retry.facts.bedrooms != null || retry.facts.bathrooms != null)) {
+              setZillowFacts((prev) => ({
+                bedrooms: retry.facts.bedrooms ?? prev.bedrooms,
+                bathrooms: retry.facts.bathrooms ?? prev.bathrooms,
+              }));
+            }
             if (retryPhotos.length === 0) {
               toast({
                 title: "Photos didn't scrape",
@@ -984,13 +996,26 @@ export default function AddSingleListing() {
                   <div><strong>Auto-discovered unit:</strong></div>
                   <div className="text-foreground">{streetAddress}, {pickedCity?.city}, {pickedCity?.state}</div>
                   <div className="text-xs text-muted-foreground">
-                    {zillowFacts.bedrooms ?? "?"} BR · {zillowFacts.bathrooms ?? "?"} BA · sourced from{" "}
+                    {/* CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+                        Show "—" instead of "?" when the Zillow scrape didn't
+                        return bathrooms — looks intentional rather than broken.
+                        The Listing Draft step (Step 4) fills this in with a
+                        Claude-generated estimate, so this is just a transient
+                        display while the scrape is partial. */}
+                    {zillowFacts.bedrooms ?? findResult.unit.bedrooms} BR
+                    {zillowFacts.bathrooms != null ? ` · ${zillowFacts.bathrooms} BA` : " · BA TBD"}
+                    {" · sourced from "}
                     <a href={findResult.unit.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
                       Zillow <ExternalLink className="h-3 w-3" />
                     </a>
                   </div>
+                  {zillowFacts.bathrooms == null && (
+                    <div className="text-[11px] text-muted-foreground italic">
+                      Bathroom count wasn't returned by the Zillow scrape — Claude will estimate it on Step 4 (you can edit there).
+                    </div>
+                  )}
                   <div className="text-xs text-muted-foreground">
-                    Tried {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} before finding a clean match.
+                    Walked {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} through the OTA cross-listing check before picking this one.
                   </div>
                 </div>
 
@@ -1049,22 +1074,35 @@ export default function AddSingleListing() {
                   </Button>
                 </div>
 
-                {findResult.attempts.length > 1 && (
-                  <details className="mt-4 text-xs">
-                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                      Why we skipped {findResult.attempts.length - 1} other candidate{findResult.attempts.length - 1 === 1 ? "" : "s"}
-                    </summary>
-                    <ul className="mt-2 space-y-1 pl-3">
-                      {findResult.attempts.slice(0, -1).map((a, i) => (
-                        <li key={`${a.url}-${i}`} className="text-muted-foreground">
-                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
-                            Candidate {i + 1}
-                          </a>: {a.rejectedBecause || "skipped"}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
+                {(() => {
+                  // CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+                  // Filter the disclosure to attempts whose URL doesn't
+                  // match the picked unit. Earlier slice(0, -1) was wrong
+                  // for the text-only-fallback case — the matched
+                  // candidate isn't always last in attempts[] (we walk
+                  // every candidate before deciding when no full match
+                  // exists). URL-based filtering correctly identifies the
+                  // skipped set in both cases.
+                  const matchedUrl = findResult.unit.url.toLowerCase();
+                  const skipped = findResult.attempts.filter((a) => a.url.toLowerCase() !== matchedUrl);
+                  if (skipped.length === 0) return null;
+                  return (
+                    <details className="mt-4 text-xs">
+                      <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                        Why we skipped {skipped.length} other candidate{skipped.length === 1 ? "" : "s"}
+                      </summary>
+                      <ul className="mt-2 space-y-1 pl-3">
+                        {skipped.map((a, i) => (
+                          <li key={`${a.url}-${i}`} className="text-muted-foreground">
+                            <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
+                              Candidate {i + 1}
+                            </a>: {a.rejectedBecause || "skipped"}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  );
+                })()}
               </>
             )}
 
