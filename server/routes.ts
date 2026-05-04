@@ -59,7 +59,7 @@ import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimit
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
-import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import { unitBuilderData, getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 
 // Fetch the latest Guesty login verification code from the operator's Gmail
 // inbox via IMAP. Polls for up to 90s (checking every 5s) so the server can
