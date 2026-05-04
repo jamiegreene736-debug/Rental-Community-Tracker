@@ -5988,7 +5988,7 @@ export async function registerRoutes(
       }
 
       const today = new Date().toISOString().slice(0, 10);
-      const fields = encodeURIComponent("_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money source integration confirmationCode preApproveState");
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState");
       // Guesty Open API requires the JSON `filters=[...]` syntax for
       // listingId — the simple `listingId=X` query param is silently
       // ignored, so the account-wide reservation list comes back

@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -24,6 +25,7 @@ import {
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
+  WalletCards, Landmark, Clock3,
 } from "lucide-react";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
@@ -38,6 +40,7 @@ interface SlotInfo extends UnitConfig {
 interface GuestyReservation {
   _id: string;
   status: string;
+  createdAt?: string;
   checkIn: string;
   checkOut: string;
   // Guesty exposes timezone-localized date-only versions of check-in/out
@@ -55,7 +58,10 @@ interface GuestyReservation {
     balanceDue?: number;
     isFullyPaid?: boolean;
     totalRefunded?: number;
+    payments?: GuestyPayment[];
+    paymentSchedule?: GuestyPayment[];
   };
+  payments?: GuestyPayment[];
   source?: string;
   integration?: { platform?: string };
   confirmationCode?: string;
@@ -63,6 +69,16 @@ interface GuestyReservation {
   slotsFilled: number;
   slotsTotal: number;
   fullyLinked: boolean;
+}
+
+interface GuestyPayment {
+  amount?: number | string;
+  paidAt?: string;
+  collectedAt?: string;
+  processedAt?: string;
+  createdAt?: string;
+  date?: string;
+  status?: string;
 }
 
 type AutoFillSearchSummary = {
@@ -625,6 +641,65 @@ function nightsBetween(a: string | undefined | null, b: string | undefined | nul
   const db = new Date(b);
   if (isNaN(da.getTime()) || isNaN(db.getTime())) return 1;
   return Math.max(1, Math.round((+db - +da) / 86400000));
+}
+
+function asMoneyNumber(v: unknown): number {
+  return typeof v === "number" ? v : typeof v === "string" ? Number(v) || 0 : 0;
+}
+
+function addDays(date: Date, days: number): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function nextBusinessDay(date: Date): Date {
+  const d = new Date(date);
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() + 1);
+  }
+  return d;
+}
+
+function parseDateCandidate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function paymentDateOf(r: GuestyReservation): { date: Date | null; source: "payment" | "reservation" | "unknown" } {
+  const payments = [
+    ...(Array.isArray(r.payments) ? r.payments : []),
+    ...(Array.isArray(r.money?.payments) ? r.money.payments : []),
+    ...(Array.isArray(r.money?.paymentSchedule) ? r.money.paymentSchedule : []),
+  ];
+  const paidDates = payments
+    .map((p) => parseDateCandidate(p.paidAt ?? p.collectedAt ?? p.processedAt ?? p.date ?? p.createdAt))
+    .filter((d): d is Date => !!d)
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (paidDates.length > 0) return { date: paidDates[0], source: "payment" };
+
+  const created = parseDateCandidate(r.createdAt);
+  if ((r.money?.totalPaid ?? 0) > 0 && created) return { date: created, source: "reservation" };
+  return { date: null, source: "unknown" };
+}
+
+function getBuyInCost(r: GuestyReservation): number {
+  return r.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+}
+
+function getDepositAmount(r: GuestyReservation): number {
+  return asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.netIncome) || asMoneyNumber(r.money?.totalPaid);
+}
+
+function depositStatusOf(r: GuestyReservation): "paid" | "partial" | "unpaid" | "unknown" {
+  const totalPaid = asMoneyNumber(r.money?.totalPaid);
+  const balanceDue = asMoneyNumber(r.money?.balanceDue);
+  const fullyPaid = r.money?.isFullyPaid === true || (balanceDue <= 0 && totalPaid > 0);
+  if (fullyPaid) return "paid";
+  if (totalPaid > 0) return "partial";
+  if (balanceDue > 0) return "unpaid";
+  return "unknown";
 }
 
 // Prefer Guesty's timezone-normalized date field when present, fall back to
@@ -1400,6 +1475,48 @@ export default function Bookings() {
     };
   }, [reservations]);
 
+  const depositRows = useMemo(() => {
+    return reservations.map((r) => {
+      const payment = paymentDateOf(r);
+      const guestPaid = asMoneyNumber(r.money?.totalPaid);
+      const balanceDue = asMoneyNumber(r.money?.balanceDue);
+      const amount = getDepositAmount(r);
+      const buyInCost = getBuyInCost(r);
+      const expectedPayout = payment.date ? addDays(payment.date, 7) : null;
+      const expectedBank = expectedPayout ? nextBusinessDay(expectedPayout) : null;
+      return {
+        reservation: r,
+        paymentDate: payment.date,
+        paymentDateSource: payment.source,
+        expectedPayout,
+        expectedBank,
+        amount,
+        guestPaid,
+        balanceDue,
+        buyInCost,
+        netAfterBuyIns: amount - buyInCost,
+        status: depositStatusOf(r),
+      };
+    }).sort((a, b) => {
+      const ad = a.expectedBank?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const bd = b.expectedBank?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      return ad - bd;
+    });
+  }, [reservations]);
+
+  const depositStats = useMemo(() => {
+    if (!depositRows.length) return null;
+    const expected = depositRows
+      .filter((r) => r.status === "paid" || r.status === "partial")
+      .reduce((s, r) => s + r.amount, 0);
+    const net = depositRows
+      .filter((r) => r.status === "paid" || r.status === "partial")
+      .reduce((s, r) => s + r.netAfterBuyIns, 0);
+    const openBalance = depositRows.reduce((s, r) => s + r.balanceDue, 0);
+    const dated = depositRows.filter((r) => r.expectedBank).length;
+    return { expected, net, openBalance, dated };
+  }, [depositRows]);
+
   const totalBedrooms = unitSlots.reduce((s, u) => s + u.bedrooms, 0);
   const propertyLabel = selectedPropertyId
     ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
@@ -1555,8 +1672,19 @@ export default function Bookings() {
           </div>
         )}
 
-        {/* Bookings list — each is expandable to show unit slots */}
         {selectedPropertyId && !bookingsError && (
+          <Tabs defaultValue="bookings" className="space-y-4">
+            <TabsList data-testid="tabs-operations">
+              <TabsTrigger value="bookings" data-testid="tab-operations-bookings">
+                <Calendar className="h-3.5 w-3.5 mr-1.5" /> Bookings
+              </TabsTrigger>
+              <TabsTrigger value="deposits" data-testid="tab-operations-deposits">
+                <WalletCards className="h-3.5 w-3.5 mr-1.5" /> Expected Deposits
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="bookings" className="space-y-4">
+          {/* Bookings list — each is expandable to show unit slots */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -1882,6 +2010,149 @@ export default function Bookings() {
               })}
             </CardContent>
           </Card>
+            </TabsContent>
+
+            <TabsContent value="deposits" className="space-y-4">
+              {depositStats && (
+                <div className="grid grid-cols-4 gap-3">
+                  <Card>
+                    <CardContent className="py-4">
+                      <p className="text-xs text-muted-foreground">Expected Deposits</p>
+                      <p className="text-2xl font-semibold mt-1">{fmtMoney(depositStats.expected)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="py-4">
+                      <p className="text-xs text-muted-foreground">Expected Net</p>
+                      <p className={`text-2xl font-semibold mt-1 ${depositStats.net >= 0 ? "text-green-600" : "text-red-600"}`}>
+                        {fmtMoney(depositStats.net)}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-0.5">after attached buy-ins</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="py-4">
+                      <p className="text-xs text-muted-foreground">Open Balance</p>
+                      <p className="text-2xl font-semibold mt-1">{fmtMoney(depositStats.openBalance)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="py-4">
+                      <p className="text-xs text-muted-foreground">Dated Rows</p>
+                      <p className="text-2xl font-semibold mt-1">{depositStats.dated}</p>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Landmark className="h-4 w-4" /> Expected Deposits
+                    {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
+                  </CardTitle>
+                  <CardDescription>
+                    GuestyPay timing uses a 7-day settlement estimate; bank receipt moves to the next business day when needed.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {!bookingsLoading && depositRows.length === 0 && (
+                    <p className="text-sm text-muted-foreground py-6 text-center">
+                      No deposit rows found for this listing.
+                    </p>
+                  )}
+                  {depositRows.length > 0 && (
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[980px]">
+                        <div className="grid grid-cols-[1.35fr_1.15fr_.95fr_.95fr_.9fr_.9fr_.9fr_.85fr] gap-3 px-3 py-2 border-b text-[10px] uppercase tracking-wider text-muted-foreground">
+                          <div>Guest</div>
+                          <div>Stay</div>
+                          <div className="text-right">Deposit</div>
+                          <div>Guesty Date</div>
+                          <div>Bank Date</div>
+                          <div className="text-right">Buy-in</div>
+                          <div className="text-right">Net</div>
+                          <div>Status</div>
+                        </div>
+                        <div className="divide-y">
+                          {depositRows.map((row) => {
+                            const r = row.reservation;
+                            const channel = r.integration?.platform ?? r.source ?? "direct";
+                            const statusClasses = {
+                              paid: "bg-green-600 text-white",
+                              partial: "bg-amber-500 text-white",
+                              unpaid: "bg-red-600 text-white",
+                              unknown: "",
+                            } as const;
+                            return (
+                              <div
+                                key={`deposit-${r._id}`}
+                                className="grid grid-cols-[1.35fr_1.15fr_.95fr_.95fr_.9fr_.9fr_.9fr_.85fr] gap-3 px-3 py-3 items-center text-sm"
+                                data-testid={`deposit-row-${r._id}`}
+                              >
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
+                                  <p className="text-[10px] text-muted-foreground font-mono truncate">{r.confirmationCode ?? r._id}</p>
+                                </div>
+                                <div className="min-w-0">
+                                  <p>{fmtDate(checkInOf(r))} → {fmtDate(checkOutOf(r))}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {r.nightsCount ?? nightsBetween(checkInOf(r), checkOutOf(r))} nights · <span className="capitalize">{channel}</span>
+                                  </p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-medium">{fmtMoney(row.amount)}</p>
+                                  {row.guestPaid > 0 && row.guestPaid !== row.amount && (
+                                    <p className="text-[10px] text-muted-foreground">{fmtMoney(row.guestPaid)} paid</p>
+                                  )}
+                                </div>
+                                <div>
+                                  <p>{row.paymentDate ? fmtDate(row.paymentDate.toISOString()) : "—"}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {row.paymentDateSource === "payment" ? "payment" : row.paymentDateSource === "reservation" ? "reservation" : "unknown"}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="font-medium">{row.expectedBank ? fmtDate(row.expectedBank.toISOString()) : "—"}</p>
+                                  {row.expectedPayout && row.expectedBank && row.expectedPayout.toDateString() !== row.expectedBank.toDateString() && (
+                                    <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                      <Clock3 className="h-2.5 w-2.5" /> {fmtDate(row.expectedPayout.toISOString())} payout
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <p>{fmtMoney(row.buyInCost)}</p>
+                                  {!r.fullyLinked && r.slotsTotal > 0 && (
+                                    <p className="text-[10px] text-amber-700">{r.slotsFilled} / {r.slotsTotal} linked</p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <p className={`font-medium ${row.netAfterBuyIns >= 0 ? "text-green-600" : "text-red-600"}`}>
+                                    {fmtMoney(row.netAfterBuyIns)}
+                                  </p>
+                                </div>
+                                <div>
+                                  <Badge
+                                    variant={row.status === "unknown" ? "outline" : "default"}
+                                    className={`text-[10px] capitalize ${statusClasses[row.status]}`}
+                                  >
+                                    {row.status === "paid" ? "paid" : row.status === "partial" ? "partial" : row.status === "unpaid" ? "unpaid" : "unknown"}
+                                  </Badge>
+                                  {row.balanceDue > 0 && (
+                                    <p className="text-[10px] text-muted-foreground mt-1">{fmtMoney(row.balanceDue)} due</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
         )}
       </div>
 
