@@ -181,6 +181,18 @@ export const communityDrafts = pgTable("community_drafts", {
   // empty value falls through to the default per-bedroom rate
   // (270 × bedrooms) and the dashboard shows that approximation.
   pricingArea: text("pricing_area"),
+  // CODEX NOTE (2026-05-04, claude/single-listing): Single-listing flag.
+  // When true, this draft is a STANDALONE condo/townhouse — only the
+  // unit1_* fields are populated and unit2_* stay null. The dashboard
+  // adapter (home.tsx → draftsAsProperties), the builder adapter
+  // (client/src/data/adapt-draft.ts), and the listing-draft generator
+  // all branch on this flag. Reusing community_drafts (rather than a
+  // new table) keeps the builder, preflight, photo pipeline, and
+  // Guesty publish path unchanged — they all already handle per-unit
+  // data and just need to skip the missing unit2. Nullable so existing
+  // drafts saved before this column existed keep working (treated as
+  // false / combo listing).
+  singleListing: boolean("single_listing"),
   listingTitle: text("listing_title"),
   // Longer "OTA-channel" headline (e.g. for Booking.com which
   // tolerates 70-80 chars where Airbnb truncates at 50).

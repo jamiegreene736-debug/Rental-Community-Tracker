@@ -15015,11 +15015,19 @@ Return ONLY compact JSON with this exact shape:
     }
 
     try {
-      const photos = await scrapeListingPhotos(listingUrl);
+      // CODEX NOTE (2026-05-04, claude/single-listing): pass an out-param
+      // `facts` object so the Zillow scraper populates bedrooms/bathrooms
+      // alongside photos. The single-listing wizard needs the bedroom
+      // count to size the bedding/sleeps defaults; the existing combo
+      // wizard ignores facts so this is additive (combo always returns
+      // an empty facts object — no behavior change for combo).
+      const facts: ListingFacts = {};
+      const photos = await scrapeListingPhotos(listingUrl, undefined, facts);
       res.json({
         photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
         sourceUrl: listingUrl,
         foundVia,
+        facts,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -15071,12 +15079,114 @@ Return ONLY compact JSON with this exact shape:
     res.json(drafts);
   });
 
+  // ============================================================
+  // Single-Listing Qualifier
+  // ============================================================
+  // CODEX NOTE (2026-05-04, claude/single-listing): Verifies a Zillow
+  // address is NOT already listed on Airbnb, VRBO, or Booking.com.
+  // Operator hard requirement — a standalone condo/townhouse only
+  // qualifies as a single listing if it's not currently being rented
+  // by anyone else through the major OTAs (otherwise we'd compete
+  // with the owner / existing PM and risk channel disputes).
+  //
+  // Different from /api/preflight/platform-check (lines ~13486+):
+  //   - platform-check verifies an EXISTING property's per-unit listings
+  //     within a known multi-unit resort (uses unit-number / building
+  //     gating to reduce false positives like "Unit 122" matching VRBO
+  //     listings for a different building's unit 122).
+  //   - This endpoint takes a STREET ADDRESS for a standalone home
+  //     and looks for ANY OTA listing at that address. No unit-number
+  //     gating needed — the address itself is unique.
+  //
+  // Returns `{ qualifies: true, platforms: { airbnb: { listed: false, ... }, ... } }`
+  // when zero confirmed matches are found across all three platforms.
+  app.post("/api/single-listing/qualify", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { address, city, state } = req.body as {
+      address?: string;
+      city?: string;
+      state?: string;
+    };
+    if (!address || !city || !state) {
+      return res.status(400).json({ error: "address, city, state required" });
+    }
+
+    const PLATFORMS: Array<{ key: "airbnb" | "vrbo" | "booking"; site: string; urlPattern: RegExp }> = [
+      { key: "airbnb", site: "airbnb.com",  urlPattern: /airbnb\.com\/(rooms|h)\// },
+      { key: "vrbo",   site: "vrbo.com",    urlPattern: /vrbo\.com\/\d+/ },
+      { key: "booking",site: "booking.com", urlPattern: /booking\.com\/(hotel|apartments)\// },
+    ];
+
+    // The street portion of the address is the strongest signal —
+    // a Booking listing card mentioning "4460 Nehe Rd" is a real
+    // match; a card just mentioning "Lihue, HI" is not. Falls back
+    // to the full address when no commas are present.
+    const streetPortion = address.includes(",") ? address.split(",")[0].trim() : address.trim();
+    const streetLower = streetPortion.toLowerCase();
+
+    type PlatformResult = {
+      listed: boolean;
+      matches: Array<{ url: string; title: string; snippet: string }>;
+      query: string;
+      error?: string;
+    };
+
+    const checkPlatform = async (p: typeof PLATFORMS[0]): Promise<PlatformResult> => {
+      const query = `site:${p.site} "${streetPortion}" "${city}"`;
+      try {
+        const url = `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(query)}&num=10&api_key=${apiKey}`;
+        const resp = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+        if (!resp.ok) {
+          return { listed: false, matches: [], query, error: `HTTP ${resp.status}` };
+        }
+        const data: any = await resp.json();
+        const results: any[] = Array.isArray(data?.organic_results) ? data.organic_results : [];
+        const matches: Array<{ url: string; title: string; snippet: string }> = [];
+        for (const r of results) {
+          const link = String(r?.link || "");
+          const title = String(r?.title || "");
+          const snippet = String(r?.snippet || "");
+          // Must look like a real listing URL on this platform
+          if (!p.urlPattern.test(link)) continue;
+          // Must mention the street in title or snippet
+          const haystack = `${title} ${snippet}`.toLowerCase();
+          if (!haystack.includes(streetLower)) continue;
+          matches.push({ url: link, title, snippet });
+        }
+        return { listed: matches.length > 0, matches, query };
+      } catch (e: any) {
+        return { listed: false, matches: [], query, error: e?.message ?? "fetch error" };
+      }
+    };
+
+    const [airbnb, vrbo, booking] = await Promise.all(PLATFORMS.map(checkPlatform));
+    const platforms = { airbnb, vrbo, booking };
+    const qualifies = !airbnb.listed && !vrbo.listed && !booking.listed;
+
+    res.json({
+      qualifies,
+      platforms,
+      address,
+      city,
+      state,
+      // Surface a one-line operator-facing reason when not qualifying
+      reason: qualifies
+        ? "No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing."
+        : `Found existing listing(s) on: ${[airbnb.listed && "Airbnb", vrbo.listed && "VRBO", booking.listed && "Booking.com"].filter(Boolean).join(", ")}.`,
+    });
+  });
+
   app.post("/api/community/save", async (req, res) => {
     const result = insertCommunityDraftSchema.safeParse(req.body);
     if (!result.success) return res.status(400).json({ error: result.error.flatten() });
-    // Reject villas / single-family / estates — the business combines two
-    // condos or two townhomes in the same building. A "community" of
-    // detached homes is not the same product.
+    // CODEX NOTE (2026-05-04, claude/single-listing): community-type
+    // check applies to BOTH combo and single-listing drafts. A
+    // single-listing standalone is still a condo/townhouse — only
+    // the count differs (one unit instead of two combined). Villas
+    // / single-family / estates remain disqualified across the
+    // board because they aren't the product the business handles.
     const typeCheck = checkCommunityType(result.data.unitTypes, result.data.researchSummary);
     if (!typeCheck.eligible) {
       return res.status(400).json({
@@ -17531,28 +17641,41 @@ Return ONLY compact JSON with this exact shape:
   // Step 5: Generate listing draft with Claude
   // ============================================================
   app.post("/api/community/generate-listing", async (req, res) => {
-    const { communityName, city, state, unit1, unit2, suggestedRate } = req.body as {
+    const { communityName, city, state, unit1, unit2, suggestedRate, singleListing } = req.body as {
       communityName: string;
       city: string;
       state: string;
       unit1: { bedrooms: number; url: string; description?: string; address?: string };
-      unit2: { bedrooms: number; url: string; description?: string; address?: string };
+      unit2?: { bedrooms: number; url: string; description?: string; address?: string };
       suggestedRate: number;
+      // CODEX NOTE (2026-05-04, claude/single-listing): when true,
+      // generate a SINGLE-UNIT draft — only `unitA` is populated,
+      // walking-distance language is omitted, and the title prompts
+      // skip the "two units" phrasing. Default false preserves the
+      // existing combo behavior.
+      singleListing?: boolean;
     };
 
-    if (!communityName || !unit1 || !unit2) {
-      return res.status(400).json({ error: "communityName, unit1, unit2 required" });
+    if (!communityName || !unit1) {
+      return res.status(400).json({ error: "communityName, unit1 required" });
+    }
+    if (!singleListing && !unit2) {
+      return res.status(400).json({ error: "unit2 required for combo listings" });
     }
 
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    const combinedBedrooms = (unit1.bedrooms || 0) + (unit2.bedrooms || 0);
+    const combinedBedrooms = singleListing
+      ? (unit1.bedrooms || 0)
+      : (unit1.bedrooms || 0) + (unit2?.bedrooms || 0);
 
-    // Best-effort walking distance for the description. Uses geocoded
-    // addresses if both units provided one, else falls back to the
-    // per-resort default.
-    const walk = (unit1.address && unit2.address)
-      ? await walkBetween(unit1.address, unit2.address, communityName).catch(() => fallbackWalkForResort(communityName))
-      : fallbackWalkForResort(communityName);
+    // Best-effort walking distance for the description. Only used for
+    // combo listings — for a single standalone unit there's only one
+    // address, so the concept doesn't apply. Use a no-op placeholder.
+    const walk = singleListing
+      ? { description: "", minutes: 0, source: "n/a" as const }
+      : (unit1.address && unit2?.address)
+        ? await walkBetween(unit1.address, unit2.address, communityName).catch(() => fallbackWalkForResort(communityName))
+        : fallbackWalkForResort(communityName);
 
     // The builder UI auto-prepends a soft "Please note: this listing
     // combines two units…" disclaimer (LISTING_DISCLOSURE in
@@ -17620,8 +17743,15 @@ Return ONLY compact JSON with this exact shape:
     })();
 
     if (!anthropicKey) {
-      const fallbackTitle = `${communityName} ${combinedBedrooms}BR for ${combinedBedrooms * 2}!`.slice(0, 50);
-      const fallbackDescription = `Two condos at ${communityName} in ${city}, ${state}. Unit A is ${unit1.bedrooms}BR, Unit B is ${unit2.bedrooms}BR — ${combinedBedrooms}BR combined. ${walk.description} Guests receive separate access codes per unit at check-in.`;
+      // CODEX NOTE (2026-05-04, claude/single-listing): branch the
+      // no-Anthropic fallback so single-listing drafts get a coherent
+      // single-unit fallback string instead of "Two condos at…".
+      const fallbackTitle = singleListing
+        ? `${communityName} ${unit1.bedrooms}BR for ${unit1.bedrooms * 2}!`.slice(0, 50)
+        : `${communityName} ${combinedBedrooms}BR for ${combinedBedrooms * 2}!`.slice(0, 50);
+      const fallbackDescription = singleListing
+        ? `Standalone ${unit1.bedrooms}BR condo at ${communityName} in ${city}, ${state}. Sleeps ~${unit1.bedrooms * 2}.`
+        : `Two condos at ${communityName} in ${city}, ${state}. Unit A is ${unit1.bedrooms}BR, Unit B is ${unit2!.bedrooms}BR — ${combinedBedrooms}BR combined. ${walk.description} Guests receive separate access codes per unit at check-in.`;
       return res.json({
         title: fallbackTitle,
         bookingTitle: fallbackTitle,
@@ -17647,12 +17777,58 @@ Return ONLY compact JSON with this exact shape:
     // (bedrooms / bathrooms / sqft / sleeps / bedding text). Output
     // shape lines up with `unit-builder-data.ts` so this draft can
     // graduate into a real property entry without reformatting.
+    //
+    // CODEX NOTE (2026-05-04, claude/single-listing): two prompt
+    // variants — the original combo prompt (unchanged) and a single-
+    // listing variant that drops the "two units" framing, omits
+    // walking-distance language, and asks for only `unitA`. The
+    // generate-listing endpoint stays one route handler with branching
+    // text rather than two parallel routes — output JSON shape is
+    // identical (just `unitB` is null for singles), so the wizard
+    // and downstream save flow can use a single client call.
     const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
-    const prompt = `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
+    const prompt = singleListing
+      ? `Generate a structured vacation rental listing draft for a STANDALONE single-unit listing at ${communityName} in ${city}, ${state}.
+
+CONTEXT
+- Single unit: ${unit1.bedrooms}-bedroom ${unit1.address ? `at ${unit1.address}` : `at ${communityName}`}${unit1.url ? ` (source: ${unit1.url})` : ""}
+- This is ONE standalone condo or townhouse — NOT a combination of two units.
+
+OUTPUT — return ONLY valid JSON with this exact shape:
+
+{
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars. Format: '<Adjective> <N>BR <Type> in <Location>!'. Examples: 'Beautiful 3BR Condo in Poipu Beach!', 'Cozy 2BR Townhouse near Disney!'. Always end with !. Use only commas and hyphens for punctuation — NO em dashes (—). Count characters and STAY UNDER 50.",
+  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
+  "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
+  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point. Do NOT mention 'two units' / 'combined' / 'multi-unit' — this is a SINGLE standalone listing.",
+  "space": "1-2 paragraphs describing this one unit's layout — bedrooms, what guests get, the vibe. Do NOT mention combination / two units / disclosure language.",
+  "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
+  "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
+  "unitA": {
+    "bedrooms": ${unit1.bedrooms},
+    "bathrooms": "Estimated bathroom count for a ${unit1.bedrooms}BR vacation condo/townhouse — return as a string like \\"2\\" or \\"2.5\\"",
+    "sqft": "Estimated square footage range like \\"~1,200\\" or \\"~1,500\\"",
+    "maxGuests": "Number — how many people can comfortably sleep here, sofa beds counted",
+    "bedding": "Concrete bedding plan: e.g. \\"King master, Queen second bedroom, queen sleeper sofa in living area\\". One sentence.",
+    "shortDescription": "1 sentence describing this unit — what stands out.",
+    "longDescription": "2-3 paragraphs describing this unit in detail. Layout, beds, key amenities."
+  }
+}
+
+CONSTRAINTS
+- title is HARD CAPPED at 50 characters. Count characters. If your draft hits 51+, shorten it.
+- bookingTitle is ALSO HARD CAPPED at 50 characters. Same rule.
+- Use commas and hyphens (-) only. NO em dashes (—) in either title.
+- Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
+- Don't invent amenities you weren't told about.
+- Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
+- Plain text only inside the strings. No Markdown. No bullet markers. No headers.
+- Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`
+      : `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
 
 CONTEXT
 - Unit A: ${unit1.bedrooms}-bedroom unit at ${communityName}${unit1.url ? ` (source: ${unit1.url})` : ""}
-- Unit B: ${unit2.bedrooms}-bedroom unit at ${communityName}${unit2.url ? ` (source: ${unit2.url})` : ""}
+- Unit B: ${unit2!.bedrooms}-bedroom unit at ${communityName}${unit2!.url ? ` (source: ${unit2!.url})` : ""}
 - Combined total: ${combinedBedrooms} bedrooms across two separate units
 - Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
 
@@ -17676,7 +17852,7 @@ OUTPUT — return ONLY valid JSON with this exact shape:
     "longDescription": "2-3 paragraphs describing this unit in detail. Layout, beds, key amenities."
   },
   "unitB": {
-    "bedrooms": ${unit2.bedrooms},
+    "bedrooms": ${unit2!.bedrooms},
     "bathrooms": "...",
     "sqft": "...",
     "maxGuests": ...,
@@ -17779,8 +17955,15 @@ CONSTRAINTS
       });
     } catch (e: any) {
       console.warn("[community/generate-listing] Claude error:", e.message);
-      const fallbackTitle = `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
-      const fallbackDescription = `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. ${walk.description}`;
+      // CODEX NOTE (2026-05-04, claude/single-listing): branched
+      // catch-block fallback so single-listing failures get a coherent
+      // single-unit fallback string instead of "combines two units".
+      const fallbackTitle = singleListing
+        ? `${communityName} — ${unit1.bedrooms}BR Standalone | ${city}, ${state}`.slice(0, 80)
+        : `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
+      const fallbackDescription = singleListing
+        ? `Standalone ${unit1.bedrooms}-bedroom unit at ${communityName} in ${city}, ${state}.`
+        : `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. ${walk.description}`;
       return res.json({
         title: fallbackTitle,
         bookingTitle: fallbackTitle,

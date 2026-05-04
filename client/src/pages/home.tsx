@@ -336,20 +336,25 @@ export default function Home() {
       return Number.isFinite(n) ? n : 0;
     };
     return communityDraftsDataForRows.map((d) => {
+      // CODEX NOTE (2026-05-04, claude/single-listing): branch on
+      // `singleListing` so standalone drafts render with `multiUnit:
+      // false` and a single-unit unitDetails string. Combos keep the
+      // existing two-unit behavior. Defaults to false so drafts saved
+      // before the column existed are treated as combos (existing
+      // behavior).
+      const isSingle = (d as any).singleListing === true;
       const u1Br = d.unit1Bedrooms ?? 0;
       const u2Br = d.unit2Bedrooms ?? 0;
-      const totalBr = d.combinedBedrooms ?? (u1Br + u2Br);
-      const totalGuests =
-        ((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) ||
-        // Fallback: 2 guests/BR, the rough rule the existing 11
-        // properties follow.
-        totalBr * 2;
-      const totalBath =
-        parseBath(d.unit1Bathrooms ?? null) + parseBath(d.unit2Bathrooms ?? null);
-      const unitDetails =
-        u1Br > 0 && u2Br > 0
-          ? `${u1Br}BR + ${u2Br}BR`
-          : "Two units (draft)";
+      const totalBr = isSingle ? u1Br : (d.combinedBedrooms ?? (u1Br + u2Br));
+      const totalGuests = isSingle
+        ? (d.unit1MaxGuests ?? u1Br * 2)
+        : (((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) || totalBr * 2);
+      const totalBath = isSingle
+        ? parseBath(d.unit1Bathrooms ?? null)
+        : parseBath(d.unit1Bathrooms ?? null) + parseBath(d.unit2Bathrooms ?? null);
+      const unitDetails = isSingle
+        ? (u1Br > 0 ? `${u1Br}BR standalone` : "Standalone (draft)")
+        : (u1Br > 0 && u2Br > 0 ? `${u1Br}BR + ${u2Br}BR` : "Two units (draft)");
       return {
         id: -d.id, // negative so id-keyed caches never collide with active rows
         draftId: d.id,
@@ -367,7 +372,7 @@ export default function Home() {
         bathrooms: totalBath,
         lowPrice: d.estimatedLowRate ?? d.suggestedRate ?? null,
         highPrice: d.estimatedHighRate ?? null,
-        multiUnit: true,
+        multiUnit: !isSingle,
         unitDetails,
         url: d.sourceUrl ?? "",
       };
@@ -674,6 +679,17 @@ export default function Home() {
               <Button data-testid="button-add-community">
                 <Plus className="h-4 w-4 mr-2" />
                 Add New Combo Listing
+              </Button>
+            </Link>
+            {/* CODEX NOTE (2026-05-04, claude/single-listing): standalone-
+                unit counterpart to "Add New Combo Listing". Routes to a
+                4-step wizard that requires the address to NOT already
+                be listed on Airbnb / VRBO / Booking.com. Same backend
+                save flow as the combo wizard (community_drafts table). */}
+            <Link href="/add-single-listing">
+              <Button variant="outline" data-testid="button-add-single-listing">
+                <Plus className="h-4 w-4 mr-2" />
+                Add a Single Listing
               </Button>
             </Link>
             <Link href="/inbox">

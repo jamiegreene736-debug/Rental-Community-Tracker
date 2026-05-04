@@ -633,6 +633,82 @@ established it so you can read the rationale in the commit message.
     to the hint-based legacy path or is treated as unscannable.
     See PR #95.
 
+33. **Single-listing drafts share the `community_drafts` table with
+    combo drafts; the `singleListing` boolean flag flips the per-unit
+    rendering across the stack.** When the operator uses the "Add a
+    Single Listing" wizard (`/add-single-listing`, see
+    `client/src/pages/add-single-listing.tsx`), the resulting draft
+    lands in the same `community_drafts` row shape as a combo — just
+    with `unit2_*` columns null and `singleListing = true`. This
+    intentionally avoids creating a parallel `single_listings` table:
+    the builder, preflight, photo pipeline, Guesty publish path, and
+    the dashboard table all already operate on per-unit fields and
+    only need to know "skip Unit B" — not a different schema shape.
+
+    Three branch points to be aware of:
+    - **Wizard side** — `add-single-listing.tsx` is a 4-step (not 5)
+      flow: Property → OTA Check → Photos → Listing Draft. There's no
+      community-wide research scan; instead, Step 2 is the OTA-clean
+      qualifier (see #34). On save, the wizard explicitly POSTs
+      `singleListing: true` plus `unit2_*: null`.
+    - **Server side** — `/api/community/save` keeps the
+      `checkCommunityType` validation (single-listing standalones must
+      still be condo/townhouse, not villa/single-family — same
+      business rule). `/api/community/generate-listing` branches its
+      Claude prompt: combo prompt mentions "two units" + walking
+      distance; single-listing prompt drops both, asks for only
+      `unitA`, and the no-Anthropic + catch-block fallbacks emit
+      single-unit copy. `/api/community/fetch-unit-photos` now also
+      returns `facts: { bedrooms?, bathrooms? }` (Zillow-extracted) so
+      the single wizard can size bedding/sleeps defaults — additive,
+      combo flow ignores it.
+    - **Client adapters** — `home.tsx → draftsAsProperties` and
+      `client/src/data/adapt-draft.ts → adaptDraftToPropertyUnitBuilder`
+      both branch on `(draft as any).singleListing === true`. Single
+      drafts render as `multiUnit: false`, with a one-element
+      `units[]` array, and `unitDetails: "{N}BR standalone"` instead
+      of "{N}BR + {M}BR". `loadDraftFullDataByNegativeId`'s photo-
+      folder list `.filter((f): f is string => !!f)` already drops
+      null `unit2PhotoFolder` so photo loading needs no further
+      change.
+
+    **Don't collapse single + combo into one prompt** — the framing
+    constraints are genuinely different ("two separate units, %{walk}
+    apart" vs. standalone), and Claude will leak combo phrasing into
+    standalones if the prompt isn't branched. **Don't add a
+    `single_listings` table** — every adapter, builder tab, and
+    Guesty endpoint would need a parallel path. The flag-on-shared-
+    table approach keeps the surface tiny.
+
+34. **`/api/single-listing/qualify` is the OTA-clean gate for the
+    single-listing wizard, NOT a generic platform-check.** Operator
+    hard requirement: a standalone unit only qualifies when its
+    street address returns ZERO confirmed matches on Airbnb / VRBO /
+    Booking.com. The endpoint runs three SearchAPI Google queries in
+    parallel — `site:{platform}.com "{streetAddress}" "{city}"` — and
+    matches the response against per-platform URL patterns:
+    `airbnb.com/(rooms|h)/`, `vrbo.com/\d+`, `booking.com/(hotel|apartments)/`.
+    A result counts as a match only when the URL pattern matches AND
+    the title or snippet contains the exact street portion (lowercase
+    substring).
+
+    Different from `/api/preflight/platform-check` (Load-Bearing
+    surface for the existing combo flow):
+    - **platform-check** verifies a known multi-unit RESORT'S per-unit
+      listings exist with strict unit-number / building gating
+      ("Unit 122" vs. random "122" in a price). False-negative tuned —
+      it's verifying the operator's own listings are live.
+    - **single-listing/qualify** verifies an INDEPENDENT address is
+      NOT listed anywhere. Less unit-number ambiguity (a standalone
+      address is unique on its own). False-positive tuned — a single
+      confirmed match on any of the three platforms hard-blocks save.
+
+    The wizard's Step 2 disables the Continue button until
+    `qualifies: true`. There's no operator override — the rule is
+    that the property must be clean, full stop. Don't add a "force
+    save" path; the failure mode is a missed disqualification, not a
+    missed qualification.
+
 ### Inbox auto-reply
 
 24. **Auto-reply has a three-layer safety stack — input filter,
@@ -723,6 +799,7 @@ Examples:
 2026-04-27 · Jamie corrected an in-progress "Browserbase + Anthropic computer-use loop for Vrbo search" with "use Stagehand, that's what their browser agent is meant for" · ACCEPTED · Vrbo search agent uses `@browserbasehq/stagehand` (DOM-mode `agent.execute()` for the search-flow UI + `extract()` with a Zod schema for structured property data) rather than rolling our own screenshot/action/observe loop against the raw `claude-sonnet-4-5` `computer_20250124` tool. Stagehand handles the loop, retries, and DOM grounding internally; same path director.ai uses. Lives in `server/stagehand-vrbo-search.ts`, wired as Vrbo path 7 (highest priority in dedupe — most likely to actually return priced data because it drives the real UI).
 2026-04-27 · Jamie wanted a search system that "encompasses everything" including PM discovery via Stagehand · ACCEPTED with escalation gating · Two PRs: (a) widened existing photo-match caps (TOP_AIRBNB_FOR_LENS 15→30, per-anchor 3→6) — cheap and high-impact; (b) added `server/stagehand-pm-finder.ts` that drives Google like a human, dismisses overlays, scrolls past PAA/Maps panels, and extracts long-tail organic PM URLs. PM finder fires only when `priced bookable < 3` from cheap paths (booking + PM Google + per-PM sitemaps + photo-match) so we don't pay $0.30 on every find-buy-in. Returned URLs are unpriced (agent doesn't drive each PM's availability widget; that's `verifyPmRate`'s job).
 2026-04-28 · Jamie: "I want Airbnb to be completely involved in this search now like it was in the previous versions of the buy in tool. Do not exclude it anymore, always include in the cheapest options." · ACCEPTED, supersedes 2026-04-27 entry above · Server's `cheapest` pool now includes `airbnbWithMatches` alongside booking + pmAugmented. Airbnb engine results auto-marked `verified: "yes"` (the engine queries with check_in / check_out, so listings returned ARE date-specific available). Vrbo stays excluded from cheapest (same TOS sublet bar but no engine-level date verification — surfacing as "buy this" is a footgun without the verification gate). The TOS-sublet warning suffix in auto-fill notes is preserved — it's a billing-flow concern, not a discovery-flow concern, and the operator wants visibility into the actually-cheapest option regardless of channel.
+2026-05-04 · Jamie asked for an "Add a Single Listing" dashboard button that mirrors Add Community but for a standalone condo/townhouse, with a Zillow-search → OTA-clean qualifier as the gate · ACCEPTED, option A (no community research scan) · New 4-step wizard at `/add-single-listing` cloning the relevant pieces of `add-community.tsx`. Reuses `community_drafts` table with a new `singleListing` boolean flag rather than a parallel table — see Load-Bearing #33 for the rationale (one shared shape across the stack, branching only at adapters). New `/api/single-listing/qualify` endpoint runs SearchAPI site:airbnb/vrbo/booking searches and hard-blocks save when any platform shows a confirmed match (Load-Bearing #34). `/api/community/generate-listing` got a branched prompt for single-unit framing; `/api/community/fetch-unit-photos` now also returns `facts: { bedrooms, bathrooms }` so the single wizard can size defaults from the Zillow scrape (additive, combo unaffected). All "what I added" surfaces carry `CODEX NOTE (2026-05-04, claude/single-listing)` comments per Jamie's instruction.
 2026-04-29 · Jamie: "You are not running the browser session locally like I asked. You have to run the browser on my PC." After multi-PR investigation showed Vrbo's anti-bot fingerprints every Browserbase residential session even with persistent context + real-Chrome cookies (IP-level flag — "There is a robot on the same network as you"). Direct Chrome MCP test from operator's home IP returned 42 priced properties for the same query that Browserbase couldn't load past the bot wall. · ACCEPTED · New "VRBO local-Chrome sidecar" architecture: in-memory queue on Railway (`server/vrbo-sidecar-queue.ts`) bridges find-buy-in to a `/loop` worker running inside the operator's Claude Code session. find-buy-in calls `searchVrboViaSidecar()` as path 9 (parallel with the existing 8 paths, prioritized FIRST in the dedup chain when results return because it's the only path that beats the IP wall). When the worker is offline, the wallet budget (75s) expires and we gracefully fall back. Endpoints `POST /api/vrbo-sidecar/enqueue`, `GET /api/admin/vrbo-sidecar/next`, `POST /api/admin/vrbo-sidecar/result`, `GET /api/vrbo-sidecar/result/:id`. Worker is a /loop task in Claude Code that polls /next, drives Chrome MCP through Vrbo's search UI on the operator's actual browser, extracts priced cards, and POSTs the result. This is the "OpenClaw"-style local-agent pattern — Claude Code on the operator's Mac is the bridge between Railway and their real-IP browser.
 ```
 
