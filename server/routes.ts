@@ -15253,15 +15253,31 @@ Return ONLY compact JSON with this exact shape:
   //
   // Returns `{ qualifies: true, platforms: { airbnb: { listed: false, ... }, ... } }`
   // when zero confirmed matches are found across all three platforms.
-  // CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+  // CODEX NOTE (2026-05-04, claude/single-listing-photo-qualifier):
   // Extracted into a helper so the new find-clean-unit endpoint can
   // call it per Zillow candidate without re-implementing the OTA
   // search logic. The /qualify endpoint still wraps it for the
   // "type an address manually" path; find-clean-unit calls it for
   // each Zillow candidate it iterates.
+  //
+  // Methodology mirrors the preflight platform-check (Load-Bearing
+  // pattern from /api/preflight/platform-check, lines ~13486+):
+  //   1. TEXT SEARCH — site:platform.com Google query for the
+  //      street + city, with strict matching (URL must be a real
+  //      listing-page shape, snippet must contain the street).
+  //   2. PHOTO REVERSE SEARCH (when photoUrls provided) — Google
+  //      Lens on each photo URL, looking for hits on
+  //      airbnb.com/vrbo.com/booking.com. Standalone units have
+  //      unique photos; a Lens hit on a competitor's listing page
+  //      means our property is already listed there even if the
+  //      address text doesn't appear in the snippet.
+  // A platform counts as "listed" when EITHER signal fires. This
+  // is the same two-source methodology the preflight uses for the
+  // existing combo flow.
   type SingleListingPlatformResult = {
     listed: boolean;
     matches: Array<{ url: string; title: string; snippet: string }>;
+    photoMatches: string[];
     query: string;
     error?: string;
   };
@@ -15276,12 +15292,80 @@ Return ONLY compact JSON with this exact shape:
     address: string;
     city: string;
     state: string;
+    photoChecksRun: number;
   };
+
+  // Photo reverse-image search via Google Lens. Caps at 3 photo
+  // URLs per call to keep wallet bounded (~3 SearchAPI calls /
+  // qualifier check). Zillow CDN URLs (photos.zillowstatic.com)
+  // are publicly accessible so we skip ImgBB upload — Lens can
+  // crawl them directly. Returns per-platform match URLs.
+  async function runPhotoReverseSearch(
+    apiKey: string,
+    photoUrls: string[],
+  ): Promise<{
+    matches: { airbnb: string[]; vrbo: string[]; booking: string[] };
+    checked: number;
+  }> {
+    if (photoUrls.length === 0) {
+      return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
+    }
+    const PLATFORM_PATTERNS: Array<{ key: "airbnb" | "vrbo" | "booking"; urlPattern: RegExp }> = [
+      { key: "airbnb", urlPattern: /airbnb\.com\/(rooms|h)\// },
+      { key: "vrbo",   urlPattern: /vrbo\.com\/\d+/ },
+      { key: "booking",urlPattern: /booking\.com\/(hotel|apartments)\// },
+    ];
+    const matches = {
+      airbnb: new Set<string>(),
+      vrbo: new Set<string>(),
+      booking: new Set<string>(),
+    };
+    const sample = photoUrls.slice(0, 3);
+    let checked = 0;
+    for (const photoUrl of sample) {
+      try {
+        const url = `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(photoUrl)}&api_key=${apiKey}`;
+        const resp = await fetch(url, { signal: AbortSignal.timeout(25_000) });
+        if (!resp.ok) continue;
+        const data: any = await resp.json();
+        checked++;
+        const allLinks: string[] = [
+          ...(data.visual_matches || []),
+          ...(data.organic_results || []),
+          ...(data.image_results || []),
+          ...(data.pages_with_matching_images || []),
+        ]
+          .map((r: any) => String(r?.link || r?.url || r?.source || r?.source_url || ""))
+          .filter((l: string) => l);
+        for (const link of allLinks) {
+          for (const p of PLATFORM_PATTERNS) {
+            if (p.urlPattern.test(link)) {
+              matches[p.key].add(link);
+            }
+          }
+        }
+      } catch {
+        // best effort — keep going
+      }
+      // 500ms breather between Lens calls so we don't trip rate limits
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return {
+      matches: {
+        airbnb: Array.from(matches.airbnb),
+        vrbo: Array.from(matches.vrbo),
+        booking: Array.from(matches.booking),
+      },
+      checked,
+    };
+  }
+
   async function runOtaQualifier(
     apiKey: string,
     address: string,
     city: string,
     state: string,
+    photoUrls: string[] = [],
   ): Promise<SingleListingQualifyResult> {
     const PLATFORMS: Array<{ key: "airbnb" | "vrbo" | "booking"; site: string; urlPattern: RegExp }> = [
       { key: "airbnb", site: "airbnb.com",  urlPattern: /airbnb\.com\/(rooms|h)\// },
@@ -15292,13 +15376,13 @@ Return ONLY compact JSON with this exact shape:
     const streetPortion = address.includes(",") ? address.split(",")[0].trim() : address.trim();
     const streetLower = streetPortion.toLowerCase();
 
-    const checkPlatform = async (p: typeof PLATFORMS[0]): Promise<SingleListingPlatformResult> => {
+    const checkPlatform = async (p: typeof PLATFORMS[0]): Promise<{ matches: Array<{ url: string; title: string; snippet: string }>; query: string; error?: string }> => {
       const query = `site:${p.site} "${streetPortion}" "${city}"`;
       try {
         const url = `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(query)}&num=10&api_key=${apiKey}`;
         const resp = await fetch(url, { signal: AbortSignal.timeout(20_000) });
         if (!resp.ok) {
-          return { listed: false, matches: [], query, error: `HTTP ${resp.status}` };
+          return { matches: [], query, error: `HTTP ${resp.status}` };
         }
         const data: any = await resp.json();
         const results: any[] = Array.isArray(data?.organic_results) ? data.organic_results : [];
@@ -15312,24 +15396,69 @@ Return ONLY compact JSON with this exact shape:
           if (!haystack.includes(streetLower)) continue;
           matches.push({ url: link, title, snippet });
         }
-        return { listed: matches.length > 0, matches, query };
+        return { matches, query };
       } catch (e: any) {
-        return { listed: false, matches: [], query, error: e?.message ?? "fetch error" };
+        return { matches: [], query, error: e?.message ?? "fetch error" };
       }
     };
 
-    const [airbnb, vrbo, booking] = await Promise.all(PLATFORMS.map(checkPlatform));
-    const platforms = { airbnb, vrbo, booking };
-    const qualifies = !airbnb.listed && !vrbo.listed && !booking.listed;
+    // Run text-search (3 platforms, parallel) and photo-search
+    // (1 Google Lens call per photo, sequential inside the helper)
+    // in parallel — they're independent.
+    const [textResults, photoSearch] = await Promise.all([
+      Promise.all(PLATFORMS.map(checkPlatform)),
+      runPhotoReverseSearch(apiKey, photoUrls),
+    ]);
+
+    const buildPlatform = (
+      idx: number,
+      key: "airbnb" | "vrbo" | "booking",
+    ): SingleListingPlatformResult => {
+      const text = textResults[idx];
+      const photoMatches = photoSearch.matches[key];
+      return {
+        listed: text.matches.length > 0 || photoMatches.length > 0,
+        matches: text.matches,
+        photoMatches,
+        query: text.query,
+        error: text.error,
+      };
+    };
+    const platforms = {
+      airbnb: buildPlatform(0, "airbnb"),
+      vrbo:   buildPlatform(1, "vrbo"),
+      booking:buildPlatform(2, "booking"),
+    };
+    const qualifies = !platforms.airbnb.listed && !platforms.vrbo.listed && !platforms.booking.listed;
+    const listedNames: string[] = [];
+    if (platforms.airbnb.listed) {
+      const sources: string[] = [];
+      if (platforms.airbnb.matches.length > 0) sources.push("address");
+      if (platforms.airbnb.photoMatches.length > 0) sources.push("photo match");
+      listedNames.push(`Airbnb (${sources.join(" + ")})`);
+    }
+    if (platforms.vrbo.listed) {
+      const sources: string[] = [];
+      if (platforms.vrbo.matches.length > 0) sources.push("address");
+      if (platforms.vrbo.photoMatches.length > 0) sources.push("photo match");
+      listedNames.push(`VRBO (${sources.join(" + ")})`);
+    }
+    if (platforms.booking.listed) {
+      const sources: string[] = [];
+      if (platforms.booking.matches.length > 0) sources.push("address");
+      if (platforms.booking.photoMatches.length > 0) sources.push("photo match");
+      listedNames.push(`Booking.com (${sources.join(" + ")})`);
+    }
     return {
       qualifies,
       platforms,
       reason: qualifies
-        ? "No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing."
-        : `Found existing listing(s) on: ${[airbnb.listed && "Airbnb", vrbo.listed && "VRBO", booking.listed && "Booking.com"].filter(Boolean).join(", ")}.`,
+        ? `No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing.${photoSearch.checked > 0 ? ` (Address text-search + reverse-image-search across ${photoSearch.checked} photo${photoSearch.checked === 1 ? "" : "s"}.)` : ""}`
+        : `Found existing listing(s) on: ${listedNames.join(", ")}.`,
       address,
       city,
       state,
+      photoChecksRun: photoSearch.checked,
     };
   }
 
@@ -15514,8 +15643,18 @@ Return ONLY compact JSON with this exact shape:
         continue;
       }
 
-      // OTA qualifier on this candidate's address.
-      const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state);
+      // CODEX NOTE (2026-05-04, claude/single-listing-photo-qualifier):
+      // Pass the candidate's scraped Zillow photo URLs into the
+      // qualifier so it runs reverse-image-search alongside the
+      // text search. Standalone units routinely show up on
+      // Airbnb/VRBO with marketing-driven titles that don't
+      // mention the street address, so the photo signal often
+      // catches listings the text search would miss. Caps at 3
+      // photos inside runPhotoReverseSearch — sending more
+      // wouldn't materially improve recall but would burn
+      // SearchAPI credits.
+      const photoUrls = photos.map((p) => p.url).slice(0, 3);
+      const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state, photoUrls);
       attempts.push({
         url,
         bedrooms: scrapedBR,
