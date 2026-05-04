@@ -413,6 +413,10 @@ function isHostPost(p: any): boolean {
   );
 }
 
+function isSignedHostTemplateBody(body: string): boolean {
+  return /john carpenter/i.test(body) && /magical island rentals/i.test(body);
+}
+
 // ─── Outbound message templates ────────────────────────────────────────────────
 // Guest-facing messages sent from the inbox are signed by the operator's
 // brand. Sender + brand live in one place so future templates pick up the
@@ -2419,9 +2423,19 @@ export default function InboxPage() {
                             const channelLower = String(channelRaw ?? "").toLowerCase();
                             const needsAgreement = channelLower.includes("vrbo") || channelLower.includes("homeaway") || channelLower.includes("booking");
                             const postBodies = posts
-                              .filter((p: any) => isHostPost(p))
-                              .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""));
-                            const wasSent = (pattern: RegExp) => postBodies.some((body: string) => pattern.test(body));
+                              .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""))
+                              .filter((body: string) => body.trim().length > 0);
+                            const outboundTemplateBodies = posts
+                              .map((p: any) => ({
+                                body: cleanMessageBody(p.body ?? p.text ?? p.message ?? ""),
+                                host: isHostPost(p),
+                              }))
+                              .filter(({ body, host }: { body: string; host: boolean }) =>
+                                body.trim().length > 0 && (host || isSignedHostTemplateBody(body))
+                              )
+                              .map(({ body }: { body: string }) => body);
+                            const sentBodies = outboundTemplateBodies.length > 0 ? outboundTemplateBodies : postBodies;
+                            const wasSent = (pattern: RegExp) => sentBodies.some((body: string) => pattern.test(body));
                             const totalPriceFromMoney = asNum(m.totalPrice) || guestGross || 0;
                             const totalPaidFromMoney = asNum(m.totalPaid);
                             const openReceiptDialog = () => {
@@ -2469,7 +2483,7 @@ export default function InboxPage() {
                                 title: "Booking confirmation / receipt",
                                 due: null as Date | null,
                                 dueLabel: "At booking",
-                                sent: wasSent(/reservation.+confirmed|booking.+confirmed|booking total|paid to date|two units.+minutes/i),
+                                sent: wasSent(/this confirms your reservation|mahalo for booking with us|confirmation code|booking total|paid to date|remaining balance|this stay is set up as two units|two separate units|detailed arrival information|reservation.+confirmed|booking.+confirmed|two units.+minute/i),
                                 detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
                                 testId: "button-draft-booking-confirmation",
                                 onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
@@ -2543,7 +2557,7 @@ export default function InboxPage() {
                                         <p className="text-[11px] text-muted-foreground">
                                           Due {formatShortDate(item.due, item.dueLabel)}
                                           {" · "}
-                                          {item.sent ? "sent/tracked" : item.detail}
+                                          {item.sent ? "Completed" : item.detail}
                                         </p>
                                       </div>
                                       <Button
