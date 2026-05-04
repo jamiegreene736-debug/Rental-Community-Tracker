@@ -9,6 +9,7 @@ import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
+import { ensureRuntimeSchema } from "./schema-maintenance";
 
 const app = express();
 const httpServer = createServer(app);
@@ -68,6 +69,7 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  await ensureRuntimeSchema();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
