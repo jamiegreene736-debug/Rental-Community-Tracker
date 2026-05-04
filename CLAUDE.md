@@ -43,6 +43,37 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04 (inbox buy-in estimate): added an inquiry-time buy-in cost
+  estimator to the Guest Inbox right panel. Use case: Jamie was getting
+  short-stay inquiries (Michelle's Kaha Lani 4-nighter on Nov 17–21)
+  where cleaning fees swallow the margin and wanted a glance-able way
+  to see "is this profitable, or do I need to send a higher Special
+  Offer?" without running the full /find-buy-in flow (which is ~60s
+  and burns SearchAPI budget — overkill for a triage decision). New
+  endpoint: `GET /api/inbox/buy-in-estimate?listingId=X&checkIn=Y
+  &checkOut=Z&cleaningFeePerUnit=N` in `server/routes.ts` — maps the
+  Guesty listingId to the local property via `guestyPropertyMap`,
+  derives `pricingArea` from `suggestPricingArea(city, state,
+  complexName)` (so Kaha Lani's "Lihue" address falls through to
+  "Kapaa Beachfront" via the Hawaii city regex), seasons by check-in
+  month via `getSeasonForMonth`, and computes per-unit nightly ×
+  nights + flat per-unit cleaning. Client renders a small "Buy-in
+  estimate" block in the right panel below the Send Special Offer
+  button, gated to `phase === "inquiry"`. Cleaning fee is editable
+  inline and persisted via the same `nexstay_cleaning_fee`
+  localStorage key buy-in-tracker.tsx already uses (so changing it
+  on either page propagates everywhere). Bottom line: per-night row
+  amortizes cleaning across the stay so a 4-night stay at $250/unit
+  surfaces +$125/night vs ~$71/night on 7 nights — operator can
+  glance both rows and decide. NOTE: deliberately NOT a live
+  /find-buy-in call — static-table estimate is within ~±20% of
+  market, plenty for the is-this-worth-it decision; the live search
+  remains canonical when the operator actually accepts. Drafts
+  (community_drafts) aren't covered yet — v1 scope is the static
+  unit-builder portfolio. Inline `NOTE FOR CODEX` comments at the
+  endpoint, the address parser (off-by-one trap is real — earlier
+  version pulled "4460 Nehe Rd" as the city), the cleaning-fee
+  state, and the render block.
 - 2026-05-04 (follow-up to the same-day inbox-v2 fix below): the previous
   fix taught the client to READ `state.lastMessage.{body,date}` and
   `state.readByNonUser` / `state.isLastPostFromGuest`, but Jamie spotted

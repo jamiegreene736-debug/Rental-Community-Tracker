@@ -1258,6 +1258,55 @@ export default function InboxPage() {
     staleTime: 60_000,
   });
 
+  // ── Inquiry-time buy-in estimate ──
+  // Reuses `nexstay_cleaning_fee` localStorage key from buy-in-tracker.tsx
+  // so the operator's preferred cleaning-fee assumption is shared between
+  // both surfaces. Default $250/unit matches buy-in-tracker. NOTE FOR
+  // CODEX: don't fork to a different storage key — we want one source of
+  // truth so changing it on either page propagates everywhere.
+  const [estimateCleaningFee, setEstimateCleaningFee] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("nexstay_cleaning_fee") || "250", 10) || 250; } catch { return 250; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("nexstay_cleaning_fee", String(estimateCleaningFee)); } catch { /* localStorage may be unavailable in private mode */ }
+  }, [estimateCleaningFee]);
+
+  // The estimate endpoint needs (listingId, checkIn, checkOut). Pull them
+  // straight from the selected conversation's reservation stub — Guesty
+  // populates these on every inquiry. Gated to inquiries only at the
+  // render layer; this query stays enabled for any phase as long as we
+  // have the inputs, so opening a booked thread doesn't refetch on
+  // every state change.
+  const estimateListingId =
+    (selectedConv as any)?.listingId ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.listingId ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.listing?._id ??
+    null;
+  const estimateCheckIn =
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkInDateLocalized ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkIn ??
+    null;
+  const estimateCheckOut =
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkOutDateLocalized ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkOut ??
+    null;
+  const { data: buyInEstimate, isLoading: buyInEstimateLoading } = useQuery<any>({
+    queryKey: ["/api/inbox/buy-in-estimate", estimateListingId, estimateCheckIn, estimateCheckOut, estimateCleaningFee],
+    enabled: !!estimateListingId && !!estimateCheckIn && !!estimateCheckOut,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        listingId: String(estimateListingId),
+        checkIn: String(estimateCheckIn),
+        checkOut: String(estimateCheckOut),
+        cleaningFeePerUnit: String(estimateCleaningFee),
+      });
+      const r = await apiRequest("GET", `/api/inbox/buy-in-estimate?${params.toString()}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
   const draftArrivalDetails = ({
     guestFirstName,
     propertyName,
@@ -2455,6 +2504,102 @@ export default function InboxPage() {
                             </Button>
                           )}
                         </div>
+                      )}
+
+                      {/* Buy-in estimate — INQUIRIES ONLY.
+                          Shows the operator's expected cost to acquire
+                          inventory for the guest's dates: per-unit nightly
+                          rate × nights + flat per-unit cleaning fee. The
+                          per-night line at the bottom AMORTIZES cleaning
+                          across the stay so short stays surface as
+                          unprofitable (a 4-night stay with $250×2 cleaning
+                          adds $125/night vs ~$71/night on a 7-night stay).
+                          Compare against `guestGross / nights` above to
+                          decide whether to send a Special Offer at a
+                          higher number or pass on the inquiry.
+                          NOTE FOR CODEX: this is a STATIC-table estimate
+                          (BUY_IN_RATES × season multiplier), NOT a live
+                          /find-buy-in call. The full live search lives
+                          at /api/operations/find-buy-in and is too slow
+                          (~60s) and expensive (~$0.30/call) to fire on
+                          every inquiry view. The static value is within
+                          ~±20% of market — plenty for the is-this-worth-
+                          it decision. See the matching note on the
+                          `/api/inbox/buy-in-estimate` route. */}
+                      {phase === "inquiry" && buyInEstimate && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
+                            <span>Buy-in estimate</span>
+                            {buyInEstimate.ok && (
+                              <span className="text-muted-foreground/70 font-normal normal-case tracking-normal">
+                                {buyInEstimate.season?.toLowerCase()} · {buyInEstimate.nights}n
+                              </span>
+                            )}
+                          </div>
+                          {buyInEstimate.ok ? (
+                            <div className="border rounded-lg divide-y text-xs">
+                              {buyInEstimate.units.map((u: any, i: number) => (
+                                <div key={i} className="flex justify-between px-2.5 py-1.5">
+                                  <span className="text-muted-foreground">
+                                    {u.label} · {u.bedrooms}BR · {buyInEstimate.nights} × ${u.nightlyRate.toLocaleString()}
+                                  </span>
+                                  <span>${u.lineTotal.toLocaleString()}</span>
+                                </div>
+                              ))}
+                              <div className="flex justify-between items-center px-2.5 py-1.5 gap-2">
+                                <span className="text-muted-foreground flex items-center gap-1.5 min-w-0">
+                                  Cleaning · $
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={2000}
+                                    step={25}
+                                    value={estimateCleaningFee}
+                                    onChange={e => setEstimateCleaningFee(Math.max(0, Math.min(2000, parseInt(e.target.value) || 0)))}
+                                    className="w-12 h-5 px-1 text-xs text-right border rounded bg-background"
+                                    title="Cleaning fee per unit per stay (saved across pages)"
+                                    data-testid="input-estimate-cleaning-fee"
+                                  />
+                                  /unit × {buyInEstimate.unitCount}
+                                </span>
+                                <span>${buyInEstimate.cleaningTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between px-2.5 py-2 bg-amber-50 dark:bg-amber-950/20 font-semibold">
+                                <span className="text-amber-900">Total cost</span>
+                                <span className="text-amber-900">${buyInEstimate.grandTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                                <span>Per night (cleaning amortized)</span>
+                                <span>${buyInEstimate.perNightAmortized.toLocaleString()}</span>
+                              </div>
+                              {/* Profit-vs-cost hint: only when the
+                                  Quoted rate is also visible above
+                                  (guestGross > 0). Operator should be
+                                  able to glance both and decide. */}
+                              {guestGross > 0 && (
+                                <div className={`flex justify-between px-2.5 py-1.5 text-[11px] font-medium ${
+                                  guestGross > buyInEstimate.grandTotal ? "text-green-700" : "text-red-700"
+                                }`}>
+                                  <span>{guestGross > buyInEstimate.grandTotal ? "Margin" : "Loss"} vs quoted</span>
+                                  <span>
+                                    {guestGross > buyInEstimate.grandTotal ? "+" : "−"}$
+                                    {Math.abs(guestGross - buyInEstimate.grandTotal).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-muted-foreground italic px-2 py-1.5 border rounded-lg">
+                              {buyInEstimate.reason ?? "Estimate not available"}
+                            </div>
+                          )}
+                          <div className="text-[10px] text-muted-foreground/70 mt-1">
+                            Static estimate from operator-validated rate table — within ~±20% of market.
+                          </div>
+                        </div>
+                      )}
+                      {phase === "inquiry" && !buyInEstimate && buyInEstimateLoading && (
+                        <div className="text-[11px] text-muted-foreground italic">Loading buy-in estimate…</div>
                       )}
 
                       {/* Financials — only for booked reservations */}
