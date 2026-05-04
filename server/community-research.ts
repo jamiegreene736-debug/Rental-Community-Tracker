@@ -19,6 +19,14 @@ export type ResearchedCommunity = {
   combinedBedroomsTypical?: number;
   combinabilityScore?: number;
   fromWorldKnowledge?: boolean;
+  // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
+  // Single-mode research returns the actual bedroom counts a
+  // community offers (e.g. Santa Maria Resort = [2, 3]) so the
+  // single-listing wizard can render only valid bedroom buttons
+  // instead of a generic 1-5BR picker. Combo flow ignores this
+  // field. Empty array means "Claude doesn't know" — wizard falls
+  // back to the generic picker in that case.
+  availableBedrooms?: number[];
 };
 
 // Pull a bedroom count out of a SearchAPI airbnb engine listing. The
@@ -494,11 +502,13 @@ SCORING:
 
 Use (1) the search results below AND (2) your own world knowledge. **You MAY (and should) add UP TO 15 well-known condo/townhouse resorts from your own knowledge** that fit "${city}, ${state}", marked fromWorldKnowledge:true. Aim for 15–20 total entries when the city has that many known resorts. **For any city named in the EXAMPLES list above, you MUST surface every example resort listed for that city as fromWorldKnowledge entries** unless you have a specific reason to disqualify one.
 
+CRITICAL: For each resort, return availableBedrooms as an array of integers — the bedroom counts that resort actually offers (e.g. Santa Maria Resort: [2, 3]; Pili Mai: [2, 3, 4]; Caribe Cove: [2, 3, 4]; Reunion Resort: [2, 3, 4, 5, 6, 7, 8]). Only include bedroom counts you are confident the resort offers. If you don't know, return an empty array []. The wizard uses this to render bedroom buttons — wrong counts cause failed Zillow lookups, missing counts hide valid options. Default to including 2 and 3 if you're sure the resort exists but uncertain about exact mix. NEVER include studio/0 or 1 unless the resort is genuinely studio/1BR-dominated.
+
 SEARCH RESULTS for "${city}, ${state}":
 ${unique.length > 0 ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n") : "(no organic results — rely on world knowledge)"}
 
 Output JSON array. Each element:
-{"communityName":"...","bedroomMix":"...","unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
+{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
 
 Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
       : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
@@ -620,6 +630,16 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               // as the default when undefined, which is fine.
               combinabilityScore: typeof s.combinabilityScore === "number" ? s.combinabilityScore : undefined,
               fromWorldKnowledge: s.fromWorldKnowledge === true,
+              // CODEX NOTE: availableBedrooms only meaningful in
+              // single mode. Filter to integers in [1,12] and
+              // dedupe; combo mode leaves it undefined.
+              availableBedrooms: Array.isArray(s.availableBedrooms)
+                ? Array.from(new Set(
+                    s.availableBedrooms
+                      .map((n: any) => typeof n === "number" ? Math.round(n) : null)
+                      .filter((n: number | null): n is number => n != null && n >= 1 && n <= 12),
+                  )).sort((a, b) => a - b)
+                : undefined,
             });
           }
         }
