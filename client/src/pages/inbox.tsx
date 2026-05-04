@@ -228,6 +228,26 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
+    name: "Guesty Guest App Agreement Request",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name},
+
+For reservations made through VRBO or Booking.com, we ask the primary guest to complete our secure Guesty Guest App check-in form for the stay at {property_name}.
+
+Please complete it here:
+{{guest_app::[app_name]}}
+
+This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.
+
+Once completed, you are all set. We will send final arrival/access details 14 days before check-in.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
     name: "14-Day Arrival Details",
     trigger: "days_before_checkin",
     daysOffset: 14,
@@ -546,6 +566,33 @@ function buildRepresentativeUnitsFollowUpBody(args: {
   lines.push(`This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.`);
   lines.push(``);
   lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildAgreementRequestBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  confirmationCode?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `For reservations made through VRBO or Booking.com, we ask the primary guest to complete our secure Guesty Guest App check-in form${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  lines.push(``);
+  lines.push(`Please complete it here:`);
+  lines.push(`{{guest_app::[app_name]}}`);
+  lines.push(``);
+  lines.push(`This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.`);
+  lines.push(``);
+  lines.push(`Once completed, you are all set. We will send final arrival/access details 14 days before check-in.`);
   lines.push(``);
   lines.push(`Thanks,`);
   lines.push(OUTBOUND_SENDER_NAME);
@@ -1166,7 +1213,7 @@ export default function InboxPage() {
     bookingTotal,
     totalPaid,
   }: {
-    kind: "booking" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
+    kind: "booking" | "agreement-request" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
@@ -1179,6 +1226,8 @@ export default function InboxPage() {
     const units = arrivalDetails?.units ?? [];
     const body = kind === "booking"
       ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
+      : kind === "agreement-request"
+        ? buildAgreementRequestBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
       : kind === "representative-follow-up"
         ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
         : kind === "local-tips"
@@ -2367,6 +2416,8 @@ export default function InboxPage() {
                             const checkInDate = parseStayDate(checkInIso);
                             const checkOutDate = parseStayDate(checkOutIso);
                             const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
+                            const channelLower = String(channelRaw ?? "").toLowerCase();
+                            const needsAgreement = channelLower.includes("vrbo") || channelLower.includes("homeaway") || channelLower.includes("booking");
                             const postBodies = posts
                               .filter((p: any) => isHostPost(p))
                               .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""));
@@ -2423,6 +2474,15 @@ export default function InboxPage() {
                                 testId: "button-draft-booking-confirmation",
                                 onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
                               },
+                              ...(needsAgreement ? [{
+                                title: "Rental agreement request",
+                                due: bookingDate,
+                                dueLabel: "After booking",
+                                sent: wasSent(/guest app|rental agreement|signed terms|complete it here|check-in form/i),
+                                detail: "Guesty Guest App · email/SMS preferred",
+                                testId: "button-draft-agreement-request",
+                                onClick: () => draftStayTemplate({ kind: "agreement-request", ...draftCommon }),
+                              }] : []),
                               {
                                 title: "Unit setup confirmation",
                                 due: bookingDate ? addDays(bookingDate, 1) : null,
