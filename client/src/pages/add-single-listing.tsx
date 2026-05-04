@@ -191,6 +191,13 @@ export default function AddSingleListing() {
           bathrooms: number | null;
           photos: Array<{ url: string; label: string }>;
           qualifier: QualifierResult;
+          // CODEX NOTE (2026-05-04, claude/single-listing-text-fallback):
+          // true when the candidate qualified by text-only because
+          // the Zillow photo scrape returned empty (Apify/ScrapingBee
+          // both failed). Wizard's auto-retry via fetch-unit-photos
+          // tries to recover photos; if that fails too, Step 3
+          // surfaces the manual paste form.
+          photoScrapeFailed?: boolean;
         };
         attempts: FindAttempt[];
         attemptCount: number;
@@ -367,8 +374,12 @@ export default function AddSingleListing() {
           }
         }
         toast({
-          title: "Found a clean unit",
-          description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
+          title: data.unit.photoScrapeFailed
+            ? "Found a clean unit (photos pending)"
+            : "Found a clean unit",
+          description: data.unit.photoScrapeFailed
+            ? `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings (text-only; photo scrape retrying).`
+            : `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
         });
         setStep(2);
       } else {
