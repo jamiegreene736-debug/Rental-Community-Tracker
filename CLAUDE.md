@@ -43,6 +43,35 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04 (special-offer pivoted to clipboard + open-in-Guesty): the
+  earlier preset-discount work surfaced a downstream issue — the actual
+  POST to Guesty 502'd because Guesty's Open API
+  (`open-api.guesty.com/v1`) does NOT expose an Airbnb special-offer
+  endpoint for this tenant. Verified 2026-05-04 across 13 path
+  variants: `/reservations/{id}/special-offer`, `/airbnb2/...`,
+  `/airbnb/...`, `/channels/airbnb/special-offers`,
+  `/channels/airbnb2/special-offers`, `/airbnb-special-offer-requests`,
+  `/listings/{id}/special-offer`, conversation-namespaced variants —
+  every single one returns 404 ("Cannot POST /api/v2/..."), with
+  Guesty's response confirming the v1→v2 internal rewrite. Pre-approve
+  and decline still work because they're WRITABLE FIELDS on the
+  reservation document (`preApproveState`, `status`) that PUT
+  /reservations/{id} accepts; special-offer needs a channel-action
+  endpoint Guesty doesn't ship in v1. Pivoted the dialog footer button
+  from `apiRequest("POST", ...)` to: `navigator.clipboard.writeText`
+  the discounted price + `window.open(https://app.guesty.com/inbox-v2/
+  {convId}/reservation, "_blank")` so the operator pastes into
+  Guesty's native Special Offer form. The discount-preset buttons
+  (5/10/15% off) still do all the math — that was the actual painful
+  part. Server endpoint at `/api/inbox/reservations/.../airbnb/
+  special-offer` and the underlying `callGuestyAirbnbAction`
+  candidate-walker remain in place for future reactivation if/when
+  Guesty ships the API endpoint. Inline NOTE FOR CODEX comments on
+  `sendSpecialOffer` and the dialog explainer flag this as
+  intentional, not a UI preference. Alternative path (Playwright
+  against app.guesty.com per Load-Bearing #25–32) was considered and
+  deferred — too heavy for a workflow the operator can complete in
+  ~10s by pasting a number.
 - 2026-05-04 (special-offer quick-discount presets): added 5% / 10% / 15%
   preset buttons inside the Send Special Offer dialog (`inbox.tsx` near
   the price input around line ~3318). Use case: Jamie kept telling guests

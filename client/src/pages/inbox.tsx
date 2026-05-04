@@ -21,7 +21,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText,
+  FileText, ExternalLink,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -1752,36 +1752,52 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
   });
 
-  // Send an Airbnb Special Offer — overrides the listing rate for
-  // this specific inquiry. Same `callGuestyAirbnbAction` candidate-
-  // walker on the server as pre-approve / decline (PR #99 verifies
-  // every candidate, so a 200 that didn't actually create the offer
-  // bubbles up as failure). Body is `{ price, message?,
-  // expirationDays? }` per the existing endpoint.
+  // "Send Special Offer" — pivoted 2026-05-04 from API call to
+  // clipboard-copy + open-in-Guesty. NOTE FOR CODEX: Guesty's Open API
+  // (`open-api.guesty.com/v1`) does NOT expose an Airbnb special-offer
+  // endpoint for this tenant — every plausible path returns 404
+  // (verified across 13 variants on 2026-05-04: `/reservations/{id}/
+  // special-offer`, `/airbnb2/...`, `/channels/airbnb/special-offers`,
+  // `/airbnb-special-offer-requests`, `/listings/{id}/special-offer`,
+  // and conversation-namespaced variants). Pre-approve and decline
+  // work because they're writable FIELDS on the reservation document
+  // (`preApproveState`, `status`); special-offer needs a channel-
+  // action endpoint that Guesty doesn't ship in v1. The legitimate
+  // alternative would be a Playwright workflow against
+  // app.guesty.com (per Load-Bearing #25–32), but that's heavy for a
+  // workflow the operator can complete in ~10s by pasting a number.
+  // So: copy the discounted price to clipboard, open Guesty's
+  // inbox-v2 URL for this conversation in a new tab, and let the
+  // operator paste into Guesty's native Special Offer dialog. The
+  // discount-preset buttons still do the math (the actual painful
+  // part). If/when Guesty ships the API endpoint, swap this back to
+  // the `apiRequest("POST", ...)` form — the server endpoint at
+  // `/api/inbox/reservations/.../airbnb/special-offer` remains in
+  // place for that future swap.
   const sendSpecialOffer = useMutation({
-    mutationFn: async (vars: { reservationId: string; price: number; message?: string }) => {
-      const r = await apiRequest("POST", `/api/inbox/reservations/${vars.reservationId}/airbnb/special-offer`, {
-        price: vars.price,
-        ...(vars.message ? { message: vars.message } : {}),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
+    mutationFn: async (vars: { reservationId: string; conversationId: string; price: number; message?: string }) => {
+      const priceStr = String(Math.round(vars.price));
+      try {
+        await navigator.clipboard.writeText(priceStr);
+      } catch {
+        // Some browsers refuse clipboard.writeText outside a user gesture;
+        // if it fails we still open the tab — operator can re-type the
+        // price if needed (it's also still in the dialog before close).
       }
-      return r.json();
+      const url = `https://app.guesty.com/inbox-v2/${vars.conversationId}/reservation`;
+      window.open(url, "_blank", "noopener,noreferrer");
+      return { ok: true, price: priceStr };
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+    onSuccess: (data) => {
       setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
       setSpecialOfferPrice("");
       setSpecialOfferMessage("");
       toast({
-        title: "Special offer sent on Airbnb",
-        description: "The guest will see your custom price next time they open the conversation.",
+        title: `Price $${Number(data.price).toLocaleString()} copied to clipboard`,
+        description: "Guesty opened in a new tab — paste into their Special Offer dialog.",
       });
     },
-    onError: (e: any) => toast({ title: "Special offer failed", description: e.message, variant: "destructive" }),
+    onError: (e: any) => toast({ title: "Couldn't open Guesty", description: e.message, variant: "destructive" }),
   });
 
   // Decline an Airbnb inquiry.
@@ -3294,9 +3310,19 @@ export default function InboxPage() {
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Send Special Offer on Airbnb</DialogTitle>
+            <DialogTitle>Prepare Special Offer for Airbnb</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-1">
+            {/* Explainer for the indirect flow. NOTE FOR CODEX: not a UI
+                preference — Guesty's Open API doesn't expose the Airbnb
+                special-offer endpoint for this tenant (verified across
+                13 path variants), so the dialog computes the price and
+                hands it to Guesty's UI via clipboard + new tab. See the
+                NOTE FOR CODEX on `sendSpecialOffer` for the full
+                investigation. */}
+            <p className="text-[11px] text-muted-foreground bg-muted/50 border rounded-md px-2.5 py-1.5">
+              Guesty's API doesn't accept Airbnb special offers from outside their app, so this <b>copies the price</b> and <b>opens Guesty</b> in a new tab — paste it into Guesty's Special Offer dialog there.
+            </p>
             <div>
               <Label htmlFor="special-offer-price">New total guest price (USD)</Label>
               <Input
@@ -3413,22 +3439,29 @@ export default function InboxPage() {
                   return;
                 }
                 if (!specialOfferDialog.reservationId) return;
+                // Pass `selectedConvId` (the conversation that owns
+                // this dialog) so the new tab lands on Guesty's
+                // inbox-v2 page for the correct thread. The
+                // reservationId is kept for future reactivation of the
+                // Guesty API path — see the NOTE FOR CODEX on
+                // sendSpecialOffer.
                 sendSpecialOffer.mutate({
                   reservationId: specialOfferDialog.reservationId,
+                  conversationId: selectedConvId ?? "",
                   price,
                   message: specialOfferMessage.trim() || undefined,
                 });
               }}
-              disabled={sendSpecialOffer.isPending || !specialOfferPrice}
+              disabled={sendSpecialOffer.isPending || !specialOfferPrice || !selectedConvId}
               data-testid="button-special-offer-send"
             >
               {sendSpecialOffer.isPending ? (
                 <>
-                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Sending…
+                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Opening Guesty…
                 </>
               ) : (
                 <>
-                  <Send className="h-3 w-3 mr-1" /> Send Special Offer
+                  <ExternalLink className="h-3 w-3 mr-1" /> Copy & Open in Guesty
                 </>
               )}
             </Button>
