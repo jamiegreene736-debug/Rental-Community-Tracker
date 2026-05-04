@@ -14,6 +14,10 @@ import PhotoAudit from "@/pages/photo-audit";
 import AvailabilityScanner from "@/pages/availability-scanner";
 import CommunityPhotoFinder from "@/pages/community-photo-finder";
 import AddCommunity from "@/pages/add-community";
+// CODEX NOTE (2026-05-04, claude/single-listing): standalone-unit
+// counterpart to AddCommunity. Same downstream save flow (community_drafts
+// table, builder, preflight) — just one unit instead of two combined.
+import AddSingleListing from "@/pages/add-single-listing";
 import Builder from "@/pages/builder";
 import BuilderPreflight from "@/pages/builder-preflight";
 import Inbox from "@/pages/inbox";
@@ -28,6 +32,7 @@ function Router() {
         <Switch>
           <Route path="/" component={Home} />
           <Route path="/add-community" component={AddCommunity} />
+          <Route path="/add-single-listing" component={AddSingleListing} />
           <Route path="/builder/:propertyId/preflight" component={BuilderPreflight} />
           <Route path="/builder/:propertyId/:step" component={Builder} />
           <Route path="/unit-builder/:id" component={UnitBuilder} />

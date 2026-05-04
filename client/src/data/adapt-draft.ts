@@ -258,8 +258,18 @@ export function adaptDraftToPropertyUnitBuilder(
     strPermit: draft.strPermit && draft.strPermit.trim() && !looksLikeSamplePlaceholder(draft.strPermit)
       ? draft.strPermit
       : licenseSamples.strPermit,
-    hasPhotos: ((draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length) ||
-                 (draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length)) ? true : false,
+    // CODEX NOTE (2026-05-04, claude/single-listing): branch on
+    // `singleListing` so standalone drafts ignore the unit2 photo
+    // folder check. Reading `unit2PhotoFolder` for a single draft
+    // would still work (it's null) but being explicit keeps the
+    // intent visible.
+    hasPhotos: (() => {
+      const isSingle = (draft as any).singleListing === true;
+      const unit1Has = !!(draft.unit1PhotoFolder && photoFiles[draft.unit1PhotoFolder]?.length);
+      if (isSingle) return unit1Has;
+      const unit2Has = !!(draft.unit2PhotoFolder && photoFiles[draft.unit2PhotoFolder]?.length);
+      return unit1Has || unit2Has;
+    })(),
     // Community photos for promoted drafts live at a deterministic
     // folder name `community-draft-<draftId>`. The wizard's save flow
     // best-effort fetches and writes 6 community-level photos there
@@ -273,32 +283,52 @@ export function adaptDraftToPropertyUnitBuilder(
     // drafts that don't have hand-curated position metadata.
     communityPhotos: [],
     communityPhotoFolder: `community-draft-${draft.id}`,
-    units: [
-      {
-        id: `draft${draft.id}-unit-a`,
-        unitNumber: "A",
-        bedrooms: u1Br,
-        bathrooms: draft.unit1Bathrooms ?? "",
-        sqft: draft.unit1Sqft ?? "",
-        maxGuests: draft.unit1MaxGuests ?? u1Br * 2,
-        shortDescription: draft.unit1ShortDescription ?? "",
-        longDescription: draft.unit1LongDescription ?? "",
-        photoFolder: draft.unit1PhotoFolder ?? "",
-        photos: filesToPhotos(draft.unit1PhotoFolder),
-      },
-      {
-        id: `draft${draft.id}-unit-b`,
-        unitNumber: "B",
-        bedrooms: u2Br,
-        bathrooms: draft.unit2Bathrooms ?? "",
-        sqft: draft.unit2Sqft ?? "",
-        maxGuests: draft.unit2MaxGuests ?? u2Br * 2,
-        shortDescription: draft.unit2ShortDescription ?? "",
-        longDescription: draft.unit2LongDescription ?? "",
-        photoFolder: draft.unit2PhotoFolder ?? "",
-        photos: filesToPhotos(draft.unit2PhotoFolder),
-      },
-    ],
+    // CODEX NOTE (2026-05-04, claude/single-listing): standalone drafts
+    // emit a one-element units[] array. Combo drafts keep the existing
+    // two-element shape. Builder tabs (Bedding, Pricing, etc.) iterate
+    // over units[] without assuming length === 2, so this works without
+    // further changes.
+    units: ((draft as any).singleListing === true)
+      ? [
+          {
+            id: `draft${draft.id}-unit-a`,
+            unitNumber: "A",
+            bedrooms: u1Br,
+            bathrooms: draft.unit1Bathrooms ?? "",
+            sqft: draft.unit1Sqft ?? "",
+            maxGuests: draft.unit1MaxGuests ?? u1Br * 2,
+            shortDescription: draft.unit1ShortDescription ?? "",
+            longDescription: draft.unit1LongDescription ?? "",
+            photoFolder: draft.unit1PhotoFolder ?? "",
+            photos: filesToPhotos(draft.unit1PhotoFolder),
+          },
+        ]
+      : [
+          {
+            id: `draft${draft.id}-unit-a`,
+            unitNumber: "A",
+            bedrooms: u1Br,
+            bathrooms: draft.unit1Bathrooms ?? "",
+            sqft: draft.unit1Sqft ?? "",
+            maxGuests: draft.unit1MaxGuests ?? u1Br * 2,
+            shortDescription: draft.unit1ShortDescription ?? "",
+            longDescription: draft.unit1LongDescription ?? "",
+            photoFolder: draft.unit1PhotoFolder ?? "",
+            photos: filesToPhotos(draft.unit1PhotoFolder),
+          },
+          {
+            id: `draft${draft.id}-unit-b`,
+            unitNumber: "B",
+            bedrooms: u2Br,
+            bathrooms: draft.unit2Bathrooms ?? "",
+            sqft: draft.unit2Sqft ?? "",
+            maxGuests: draft.unit2MaxGuests ?? u2Br * 2,
+            shortDescription: draft.unit2ShortDescription ?? "",
+            longDescription: draft.unit2LongDescription ?? "",
+            photoFolder: draft.unit2PhotoFolder ?? "",
+            photos: filesToPhotos(draft.unit2PhotoFolder),
+          },
+        ],
   } as PropertyUnitBuilder;
 }
 

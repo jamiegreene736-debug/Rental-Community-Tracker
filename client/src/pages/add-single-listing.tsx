@@ -1,0 +1,871 @@
+// CODEX NOTE (2026-05-04, claude/single-listing):
+// Add-Single-Listing wizard. Mirrors `add-community.tsx` but for a
+// STANDALONE condo/townhouse — one unit, not a combo. Reuses the
+// same backend endpoints (community/save, community/generate-listing,
+// community/fetch-unit-photos, community/persist-photos,
+// community/refresh-pricing, community/persist-community-photos)
+// with the new `singleListing: true` flag where supported.
+//
+// Operator-driven differences vs. add-community:
+//   - No "Research" / "Top Markets" community-wide scan. Operator
+//     enters a specific street address and a Zillow URL.
+//   - Step 2 is the OTA-clean QUALIFIER — calls /api/single-listing/qualify
+//     to verify the address is NOT listed on Airbnb / VRBO / Booking.
+//     If any platform shows a confirmed match, the property doesn't
+//     qualify and the wizard hard-blocks save.
+//   - Step 3 photos: only Unit A (no Unit B).
+//   - Step 4 listing draft: single-unit prompt (no walking distance,
+//     no "two units" framing).
+//
+// Save shape: unit2_* fields stay null. `singleListing: true` is
+// persisted on the draft so downstream adapters (home.tsx,
+// adapt-draft.ts) know to render it as a single-unit property.
+
+import { useState, useCallback, useRef, useEffect } from "react";
+import { Link, useLocation } from "wouter";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  ArrowLeft,
+  ArrowRight,
+  MapPin,
+  Search,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  Building2,
+  BedDouble,
+  Camera,
+  FileText,
+  ShieldCheck,
+  ShieldX,
+  ExternalLink,
+} from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
+
+const US_STATES = [
+  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+  "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+  "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+  "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+  "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+  "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+  "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+  "Wisconsin","Wyoming",
+];
+
+// 4 steps vs. add-community's 5 (no community-wide research step).
+const STEPS = ["Property", "OTA Check", "Photos", "Listing Draft"];
+
+type QualifierPlatformResult = {
+  listed: boolean;
+  matches: Array<{ url: string; title: string; snippet: string }>;
+  query: string;
+  error?: string;
+};
+
+type QualifierResult = {
+  qualifies: boolean;
+  platforms: {
+    airbnb: QualifierPlatformResult;
+    vrbo: QualifierPlatformResult;
+    booking: QualifierPlatformResult;
+  };
+  reason: string;
+};
+
+type PhotoItem = { url: string; label: string };
+
+type UnitDraft = {
+  bedrooms: number;
+  bathrooms: string;
+  sqft: string;
+  maxGuests: number;
+  bedding: string;
+  shortDescription: string;
+  longDescription: string;
+};
+
+type ListingDraft = {
+  title: string;
+  bookingTitle?: string;
+  propertyType?: string;
+  description: string;
+  summary?: string;
+  space?: string;
+  neighborhood?: string;
+  transit?: string;
+  unitA?: UnitDraft | null;
+  combinedBedrooms: number;
+  suggestedRate: number;
+  strPermitSample?: string;
+  warning?: string;
+};
+
+export default function AddSingleListing() {
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [step, setStep] = useState(1);
+
+  // Step 1 — Property identification
+  const [selectedState, setSelectedState] = useState("");
+  const [cityInput, setCityInput] = useState("");
+  const [streetAddress, setStreetAddress] = useState("");
+  const [propertyName, setPropertyName] = useState(""); // optional — building / complex name
+  // City typeahead (same shape as add-community's). Not strictly needed
+  // for a standalone, but operators expect it from the combo flow.
+  const [citySuggestions, setCitySuggestions] = useState<string[]>([]);
+  const [citySuggestionsLoading, setCitySuggestionsLoading] = useState(false);
+  const [showCitySuggestions, setShowCitySuggestions] = useState(false);
+  const cityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cityRequestSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
+    if (!selectedState || cityInput.trim().length < 2) {
+      setCitySuggestions([]);
+      setCitySuggestionsLoading(false);
+      return;
+    }
+    setCitySuggestionsLoading(true);
+    const mySeq = ++cityRequestSeqRef.current;
+    cityDebounceRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/community/city-suggest?state=${encodeURIComponent(selectedState)}&query=${encodeURIComponent(cityInput.trim())}`,
+        );
+        const data = await r.json();
+        if (mySeq !== cityRequestSeqRef.current) return;
+        setCitySuggestions(Array.isArray(data?.cities) ? data.cities : []);
+      } catch {
+        if (mySeq !== cityRequestSeqRef.current) return;
+        setCitySuggestions([]);
+      } finally {
+        if (mySeq === cityRequestSeqRef.current) setCitySuggestionsLoading(false);
+      }
+    }, 250);
+    return () => {
+      if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
+    };
+  }, [cityInput, selectedState]);
+
+  // Step 2 — OTA qualifier
+  const [qualifierLoading, setQualifierLoading] = useState(false);
+  const [qualifierResult, setQualifierResult] = useState<QualifierResult | null>(null);
+
+  // Step 3 — Zillow URL + photos
+  const [zillowUrl, setZillowUrl] = useState("");
+  const [unit1Photos, setUnit1Photos] = useState<PhotoItem[]>([]);
+  const [photosLoading, setPhotosLoading] = useState(false);
+  const [zillowFacts, setZillowFacts] = useState<{ bedrooms?: number; bathrooms?: number }>({});
+  const [zillowSourceUrl, setZillowSourceUrl] = useState("");
+
+  // Step 4 — Listing draft
+  const [listing, setListing] = useState<ListingDraft | null>(null);
+  const [listingLoading, setListingLoading] = useState(false);
+  const [editedTitle, setEditedTitle] = useState("");
+  const [editedBookingTitle, setEditedBookingTitle] = useState("");
+  const [editedPropertyType, setEditedPropertyType] = useState<string>("Condominium");
+  const [editedPricingArea, setEditedPricingArea] = useState<string>("");
+  const [editedDescription, setEditedDescription] = useState("");
+  const [editedNeighborhood, setEditedNeighborhood] = useState("");
+  const [editedTransit, setEditedTransit] = useState("");
+  const [editedUnitA, setEditedUnitA] = useState<UnitDraft | null>(null);
+  const [strPermit, setStrPermit] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const bedrooms = zillowFacts.bedrooms ?? 0;
+  // Same NET margin math as add-community.tsx — see that file for
+  // the rationale (target 20% net after Airbnb's 15.5% take, hence
+  // a ~1.42 sell markup).
+  const NET_MARGIN_TARGET = 0.20;
+  const AIRBNB_FEE = 0.155;
+  const SELL_MARKUP = (1 + NET_MARGIN_TARGET) / (1 - AIRBNB_FEE);
+  // Suggested base rate from a per-bedroom assumption — replaces
+  // the combo flow's per-unit-Zillow-price math since a single
+  // standalone has just one unit. 250/BR is a reasonable starting
+  // point (matches Hawaii fallback in shared/pricing-rates).
+  const baseRate = bedrooms > 0 ? bedrooms * 250 : 0;
+  const suggestedRate = baseRate > 0 ? Math.round(baseRate * SELL_MARKUP) : 0;
+
+  // ── Step 2: OTA qualifier ──────────────────────────────────
+  const runQualifier = useCallback(async () => {
+    if (!streetAddress.trim() || !cityInput.trim() || !selectedState) {
+      toast({ title: "Enter the full street address, city, and state first", variant: "destructive" });
+      return;
+    }
+    setQualifierLoading(true);
+    setQualifierResult(null);
+    try {
+      const res = await apiRequest("POST", "/api/single-listing/qualify", {
+        address: streetAddress.trim(),
+        city: cityInput.trim(),
+        state: selectedState,
+      });
+      const data: QualifierResult = await res.json();
+      setQualifierResult(data);
+      if (data.qualifies) {
+        toast({ title: "Qualifies as a standalone listing", description: "No matches on Airbnb, VRBO, or Booking.com." });
+      } else {
+        toast({
+          title: "Does not qualify",
+          description: data.reason,
+          variant: "destructive",
+        });
+      }
+    } catch (e: any) {
+      toast({ title: "Qualifier check failed", description: e.message, variant: "destructive" });
+    } finally {
+      setQualifierLoading(false);
+    }
+  }, [streetAddress, cityInput, selectedState, toast]);
+
+  // ── Step 3: Fetch photos from Zillow ───────────────────────
+  const fetchZillowPhotos = useCallback(async () => {
+    if (!zillowUrl.trim()) {
+      toast({ title: "Paste a Zillow URL first", variant: "destructive" });
+      return;
+    }
+    setPhotosLoading(true);
+    setUnit1Photos([]);
+    try {
+      const res = await apiRequest("POST", "/api/community/fetch-unit-photos", {
+        url: zillowUrl.trim(),
+      });
+      const data = await res.json();
+      setUnit1Photos((data.photos || []).slice(0, 25));
+      setZillowSourceUrl(data.sourceUrl || zillowUrl.trim());
+      if (data.facts) setZillowFacts(data.facts);
+      if ((data.photos || []).length === 0) {
+        toast({ title: "No photos found", description: "Zillow returned no photos for that URL.", variant: "destructive" });
+      }
+    } catch (e: any) {
+      toast({ title: "Photo fetch failed", description: e.message, variant: "destructive" });
+    } finally {
+      setPhotosLoading(false);
+    }
+  }, [zillowUrl, toast]);
+
+  // ── Step 4: Generate listing draft ─────────────────────────
+  const handleGenerateListing = useCallback(async () => {
+    if (!propertyName.trim() && !streetAddress.trim()) {
+      toast({ title: "Need a property name or address before generating", variant: "destructive" });
+      return;
+    }
+    setListingLoading(true);
+    try {
+      const res = await apiRequest("POST", "/api/community/generate-listing", {
+        // CODEX NOTE: `singleListing: true` flips the prompt + fallback
+        // shape on the server — see /api/community/generate-listing.
+        singleListing: true,
+        communityName: propertyName.trim() || streetAddress.trim(),
+        city: cityInput.trim(),
+        state: selectedState,
+        unit1: {
+          bedrooms: bedrooms || 2,
+          url: zillowSourceUrl,
+          address: streetAddress.trim(),
+        },
+        suggestedRate,
+      });
+      const data: ListingDraft = await res.json();
+      setListing(data);
+      setEditedTitle(data.title || "");
+      setEditedBookingTitle(data.bookingTitle || data.title || "");
+      setEditedPropertyType(data.propertyType || "Condominium");
+      setEditedDescription(data.description || "");
+      setEditedNeighborhood(data.neighborhood || "");
+      setEditedTransit(data.transit || "");
+      setEditedUnitA(data.unitA ?? null);
+      // Seed pricing-area suggestion from city/state (same logic as combo flow).
+      if (!editedPricingArea && cityInput && selectedState) {
+        const suggested = suggestPricingArea(cityInput, selectedState);
+        if (suggested) setEditedPricingArea(suggested);
+      }
+      if (!strPermit && data.strPermitSample) {
+        setStrPermit(data.strPermitSample);
+      }
+      if (data.warning) {
+        toast({ title: "AI draft incomplete", description: data.warning, variant: "destructive" });
+      }
+    } catch (e: any) {
+      toast({ title: "Listing generation failed", description: e.message, variant: "destructive" });
+    } finally {
+      setListingLoading(false);
+    }
+  }, [propertyName, streetAddress, cityInput, selectedState, bedrooms, zillowSourceUrl, suggestedRate, editedPricingArea, strPermit, toast]);
+
+  // ── Save to dashboard ──────────────────────────────────────
+  const handleSave = useCallback(async () => {
+    if (!cityInput.trim() || !selectedState) {
+      toast({ title: "Missing city/state", variant: "destructive" });
+      return;
+    }
+    setSaving(true);
+    try {
+      const saveResp = await apiRequest("POST", "/api/community/save", {
+        // CODEX NOTE: standalone single-listing draft. unit2_* fields
+        // intentionally null. `singleListing: true` flag tells the
+        // dashboard adapter (home.tsx) and builder adapter
+        // (adapt-draft.ts) to skip Unit B and render this as a
+        // single-unit property.
+        singleListing: true,
+        name: propertyName.trim() || streetAddress.trim() || `${cityInput.trim()} listing`,
+        city: cityInput.trim(),
+        state: selectedState,
+        // Pass a unitTypes hint that satisfies checkCommunityType
+        // (must contain "condo" or "townhouse"). The operator picks
+        // the actual property type below; we tag the draft as a
+        // condo by default since that's the most common standalone
+        // case for this business.
+        unitTypes: editedPropertyType?.toLowerCase().includes("townhouse") ? "townhouse" : "condominium",
+        sourceUrl: zillowSourceUrl || null,
+        unit1Url: zillowSourceUrl || null,
+        unit1Bedrooms: bedrooms || null,
+        unit1Bathrooms: editedUnitA?.bathrooms ?? (zillowFacts.bathrooms ? String(zillowFacts.bathrooms) : null),
+        unit1Sqft: editedUnitA?.sqft ?? null,
+        unit1MaxGuests: editedUnitA?.maxGuests ?? null,
+        unit1Bedding: editedUnitA?.bedding ?? null,
+        unit1ShortDescription: editedUnitA?.shortDescription ?? null,
+        unit1LongDescription: editedUnitA?.longDescription ?? null,
+        // unit2_* explicitly null — see CODEX NOTE above.
+        unit2Url: null,
+        unit2Bedrooms: null,
+        unit2Bathrooms: null,
+        unit2Sqft: null,
+        unit2MaxGuests: null,
+        unit2Bedding: null,
+        unit2ShortDescription: null,
+        unit2LongDescription: null,
+        // For singles, "combinedBedrooms" == the single unit's bedrooms.
+        // The dashboard adapter reads it via the same code path as combos.
+        combinedBedrooms: bedrooms || null,
+        suggestedRate: suggestedRate || null,
+        listingTitle: editedTitle || null,
+        bookingTitle: editedBookingTitle || null,
+        propertyType: editedPropertyType || null,
+        pricingArea: editedPricingArea || null,
+        streetAddress: streetAddress.trim() || null,
+        listingDescription: editedDescription || null,
+        neighborhood: editedNeighborhood || null,
+        transit: editedTransit || null,
+        strPermit: strPermit.trim() || null,
+        status: "draft_ready",
+      });
+      const saved = await saveResp.json().catch(() => null) as { id?: number } | null;
+      const draftId = saved?.id;
+      // Persist Step 3 photos to the draft's unit-a folder so the
+      // builder Photos tab has them on first load.
+      if (draftId && unit1Photos.length > 0) {
+        try {
+          await apiRequest("POST", `/api/community/${draftId}/persist-photos`, {
+            unit1Photos: unit1Photos.map((p) => p.url),
+            unit2Photos: [], // explicit empty array — no Unit B photos for singles
+          });
+        } catch (e: any) {
+          console.warn(`[add-single-listing] photo persist failed: ${e?.message}`);
+          toast({
+            title: "Saved (photos pending)",
+            description: "Listing saved, but the photos didn't persist. Edit + re-save to retry.",
+          });
+        }
+      }
+      // Auto-fetch resort/community-level photos + per-BR live market
+      // rates (same pattern as add-community.tsx). Best-effort.
+      if (draftId) {
+        apiRequest("POST", `/api/community/${draftId}/persist-community-photos`, {})
+          .catch((e: any) => console.warn(`[add-single-listing] community-photos persist failed: ${e?.message}`));
+        apiRequest("POST", `/api/community/${draftId}/refresh-pricing`, {})
+          .catch((e: any) => console.warn(`[add-single-listing] refresh-pricing failed: ${e?.message}`));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      toast({ title: "Single listing saved to dashboard!" });
+      navigate("/");
+    } catch (e: any) {
+      toast({ title: "Save failed", description: e.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }, [propertyName, streetAddress, cityInput, selectedState, editedPropertyType, zillowSourceUrl, bedrooms, zillowFacts, editedUnitA, suggestedRate, editedTitle, editedBookingTitle, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, strPermit, unit1Photos, queryClient, toast, navigate]);
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="max-w-4xl mx-auto px-4 py-6">
+        {/* Header */}
+        <div className="mb-6 flex items-center gap-3">
+          <Link href="/">
+            <Button variant="ghost" size="sm" data-testid="button-back-home">
+              <ArrowLeft className="h-4 w-4 mr-1" /> Dashboard
+            </Button>
+          </Link>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Add a Single Listing</h1>
+            <p className="text-sm text-muted-foreground">Standalone condo or townhouse — verified clean of existing OTA listings</p>
+          </div>
+        </div>
+
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1" aria-label={`Step ${step} of ${STEPS.length}`}>
+          {STEPS.map((label, i) => {
+            const stepNum = i + 1;
+            const isActive = step === stepNum;
+            const isDone = step > stepNum;
+            return (
+              <div key={label} className="flex items-center gap-2 shrink-0">
+                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  isActive ? "bg-primary text-primary-foreground" :
+                  isDone ? "bg-primary/20 text-primary" :
+                  "bg-muted text-muted-foreground"
+                }`}>
+                  {isDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className="w-4 h-4 text-center leading-4">{stepNum}</span>}
+                  {label}
+                </div>
+                {i < STEPS.length - 1 && <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />}
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-sm text-muted-foreground mb-6">Step {step} of {STEPS.length}: {STEPS[step - 1]}</p>
+
+        {/* ── STEP 1: Property identification ───────────── */}
+        {step === 1 && (
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <MapPin className="h-5 w-5 text-primary" />
+              <h2 className="text-lg font-semibold">Step 1: Property details</h2>
+            </div>
+            <p className="text-muted-foreground text-sm mb-6">
+              Enter the standalone unit's full street address. We'll use it on the next step
+              to verify the property isn't already listed on Airbnb, VRBO, or Booking.com.
+            </p>
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="text-sm font-medium mb-1.5 block">Property / building name (optional)</label>
+                <Input
+                  placeholder="e.g. The Surfrider, Building 4 Unit 12, …"
+                  value={propertyName}
+                  onChange={(e) => setPropertyName(e.target.value)}
+                  data-testid="input-property-name"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Leave blank if it's a standalone home with no complex name.
+                </p>
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-1.5 block">Street address</label>
+                <Input
+                  placeholder="e.g. 4460 Nehe Rd #122"
+                  value={streetAddress}
+                  onChange={(e) => setStreetAddress(e.target.value)}
+                  data-testid="input-street-address"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Used for the OTA cross-listing check on the next step.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">State</label>
+                  <Select value={selectedState} onValueChange={setSelectedState}>
+                    <SelectTrigger data-testid="select-state">
+                      <SelectValue placeholder="Select a state…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {US_STATES.map((s) => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">City</label>
+                  <div className="relative">
+                    <Input
+                      placeholder={selectedState ? "Start typing — e.g. Lihue, Kissimmee…" : "Pick a state first…"}
+                      value={cityInput}
+                      onChange={(e) => {
+                        setCityInput(e.target.value);
+                        setShowCitySuggestions(true);
+                      }}
+                      onFocus={() => setShowCitySuggestions(true)}
+                      onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
+                      disabled={!selectedState}
+                      data-testid="input-city"
+                      autoComplete="off"
+                    />
+                    {showCitySuggestions && (citySuggestionsLoading || citySuggestions.length > 0) && (
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-md shadow-lg z-20 max-h-60 overflow-auto">
+                        {citySuggestionsLoading && citySuggestions.length === 0 && (
+                          <div className="px-3 py-2 text-xs text-muted-foreground italic">Looking up cities…</div>
+                        )}
+                        {citySuggestions.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setCityInput(c);
+                              setShowCitySuggestions(false);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-muted focus:bg-muted focus:outline-none"
+                          >
+                            {c}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <Button
+              onClick={() => setStep(2)}
+              disabled={!streetAddress.trim() || !cityInput.trim() || !selectedState}
+              data-testid="button-step-1-next"
+            >
+              Continue to OTA Check
+              <ArrowRight className="h-4 w-4 ml-2" />
+            </Button>
+          </Card>
+        )}
+
+        {/* ── STEP 2: OTA Qualifier ─────────────────────── */}
+        {step === 2 && (
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <ShieldCheck className="h-5 w-5 text-primary" />
+              <h2 className="text-lg font-semibold">Step 2: OTA cross-listing check</h2>
+            </div>
+            <p className="text-muted-foreground text-sm mb-6">
+              For a standalone unit to qualify, it must NOT already be listed on Airbnb, VRBO, or Booking.com.
+              We'll search each platform for your address and show what we find.
+            </p>
+            <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
+              <strong>Address being checked:</strong>
+              <div className="mt-1">{streetAddress || "—"}, {cityInput || "—"}, {selectedState || "—"}</div>
+            </div>
+
+            {!qualifierResult && (
+              <Button
+                onClick={runQualifier}
+                disabled={qualifierLoading}
+                data-testid="button-run-qualifier"
+              >
+                {qualifierLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                {qualifierLoading ? "Checking Airbnb / VRBO / Booking…" : "Run OTA check"}
+              </Button>
+            )}
+
+            {qualifierResult && (
+              <>
+                <div className={`p-4 rounded-lg mb-4 border ${qualifierResult.qualifies ? "border-green-500 bg-green-50/40" : "border-red-500 bg-red-50/40"}`}>
+                  <div className="flex items-center gap-2 font-semibold">
+                    {qualifierResult.qualifies ? (
+                      <><ShieldCheck className="h-5 w-5 text-green-700" /> <span className="text-green-900">Qualifies as a standalone listing</span></>
+                    ) : (
+                      <><ShieldX className="h-5 w-5 text-red-700" /> <span className="text-red-900">Does not qualify</span></>
+                    )}
+                  </div>
+                  <p className="text-sm mt-1">{qualifierResult.reason}</p>
+                </div>
+                <div className="space-y-2">
+                  {(["airbnb", "vrbo", "booking"] as const).map((key) => {
+                    const r = qualifierResult.platforms[key];
+                    const label = key === "airbnb" ? "Airbnb" : key === "vrbo" ? "VRBO" : "Booking.com";
+                    return (
+                      <Card key={key} className={`p-3 ${r.listed ? "border-red-300 bg-red-50/30" : "border-green-200 bg-green-50/30"}`}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-sm flex items-center gap-2">
+                              {r.listed ? <XCircle className="h-4 w-4 text-red-700" /> : <CheckCircle2 className="h-4 w-4 text-green-700" />}
+                              {label}
+                              <Badge variant={r.listed ? "destructive" : "secondary"}>
+                                {r.listed ? `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}` : "Clean"}
+                              </Badge>
+                            </div>
+                            {r.matches.length > 0 && (
+                              <ul className="mt-2 space-y-1 text-xs">
+                                {r.matches.slice(0, 5).map((m) => (
+                                  <li key={m.url}>
+                                    <a href={m.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
+                                      {m.title.slice(0, 80)} <ExternalLink className="h-3 w-3" />
+                                    </a>
+                                    {m.snippet && <div className="text-muted-foreground">{m.snippet.slice(0, 140)}</div>}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {r.error && <p className="text-xs text-red-700 mt-1">Error: {r.error}</p>}
+                          </div>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2 mt-6">
+                  <Button variant="outline" onClick={() => setQualifierResult(null)}>
+                    Re-run check
+                  </Button>
+                  <Button
+                    onClick={() => setStep(3)}
+                    disabled={!qualifierResult.qualifies}
+                    data-testid="button-step-2-next"
+                  >
+                    Continue to Photos
+                    <ArrowRight className="h-4 w-4 ml-2" />
+                  </Button>
+                </div>
+              </>
+            )}
+          </Card>
+        )}
+
+        {/* ── STEP 3: Photos via Zillow ──────────────────── */}
+        {step === 3 && (
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Camera className="h-5 w-5 text-primary" />
+              <h2 className="text-lg font-semibold">Step 3: Zillow URL & photos</h2>
+            </div>
+            <p className="text-muted-foreground text-sm mb-6">
+              Paste the Zillow listing URL for this property. We'll grab the photos and basic facts (bedrooms, bathrooms).
+            </p>
+            <div className="space-y-3 mb-4">
+              <div>
+                <label className="text-sm font-medium mb-1.5 block">Zillow URL</label>
+                <Input
+                  placeholder="https://www.zillow.com/homedetails/…"
+                  value={zillowUrl}
+                  onChange={(e) => setZillowUrl(e.target.value)}
+                  data-testid="input-zillow-url"
+                />
+              </div>
+              <Button onClick={fetchZillowPhotos} disabled={photosLoading || !zillowUrl.trim()}>
+                {photosLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                {photosLoading ? "Scraping Zillow…" : "Fetch photos"}
+              </Button>
+            </div>
+
+            {(zillowFacts.bedrooms != null || zillowFacts.bathrooms != null) && (
+              <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
+                <strong>Zillow facts:</strong> {zillowFacts.bedrooms ?? "?"} BR / {zillowFacts.bathrooms ?? "?"} BA
+              </div>
+            )}
+
+            {unit1Photos.length > 0 && (
+              <>
+                <h3 className="text-sm font-semibold mb-2">{unit1Photos.length} photo{unit1Photos.length === 1 ? "" : "s"} found</h3>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-6 max-h-96 overflow-y-auto">
+                  {unit1Photos.map((p, idx) => (
+                    <img
+                      key={`${p.url}-${idx}`}
+                      src={p.url}
+                      alt={p.label}
+                      className="w-full h-24 object-cover rounded border"
+                      loading="lazy"
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setStep(2)}>
+                <ArrowLeft className="h-4 w-4 mr-2" /> Back
+              </Button>
+              <Button
+                onClick={() => { setStep(4); handleGenerateListing(); }}
+                disabled={unit1Photos.length === 0}
+                data-testid="button-step-3-next"
+              >
+                Continue to Listing Draft
+                <ArrowRight className="h-4 w-4 ml-2" />
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {/* ── STEP 4: Listing draft ──────────────────────── */}
+        {step === 4 && (
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <FileText className="h-5 w-5 text-primary" />
+              <h2 className="text-lg font-semibold">Step 4: Review listing draft</h2>
+            </div>
+
+            {listingLoading && (
+              <div className="text-center py-8 text-muted-foreground">
+                <Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />
+                Generating listing draft with Claude…
+              </div>
+            )}
+
+            {!listingLoading && listing && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Airbnb title (≤50 chars)</label>
+                    <Input
+                      value={editedTitle}
+                      onChange={(e) => setEditedTitle(e.target.value.slice(0, 50))}
+                      data-testid="input-title"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">{editedTitle.length}/50</p>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Booking/VRBO title (≤50 chars)</label>
+                    <Input
+                      value={editedBookingTitle}
+                      onChange={(e) => setEditedBookingTitle(e.target.value.slice(0, 50))}
+                      data-testid="input-booking-title"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">{editedBookingTitle.length}/50</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Property type</label>
+                    <Select value={editedPropertyType} onValueChange={setEditedPropertyType}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {["Condominium","Townhouse","House","Apartment","Cottage","Bungalow","Loft"].map((t) => (
+                          <SelectItem key={t} value={t}>{t}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Pricing area</label>
+                    <Select value={editedPricingArea || "__none"} onValueChange={(v) => setEditedPricingArea(v === "__none" ? "" : v)}>
+                      <SelectTrigger><SelectValue placeholder="Select pricing area…" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none">— No area / use default —</SelectItem>
+                        {Object.keys(BUY_IN_RATES).map((a) => (
+                          <SelectItem key={a} value={a}>{a}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">Description</label>
+                  <Textarea
+                    value={editedDescription}
+                    onChange={(e) => setEditedDescription(e.target.value)}
+                    rows={6}
+                    data-testid="textarea-description"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Neighborhood</label>
+                    <Textarea
+                      value={editedNeighborhood}
+                      onChange={(e) => setEditedNeighborhood(e.target.value)}
+                      rows={4}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Transit / getting around</label>
+                    <Textarea
+                      value={editedTransit}
+                      onChange={(e) => setEditedTransit(e.target.value)}
+                      rows={4}
+                    />
+                  </div>
+                </div>
+
+                {editedUnitA && (
+                  <Card className="p-4 bg-muted/30">
+                    <h3 className="font-semibold text-sm mb-3 flex items-center gap-2">
+                      <BedDouble className="h-4 w-4" /> Unit details
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Bedrooms</label>
+                        <Input
+                          type="number"
+                          value={editedUnitA.bedrooms}
+                          onChange={(e) => setEditedUnitA({ ...editedUnitA, bedrooms: parseInt(e.target.value) || 0 })}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Bathrooms</label>
+                        <Input
+                          value={editedUnitA.bathrooms}
+                          onChange={(e) => setEditedUnitA({ ...editedUnitA, bathrooms: e.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Sqft</label>
+                        <Input
+                          value={editedUnitA.sqft}
+                          onChange={(e) => setEditedUnitA({ ...editedUnitA, sqft: e.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Max guests</label>
+                        <Input
+                          type="number"
+                          value={editedUnitA.maxGuests}
+                          onChange={(e) => setEditedUnitA({ ...editedUnitA, maxGuests: parseInt(e.target.value) || 0 })}
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium mb-1 block">Bedding plan</label>
+                        <Input
+                          value={editedUnitA.bedding}
+                          onChange={(e) => setEditedUnitA({ ...editedUnitA, bedding: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                  </Card>
+                )}
+
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">STR permit</label>
+                  <Input
+                    value={strPermit}
+                    onChange={(e) => setStrPermit(e.target.value)}
+                    placeholder="e.g. TVR-2024-099"
+                  />
+                </div>
+
+                {suggestedRate > 0 && (
+                  <div className="p-3 rounded-lg bg-muted/50 text-sm">
+                    <strong>Suggested nightly rate:</strong> ${suggestedRate} (target ~20% net after Airbnb fees)
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <Button variant="outline" onClick={() => setStep(3)}>
+                    <ArrowLeft className="h-4 w-4 mr-2" /> Back
+                  </Button>
+                  <Button onClick={handleGenerateListing} variant="outline" disabled={listingLoading}>
+                    Re-generate
+                  </Button>
+                  <Button onClick={handleSave} disabled={saving} data-testid="button-save">
+                    {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-2" />}
+                    {saving ? "Saving…" : "Save to dashboard"}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
