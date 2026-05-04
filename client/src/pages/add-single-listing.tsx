@@ -76,11 +76,23 @@ type CommunityResult = {
   combinedBedroomsTypical?: number;
   combinabilityScore?: number;
   fromWorldKnowledge?: boolean;
+  // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
+  // From the single-mode research prompt — the actual bedroom
+  // counts this community offers. Wizard uses this to render
+  // valid bedroom buttons instead of a generic 1-5 picker.
+  availableBedrooms?: number[];
 };
 
 type QualifierPlatformResult = {
   listed: boolean;
   matches: Array<{ url: string; title: string; snippet: string }>;
+  // CODEX NOTE (2026-05-04, claude/single-listing-photo-qualifier):
+  // photoMatches surfaces Google Lens hits where one of our scraped
+  // Zillow photos appears on a competitor's listing page. A platform
+  // counts as "listed" when EITHER text matches (address in
+  // title/snippet) OR photoMatches (reverse-image-search hit) is
+  // non-empty.
+  photoMatches: string[];
   query: string;
   error?: string;
 };
@@ -93,6 +105,7 @@ type QualifierResult = {
     booking: QualifierPlatformResult;
   };
   reason: string;
+  photoChecksRun?: number;
 };
 
 type PhotoItem = { url: string; label: string };
@@ -797,36 +810,58 @@ export default function AddSingleListing() {
                   with a bedroom-count picker. The /find-clean-unit
                   endpoint discovers the address + Zillow URL + photos
                   automatically, so the operator only picks the BR. — */}
-            {selectedCommunity && (
-              <div className="space-y-4 border-t pt-5 mb-6">
-                <h3 className="text-sm font-semibold">How many bedrooms?</h3>
-                <p className="text-xs text-muted-foreground -mt-2">
-                  We'll search Zillow for a {selectedBedrooms ?? "?"}BR unit at {selectedCommunity.name},
-                  then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
-                  If the first candidate is listed somewhere, we'll automatically try another.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {[1, 2, 3, 4, 5].map((br) => {
-                    const active = selectedBedrooms === br;
-                    return (
-                      <button
-                        key={br}
-                        type="button"
-                        onClick={() => setSelectedBedrooms(br)}
-                        className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
-                          active
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-card hover:border-primary/50"
-                        }`}
-                        data-testid={`button-bedrooms-${br}`}
-                      >
-                        {br}BR
-                      </button>
-                    );
-                  })}
+            {selectedCommunity && (() => {
+              // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
+              // Render only the bedroom counts the picked community
+              // actually offers. Falls back to the generic 1-5
+              // picker when the research scan didn't return an
+              // availableBedrooms array (older drafts / Claude
+              // returned an empty array because it didn't know).
+              const validBedrooms = selectedCommunity.availableBedrooms && selectedCommunity.availableBedrooms.length > 0
+                ? selectedCommunity.availableBedrooms
+                : [1, 2, 3, 4, 5];
+              const usedFallback = !selectedCommunity.availableBedrooms || selectedCommunity.availableBedrooms.length === 0;
+              return (
+                <div className="space-y-4 border-t pt-5 mb-6">
+                  <h3 className="text-sm font-semibold">How many bedrooms?</h3>
+                  <p className="text-xs text-muted-foreground -mt-2">
+                    We'll search Zillow for a {selectedBedrooms ?? "?"}BR unit at {selectedCommunity.name},
+                    then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
+                    If the first candidate is listed somewhere, we'll automatically try another.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {validBedrooms.map((br) => {
+                      const active = selectedBedrooms === br;
+                      return (
+                        <button
+                          key={br}
+                          type="button"
+                          onClick={() => setSelectedBedrooms(br)}
+                          className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
+                            active
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-card hover:border-primary/50"
+                          }`}
+                          data-testid={`button-bedrooms-${br}`}
+                        >
+                          {br}BR
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!usedFallback && (
+                    <p className="text-xs text-muted-foreground">
+                      {selectedCommunity.name} typically offers {validBedrooms.map(b => `${b}BR`).join(", ")} units.
+                    </p>
+                  )}
+                  {usedFallback && (
+                    <p className="text-xs text-amber-700">
+                      We don't have a confirmed bedroom mix for this community — pick the size you want and we'll search Zillow.
+                    </p>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* — Manual mode: keep the typed-address path as escape
                   hatch for resorts not on Zillow. — */}
@@ -934,19 +969,27 @@ export default function AddSingleListing() {
                   {(["airbnb", "vrbo", "booking"] as const).map((key) => {
                     const r = qualifierResult.platforms[key];
                     const label = key === "airbnb" ? "Airbnb" : key === "vrbo" ? "VRBO" : "Booking.com";
+                    const totalHits = r.matches.length + (r.photoMatches?.length ?? 0);
                     return (
                       <Card key={key} className={`p-3 ${r.listed ? "border-red-300 bg-red-50/30" : "border-green-200 bg-green-50/30"}`}>
-                        <div className="font-semibold text-sm flex items-center gap-2">
+                        <div className="font-semibold text-sm flex items-center gap-2 flex-wrap">
                           {r.listed ? <XCircle className="h-4 w-4 text-red-700" /> : <CheckCircle2 className="h-4 w-4 text-green-700" />}
                           {label}
                           <Badge variant={r.listed ? "destructive" : "secondary"}>
-                            {r.listed ? `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}` : "Clean"}
+                            {r.listed ? `${totalHits} match${totalHits === 1 ? "" : "es"}` : "Clean"}
                           </Badge>
+                          {r.matches.length > 0 && <Badge variant="outline" className="text-[10px]">{r.matches.length} address</Badge>}
+                          {(r.photoMatches?.length ?? 0) > 0 && <Badge variant="outline" className="text-[10px]">{r.photoMatches.length} photo</Badge>}
                         </div>
                       </Card>
                     );
                   })}
                 </div>
+                {(qualifierResult.photoChecksRun ?? 0) > 0 && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Reverse-image-searched {qualifierResult.photoChecksRun} photo{qualifierResult.photoChecksRun === 1 ? "" : "s"} via Google Lens (same methodology as the combo-listing pre-flight check).
+                  </p>
+                )}
 
                 <div className="flex flex-wrap gap-2 mt-6">
                   <Button variant="outline" onClick={() => setStep(1)}>
