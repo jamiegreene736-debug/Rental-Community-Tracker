@@ -331,12 +331,41 @@ export default function AddSingleListing() {
         // any further operator typing.
         setStreetAddress(data.unit.address);
         setZillowSourceUrl(data.unit.url);
-        setUnit1Photos(data.unit.photos);
         setZillowFacts({
           bedrooms: data.unit.bedrooms,
           bathrooms: data.unit.bathrooms ?? undefined,
         });
         setQualifierResult(data.unit.qualifier);
+        // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
+        // Server-side find-clean-unit now hard-rejects 0-photo
+        // candidates, so `data.unit.photos` should always be non-
+        // empty when `found: true`. Belt-and-suspenders: if for any
+        // reason it IS empty (e.g. an older deploy of the server
+        // that didn't yet have the gate, or a future regression),
+        // retry the scrape via /api/community/fetch-unit-photos
+        // with the discovered URL before falling through to Step
+        // 3's manual paste form.
+        if (data.unit.photos.length > 0) {
+          setUnit1Photos(data.unit.photos);
+        } else {
+          try {
+            const retryRes = await apiRequest("POST", "/api/community/fetch-unit-photos", {
+              url: data.unit.url,
+            });
+            const retry = await retryRes.json();
+            const retryPhotos = Array.isArray(retry.photos) ? retry.photos.slice(0, 25) : [];
+            setUnit1Photos(retryPhotos);
+            if (retryPhotos.length === 0) {
+              toast({
+                title: "Photos didn't scrape",
+                description: "The unit qualifies but Zillow scrape came back empty. You can paste the Zillow URL manually on Step 3 if needed.",
+              });
+            }
+          } catch (e: any) {
+            console.warn(`[add-single-listing] photo retry failed: ${e?.message}`);
+            setUnit1Photos([]);
+          }
+        }
         toast({
           title: "Found a clean unit",
           description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
