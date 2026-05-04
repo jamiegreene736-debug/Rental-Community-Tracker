@@ -365,6 +365,40 @@ function isSidecarStatusForSearch(
   return newestMs >= startedAtMs - 15_000;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientAutoFillErrorMessage(raw: string): boolean {
+  const s = raw.toLowerCase();
+  return /\b(?:429|502|503|504)\b/.test(s)
+    || s.includes("application failed to respond")
+    || s.includes("http 502")
+    || s.includes("failed to fetch")
+    || s.includes("load failed")
+    || s.includes("networkerror")
+    // Safari sometimes reports an interrupted fetch/navigation this way,
+    // especially when the production app restarts while a long scan is open.
+    || s.includes("the string did not match the expected pattern");
+}
+
+async function fetchFindBuyInWithRetry(url: string): Promise<FindBuyInResponse> {
+  const delays = [1_500, 4_000, 8_000];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      const res = await apiRequest("GET", url);
+      return await res.json() as FindBuyInResponse;
+    } catch (e: any) {
+      lastError = e;
+      const raw = String(e?.message ?? e ?? "");
+      if (!isTransientAutoFillErrorMessage(raw) || attempt >= delays.length) break;
+      await wait(delays[attempt]);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Find buy-in failed"));
+}
+
 function sidecarQueueProgressValue(status: SidecarQueueStatus | null | undefined): number {
   if (!status) return 12;
   const active = activeSidecarCount(status);
@@ -1222,7 +1256,7 @@ export default function Bookings() {
         });
         if (!includePm) params.set("includePm", "0");
         const url = `/api/operations/find-buy-in?${params.toString()}`;
-        const promise = apiRequest("GET", url).then((r) => r.json()) as Promise<FindBuyInResponse>;
+        const promise = fetchFindBuyInWithRetry(url);
         findBuyInCache.set(key, promise);
         return promise;
       };
@@ -1662,10 +1696,11 @@ export default function Bookings() {
       // this in steady state — if you're still seeing 502s, it
       // means several sources are simultaneously slow.
       const is502 = /\b502\b/.test(raw) && /Application failed to respond/.test(raw);
+      const isTransient = isTransientAutoFillErrorMessage(raw);
       toast({
-        title: is502 ? "Search took too long — retry in a moment" : "Auto-fill failed",
-        description: is502
-          ? "The buy-in search exceeded the upstream timeout (likely a slow scraper). Click Auto-fill cheapest again — the second run usually warms the cache and completes in under 30s."
+        title: is502 || isTransient ? "Search interrupted — retry in a moment" : "Auto-fill failed",
+        description: is502 || isTransient
+          ? "The buy-in search was interrupted while the app or sidecar was reconnecting. Click Auto-fill cheapest again — the scan cache is likely warm now."
           : raw,
         variant: "destructive",
       });
