@@ -237,7 +237,7 @@ VacationRentalExpertz`,
 For reservations made through VRBO or Booking.com, we ask the primary guest to complete our secure Guesty Guest App check-in form for the stay at {property_name}.
 
 Please complete it here:
-{{guest_app::[app_name]}}
+{{checkin_form}}
 
 This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.
 
@@ -417,6 +417,10 @@ function isSignedHostTemplateBody(body: string): boolean {
   return /john carpenter/i.test(body) && /magical island rentals/i.test(body);
 }
 
+function normalizeGuestyManualMessageBody(body: string): string {
+  return body.replace(/\{\{guest_app::\[app_name\]\}\}/g, "{{checkin_form}}");
+}
+
 // ─── Outbound message templates ────────────────────────────────────────────────
 // Guest-facing messages sent from the inbox are signed by the operator's
 // brand. Sender + brand live in one place so future templates pick up the
@@ -592,7 +596,7 @@ function buildAgreementRequestBody(args: {
   if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
   lines.push(``);
   lines.push(`Please complete it here:`);
-  lines.push(`{{guest_app::[app_name]}}`);
+  lines.push(`{{checkin_form}}`);
   lines.push(``);
   lines.push(`This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.`);
   lines.push(``);
@@ -1272,7 +1276,7 @@ export default function InboxPage() {
       const r = await apiRequest(
         "POST",
         `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: replyText, module: mod },
+        { body: normalizeGuestyManualMessageBody(replyText), module: mod },
       );
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
