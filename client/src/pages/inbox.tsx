@@ -21,6 +21,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
+  FileText,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -29,6 +30,19 @@ import type { MessageTemplate } from "@shared/schema";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
+
+type ArrivalUnitDetail = {
+  id: number;
+  unitLabel: string;
+  unitAddress?: string;
+  accessCode?: string;
+  wifiName?: string;
+  wifiPassword?: string;
+  parkingInfo?: string;
+  managementCompany?: string;
+  managementContact?: string;
+  arrivalNotes?: string;
+};
 
 // ─── AI draft property-context builder ────────────────────────────────────────
 // Given a Guesty listingId, look up the matching NexStay property via the
@@ -397,6 +411,50 @@ function buildReceiptBody(args: {
   lines.push(OUTBOUND_BRAND_NAME);
 
   return lines.join("\n");
+}
+
+function buildArrivalDetailsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is coming up, so I wanted to send the arrival details for the units you will be staying in.`,
+  ];
+  if (args.checkInIso) {
+    lines.push(``);
+    lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  }
+  lines.push(``);
+  if (args.units.length === 0) {
+    lines.push(`I am still confirming the final unit access details and will send them shortly.`);
+  } else {
+    args.units.forEach((unit, index) => {
+      lines.push(`${args.units.length > 1 ? `Unit ${index + 1}` : "Unit"}: ${unit.unitLabel}`);
+      if (unit.unitAddress) lines.push(`Address: ${unit.unitAddress}`);
+      if (unit.accessCode) lines.push(`Access code: ${unit.accessCode}`);
+      if (unit.wifiName || unit.wifiPassword) {
+        lines.push(`Wi-Fi: ${unit.wifiName || "Network TBD"}${unit.wifiPassword ? ` / ${unit.wifiPassword}` : ""}`);
+      }
+      if (unit.parkingInfo) lines.push(`Parking: ${unit.parkingInfo}`);
+      if (unit.managementCompany || unit.managementContact) {
+        lines.push(`Local contact: ${[unit.managementCompany, unit.managementContact].filter(Boolean).join(" - ")}`);
+      }
+      if (unit.arrivalNotes) lines.push(`Notes: ${unit.arrivalNotes}`);
+      lines.push(``);
+    });
+  }
+  lines.push(`A quick note: the listing photos are representative sample photos for this bundled stay. The exact assigned units may vary, but they are matched to the same bedroom count and resort/community standard.`);
+  lines.push(``);
+  lines.push(`Please reply here if anything looks unclear before arrival.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -852,6 +910,36 @@ export default function InboxPage() {
     },
     staleTime: 60_000,
   });
+
+  const { data: arrivalDetails, isLoading: arrivalDetailsLoading } = useQuery<{ units: ArrivalUnitDetail[] }>({
+    queryKey: ["/api/bookings", reservationId, "arrival-details"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/arrival-details`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const draftArrivalDetails = ({
+    guestFirstName,
+    propertyName,
+    checkInIso,
+  }: {
+    guestFirstName: string;
+    propertyName: string;
+    checkInIso?: string;
+  }) => {
+    const body = buildArrivalDetailsBody({
+      guestFirstName,
+      propertyName,
+      checkInIso,
+      units: arrivalDetails?.units ?? [],
+    });
+    setReplyText(body);
+    toast({ title: "Arrival details drafted", description: "Review the message, then click Send." });
+  };
 
   const sendMessage = useMutation({
     // /posts adds a message to the thread but doesn't deliver it to the guest —
@@ -2032,6 +2120,46 @@ export default function InboxPage() {
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                             Templates
                           </div>
+                          {(() => {
+                            const fullName = guest.fullName ?? selectedConv.displayGuestName ?? "";
+                            const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
+                            const propertyName = listing.title ?? listing.nickname ?? "";
+                            const checkInIso = res?.checkInDateLocalized ?? res?.checkIn;
+                            const due = checkInIso ? new Date(checkInIso) : null;
+                            if (due && !Number.isNaN(due.getTime())) due.setDate(due.getDate() - 14);
+                            const alreadySent = posts.some((p: any) => {
+                              const body = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
+                              return isHostPost(p) && /arrival details|access code|check-in date/i.test(body);
+                            });
+                            return (
+                              <div className="border rounded-lg p-2 mb-2 text-xs bg-muted/20">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div>
+                                    <p className="font-medium flex items-center gap-1">
+                                      {alreadySent ? <CheckCircle className="h-3 w-3 text-green-600" /> : <Clock className="h-3 w-3 text-amber-600" />}
+                                      Arrival details
+                                    </p>
+                                    <p className="text-[11px] text-muted-foreground">
+                                      Due {due && !Number.isNaN(due.getTime()) ? due.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "14 days before arrival"}
+                                      {" · "}
+                                      {alreadySent ? "sent/tracked" : `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`}
+                                    </p>
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 px-2 text-[11px]"
+                                    disabled={arrivalDetailsLoading}
+                                    onClick={() => draftArrivalDetails({ guestFirstName: firstName, propertyName, checkInIso })}
+                                    data-testid="button-draft-arrival-details"
+                                  >
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    Draft
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })()}
                           <Button
                             size="sm"
                             variant="outline"

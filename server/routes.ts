@@ -1936,7 +1936,13 @@ export async function registerRoutes(
   app.patch("/api/buy-ins/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const allowed = ["propertyId", "unitId", "propertyName", "unitLabel", "checkIn", "checkOut", "costPaid", "airbnbConfirmation", "airbnbListingUrl", "notes", "status"];
+      const allowed = [
+        "propertyId", "unitId", "propertyName", "unitLabel", "checkIn", "checkOut", "costPaid",
+        "airbnbConfirmation", "airbnbListingUrl",
+        "unitAddress", "accessCode", "wifiName", "wifiPassword", "parkingInfo",
+        "managementCompany", "managementContact", "arrivalNotes",
+        "notes", "status",
+      ];
       const filtered: Record<string, any> = {};
       for (const key of allowed) {
         if (key in req.body) filtered[key] = req.body[key];
@@ -1968,6 +1974,38 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to delete buy-in", message: err.message });
+    }
+  });
+
+  app.get("/api/bookings/:reservationId/arrival-details", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const attached = await storage.getBuyInsByReservation(reservationId);
+      res.json({
+        reservationId,
+        units: attached
+          .slice()
+          .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+          .map((b) => ({
+            id: b.id,
+            unitId: b.unitId,
+            unitLabel: b.unitLabel,
+            propertyName: b.propertyName,
+            checkIn: b.checkIn,
+            checkOut: b.checkOut,
+            unitAddress: b.unitAddress ?? "",
+            accessCode: b.accessCode ?? "",
+            wifiName: b.wifiName ?? "",
+            wifiPassword: b.wifiPassword ?? "",
+            parkingInfo: b.parkingInfo ?? "",
+            managementCompany: b.managementCompany ?? "",
+            managementContact: b.managementContact ?? "",
+            arrivalNotes: b.arrivalNotes ?? "",
+          })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
     }
   });
 

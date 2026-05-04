@@ -1035,6 +1035,7 @@ export default function Bookings() {
     | { buyIn: BuyIn; reservation: GuestyReservation; slot: SlotInfo }
     | null
   >(null);
+  const [arrivalEditor, setArrivalEditor] = useState<BuyIn | null>(null);
   // Slots whose inline live-search panel is expanded. Operators can open
   // these manually for an audit search after Auto-fill finishes. Auto-fill
   // itself keeps them closed so it does not launch a second, unrelated
@@ -1201,6 +1202,18 @@ export default function Bookings() {
       toast({ title: "Buy-in detached" });
     },
     onError: (e: any) => toast({ title: "Detach failed", description: e.message, variant: "destructive" }),
+  });
+
+  const saveArrivalDetails = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: Partial<BuyIn> }) =>
+      apiRequest("PATCH", `/api/buy-ins/${id}`, data).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      setArrivalEditor(null);
+      toast({ title: "Arrival details saved" });
+    },
+    onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
   });
 
   // Auto-fill: for every empty slot on a reservation, search live sources,
@@ -2232,6 +2245,16 @@ export default function Bookings() {
                                   <Button
                                     size="sm"
                                     variant="ghost"
+                                    onClick={() => slot.buyIn && setArrivalEditor(slot.buyIn)}
+                                    data-testid={`button-arrival-details-${r._id}-${slot.unitId}`}
+                                    title="Edit unit address, access code, Wi-Fi, parking, and manager contact"
+                                  >
+                                    <FileText className="h-3.5 w-3.5 mr-1" />
+                                    Unit details
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
                                     onClick={() => slot.buyIn && detachMutation.mutate(slot.buyIn.id)}
                                     disabled={detachMutation.isPending}
                                     data-testid={`button-detach-${r._id}-${slot.unitId}`}
@@ -2505,7 +2528,92 @@ export default function Bookings() {
           onClose={() => setListingSitesTarget(null)}
         />
       )}
+      {arrivalEditor && (
+        <ArrivalDetailsDialog
+          buyIn={arrivalEditor}
+          isSaving={saveArrivalDetails.isPending}
+          onClose={() => setArrivalEditor(null)}
+          onSave={(data) => saveArrivalDetails.mutate({ id: arrivalEditor.id, data })}
+        />
+      )}
     </div>
+  );
+}
+
+function ArrivalDetailsDialog({
+  buyIn,
+  isSaving,
+  onClose,
+  onSave,
+}: {
+  buyIn: BuyIn;
+  isSaving: boolean;
+  onClose: () => void;
+  onSave: (data: Partial<BuyIn>) => void;
+}) {
+  const [form, setForm] = useState({
+    unitAddress: buyIn.unitAddress ?? "",
+    accessCode: buyIn.accessCode ?? "",
+    wifiName: buyIn.wifiName ?? "",
+    wifiPassword: buyIn.wifiPassword ?? "",
+    parkingInfo: buyIn.parkingInfo ?? "",
+    managementCompany: buyIn.managementCompany ?? "",
+    managementContact: buyIn.managementContact ?? "",
+    arrivalNotes: buyIn.arrivalNotes ?? "",
+  });
+  const set = (key: keyof typeof form, value: string) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Unit arrival details</DialogTitle>
+          <DialogDescription>
+            {buyIn.unitLabel} · {fmtDate(buyIn.checkIn)} → {fmtDate(buyIn.checkOut)}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Label>Unit address</Label>
+            <Input value={form.unitAddress} onChange={(e) => set("unitAddress", e.target.value)} placeholder="Street address, unit number, resort/building" />
+          </div>
+          <div>
+            <Label>Access code</Label>
+            <Input value={form.accessCode} onChange={(e) => set("accessCode", e.target.value)} placeholder="Door / lockbox code" />
+          </div>
+          <div>
+            <Label>Management company</Label>
+            <Input value={form.managementCompany} onChange={(e) => set("managementCompany", e.target.value)} placeholder="Company name" />
+          </div>
+          <div>
+            <Label>Wi-Fi name</Label>
+            <Input value={form.wifiName} onChange={(e) => set("wifiName", e.target.value)} placeholder="Network name" />
+          </div>
+          <div>
+            <Label>Wi-Fi password</Label>
+            <Input value={form.wifiPassword} onChange={(e) => set("wifiPassword", e.target.value)} placeholder="Password" />
+          </div>
+          <div className="col-span-2">
+            <Label>Management contact</Label>
+            <Input value={form.managementContact} onChange={(e) => set("managementContact", e.target.value)} placeholder="Phone, email, after-hours contact" />
+          </div>
+          <div className="col-span-2">
+            <Label>Parking info</Label>
+            <Textarea rows={2} value={form.parkingInfo} onChange={(e) => set("parkingInfo", e.target.value)} placeholder="Assigned stall, permits, garage notes" />
+          </div>
+          <div className="col-span-2">
+            <Label>Arrival notes</Label>
+            <Textarea rows={4} value={form.arrivalNotes} onChange={(e) => set("arrivalNotes", e.target.value)} placeholder="Check-in desk, gate code, elevator, unit-specific instructions" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => onSave(form)} disabled={isSaving}>
+            {isSaving ? "Saving..." : "Save details"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
