@@ -79,6 +79,7 @@ interface GuestyPayment {
   createdAt?: string;
   date?: string;
   status?: string;
+  [key: string]: unknown;
 }
 
 type AutoFillSearchSummary = {
@@ -668,6 +669,7 @@ function parseDateCandidate(value: unknown): Date | null {
 }
 
 type DepositStatus = "airbnb_expected" | "collected" | "partial" | "not_collected" | "unknown";
+type PaymentSourceKind = "airbnb" | "guesty_card" | "booking_vcc" | "booking_payout" | "not_visible" | "unknown";
 
 function channelKindOf(r: GuestyReservation): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
   const raw = `${r.integration?.platform ?? ""} ${r.source ?? ""}`.toLowerCase();
@@ -717,6 +719,46 @@ function depositStatusOf(r: GuestyReservation): DepositStatus {
   if (totalPaid > 0) return "partial";
   if (balanceDue > 0) return "not_collected";
   return "unknown";
+}
+
+function paymentSourceOf(r: GuestyReservation): { kind: PaymentSourceKind; label: string; detail: string } {
+  const channel = channelKindOf(r);
+  if (channel === "airbnb") {
+    return { kind: "airbnb", label: "Airbnb payout", detail: "arrival-based estimate" };
+  }
+
+  const totalPaid = asMoneyNumber(r.money?.totalPaid);
+  const balanceDue = asMoneyNumber(r.money?.balanceDue);
+  const payload = JSON.stringify({
+    payments: r.payments,
+    moneyPayments: r.money?.payments,
+    paymentSchedule: r.money?.paymentSchedule,
+    money: r.money,
+  }).toLowerCase();
+
+  if (channel === "booking") {
+    if (/virtual\s*credit|vcc|virtual[_\s-]*card|booking virtual/.test(payload)) {
+      return { kind: "booking_vcc", label: "Booking.com VCC", detail: "virtual card evidence in Guesty" };
+    }
+    if (/payments?\s+by\s+booking|payment_via_booking|booking\.com\s+payout|payout[_\s-]*type|bank\s+transfer|stripe\s+payout/.test(payload)) {
+      return { kind: "booking_payout", label: "Booking.com payout", detail: "Booking.com payout evidence in Guesty" };
+    }
+    if (/credit\s*card|card[_\s-]*not[_\s-]*present|visa|mastercard|amex|stripe|guesty\s*pay|guesty_pay/.test(payload)) {
+      return { kind: "guesty_card", label: "Card payment", detail: "card/processor evidence in Guesty" };
+    }
+    if (totalPaid <= 0 && balanceDue > 0) {
+      return { kind: "not_visible", label: "Payment type unknown", detail: "no collected payment visible in Guesty" };
+    }
+    return { kind: "unknown", label: "Payment type unknown", detail: "Guesty money fields do not identify source" };
+  }
+
+  if (/credit\s*card|visa|mastercard|amex|stripe|guesty\s*pay|guesty_pay/.test(payload)) {
+    return { kind: "guesty_card", label: "Card payment", detail: "card/processor evidence in Guesty" };
+  }
+  if (totalPaid <= 0 && balanceDue > 0) {
+    return { kind: "not_visible", label: "Payment not visible", detail: "no collected payment visible in Guesty" };
+  }
+  return { kind: "unknown", label: "Payment source unknown", detail: "Guesty money fields do not identify source" };
 }
 
 function depositTimingFor(r: GuestyReservation): {
@@ -1533,6 +1575,7 @@ export default function Bookings() {
       const isExpected = status === "airbnb_expected" || status === "collected" || status === "partial";
       const amount = isExpected ? getDepositAmount(r) : 0;
       const buyInCost = getBuyInCost(r);
+      const paymentSource = paymentSourceOf(r);
       return {
         reservation: r,
         triggerDate: timing.triggerDate,
@@ -1545,6 +1588,7 @@ export default function Bookings() {
         openBalance: channelKindOf(r) === "airbnb" ? 0 : balanceDue,
         buyInCost,
         netAfterBuyIns: amount > 0 ? amount - buyInCost : 0,
+        paymentSource,
         status,
       };
     }).sort((a, b) => {
@@ -2208,6 +2252,9 @@ export default function Bookings() {
                                   {row.openBalance > 0 && (
                                     <p className="text-[10px] text-muted-foreground mt-1">{fmtMoney(row.openBalance)} due</p>
                                   )}
+                                  <p className="text-[10px] text-muted-foreground mt-1" title={row.paymentSource.detail}>
+                                    {row.paymentSource.label}
+                                  </p>
                                 </div>
                               </div>
                             );
