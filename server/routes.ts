@@ -16180,6 +16180,93 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
+  // GET /api/community/city-suggest-any?query=kissim
+  // CODEX NOTE (2026-05-04, claude/single-listing): nationwide
+  // counterpart to /api/community/city-suggest — accepts a bare
+  // query and returns { city, state } pairs across ALL US states.
+  // Used by the single-listing wizard's Step 1 where the operator
+  // wants to type just a city and pick from a "City, State" list
+  // (rather than picking a state first). The combo wizard's
+  // existing state-scoped endpoint stays unchanged.
+  const cityAnyCache = new Map<string, { cities: Array<{ city: string; state: string }>; ts: number }>();
+  app.get("/api/community/city-suggest-any", async (req, res) => {
+    const query = String(req.query.query || "").trim();
+    if (query.length < 2) return res.json({ cities: [] });
+
+    const cacheKey = query.toLowerCase();
+    const cached = cityAnyCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CITY_CACHE_TTL) {
+      return res.json({ cities: cached.cities });
+    }
+
+    try {
+      // Same Photon endpoint as city-suggest, no bbox — let the
+      // place-type filter + country filter narrow results to US
+      // populated places matching the query prefix.
+      const url = new URL("https://photon.komoot.io/api/");
+      url.searchParams.set("q", query);
+      url.searchParams.set("limit", "30");
+      url.searchParams.set("osm_tag", "place");
+
+      const resp = await fetch(url.toString(), {
+        headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" },
+      });
+      if (!resp.ok) {
+        console.warn(`[city-suggest-any] Photon ${resp.status} for "${query}"`);
+        return res.json({ cities: [] });
+      }
+      const data = await resp.json() as {
+        features?: Array<{
+          properties?: {
+            name?: string;
+            country?: string;
+            state?: string;
+            osm_value?: string;
+          };
+        }>;
+      };
+
+      const PLACE_VALUES = new Set([
+        "city", "town", "village", "hamlet", "municipality",
+        "borough", "suburb", "locality", "neighbourhood",
+      ]);
+      const stripOkina = (s: string) =>
+        s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+      // De-duplicate on (city, state) pair so e.g. multiple Kissimmee
+      // OSM rows collapse to one suggestion.
+      // CODEX NOTE (2026-05-04, claude/single-listing): scoped to
+      // Hawaii + Florida per operator directive — those are the two
+      // states the business currently operates in. Add more state
+      // names to ALLOWED_STATES when expanding to a new market.
+      const ALLOWED_STATES = new Set(["hawaii", "florida"]);
+      const seen = new Set<string>();
+      const cities: Array<{ city: string; state: string }> = [];
+      for (const f of (data.features ?? [])) {
+        const p = f.properties ?? {};
+        if ((p.country ?? "") !== "United States") continue;
+        const stateName = (p.state ?? "").trim();
+        if (!stateName) continue;
+        if (!ALLOWED_STATES.has(stateName.toLowerCase())) continue;
+        if (!PLACE_VALUES.has((p.osm_value ?? "").toLowerCase())) continue;
+        const raw = (p.name ?? "").trim();
+        if (!raw) continue;
+        const display = stripOkina(raw);
+        const key = `${display.toLowerCase()}|${stateName.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        cities.push({ city: display, state: stateName });
+        if (cities.length >= 12) break;
+      }
+
+      cityAnyCache.set(cacheKey, { cities, ts: Date.now() });
+      res.json({ cities });
+    } catch (e: any) {
+      console.warn(`[city-suggest-any] error for "${query}": ${e.message}`);
+      res.json({ cities: [] });
+    }
+  });
+
   // ============================================================
   // Photo listing check (reverse image search across Airbnb/VRBO/Booking.com)
   // ============================================================
