@@ -37,14 +37,12 @@ import {
   Layers,
   Hammer,
   CalendarSearch,
-  Images,
   Plus,
   Trash2,
   MapPin,
   Star,
   TrendingUp,
   MessageSquare,
-  Camera,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -615,23 +613,6 @@ export default function Home() {
   }, [photoCheckByFolder]);
 
   const { toast } = useToast();
-  const [runningPhotoScan, setRunningPhotoScan] = useState(false);
-  const runPhotoScan = async () => {
-    setRunningPhotoScan(true);
-    try {
-      const resp = await apiRequest("POST", "/api/photo-listing-check/run", {});
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Failed to start scan");
-      toast({
-        title: "Photo scan started",
-        description: `Scanning ${data.folders?.length ?? "?"} folders in the background. Refresh in a few minutes.`,
-      });
-    } catch (e: any) {
-      toast({ title: "Couldn't start photo scan", description: e?.message, variant: "destructive" });
-    } finally {
-      setRunningPhotoScan(false);
-    }
-  };
 
   const queryClient = useQueryClient();
 
@@ -692,13 +673,7 @@ export default function Home() {
             <Link href="/add-community">
               <Button data-testid="button-add-community">
                 <Plus className="h-4 w-4 mr-2" />
-                Add New Community
-              </Button>
-            </Link>
-            <Link href="/community-photo-finder">
-              <Button variant="outline" data-testid="button-community-photo-finder">
-                <Images className="h-4 w-4 mr-2" />
-                Community Photos
+                Add New Combo Listing
               </Button>
             </Link>
             <Link href="/inbox">
@@ -716,16 +691,6 @@ export default function Home() {
                 Operations
               </Button>
             </Link>
-            <Button
-              variant="outline"
-              onClick={runPhotoScan}
-              disabled={runningPhotoScan}
-              data-testid="button-run-photo-scan"
-              title="Reverse-image-search every property's photos on Airbnb, VRBO, and Booking.com"
-            >
-              <Camera className="h-4 w-4 mr-2" />
-              {runningPhotoScan ? "Starting…" : "Run Photo Scan"}
-            </Button>
           </div>
         </div>
 
@@ -1104,8 +1069,7 @@ export default function Home() {
                       //   - red ✗    → photos matched to ≥2 other listings
                       //                on that platform (likely re-post)
                       //   - amber ⚠  → not yet scanned OR Lens errored.
-                      //                Check back after the weekly scan,
-                      //                or click "Run Photo Scan".
+                      //                Check back after the automated scan.
                       const agg = photoByProperty.get(property.id);
                       type Tone = "ok" | "warn" | "bad" | "na";
                       // "na" = the property has no scannable folders
@@ -1144,7 +1108,7 @@ export default function Home() {
                               it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                               it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found (last checked ${stamp})` :
                               it.status === "unknown" ? `${it.name}: Lens error on last run (${stamp}) — will retry` :
-                              `${it.name}: never scanned — click Run Photo Scan`;
+                              `${it.name}: waiting for automated scan`;
                             return (
                               <span
                                 key={it.letter}
