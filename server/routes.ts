@@ -15573,48 +15573,63 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
-    // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
-    // Bumped from 8 → 12 because the 0-photo rejection below can
-    // eat several attempts on bad scraping days (Apify rate-limited,
-    // Zillow anti-bot stalling). 12 keeps the worst-case wallet
-    // bounded while leaving headroom for retries.
-    for (const url of candidateUrls.slice(0, 12)) {
-      // Scrape Zillow for facts + photos. We need the address; we
-      // pass an empty `facts` object so scrapeListingPhotos
-      // populates it via the Apify/ScrapingBee path.
+    // CODEX NOTE (2026-05-04, claude/single-listing-text-fallback):
+    // Two-pass logic. We PREFER candidates with both text-clean AND
+    // photo-clean qualifiers (full methodology — same as preflight).
+    // But when Apify/ScrapingBee fail to extract photos (rate
+    // limits, Zillow anti-bot, off-market listings), the photo
+    // reverse-search can't run. Rather than failing the whole find-
+    // clean-unit call (which was Jamie's "no clean unit found"
+    // bug), we accept text-only-clean candidates as a fallback and
+    // surface them with `photoScrapeFailed: true` so the wizard's
+    // belt-and-suspenders retry can fire fetch-unit-photos against
+    // the URL on a fresh code path. If even that fails, the
+    // operator gets a clean candidate with zero photos and the
+    // option to manually paste the Zillow URL on Step 3.
+    //
+    // Bumped candidate cap from 12 to 15 — gives more headroom on
+    // bad scraping days. Worst-case wallet still bounded:
+    // 15 candidates × ~6 SearchAPI calls + 15 Apify calls.
+    type FallbackMatch = {
+      url: string;
+      addressGuess: string;
+      scrapedBR: number | null;
+      scrapedBA: number | null;
+      photos: ScrapedPhoto[];
+      qualifier: SingleListingQualifyResult;
+      photoScrapeFailed: boolean;
+    };
+    let textOnlyFallback: FallbackMatch | null = null;
+
+    for (const url of candidateUrls.slice(0, 15)) {
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
+      let scrapeError: string | null = null;
       try {
         photos = await scrapeListingPhotos(url, undefined, facts);
       } catch (e: any) {
-        attempts.push({
-          url,
-          bedrooms: null,
-          bathrooms: null,
-          address: null,
-          bedroomMatches: false,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: `Zillow scrape failed: ${e?.message ?? e}`,
-        });
-        continue;
+        scrapeError = e?.message ?? String(e);
       }
 
-      // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
-      // Reject candidates where Zillow scrape returned 0 photos.
-      // scrapeListingPhotos returns gracefully-empty (no throw)
-      // when both Apify and ScrapingBee fail — without this gate,
-      // find-clean-unit was accepting candidates whose qualifier
-      // text-search passed but had no photos, which (a) made Step
-      // 3 of the wizard render the manual paste-Zillow-URL form
-      // (Jamie's reported bug) and (b) skipped the photo reverse-
-      // image-search portion of the qualifier, giving us a half-
-      // verified "clean" unit. Skip and try the next candidate;
-      // if all 12 candidates have 0 photos, we surface a clear
-      // "scrape returned no photos for any candidate" error so the
-      // operator knows it's a transient scraping issue, not a
-      // real "no clean unit" result.
-      if (photos.length === 0) {
+      // Surface scrape outcome to Railway logs so we can see why
+      // photos aren't landing. Apify-token-exhausted /
+      // ScrapingBee-not-configured / Zillow-blocking all show up
+      // here.
+      console.log(
+        `[find-clean-unit] candidate ${url}: photos=${photos.length}` +
+        ` facts={br:${facts.bedrooms ?? "?"},ba:${facts.bathrooms ?? "?"}}` +
+        (scrapeError ? ` scrapeError=${scrapeError.slice(0, 200)}` : ""),
+      );
+
+      // Parse address from the Zillow URL slug
+      // (/homedetails/4460-Nehe-Rd-Lihue-HI-96766/...).
+      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
+      let addressGuess: string | null = null;
+      if (slugMatch) {
+        const raw = slugMatch[1].replace(/-/g, " ").trim();
+        addressGuess = raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
+      }
+      if (!addressGuess) {
         attempts.push({
           url,
           bedrooms: facts.bedrooms ?? null,
@@ -15623,7 +15638,7 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: false,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: "Zillow scrape returned 0 photos (Apify + ScrapingBee both empty).",
+          rejectedBecause: "Could not parse address from Zillow URL slug.",
         });
         continue;
       }
@@ -15631,37 +15646,11 @@ Return ONLY compact JSON with this exact shape:
       const scrapedBR = facts.bedrooms ?? null;
       const scrapedBA = facts.bathrooms ?? null;
 
-      // Pull the address from the Zillow URL slug — homedetails URLs
-      // bake the street address into the path
-      // (e.g. /homedetails/4460-Nehe-Rd-Lihue-HI-96766/...).
-      // Falls back to null if parse fails (rare).
-      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
-      let addressGuess: string | null = null;
-      if (slugMatch) {
-        const raw = slugMatch[1].replace(/-/g, " ").trim();
-        // Strip trailing zip + state code if present (so the
-        // qualifier query targets the street + city explicitly)
-        addressGuess = raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
-      }
-
-      if (!addressGuess) {
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: null,
-          bedroomMatches: scrapedBR === bedrooms,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: "Could not parse address from Zillow URL slug.",
-        });
-        continue;
-      }
-
-      // Hard requirement: bedroom count must match the operator's
-      // selection. Zillow's scrape returns a precise integer; if it
-      // doesn't match the requested BR, skip — combining a 2BR
-      // listing into a "3BR standalone" draft would be wrong.
+      // Bedroom-count gate: skip when scrape returned a number that
+      // doesn't match. When the scrape returned NO bedroom info
+      // (null), we let the candidate through — better to surface a
+      // text-only-clean fallback than to discard it on incomplete
+      // data.
       if (scrapedBR !== null && scrapedBR !== bedrooms) {
         attempts.push({
           url,
@@ -15676,18 +15665,12 @@ Return ONLY compact JSON with this exact shape:
         continue;
       }
 
-      // CODEX NOTE (2026-05-04, claude/single-listing-photo-qualifier):
-      // Pass the candidate's scraped Zillow photo URLs into the
-      // qualifier so it runs reverse-image-search alongside the
-      // text search. Standalone units routinely show up on
-      // Airbnb/VRBO with marketing-driven titles that don't
-      // mention the street address, so the photo signal often
-      // catches listings the text search would miss. Caps at 3
-      // photos inside runPhotoReverseSearch — sending more
-      // wouldn't materially improve recall but would burn
-      // SearchAPI credits.
+      // Run the qualifier. When photos is empty the qualifier
+      // automatically skips the photo-reverse-search step (text-
+      // only check). When photos exist we send up to 3 to Lens.
       const photoUrls = photos.map((p) => p.url).slice(0, 3);
       const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state, photoUrls);
+      const photoScrapeFailed = photos.length === 0;
       attempts.push({
         url,
         bedrooms: scrapedBR,
@@ -15696,13 +15679,13 @@ Return ONLY compact JSON with this exact shape:
         bedroomMatches: scrapedBR === bedrooms || scrapedBR === null,
         qualifies: qualifier.qualifies,
         qualifierReason: qualifier.reason,
-        rejectedBecause: qualifier.qualifies ? "" : `Listed on OTA: ${qualifier.reason}`,
+        rejectedBecause: qualifier.qualifies
+          ? (photoScrapeFailed ? "Clean (text-only — photo scrape failed)" : "")
+          : `Listed on OTA: ${qualifier.reason}`,
       });
 
-      if (qualifier.qualifies) {
-        // First clean unit wins. Return the candidate plus its
-        // photos (so the wizard can skip the photo-fetch step) and
-        // the qualifier result (so the wizard can show it).
+      if (qualifier.qualifies && !photoScrapeFailed) {
+        // BEST CASE: clean by text AND photo. Return immediately.
         return res.json({
           found: true,
           unit: {
@@ -15712,21 +15695,59 @@ Return ONLY compact JSON with this exact shape:
             bathrooms: scrapedBA,
             photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
             qualifier,
+            photoScrapeFailed: false,
           },
           attempts,
           attemptCount: attempts.length,
           totalCandidates: candidateUrls.length,
         });
       }
+      if (qualifier.qualifies && photoScrapeFailed && !textOnlyFallback) {
+        // FALLBACK: text-only verified. Keep walking in case a
+        // later candidate has photos AND clean text — full match
+        // wins. Track the first text-only match as the fallback.
+        textOnlyFallback = {
+          url,
+          addressGuess,
+          scrapedBR,
+          scrapedBA,
+          photos,
+          qualifier,
+          photoScrapeFailed: true,
+        };
+      }
     }
 
-    // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
-    // Build a more diagnostic "no clean unit" reason. If most/all
-    // candidates failed because of scrape-empty (not because of
-    // OTA matches), the issue is likely a transient Apify/Zillow
-    // problem rather than a real "no inventory" answer — the
-    // operator can retry later or hit "Try another unit" once
-    // scraping recovers.
+    // No full match found. Use the text-only fallback if we have
+    // one — wizard's belt-and-suspenders retry will hit
+    // /api/community/fetch-unit-photos for a second photo-scrape
+    // attempt, and if THAT also fails the manual Zillow-URL paste
+    // form on Step 3 is the final escape hatch.
+    if (textOnlyFallback) {
+      console.log(
+        `[find-clean-unit] returning text-only fallback for "${communityName}" (${bedrooms}BR) — ` +
+        `${textOnlyFallback.url} (photo scrape failed; OTA text-search clean)`,
+      );
+      return res.json({
+        found: true,
+        unit: {
+          url: textOnlyFallback.url,
+          address: textOnlyFallback.addressGuess,
+          bedrooms: textOnlyFallback.scrapedBR ?? bedrooms,
+          bathrooms: textOnlyFallback.scrapedBA,
+          photos: [],
+          qualifier: textOnlyFallback.qualifier,
+          photoScrapeFailed: true,
+        },
+        attempts,
+        attemptCount: attempts.length,
+        totalCandidates: candidateUrls.length,
+      });
+    }
+
+    // No clean candidate at all. Build a diagnostic reason so the
+    // operator can tell whether it's a real no-inventory result or
+    // a transient scraping issue worth retrying later.
     const scrapeFailures = attempts.filter((a) => /scrape (returned 0 photos|failed)/i.test(a.rejectedBecause)).length;
     const otaMatches = attempts.filter((a) => /^Listed on OTA/i.test(a.rejectedBecause)).length;
     const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
