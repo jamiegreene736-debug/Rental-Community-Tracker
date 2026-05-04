@@ -9532,22 +9532,31 @@ export async function registerRoutes(
   // automatically when steady-state cookies expire — these endpoints
   // are for the one-time bootstrap and the manual fallback.
   //
-  // Auth: when ADMIN_SECRET env var is set, require X-Admin-Secret
-  // header match. When unset, allow (matching the existing
-  // /api/admin/guesty-token/set posture). Operators who care about the
-  // sensitivity of session cookies should set ADMIN_SECRET.
+  // Auth: superseded by `server/auth.ts` `requireAuth` middleware
+  // (Load-Bearing #35) on 2026-05-04. The outer middleware
+  // authenticates EVERY request before the route handler runs and
+  // accepts both browser cookies AND the X-Admin-Secret header — the
+  // legacy header-only check this function used to do became actively
+  // harmful when the gate activated:
+  //
+  //   1. Sidecar worker on the operator's Mac calls
+  //      /api/admin/vrbo-sidecar/* without any header (those paths are
+  //      whitelisted by the outer middleware as a load-bearing
+  //      exception per Load-Bearing #35). The legacy header check then
+  //      401'd every poll → sidecar dropped offline.
+  //   2. Browser-driven admin operations (Guesty save-session,
+  //      refresh-session, etc.) authenticate via the auth cookie set by
+  //      POST /login. They don't carry X-Admin-Secret. The legacy check
+  //      401'd them too.
+  //
+  // No-op now. The function name and call sites are kept as
+  // documentation — they signal "this endpoint requires admin auth"
+  // even though the actual enforcement is upstream. NOTE FOR CODEX:
+  // do NOT restore the old check unless the outer middleware is
+  // simultaneously narrowed to NOT whitelist the sidecar paths AND
+  // the worker is updated to send the header.
   // ============================================================
-  function checkAdminSecret(req: Request, res: Response): boolean {
-    const expected = process.env.ADMIN_SECRET;
-    if (!expected) return true;
-    const provided = req.headers["x-admin-secret"];
-    if (provided !== expected) {
-      res.status(401).json({
-        error:
-          "ADMIN_SECRET is set but the X-Admin-Secret header didn't match. Pass it via curl -H 'X-Admin-Secret: <value>' or remove ADMIN_SECRET from Railway to disable the gate.",
-      });
-      return false;
-    }
+  function checkAdminSecret(_req: Request, _res: Response): boolean {
     return true;
   }
 
