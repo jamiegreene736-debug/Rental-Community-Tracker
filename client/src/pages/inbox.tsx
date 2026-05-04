@@ -373,6 +373,18 @@ function cleanMessageBody(raw: string): string {
   return s;
 }
 
+function isHostPost(p: any): boolean {
+  return (
+    p.authorType === "host" ||
+    p.authorRole === "host" ||
+    p.senderType === "host" ||
+    p.direction === "outbound" ||
+    p.direction === "out" ||
+    p.direction === "outgoing" ||
+    p.isIncoming === false
+  );
+}
+
 // ─── Outbound message templates ────────────────────────────────────────────────
 // Guest-facing messages sent from the inbox are signed by the operator's
 // brand. Sender + brand live in one place so future templates pick up the
@@ -1338,14 +1350,6 @@ export default function InboxPage() {
       if (body === "new guest inquiry" || body === "new inquiry" || body === "new reservation request" || body.startsWith("new guest reservation")) return true;
       return false;
     };
-    const isHostPost = (p: any): boolean =>
-      p.authorType === "host" ||
-      p.authorRole === "host" ||
-      p.senderType === "host" ||
-      p.direction === "outbound" ||
-      p.direction === "out" ||
-      p.direction === "outgoing" ||
-      p.isIncoming === false;
     const conversationalPosts = sortedAsc.filter((p: any) => !isSystemPost(p));
     const isInitialContact = !conversationalPosts.some(isHostPost);
     const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
