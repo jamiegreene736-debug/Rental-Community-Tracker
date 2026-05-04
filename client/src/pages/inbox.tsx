@@ -189,69 +189,106 @@ const MERGE_TAGS = [
 
 const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
   {
-    name: "Booking Confirmed",
+    name: "Booking Confirmation / Payment Receipt",
     trigger: "booking_confirmed",
     daysOffset: 0,
     isActive: true,
-    body: `Aloha {guest_name}! 🌺
+    body: `Hi {guest_name},
 
-We're so excited to host you at {property_name}! Your reservation is confirmed for {check_in_date} through {check_out_date} ({num_nights} nights).
+This confirms your reservation at {property_name} for {check_in_date} through {check_out_date} ({num_nights} nights).
 
-We'll send check-in details 3 days before your arrival. In the meantime, please don't hesitate to reach out with any questions — we're always happy to help.
+Confirmation code: {confirmation_code}
 
-Can't wait to welcome you to Hawaii!
-The NexStay Team`,
+We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
+
+Thanks,
+VacationRentalExpertz`,
   },
   {
-    name: "Pre-Arrival (3 days before)",
+    name: "30-Day What To Expect",
+    trigger: "days_before_checkin",
+    daysOffset: 30,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Your stay at {property_name} is about a month away, so I wanted to share a quick reminder of what to expect.
+
+The listing photos are representative sample photos for this bundled stay. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.
+
+Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.
+
+Thanks,
+VacationRentalExpertz`,
+  },
+  {
+    name: "14-Day Arrival Details",
+    trigger: "days_before_checkin",
+    daysOffset: 14,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Your stay at {property_name} is coming up, so I wanted to send your arrival details.
+
+Check-in date: {check_in_date}
+Confirmation code: {confirmation_code}
+
+Address / access code / parking / Wi-Fi:
+[INSERT UNIT DETAILS]
+
+Please reply here if anything looks unclear before arrival.
+
+Thanks,
+VacationRentalExpertz`,
+  },
+  {
+    name: "3-Day Local Tips",
     trigger: "days_before_checkin",
     daysOffset: 3,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-Your stay at {property_name} is just 3 days away — so exciting! Here's everything you need for a smooth arrival:
+Your stay at {property_name} is just a few days away. A few quick reminders:
 
-📍 Address: [INSERT ADDRESS]
-🔑 Check-in: [INSERT CHECK-IN TIME & ACCESS INSTRUCTIONS]
-🅿️ Parking: [INSERT PARKING DETAILS]
-📶 WiFi: [INSERT WIFI DETAILS]
+- Please review your arrival/access details before travel day.
+- Bring any parking or gate information with you.
+- For restaurants, beaches, groceries, and local activities, I recommend making reservations where possible during busy weeks.
 
-Your confirmation code is {confirmation_code}. If anything comes up before you arrive, we're just a message away.
+If you want recommendations near the property, reply here and I am happy to help.
 
-See you soon!
-The NexStay Team`,
+Thanks,
+VacationRentalExpertz`,
   },
   {
-    name: "Check-out Reminder",
-    trigger: "days_before_checkout",
+    name: "Day-Before Final Check-In",
+    trigger: "days_before_checkin",
     daysOffset: 1,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-We hope you're having an amazing time! Just a friendly reminder that check-out is tomorrow.
+Your check-in for {property_name} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.
 
-⏰ Check-out time: 10:00 AM
-🗝️ Please leave the key/lockbox as you found it and feel free to leave used towels in the bathroom.
+Confirmation code: {confirmation_code}
 
-We'd love to know how your stay has been — feel free to share any feedback!
+Safe travels, and please reply here if anything comes up.
 
-Mahalo for choosing NexStay. 🤙
-The NexStay Team`,
+Thanks,
+VacationRentalExpertz`,
   },
   {
-    name: "Post-Stay Review Request",
+    name: "Post-Stay Thank You / Review Request",
     trigger: "days_after_checkout",
     daysOffset: 2,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-It was such a pleasure having you at {property_name}! We hope you had an unforgettable time in Hawaii.
+Thank you again for staying at {property_name}. I hope you had a wonderful trip.
 
-If you have a moment, we'd really appreciate a review — it means the world to small hosts like us and helps future guests find a great place to stay.
+If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.
 
-We hope to see you again on your next Hawaii adventure! 🌊
-Mahalo nui loa,
-The NexStay Team`,
+We would be happy to host you again anytime.
+
+Thanks,
+VacationRentalExpertz`,
   },
 ];
 
@@ -354,6 +391,21 @@ const formatLongDate = (isoYmd: string): string => {
   });
 };
 
+const addDays = (date: Date, days: number): Date => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const parseStayDate = (iso?: string): Date | null => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const formatShortDate = (date: Date | null, fallback: string): string =>
+  date ? date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : fallback;
+
 // Renders a payment-receipt body. `pastPayments` lists every prior
 // payment on the booking (date + amount); today's charge is supplied
 // separately as `paymentAmount` / `paymentDateIso` so it can be flagged
@@ -413,6 +465,68 @@ function buildReceiptBody(args: {
   return lines.join("\n");
 }
 
+function buildBookingConfirmationBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  checkOutIso?: string;
+  confirmationCode?: string;
+  numNights?: number | null;
+  bookingTotal?: number;
+  totalPaid?: number;
+}): string {
+  const total = args.bookingTotal ?? 0;
+  const paid = args.totalPaid ?? 0;
+  const balance = Math.max(0, total - paid);
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `This confirms your reservation${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso || args.checkOutIso) {
+    lines.push(``);
+    if (args.checkInIso) lines.push(`Check-in: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+    if (args.checkOutIso) lines.push(`Check-out: ${formatLongDate(args.checkOutIso.slice(0, 10))}`);
+    if (args.numNights) lines.push(`Nights: ${args.numNights}`);
+  }
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  if (total > 0 || paid > 0) {
+    lines.push(``);
+    if (total > 0) lines.push(`Booking total: ${formatMoney(total)}`);
+    if (paid > 0) lines.push(`Paid to date: ${formatMoney(paid)}`);
+    if (total > 0) lines.push(`Remaining balance: ${formatMoney(balance)}`);
+  }
+  lines.push(``);
+  lines.push(`We will send your detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildThirtyDayExpectationsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is about a month away, so I wanted to share a quick reminder of what to expect.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  lines.push(``);
+  lines.push(`The listing photos are representative sample photos for this bundled stay. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.`);
+  lines.push(``);
+  lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
 function buildArrivalDetailsBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -455,6 +569,80 @@ function buildArrivalDetailsBody(args: {
   lines.push(OUTBOUND_SENDER_NAME);
   lines.push(OUTBOUND_BRAND_NAME);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildLocalTipsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const parking = args.units.map((u) => u.parkingInfo).filter(Boolean).join("\n");
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is just a few days away. A few quick reminders before travel day:`,
+    ``,
+    `- Please review your arrival/access details before you leave.`,
+    `- If you are renting a car, keep the parking details handy.${parking ? `\n\nParking notes:\n${parking}` : ""}`,
+    `- For restaurants, activities, luaus, boat tours, and popular beach parking, reservations can be helpful during busy weeks.`,
+    `- Grocery stops are usually easiest before heading fully into resort areas.`,
+    ``,
+    `If you want specific restaurant or local area ideas near the property, reply here and I am happy to help.`,
+    ``,
+    `Thanks,`,
+    OUTBOUND_SENDER_NAME,
+    OUTBOUND_BRAND_NAME,
+  ];
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildDayBeforeBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.units.length > 0) {
+    lines.push(``);
+    args.units.forEach((unit, index) => {
+      lines.push(`${args.units.length > 1 ? `Unit ${index + 1}` : "Unit"}: ${unit.unitLabel}`);
+      if (unit.unitAddress) lines.push(`Address: ${unit.unitAddress}`);
+      if (unit.accessCode) lines.push(`Access code: ${unit.accessCode}`);
+      if (unit.parkingInfo) lines.push(`Parking: ${unit.parkingInfo}`);
+      lines.push(``);
+    });
+  }
+  lines.push(`Safe travels, and please reply here if anything comes up.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildPostStayBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. I hope you had a wonderful trip.`,
+    ``,
+    `If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.`,
+    ``,
+    `We would be happy to host you again anytime.`,
+    ``,
+    `Thanks,`,
+    OUTBOUND_SENDER_NAME,
+    OUTBOUND_BRAND_NAME,
+  ].join("\n");
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -939,6 +1127,41 @@ export default function InboxPage() {
     });
     setReplyText(body);
     toast({ title: "Arrival details drafted", description: "Review the message, then click Send." });
+  };
+
+  const draftStayTemplate = ({
+    kind,
+    guestFirstName,
+    propertyName,
+    checkInIso,
+    checkOutIso,
+    confirmationCode,
+    numNights,
+    bookingTotal,
+    totalPaid,
+  }: {
+    kind: "booking" | "thirty-day" | "local-tips" | "day-before" | "post-stay";
+    guestFirstName: string;
+    propertyName: string;
+    checkInIso?: string;
+    checkOutIso?: string;
+    confirmationCode?: string;
+    numNights?: number | null;
+    bookingTotal?: number;
+    totalPaid?: number;
+  }) => {
+    const units = arrivalDetails?.units ?? [];
+    const body = kind === "booking"
+      ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
+      : kind === "thirty-day"
+        ? buildThirtyDayExpectationsBody({ guestFirstName, propertyName, checkInIso })
+        : kind === "local-tips"
+          ? buildLocalTipsBody({ guestFirstName, propertyName, units })
+          : kind === "day-before"
+            ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
+            : buildPostStayBody({ guestFirstName, propertyName });
+    setReplyText(body);
+    toast({ title: "Template drafted", description: "Review the message, then click Send." });
   };
 
   const sendMessage = useMutation({
@@ -2111,10 +2334,7 @@ export default function InboxPage() {
                       )}
 
                       {/* Templates — manual on-demand outbound message
-                          templates. Currently one entry (payment receipt);
-                          designed to grow as more templates land. Hidden
-                          for inquiries because there's no booking to
-                          receipt against. */}
+                          timeline for booked/request reservations. */}
                       {(phase === "booked" || phase === "request") && res?._id && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
@@ -2125,51 +2345,16 @@ export default function InboxPage() {
                             const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
                             const propertyName = listing.title ?? listing.nickname ?? "";
                             const checkInIso = res?.checkInDateLocalized ?? res?.checkIn;
-                            const due = checkInIso ? new Date(checkInIso) : null;
-                            if (due && !Number.isNaN(due.getTime())) due.setDate(due.getDate() - 14);
-                            const alreadySent = posts.some((p: any) => {
-                              const body = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
-                              return isHostPost(p) && /arrival details|access code|check-in date/i.test(body);
-                            });
-                            return (
-                              <div className="border rounded-lg p-2 mb-2 text-xs bg-muted/20">
-                                <div className="flex items-center justify-between gap-2">
-                                  <div>
-                                    <p className="font-medium flex items-center gap-1">
-                                      {alreadySent ? <CheckCircle className="h-3 w-3 text-green-600" /> : <Clock className="h-3 w-3 text-amber-600" />}
-                                      Arrival details
-                                    </p>
-                                    <p className="text-[11px] text-muted-foreground">
-                                      Due {due && !Number.isNaN(due.getTime()) ? due.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "14 days before arrival"}
-                                      {" · "}
-                                      {alreadySent ? "sent/tracked" : `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-7 px-2 text-[11px]"
-                                    disabled={arrivalDetailsLoading}
-                                    onClick={() => draftArrivalDetails({ guestFirstName: firstName, propertyName, checkInIso })}
-                                    data-testid="button-draft-arrival-details"
-                                  >
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    Draft
-                                  </Button>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-8 px-2.5 text-[11px] w-full justify-start"
-                            onClick={() => {
-                              const totalPriceFromMoney =
-                                asNum(m.totalPrice) || guestGross || 0;
-                              const propertyName = listing.title ?? listing.nickname ?? "";
-                              const fullName = guest.fullName ?? selectedConv.displayGuestName ?? "";
-                              const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
+                            const checkOutIso = res?.checkOutDateLocalized ?? res?.checkOut;
+                            const checkInDate = parseStayDate(checkInIso);
+                            const checkOutDate = parseStayDate(checkOutIso);
+                            const postBodies = posts
+                              .filter((p: any) => isHostPost(p))
+                              .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""));
+                            const wasSent = (pattern: RegExp) => postBodies.some((body: string) => pattern.test(body));
+                            const totalPriceFromMoney = asNum(m.totalPrice) || guestGross || 0;
+                            const totalPaidFromMoney = asNum(m.totalPaid);
+                            const openReceiptDialog = () => {
                               const today = new Date();
                               const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
                               setReceiptDialog({
@@ -2186,11 +2371,6 @@ export default function InboxPage() {
                               setReceiptPaymentDate(todayIso);
                               setReceiptBody("");
                               setReceiptBodyTouched(false);
-                              // Best-effort fetch of prior payment records
-                              // from Guesty. The dialog opens immediately
-                              // and the list backfills when the response
-                              // lands; if it fails or returns nothing the
-                              // operator can add rows manually.
                               apiRequest("GET", `/api/inbox/reservations/${res._id}/payments`)
                                 .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
                                 .then((data: any) => {
@@ -2203,14 +2383,118 @@ export default function InboxPage() {
                                 })
                                 .catch(() => { /* leave list empty; operator can add manually */ })
                                 .finally(() => setReceiptPaymentsLoading(false));
-                            }}
-                            data-testid="button-send-receipt"
-                          >
-                            <DollarSign className="h-3 w-3 mr-1.5" /> Send payment receipt
-                          </Button>
+                            };
+                            const draftCommon = {
+                              guestFirstName: firstName,
+                              propertyName,
+                              checkInIso,
+                              checkOutIso,
+                              confirmationCode: res?.confirmationCode,
+                              numNights: nights ?? res?.nightsCount ?? null,
+                              bookingTotal: totalPriceFromMoney,
+                              totalPaid: totalPaidFromMoney,
+                            };
+                            const timeline = [
+                              {
+                                title: "Booking confirmation / receipt",
+                                due: null as Date | null,
+                                dueLabel: "At booking",
+                                sent: wasSent(/reservation.+confirmed|booking.+confirmed|booking total|paid to date/i),
+                                detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
+                                testId: "button-draft-booking-confirmation",
+                                onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
+                              },
+                              {
+                                title: "30-day sample photos / what to expect",
+                                due: checkInDate ? addDays(checkInDate, -30) : null,
+                                dueLabel: "30 days before arrival",
+                                sent: wasSent(/sample photos|what to expect|representative sample photos/i),
+                                detail: "Sets expectations before unit assignment",
+                                testId: "button-draft-thirty-day-expectations",
+                                onClick: () => draftStayTemplate({ kind: "thirty-day", ...draftCommon }),
+                              },
+                              {
+                                title: "14-day arrival details",
+                                due: checkInDate ? addDays(checkInDate, -14) : null,
+                                dueLabel: "14 days before arrival",
+                                sent: wasSent(/arrival details|access code|check-in date/i),
+                                detail: `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`,
+                                testId: "button-draft-arrival-details",
+                                disabled: arrivalDetailsLoading,
+                                onClick: () => draftArrivalDetails({ guestFirstName: firstName, propertyName, checkInIso }),
+                              },
+                              {
+                                title: "3-day local tips / parking reminder",
+                                due: checkInDate ? addDays(checkInDate, -3) : null,
+                                dueLabel: "3 days before arrival",
+                                sent: wasSent(/local area|restaurant|restaurants|parking notes|few days away/i),
+                                detail: "Restaurants, travel day, parking",
+                                testId: "button-draft-local-tips",
+                                onClick: () => draftStayTemplate({ kind: "local-tips", ...draftCommon }),
+                              },
+                              {
+                                title: "Day-before final check-in reminder",
+                                due: checkInDate ? addDays(checkInDate, -1) : null,
+                                dueLabel: "1 day before arrival",
+                                sent: wasSent(/check-in.+tomorrow|tomorrow.+check-in|safe travels/i),
+                                detail: "Final access and parking reminder",
+                                testId: "button-draft-day-before-checkin",
+                                onClick: () => draftStayTemplate({ kind: "day-before", ...draftCommon }),
+                              },
+                              {
+                                title: "Post-stay thank-you / review request",
+                                due: checkOutDate ? addDays(checkOutDate, 2) : null,
+                                dueLabel: "2 days after checkout",
+                                sent: wasSent(/thank you again for staying|appreciate a review|review request/i),
+                                detail: "Review and repeat guest note",
+                                testId: "button-draft-post-stay-review",
+                                onClick: () => draftStayTemplate({ kind: "post-stay", ...draftCommon }),
+                              },
+                            ];
+                            return (
+                              <div className="space-y-1.5">
+                                {timeline.map((item) => (
+                                  <div key={item.title} className="border rounded-lg p-2 text-xs bg-muted/20">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="min-w-0">
+                                        <p className="font-medium flex items-center gap-1">
+                                          {item.sent ? <CheckCircle className="h-3 w-3 text-green-600 shrink-0" /> : <Clock className="h-3 w-3 text-amber-600 shrink-0" />}
+                                          <span className="truncate">{item.title}</span>
+                                        </p>
+                                        <p className="text-[11px] text-muted-foreground">
+                                          Due {formatShortDate(item.due, item.dueLabel)}
+                                          {" · "}
+                                          {item.sent ? "sent/tracked" : item.detail}
+                                        </p>
+                                      </div>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 text-[11px] shrink-0"
+                                        disabled={Boolean(item.disabled)}
+                                        onClick={item.onClick}
+                                        data-testid={item.testId}
+                                      >
+                                        <FileText className="h-3 w-3 mr-1" />
+                                        Draft
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ))}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 px-2.5 text-[11px] w-full justify-start"
+                                  onClick={openReceiptDialog}
+                                  data-testid="button-send-receipt"
+                                >
+                                  <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
+                                </Button>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
-
                       {/* Confirmation code + Guesty deep link */}
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Confirmation</div>
