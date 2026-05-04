@@ -725,6 +725,73 @@ established it so you can read the rationale in the commit message.
     Photon returns enough other-country / other-state noise that an
     explicit allowlist is the safest gate.
 
+36. **`researchCommunitiesForCity` takes a `mode` parameter — `"combo"`
+    keeps the original combinability-gated 10-result Haiku flow;
+    `"single"` is purpose-built for the single-listing wizard.** Single
+    mode (a) drops the `combinabilityScore >= 50` hard filter (irrelevant
+    for standalone listings — combinability is a combo-flow concept),
+    (b) lifts the world-knowledge cap from 3 to 15 entries, (c) returns
+    up to 20 results instead of 10, (d) runs on Sonnet rather than
+    Haiku for better recall on niche named resorts, and (e) uses an
+    expanded 5-query SearchAPI sweep that hits "best resort" round-up
+    pages along with the original site:airbnb-style queries. The prompt
+    also enumerates known resorts per major Florida market (Fort Myers
+    Beach, Destin, Panama City Beach, Kissimmee/Orlando) and per
+    Hawaii market (Lihue/Kapaa/Poipu) as a recall anchor — explicitly
+    telling Claude "for any city named, you MUST surface every example
+    resort listed for that city" because the Haiku-default behavior
+    was to omit Santa Maria Resort (Fort Myers Beach) from results.
+
+    The combo flow is unchanged. `/api/community/research` accepts an
+    optional `mode` field on the request body; default `"combo"`. Top-
+    markets-sweep keeps using combo mode because it iterates 12+
+    markets back-to-back and the Haiku speed advantage matters there.
+
+    **Don't merge the prompts back into one** — the combinability
+    framing leaks into single-mode if the prompt isn't branched, and
+    Haiku's narrower world knowledge silently drops niche resorts.
+    **Don't shorten the example-resort list in the single-mode prompt** —
+    it's the recall anchor that solved the original Santa Maria bug.
+
+37. **Single-listing wizard: one click finds a clean Zillow unit, no
+    address typing.** After picking a community + bedroom count on
+    Step 1, the operator clicks "Find a clean {N}BR unit" and the
+    backend (`/api/single-listing/find-clean-unit`) does the rest:
+    (1) SearchAPI Google for `site:zillow.com "{community}" {city} {state}
+    {bedrooms} bedroom` with two progressively-broader fallback queries,
+    (2) iterates up to 8 Zillow homedetails candidates, (3) scrapes
+    each for facts + photos via the existing Apify→ScrapingBee chain,
+    (4) parses the address from the URL slug
+    (`/homedetails/4460-Nehe-Rd-Lihue-HI-96766/...`), (5) hard-filters
+    on bedroom-count match, (6) calls the extracted `runOtaQualifier`
+    helper on the address. First clean candidate wins — wizard skips
+    straight to Step 2 with the unit + qualifier result + photos all
+    pre-populated. The "Try another unit" button on Step 2 re-calls
+    the endpoint with the current URL appended to `skipUrls`.
+
+    `runOtaQualifier(apiKey, address, city, state)` is the shared
+    helper; both `/api/single-listing/qualify` (manual-typed-address
+    path) and `/api/single-listing/find-clean-unit` (auto-discovery
+    path) call it. The helper returns `{ qualifies, platforms, reason,
+    address, city, state }` — same shape as the qualify endpoint
+    response, so the wizard reuses one component to render either
+    path's result.
+
+    **Worst-case wallet:** ~3 SearchAPI calls (Zillow discovery) +
+    8 candidates × (1 Apify scrape + 3 SearchAPI qualifier calls) =
+    ~32 SearchAPI calls + 8 Apify calls per click. Aborts the
+    iteration as soon as a clean candidate is found; common case is
+    1–2 candidates. **Don't bump the candidate cap above 8** without
+    a wallet review — Apify scrapes are the slow leg (60-120s
+    cold-start each).
+
+    **Manual escape hatch preserved:** the wizard still has a
+    "Couldn't find your resort? Type the unit's name + street
+    address manually" path that bypasses the auto-discovery and
+    runs the original `/qualify` endpoint. Used when the resort
+    isn't on Zillow yet or when the operator already has a specific
+    listing in mind.
+
 ### Inbox auto-reply
 
 24. **Auto-reply has a three-layer safety stack — input filter,
@@ -816,6 +883,7 @@ Examples:
 2026-04-27 · Jamie wanted a search system that "encompasses everything" including PM discovery via Stagehand · ACCEPTED with escalation gating · Two PRs: (a) widened existing photo-match caps (TOP_AIRBNB_FOR_LENS 15→30, per-anchor 3→6) — cheap and high-impact; (b) added `server/stagehand-pm-finder.ts` that drives Google like a human, dismisses overlays, scrolls past PAA/Maps panels, and extracts long-tail organic PM URLs. PM finder fires only when `priced bookable < 3` from cheap paths (booking + PM Google + per-PM sitemaps + photo-match) so we don't pay $0.30 on every find-buy-in. Returned URLs are unpriced (agent doesn't drive each PM's availability widget; that's `verifyPmRate`'s job).
 2026-04-28 · Jamie: "I want Airbnb to be completely involved in this search now like it was in the previous versions of the buy in tool. Do not exclude it anymore, always include in the cheapest options." · ACCEPTED, supersedes 2026-04-27 entry above · Server's `cheapest` pool now includes `airbnbWithMatches` alongside booking + pmAugmented. Airbnb engine results auto-marked `verified: "yes"` (the engine queries with check_in / check_out, so listings returned ARE date-specific available). Vrbo stays excluded from cheapest (same TOS sublet bar but no engine-level date verification — surfacing as "buy this" is a footgun without the verification gate). The TOS-sublet warning suffix in auto-fill notes is preserved — it's a billing-flow concern, not a discovery-flow concern, and the operator wants visibility into the actually-cheapest option regardless of channel.
 2026-05-04 · Jamie asked for an "Add a Single Listing" dashboard button that mirrors Add Community but for a standalone condo/townhouse, with a Zillow-search → OTA-clean qualifier as the gate · ACCEPTED, option A (no community research scan) · New 4-step wizard at `/add-single-listing` cloning the relevant pieces of `add-community.tsx`. Reuses `community_drafts` table with a new `singleListing` boolean flag rather than a parallel table — see Load-Bearing #33 for the rationale (one shared shape across the stack, branching only at adapters). New `/api/single-listing/qualify` endpoint runs SearchAPI site:airbnb/vrbo/booking searches and hard-blocks save when any platform shows a confirmed match (Load-Bearing #34). `/api/community/generate-listing` got a branched prompt for single-unit framing; `/api/community/fetch-unit-photos` now also returns `facts: { bedrooms, bathrooms }` so the single wizard can size defaults from the Zillow scrape (additive, combo unaffected). All "what I added" surfaces carry `CODEX NOTE (2026-05-04, claude/single-listing)` comments per Jamie's instruction.
+2026-05-04 · Jamie tested Fort Myers Beach in the single-listing wizard and Santa Maria Resort wasn't surfacing in the community list — followed up: "Also, when I click a resort, I should not need to enter a street address etc. I should just like select the say the bedroom count and click continue and then it automatically search Zillow for that resort and that bedroom count and find a unit with that bedroom count and then scan to make sure it's not on Aibnb,VRBO, and/or Booking.com. If it is listed on any of those sites please then find another unit." · ACCEPTED · Two-PR ship: (1) `researchCommunitiesForCity` got a `mode` param — single mode drops combinability filter, lifts world-knowledge cap 3→15, returns up to 20, runs on Sonnet, uses an expanded 5-query SearchAPI sweep, and includes per-market example-resort lists in the prompt as a recall anchor (Load-Bearing #36). (2) New `/api/single-listing/find-clean-unit` endpoint does Zillow discovery + scrape + bedroom-match filter + OTA qualifier per candidate, returning the first clean match with photos pre-loaded; the `runOtaQualifier` helper extracted from the original `/qualify` endpoint is shared between both paths. Wizard Step 1 replaced the operator-typed propertyName + streetAddress fields with a bedroom-count picker + "Find a clean {N}BR unit" button; Step 2 now displays the auto-discovered unit + qualifier with a "Try another unit" button (re-calls the endpoint with skipUrls). Manual-mode escape hatch preserved for resorts not on Zillow. (Load-Bearing #37.)
 2026-05-04 · Jamie reviewed the deployed Step 1 form ("4 fields: name + address + state + city") and asked to switch it to a discovery flow: "type a city → drop down list of cities → top 20 best vacation rental communities to choose from." Follow-up: "for now just keep it focused on Hawaii and Florida." · ACCEPTED · Step 1 of `add-single-listing.tsx` rewritten as: nationwide city autocomplete (new `/api/community/city-suggest-any` endpoint, Photon + state allowlist) → kicks off `/api/community/research` automatically on city pick → top-20 community cards → operator picks a community (or hits "enter manually") → fills the unit-specific street address. Picked community pre-fills `propertyName`. Hawaii + Florida scope lives in `ALLOWED_STATES` set in the new endpoint — see Load-Bearing #35. Combo flow's existing state-scoped city-suggest endpoint is untouched; only the new single-listing wizard uses the nationwide variant.
 2026-04-29 · Jamie: "You are not running the browser session locally like I asked. You have to run the browser on my PC." After multi-PR investigation showed Vrbo's anti-bot fingerprints every Browserbase residential session even with persistent context + real-Chrome cookies (IP-level flag — "There is a robot on the same network as you"). Direct Chrome MCP test from operator's home IP returned 42 priced properties for the same query that Browserbase couldn't load past the bot wall. · ACCEPTED · New "VRBO local-Chrome sidecar" architecture: in-memory queue on Railway (`server/vrbo-sidecar-queue.ts`) bridges find-buy-in to a `/loop` worker running inside the operator's Claude Code session. find-buy-in calls `searchVrboViaSidecar()` as path 9 (parallel with the existing 8 paths, prioritized FIRST in the dedup chain when results return because it's the only path that beats the IP wall). When the worker is offline, the wallet budget (75s) expires and we gracefully fall back. Endpoints `POST /api/vrbo-sidecar/enqueue`, `GET /api/admin/vrbo-sidecar/next`, `POST /api/admin/vrbo-sidecar/result`, `GET /api/vrbo-sidecar/result/:id`. Worker is a /loop task in Claude Code that polls /next, drives Chrome MCP through Vrbo's search UI on the operator's actual browser, extracts priced cards, and POSTs the result. This is the "OpenClaw"-style local-agent pattern — Claude Code on the operator's Mac is the bridge between Railway and their real-IP browser.
 ```
