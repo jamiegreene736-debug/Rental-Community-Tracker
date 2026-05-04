@@ -667,13 +667,29 @@ function parseDateCandidate(value: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-function paymentDateOf(r: GuestyReservation): { date: Date | null; source: "payment" | "reservation" | "unknown" } {
+type DepositStatus = "airbnb_expected" | "collected" | "partial" | "not_collected" | "unknown";
+
+function channelKindOf(r: GuestyReservation): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
+  const raw = `${r.integration?.platform ?? ""} ${r.source ?? ""}`.toLowerCase();
+  if (raw.includes("airbnb")) return "airbnb";
+  if (raw.includes("booking")) return "booking";
+  if (raw.includes("vrbo") || raw.includes("homeaway")) return "vrbo";
+  if (raw.includes("manual") || raw.includes("direct")) return "manual";
+  return "other";
+}
+
+function collectedPaymentDateOf(r: GuestyReservation): { date: Date | null; source: "payment" | "reservation" | "unknown" } {
   const payments = [
     ...(Array.isArray(r.payments) ? r.payments : []),
     ...(Array.isArray(r.money?.payments) ? r.money.payments : []),
     ...(Array.isArray(r.money?.paymentSchedule) ? r.money.paymentSchedule : []),
   ];
   const paidDates = payments
+    .filter((p) => {
+      const status = String(p.status ?? "").toLowerCase();
+      if (!status) return true;
+      return !/(scheduled|pending|unpaid|due|failed|cancel)/.test(status);
+    })
     .map((p) => parseDateCandidate(p.paidAt ?? p.collectedAt ?? p.processedAt ?? p.date ?? p.createdAt))
     .filter((d): d is Date => !!d)
     .sort((a, b) => a.getTime() - b.getTime());
@@ -692,14 +708,47 @@ function getDepositAmount(r: GuestyReservation): number {
   return asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.netIncome) || asMoneyNumber(r.money?.totalPaid);
 }
 
-function depositStatusOf(r: GuestyReservation): "paid" | "partial" | "unpaid" | "unknown" {
+function depositStatusOf(r: GuestyReservation): DepositStatus {
+  if (channelKindOf(r) === "airbnb") return "airbnb_expected";
   const totalPaid = asMoneyNumber(r.money?.totalPaid);
   const balanceDue = asMoneyNumber(r.money?.balanceDue);
   const fullyPaid = r.money?.isFullyPaid === true || (balanceDue <= 0 && totalPaid > 0);
-  if (fullyPaid) return "paid";
+  if (fullyPaid) return "collected";
   if (totalPaid > 0) return "partial";
-  if (balanceDue > 0) return "unpaid";
+  if (balanceDue > 0) return "not_collected";
   return "unknown";
+}
+
+function depositTimingFor(r: GuestyReservation): {
+  triggerDate: Date | null;
+  triggerSource: "airbnb_arrival" | "payment" | "reservation" | "unknown";
+  expectedPayout: Date | null;
+  expectedBank: Date | null;
+} {
+  if (channelKindOf(r) === "airbnb") {
+    const checkIn = parseDateCandidate(checkInOf(r));
+    const expectedPayout = checkIn ? addDays(checkIn, 1) : null;
+    return {
+      triggerDate: checkIn,
+      triggerSource: checkIn ? "airbnb_arrival" : "unknown",
+      expectedPayout,
+      expectedBank: expectedPayout ? nextBusinessDay(expectedPayout) : null,
+    };
+  }
+
+  const status = depositStatusOf(r);
+  if (status !== "collected" && status !== "partial") {
+    return { triggerDate: null, triggerSource: "unknown", expectedPayout: null, expectedBank: null };
+  }
+
+  const payment = collectedPaymentDateOf(r);
+  const expectedPayout = payment.date ? addDays(payment.date, 7) : null;
+  return {
+    triggerDate: payment.date,
+    triggerSource: payment.source,
+    expectedPayout,
+    expectedBank: expectedPayout ? nextBusinessDay(expectedPayout) : null,
+  };
 }
 
 // Prefer Guesty's timezone-normalized date field when present, fall back to
@@ -1477,25 +1526,26 @@ export default function Bookings() {
 
   const depositRows = useMemo(() => {
     return reservations.map((r) => {
-      const payment = paymentDateOf(r);
+      const status = depositStatusOf(r);
+      const timing = depositTimingFor(r);
       const guestPaid = asMoneyNumber(r.money?.totalPaid);
       const balanceDue = asMoneyNumber(r.money?.balanceDue);
-      const amount = getDepositAmount(r);
+      const isExpected = status === "airbnb_expected" || status === "collected" || status === "partial";
+      const amount = isExpected ? getDepositAmount(r) : 0;
       const buyInCost = getBuyInCost(r);
-      const expectedPayout = payment.date ? addDays(payment.date, 7) : null;
-      const expectedBank = expectedPayout ? nextBusinessDay(expectedPayout) : null;
       return {
         reservation: r,
-        paymentDate: payment.date,
-        paymentDateSource: payment.source,
-        expectedPayout,
-        expectedBank,
+        triggerDate: timing.triggerDate,
+        triggerSource: timing.triggerSource,
+        expectedPayout: timing.expectedPayout,
+        expectedBank: timing.expectedBank,
         amount,
         guestPaid,
         balanceDue,
+        openBalance: channelKindOf(r) === "airbnb" ? 0 : balanceDue,
         buyInCost,
-        netAfterBuyIns: amount - buyInCost,
-        status: depositStatusOf(r),
+        netAfterBuyIns: amount > 0 ? amount - buyInCost : 0,
+        status,
       };
     }).sort((a, b) => {
       const ad = a.expectedBank?.getTime() ?? Number.MAX_SAFE_INTEGER;
@@ -1506,13 +1556,9 @@ export default function Bookings() {
 
   const depositStats = useMemo(() => {
     if (!depositRows.length) return null;
-    const expected = depositRows
-      .filter((r) => r.status === "paid" || r.status === "partial")
-      .reduce((s, r) => s + r.amount, 0);
-    const net = depositRows
-      .filter((r) => r.status === "paid" || r.status === "partial")
-      .reduce((s, r) => s + r.netAfterBuyIns, 0);
-    const openBalance = depositRows.reduce((s, r) => s + r.balanceDue, 0);
+    const expected = depositRows.reduce((s, r) => s + r.amount, 0);
+    const net = depositRows.reduce((s, r) => s + r.netAfterBuyIns, 0);
+    const openBalance = depositRows.reduce((s, r) => s + r.openBalance, 0);
     const dated = depositRows.filter((r) => r.expectedBank).length;
     return { expected, net, openBalance, dated };
   }, [depositRows]);
@@ -2052,7 +2098,7 @@ export default function Bookings() {
                     {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
                   </CardTitle>
                   <CardDescription>
-                    GuestyPay timing uses a 7-day settlement estimate; bank receipt moves to the next business day when needed.
+                    Airbnb is estimated from arrival/check-in. Booking.com, VRBO, and manual rows only get bank dates after Guesty shows a collected payment.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -2068,8 +2114,8 @@ export default function Bookings() {
                           <div>Guest</div>
                           <div>Stay</div>
                           <div className="text-right">Deposit</div>
-                          <div>Guesty Date</div>
-                          <div>Bank Date</div>
+                          <div>Trigger Date</div>
+                          <div>Expected Bank</div>
                           <div className="text-right">Buy-in</div>
                           <div className="text-right">Net</div>
                           <div>Status</div>
@@ -2079,11 +2125,19 @@ export default function Bookings() {
                             const r = row.reservation;
                             const channel = r.integration?.platform ?? r.source ?? "direct";
                             const statusClasses = {
-                              paid: "bg-green-600 text-white",
+                              airbnb_expected: "bg-blue-600 text-white",
+                              collected: "bg-green-600 text-white",
                               partial: "bg-amber-500 text-white",
-                              unpaid: "bg-red-600 text-white",
+                              not_collected: "bg-red-600 text-white",
                               unknown: "",
                             } as const;
+                            const statusLabel = {
+                              airbnb_expected: "arrival payout",
+                              collected: "collected",
+                              partial: "partial",
+                              not_collected: "not collected",
+                              unknown: "unknown",
+                            }[row.status];
                             return (
                               <div
                                 key={`deposit-${r._id}`}
@@ -2101,15 +2155,24 @@ export default function Bookings() {
                                   </p>
                                 </div>
                                 <div className="text-right">
-                                  <p className="font-medium">{fmtMoney(row.amount)}</p>
+                                  <p className="font-medium">{row.amount > 0 ? fmtMoney(row.amount) : "—"}</p>
                                   {row.guestPaid > 0 && row.guestPaid !== row.amount && (
                                     <p className="text-[10px] text-muted-foreground">{fmtMoney(row.guestPaid)} paid</p>
                                   )}
+                                  {row.amount <= 0 && row.openBalance > 0 && (
+                                    <p className="text-[10px] text-muted-foreground">not collected</p>
+                                  )}
                                 </div>
                                 <div>
-                                  <p>{row.paymentDate ? fmtDate(row.paymentDate.toISOString()) : "—"}</p>
+                                  <p>{row.triggerDate ? fmtDate(row.triggerDate.toISOString()) : "—"}</p>
                                   <p className="text-[10px] text-muted-foreground">
-                                    {row.paymentDateSource === "payment" ? "payment" : row.paymentDateSource === "reservation" ? "reservation" : "unknown"}
+                                    {row.triggerSource === "airbnb_arrival"
+                                      ? "arrival"
+                                      : row.triggerSource === "payment"
+                                        ? "payment"
+                                        : row.triggerSource === "reservation"
+                                          ? "reservation"
+                                          : "unknown"}
                                   </p>
                                 </div>
                                 <div>
@@ -2127,19 +2190,23 @@ export default function Bookings() {
                                   )}
                                 </div>
                                 <div className="text-right">
-                                  <p className={`font-medium ${row.netAfterBuyIns >= 0 ? "text-green-600" : "text-red-600"}`}>
-                                    {fmtMoney(row.netAfterBuyIns)}
-                                  </p>
+                                  {row.amount > 0 ? (
+                                    <p className={`font-medium ${row.netAfterBuyIns >= 0 ? "text-green-600" : "text-red-600"}`}>
+                                      {fmtMoney(row.netAfterBuyIns)}
+                                    </p>
+                                  ) : (
+                                    <p className="text-muted-foreground">—</p>
+                                  )}
                                 </div>
                                 <div>
                                   <Badge
                                     variant={row.status === "unknown" ? "outline" : "default"}
                                     className={`text-[10px] capitalize ${statusClasses[row.status]}`}
                                   >
-                                    {row.status === "paid" ? "paid" : row.status === "partial" ? "partial" : row.status === "unpaid" ? "unpaid" : "unknown"}
+                                    {statusLabel}
                                   </Badge>
-                                  {row.balanceDue > 0 && (
-                                    <p className="text-[10px] text-muted-foreground mt-1">{fmtMoney(row.balanceDue)} due</p>
+                                  {row.openBalance > 0 && (
+                                    <p className="text-[10px] text-muted-foreground mt-1">{fmtMoney(row.openBalance)} due</p>
                                   )}
                                 </div>
                               </div>
