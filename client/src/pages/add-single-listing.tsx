@@ -426,6 +426,12 @@ export default function AddSingleListing() {
   const [photosLoading, setPhotosLoading] = useState(false);
   const [zillowFacts, setZillowFacts] = useState<{ bedrooms?: number; bathrooms?: number }>({});
   const [zillowSourceUrl, setZillowSourceUrl] = useState("");
+  // CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+  // Tracks whether Step 3 already auto-fired a third photo-fetch
+  // attempt against the discovered URL. Without this guard, the
+  // useEffect below would re-fire on every render and could loop
+  // when the scrape persistently fails.
+  const [step3AutoRetryFired, setStep3AutoRetryFired] = useState(false);
 
   // Step 4 — Listing draft
   const [listing, setListing] = useState<ListingDraft | null>(null);
@@ -502,7 +508,12 @@ export default function AddSingleListing() {
       const data = await res.json();
       setUnit1Photos((data.photos || []).slice(0, 25));
       setZillowSourceUrl(data.sourceUrl || zillowUrl.trim());
-      if (data.facts) setZillowFacts(data.facts);
+      if (data.facts && (data.facts.bedrooms != null || data.facts.bathrooms != null)) {
+        setZillowFacts((prev) => ({
+          bedrooms: data.facts.bedrooms ?? prev.bedrooms,
+          bathrooms: data.facts.bathrooms ?? prev.bathrooms,
+        }));
+      }
       if ((data.photos || []).length === 0) {
         toast({ title: "No photos found", description: "Zillow returned no photos for that URL.", variant: "destructive" });
       }
@@ -512,6 +523,48 @@ export default function AddSingleListing() {
       setPhotosLoading(false);
     }
   }, [zillowUrl, toast]);
+
+  // CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+  // When the operator lands on Step 3 with photos still empty AND
+  // we have a Zillow URL from the auto-discovery, pre-fill the URL
+  // input and fire one more fetch attempt. This is the THIRD retry
+  // (1: find-clean-unit's scrape, 2: findCleanUnit's belt-and-
+  // suspenders fetch-unit-photos, 3: this one). Each attempt hits
+  // the same Apify→ScrapingBee chain but at slightly different
+  // times — sometimes one of them wins on a different cache state.
+  // Guarded by step3AutoRetryFired so the effect doesn't loop.
+  useEffect(() => {
+    if (step !== 3) return;
+    if (unit1Photos.length > 0) return;
+    if (!zillowSourceUrl) return;
+    if (step3AutoRetryFired) return;
+    if (photosLoading) return;
+    setStep3AutoRetryFired(true);
+    setZillowUrl(zillowSourceUrl);
+    // Defer the fetch so the URL state lands first; fetchZillowPhotos
+    // reads `zillowUrl` from its closure.
+    setTimeout(() => {
+      (async () => {
+        setPhotosLoading(true);
+        try {
+          const res = await apiRequest("POST", "/api/community/fetch-unit-photos", { url: zillowSourceUrl });
+          const data = await res.json();
+          const photos = Array.isArray(data.photos) ? data.photos.slice(0, 25) : [];
+          setUnit1Photos(photos);
+          if (data.facts && (data.facts.bedrooms != null || data.facts.bathrooms != null)) {
+            setZillowFacts((prev) => ({
+              bedrooms: data.facts.bedrooms ?? prev.bedrooms,
+              bathrooms: data.facts.bathrooms ?? prev.bathrooms,
+            }));
+          }
+        } catch (e: any) {
+          console.warn(`[add-single-listing] Step 3 auto-retry failed: ${e?.message}`);
+        } finally {
+          setPhotosLoading(false);
+        }
+      })();
+    }, 50);
+  }, [step, unit1Photos.length, zillowSourceUrl, step3AutoRetryFired, photosLoading]);
 
   // ── Step 4: Generate listing draft ─────────────────────────
   const handleGenerateListing = useCallback(async () => {
@@ -1184,8 +1237,69 @@ export default function AddSingleListing() {
               </p>
             )}
 
-            {/* Manual fetch path (escape hatch when no auto-discovery happened) */}
-            {unit1Photos.length === 0 && (
+            {/* CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+                Three modes for the empty-photos state:
+                  (a) Auto-retry running — show spinner + "scraping Zillow"
+                  (b) Auto-retry done, still empty, URL known — show
+                      "Scrape failed N times" message, pre-filled URL,
+                      a Re-try button, and a Skip Photos for Now button
+                  (c) No URL known (manual mode operator) — show the
+                      original "Paste a Zillow URL" form */}
+            {unit1Photos.length === 0 && photosLoading && (
+              <div className="text-center py-8 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                Scraping Zillow for photos…
+              </div>
+            )}
+            {unit1Photos.length === 0 && !photosLoading && zillowSourceUrl && step3AutoRetryFired && (
+              <>
+                <div className="mb-4 p-4 rounded-lg border border-amber-300 bg-amber-50/40 text-sm space-y-2">
+                  <div className="font-semibold text-amber-900">Zillow photo scrape kept coming back empty</div>
+                  <div className="text-amber-900">
+                    We tried 3 times against{" "}
+                    <a href={zillowSourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
+                      this listing <ExternalLink className="h-3 w-3" />
+                    </a>{" "}
+                    but Apify and ScrapingBee both returned no photos.
+                  </div>
+                  <div className="text-amber-900">
+                    Common causes: Apify rate-limited or out of credits, ScrapingBee not configured, or Zillow temporarily blocking the scraper for this listing. The unit still qualifies as standalone; you can re-try here, or skip and add photos manually in the builder.
+                  </div>
+                </div>
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Zillow URL (pre-filled from auto-discovery)</label>
+                    <Input
+                      value={zillowUrl}
+                      onChange={(e) => setZillowUrl(e.target.value)}
+                      data-testid="input-zillow-url"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={fetchZillowPhotos} disabled={photosLoading || !zillowUrl.trim()}>
+                      {photosLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                      {photosLoading ? "Scraping…" : "Re-try scrape"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        // Skip photos: jump to Step 4. The operator will
+                        // get the listing draft generated and can save the
+                        // unit without photos. Photos can be added later
+                        // via the builder's Photos tab.
+                        setStep(4);
+                        handleGenerateListing();
+                      }}
+                      data-testid="button-skip-photos"
+                    >
+                      Skip photos for now <ArrowRight className="h-4 w-4 ml-2" />
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+            {/* Manual mode: no URL was discovered (operator entered manually on Step 1) */}
+            {unit1Photos.length === 0 && !photosLoading && !zillowSourceUrl && (
               <>
                 <p className="text-muted-foreground text-sm mb-4">
                   Paste the Zillow listing URL for this property. We'll grab the photos and basic facts (bedrooms, bathrooms).
