@@ -191,6 +191,13 @@ export default function AddSingleListing() {
           bathrooms: number | null;
           photos: Array<{ url: string; label: string }>;
           qualifier: QualifierResult;
+          // CODEX NOTE (2026-05-04, claude/single-listing-text-fallback):
+          // true when the candidate qualified by text-only because
+          // the Zillow photo scrape returned empty (Apify/ScrapingBee
+          // both failed). Wizard's auto-retry via fetch-unit-photos
+          // tries to recover photos; if that fails too, Step 3
+          // surfaces the manual paste form.
+          photoScrapeFailed?: boolean;
         };
         attempts: FindAttempt[];
         attemptCount: number;
@@ -355,6 +362,18 @@ export default function AddSingleListing() {
             const retry = await retryRes.json();
             const retryPhotos = Array.isArray(retry.photos) ? retry.photos.slice(0, 25) : [];
             setUnit1Photos(retryPhotos);
+            // CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+            // fetch-unit-photos returns `facts: { bedrooms?, bathrooms? }`
+            // alongside photos (added in Load-Bearing #34's fold-in).
+            // If the retry recovered facts the find-clean-unit scrape
+            // missed, fold them into zillowFacts so the wizard shows
+            // real BR/BA on Step 2 instead of "?".
+            if (retry.facts && (retry.facts.bedrooms != null || retry.facts.bathrooms != null)) {
+              setZillowFacts((prev) => ({
+                bedrooms: retry.facts.bedrooms ?? prev.bedrooms,
+                bathrooms: retry.facts.bathrooms ?? prev.bathrooms,
+              }));
+            }
             if (retryPhotos.length === 0) {
               toast({
                 title: "Photos didn't scrape",
@@ -367,8 +386,12 @@ export default function AddSingleListing() {
           }
         }
         toast({
-          title: "Found a clean unit",
-          description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
+          title: data.unit.photoScrapeFailed
+            ? "Found a clean unit (photos pending)"
+            : "Found a clean unit",
+          description: data.unit.photoScrapeFailed
+            ? `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings (text-only; photo scrape retrying).`
+            : `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
         });
         setStep(2);
       } else {
@@ -403,6 +426,12 @@ export default function AddSingleListing() {
   const [photosLoading, setPhotosLoading] = useState(false);
   const [zillowFacts, setZillowFacts] = useState<{ bedrooms?: number; bathrooms?: number }>({});
   const [zillowSourceUrl, setZillowSourceUrl] = useState("");
+  // CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+  // Tracks whether Step 3 already auto-fired a third photo-fetch
+  // attempt against the discovered URL. Without this guard, the
+  // useEffect below would re-fire on every render and could loop
+  // when the scrape persistently fails.
+  const [step3AutoRetryFired, setStep3AutoRetryFired] = useState(false);
 
   // Step 4 — Listing draft
   const [listing, setListing] = useState<ListingDraft | null>(null);
@@ -479,7 +508,12 @@ export default function AddSingleListing() {
       const data = await res.json();
       setUnit1Photos((data.photos || []).slice(0, 25));
       setZillowSourceUrl(data.sourceUrl || zillowUrl.trim());
-      if (data.facts) setZillowFacts(data.facts);
+      if (data.facts && (data.facts.bedrooms != null || data.facts.bathrooms != null)) {
+        setZillowFacts((prev) => ({
+          bedrooms: data.facts.bedrooms ?? prev.bedrooms,
+          bathrooms: data.facts.bathrooms ?? prev.bathrooms,
+        }));
+      }
       if ((data.photos || []).length === 0) {
         toast({ title: "No photos found", description: "Zillow returned no photos for that URL.", variant: "destructive" });
       }
@@ -489,6 +523,48 @@ export default function AddSingleListing() {
       setPhotosLoading(false);
     }
   }, [zillowUrl, toast]);
+
+  // CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+  // When the operator lands on Step 3 with photos still empty AND
+  // we have a Zillow URL from the auto-discovery, pre-fill the URL
+  // input and fire one more fetch attempt. This is the THIRD retry
+  // (1: find-clean-unit's scrape, 2: findCleanUnit's belt-and-
+  // suspenders fetch-unit-photos, 3: this one). Each attempt hits
+  // the same Apify→ScrapingBee chain but at slightly different
+  // times — sometimes one of them wins on a different cache state.
+  // Guarded by step3AutoRetryFired so the effect doesn't loop.
+  useEffect(() => {
+    if (step !== 3) return;
+    if (unit1Photos.length > 0) return;
+    if (!zillowSourceUrl) return;
+    if (step3AutoRetryFired) return;
+    if (photosLoading) return;
+    setStep3AutoRetryFired(true);
+    setZillowUrl(zillowSourceUrl);
+    // Defer the fetch so the URL state lands first; fetchZillowPhotos
+    // reads `zillowUrl` from its closure.
+    setTimeout(() => {
+      (async () => {
+        setPhotosLoading(true);
+        try {
+          const res = await apiRequest("POST", "/api/community/fetch-unit-photos", { url: zillowSourceUrl });
+          const data = await res.json();
+          const photos = Array.isArray(data.photos) ? data.photos.slice(0, 25) : [];
+          setUnit1Photos(photos);
+          if (data.facts && (data.facts.bedrooms != null || data.facts.bathrooms != null)) {
+            setZillowFacts((prev) => ({
+              bedrooms: data.facts.bedrooms ?? prev.bedrooms,
+              bathrooms: data.facts.bathrooms ?? prev.bathrooms,
+            }));
+          }
+        } catch (e: any) {
+          console.warn(`[add-single-listing] Step 3 auto-retry failed: ${e?.message}`);
+        } finally {
+          setPhotosLoading(false);
+        }
+      })();
+    }, 50);
+  }, [step, unit1Photos.length, zillowSourceUrl, step3AutoRetryFired, photosLoading]);
 
   // ── Step 4: Generate listing draft ─────────────────────────
   const handleGenerateListing = useCallback(async () => {
@@ -973,13 +1049,26 @@ export default function AddSingleListing() {
                   <div><strong>Auto-discovered unit:</strong></div>
                   <div className="text-foreground">{streetAddress}, {pickedCity?.city}, {pickedCity?.state}</div>
                   <div className="text-xs text-muted-foreground">
-                    {zillowFacts.bedrooms ?? "?"} BR · {zillowFacts.bathrooms ?? "?"} BA · sourced from{" "}
+                    {/* CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+                        Show "—" instead of "?" when the Zillow scrape didn't
+                        return bathrooms — looks intentional rather than broken.
+                        The Listing Draft step (Step 4) fills this in with a
+                        Claude-generated estimate, so this is just a transient
+                        display while the scrape is partial. */}
+                    {zillowFacts.bedrooms ?? findResult.unit.bedrooms} BR
+                    {zillowFacts.bathrooms != null ? ` · ${zillowFacts.bathrooms} BA` : " · BA TBD"}
+                    {" · sourced from "}
                     <a href={findResult.unit.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
                       Zillow <ExternalLink className="h-3 w-3" />
                     </a>
                   </div>
+                  {zillowFacts.bathrooms == null && (
+                    <div className="text-[11px] text-muted-foreground italic">
+                      Bathroom count wasn't returned by the Zillow scrape — Claude will estimate it on Step 4 (you can edit there).
+                    </div>
+                  )}
                   <div className="text-xs text-muted-foreground">
-                    Tried {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} before finding a clean match.
+                    Walked {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} through the OTA cross-listing check before picking this one.
                   </div>
                 </div>
 
@@ -1038,22 +1127,35 @@ export default function AddSingleListing() {
                   </Button>
                 </div>
 
-                {findResult.attempts.length > 1 && (
-                  <details className="mt-4 text-xs">
-                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                      Why we skipped {findResult.attempts.length - 1} other candidate{findResult.attempts.length - 1 === 1 ? "" : "s"}
-                    </summary>
-                    <ul className="mt-2 space-y-1 pl-3">
-                      {findResult.attempts.slice(0, -1).map((a, i) => (
-                        <li key={`${a.url}-${i}`} className="text-muted-foreground">
-                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
-                            Candidate {i + 1}
-                          </a>: {a.rejectedBecause || "skipped"}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
+                {(() => {
+                  // CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
+                  // Filter the disclosure to attempts whose URL doesn't
+                  // match the picked unit. Earlier slice(0, -1) was wrong
+                  // for the text-only-fallback case — the matched
+                  // candidate isn't always last in attempts[] (we walk
+                  // every candidate before deciding when no full match
+                  // exists). URL-based filtering correctly identifies the
+                  // skipped set in both cases.
+                  const matchedUrl = findResult.unit.url.toLowerCase();
+                  const skipped = findResult.attempts.filter((a) => a.url.toLowerCase() !== matchedUrl);
+                  if (skipped.length === 0) return null;
+                  return (
+                    <details className="mt-4 text-xs">
+                      <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                        Why we skipped {skipped.length} other candidate{skipped.length === 1 ? "" : "s"}
+                      </summary>
+                      <ul className="mt-2 space-y-1 pl-3">
+                        {skipped.map((a, i) => (
+                          <li key={`${a.url}-${i}`} className="text-muted-foreground">
+                            <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
+                              Candidate {i + 1}
+                            </a>: {a.rejectedBecause || "skipped"}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  );
+                })()}
               </>
             )}
 
@@ -1135,8 +1237,69 @@ export default function AddSingleListing() {
               </p>
             )}
 
-            {/* Manual fetch path (escape hatch when no auto-discovery happened) */}
-            {unit1Photos.length === 0 && (
+            {/* CODEX NOTE (2026-05-04, claude/single-listing-step3-prefill):
+                Three modes for the empty-photos state:
+                  (a) Auto-retry running — show spinner + "scraping Zillow"
+                  (b) Auto-retry done, still empty, URL known — show
+                      "Scrape failed N times" message, pre-filled URL,
+                      a Re-try button, and a Skip Photos for Now button
+                  (c) No URL known (manual mode operator) — show the
+                      original "Paste a Zillow URL" form */}
+            {unit1Photos.length === 0 && photosLoading && (
+              <div className="text-center py-8 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                Scraping Zillow for photos…
+              </div>
+            )}
+            {unit1Photos.length === 0 && !photosLoading && zillowSourceUrl && step3AutoRetryFired && (
+              <>
+                <div className="mb-4 p-4 rounded-lg border border-amber-300 bg-amber-50/40 text-sm space-y-2">
+                  <div className="font-semibold text-amber-900">Zillow photo scrape kept coming back empty</div>
+                  <div className="text-amber-900">
+                    We tried 3 times against{" "}
+                    <a href={zillowSourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
+                      this listing <ExternalLink className="h-3 w-3" />
+                    </a>{" "}
+                    but Apify and ScrapingBee both returned no photos.
+                  </div>
+                  <div className="text-amber-900">
+                    Common causes: Apify rate-limited or out of credits, ScrapingBee not configured, or Zillow temporarily blocking the scraper for this listing. The unit still qualifies as standalone; you can re-try here, or skip and add photos manually in the builder.
+                  </div>
+                </div>
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Zillow URL (pre-filled from auto-discovery)</label>
+                    <Input
+                      value={zillowUrl}
+                      onChange={(e) => setZillowUrl(e.target.value)}
+                      data-testid="input-zillow-url"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={fetchZillowPhotos} disabled={photosLoading || !zillowUrl.trim()}>
+                      {photosLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                      {photosLoading ? "Scraping…" : "Re-try scrape"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        // Skip photos: jump to Step 4. The operator will
+                        // get the listing draft generated and can save the
+                        // unit without photos. Photos can be added later
+                        // via the builder's Photos tab.
+                        setStep(4);
+                        handleGenerateListing();
+                      }}
+                      data-testid="button-skip-photos"
+                    >
+                      Skip photos for now <ArrowRight className="h-4 w-4 ml-2" />
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+            {/* Manual mode: no URL was discovered (operator entered manually on Step 1) */}
+            {unit1Photos.length === 0 && !photosLoading && !zillowSourceUrl && (
               <>
                 <p className="text-muted-foreground text-sm mb-4">
                   Paste the Zillow listing URL for this property. We'll grab the photos and basic facts (bedrooms, bathrooms).
