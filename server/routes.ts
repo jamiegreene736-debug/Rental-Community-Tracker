@@ -15573,7 +15573,12 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
-    for (const url of candidateUrls.slice(0, 8)) {
+    // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
+    // Bumped from 8 → 12 because the 0-photo rejection below can
+    // eat several attempts on bad scraping days (Apify rate-limited,
+    // Zillow anti-bot stalling). 12 keeps the worst-case wallet
+    // bounded while leaving headroom for retries.
+    for (const url of candidateUrls.slice(0, 12)) {
       // Scrape Zillow for facts + photos. We need the address; we
       // pass an empty `facts` object so scrapeListingPhotos
       // populates it via the Apify/ScrapingBee path.
@@ -15591,6 +15596,34 @@ Return ONLY compact JSON with this exact shape:
           qualifies: null,
           qualifierReason: null,
           rejectedBecause: `Zillow scrape failed: ${e?.message ?? e}`,
+        });
+        continue;
+      }
+
+      // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
+      // Reject candidates where Zillow scrape returned 0 photos.
+      // scrapeListingPhotos returns gracefully-empty (no throw)
+      // when both Apify and ScrapingBee fail — without this gate,
+      // find-clean-unit was accepting candidates whose qualifier
+      // text-search passed but had no photos, which (a) made Step
+      // 3 of the wizard render the manual paste-Zillow-URL form
+      // (Jamie's reported bug) and (b) skipped the photo reverse-
+      // image-search portion of the qualifier, giving us a half-
+      // verified "clean" unit. Skip and try the next candidate;
+      // if all 12 candidates have 0 photos, we surface a clear
+      // "scrape returned no photos for any candidate" error so the
+      // operator knows it's a transient scraping issue, not a
+      // real "no clean unit" result.
+      if (photos.length === 0) {
+        attempts.push({
+          url,
+          bedrooms: facts.bedrooms ?? null,
+          bathrooms: facts.bathrooms ?? null,
+          address: null,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: "Zillow scrape returned 0 photos (Apify + ScrapingBee both empty).",
         });
         continue;
       }
@@ -15687,9 +15720,24 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    // CODEX NOTE (2026-05-04, claude/single-listing-photo-required):
+    // Build a more diagnostic "no clean unit" reason. If most/all
+    // candidates failed because of scrape-empty (not because of
+    // OTA matches), the issue is likely a transient Apify/Zillow
+    // problem rather than a real "no inventory" answer — the
+    // operator can retry later or hit "Try another unit" once
+    // scraping recovers.
+    const scrapeFailures = attempts.filter((a) => /scrape (returned 0 photos|failed)/i.test(a.rejectedBecause)).length;
+    const otaMatches = attempts.filter((a) => /^Listed on OTA/i.test(a.rejectedBecause)).length;
+    const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
+    const reasonParts: string[] = [];
+    if (otaMatches > 0) reasonParts.push(`${otaMatches} listed on Airbnb/VRBO/Booking`);
+    if (scrapeFailures > 0) reasonParts.push(`${scrapeFailures} Zillow scrape failed/empty`);
+    if (wrongBR > 0) reasonParts.push(`${wrongBR} wrong bedroom count`);
+    const reason = `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
     res.json({
       found: false,
-      reason: `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none were clean of OTA listings.`,
+      reason,
       attempts,
       attemptCount: attempts.length,
       totalCandidates: candidateUrls.length,
