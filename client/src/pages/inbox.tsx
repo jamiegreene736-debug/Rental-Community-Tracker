@@ -207,24 +207,24 @@ This stay is set up as two units that are minutes from each other. We will send 
 We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
   {
-    name: "1-Week Representative Units Follow-Up",
+    name: "Unit Setup Confirmation",
     trigger: "days_after_booking",
-    daysOffset: 7,
+    daysOffset: 1,
     isActive: true,
     body: `Hi {guest_name},
 
-I wanted to follow up with a little more detail about what to expect for your stay at {property_name}.
+Just a quick note about your upcoming stay at {property_name}.
 
-This is a bundled stay made up of two nearby units that are minutes from each other. The listing photos are representative sample photos, so the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.
-
-If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.
+This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.
 
 Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
   {
@@ -245,6 +245,7 @@ Address / access code / parking / Wi-Fi:
 Please reply here if anything looks unclear before arrival.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
   {
@@ -263,6 +264,7 @@ Your stay at {property_name} is just a few days away. A few quick reminders:
 If you want recommendations near the property, reply here and I am happy to help.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
   {
@@ -279,6 +281,7 @@ Confirmation code: {confirmation_code}
 Safe travels, and please reply here if anything comes up.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
   {
@@ -295,6 +298,7 @@ If you have a moment, I would really appreciate a review. It helps future guests
 We would be happy to host you again anytime.
 
 Thanks,
+John Carpenter
 VacationRentalExpertz`,
   },
 ];
@@ -535,13 +539,11 @@ function buildRepresentativeUnitsFollowUpBody(args: {
   const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
-    `I wanted to follow up with a little more detail about what to expect for your stay${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+    `Just a quick note about your upcoming stay${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   lines.push(``);
-  lines.push(`This is a bundled stay made up of two nearby units that are minutes from each other. The listing photos are representative sample photos, so the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. Your assigned units will match the bedroom count and resort/community standard, and we will send final unit/access details closer to arrival.`);
-  lines.push(``);
-  lines.push(`If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.`);
+  lines.push(`This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.`);
   lines.push(``);
   lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
   lines.push(``);
@@ -2422,11 +2424,11 @@ export default function InboxPage() {
                                 onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
                               },
                               {
-                                title: "1-week representative units follow-up",
-                                due: bookingDate ? addDays(bookingDate, 7) : null,
-                                dueLabel: "1 week after booking",
-                                sent: wasSent(/representative sample photos|full refund and cancel|not what you expected|bundled stay made up of two/i),
-                                detail: "Explains sample photos and refund option",
+                                title: "Unit setup confirmation",
+                                due: bookingDate ? addDays(bookingDate, 1) : null,
+                                dueLabel: "1 day after booking",
+                                sent: wasSent(/unit setup|two nearby units|representative of the resort|unit style/i),
+                                detail: "Confirms nearby units and sample photos",
                                 testId: "button-draft-representative-follow-up",
                                 onClick: () => draftStayTemplate({ kind: "representative-follow-up", ...draftCommon }),
                               },
