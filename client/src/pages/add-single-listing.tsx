@@ -7,12 +7,16 @@
 // with the new `singleListing: true` flag where supported.
 //
 // Operator-driven differences vs. add-community:
-//   - No "Research" / "Top Markets" community-wide scan. Operator
-//     enters a specific street address and a Zillow URL.
-//   - Step 2 is the OTA-clean QUALIFIER — calls /api/single-listing/qualify
-//     to verify the address is NOT listed on Airbnb / VRBO / Booking.
-//     If any platform shows a confirmed match, the property doesn't
-//     qualify and the wizard hard-blocks save.
+//   - Step 1 is a city-first discovery flow: nationwide city
+//     autocomplete (scoped to Hawaii + Florida — see Load-Bearing
+//     #35) → top-20 community research scan via
+//     /api/community/research → operator picks a community → typed
+//     street address for the OTA qualifier.
+//   - Step 2 is the OTA-clean QUALIFIER — calls
+//     /api/single-listing/qualify to verify the address is NOT
+//     listed on Airbnb / VRBO / Booking. If any platform shows a
+//     confirmed match, the property doesn't qualify and the wizard
+//     hard-blocks save.
 //   - Step 3 photos: only Unit A (no Unit B).
 //   - Step 4 listing draft: single-unit prompt (no walking distance,
 //     no "two units" framing).
@@ -45,24 +49,34 @@ import {
   ShieldCheck,
   ShieldX,
   ExternalLink,
+  Star,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 
-const US_STATES = [
-  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
-  "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
-  "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
-  "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
-  "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
-  "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
-  "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
-  "Wisconsin","Wyoming",
-];
-
-// 4 steps vs. add-community's 5 (no community-wide research step).
+// 4 steps. Step 1 collapses location + community research into one
+// screen — city autocomplete kicks off /api/community/research and
+// the operator picks a top community without leaving the screen.
 const STEPS = ["Property", "OTA Check", "Photos", "Listing Draft"];
+
+type CitySuggestion = { city: string; state: string };
+
+type CommunityResult = {
+  name: string;
+  city: string;
+  state: string;
+  estimatedLowRate: number | null;
+  estimatedHighRate: number | null;
+  unitTypes: string;
+  confidenceScore: number;
+  researchSummary: string;
+  sourceUrl: string;
+  bedroomMix?: string;
+  combinedBedroomsTypical?: number;
+  combinabilityScore?: number;
+  fromWorldKnowledge?: boolean;
+};
 
 type QualifierPlatformResult = {
   listed: boolean;
@@ -116,22 +130,34 @@ export default function AddSingleListing() {
 
   const [step, setStep] = useState(1);
 
-  // Step 1 — Property identification
-  const [selectedState, setSelectedState] = useState("");
+  // Step 1 — City picker → community research → address
   const [cityInput, setCityInput] = useState("");
-  const [streetAddress, setStreetAddress] = useState("");
-  const [propertyName, setPropertyName] = useState(""); // optional — building / complex name
-  // City typeahead (same shape as add-community's). Not strictly needed
-  // for a standalone, but operators expect it from the combo flow.
-  const [citySuggestions, setCitySuggestions] = useState<string[]>([]);
+  const [pickedCity, setPickedCity] = useState<CitySuggestion | null>(null);
+  const [citySuggestions, setCitySuggestions] = useState<CitySuggestion[]>([]);
   const [citySuggestionsLoading, setCitySuggestionsLoading] = useState(false);
   const [showCitySuggestions, setShowCitySuggestions] = useState(false);
   const cityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cityRequestSeqRef = useRef(0);
 
+  // Top-20 community research for the picked city.
+  const [communities, setCommunities] = useState<CommunityResult[]>([]);
+  const [researchLoading, setResearchLoading] = useState(false);
+  const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
+
+  // The specific unit fields the rest of the wizard depends on.
+  // `propertyName` is filled from the picked community (or from a
+  // manual override). `streetAddress` is still entered by the
+  // operator — even after picking a community, we need the unit-
+  // level address for the OTA qualifier.
+  const [streetAddress, setStreetAddress] = useState("");
+  const [propertyName, setPropertyName] = useState("");
+  const [manualMode, setManualMode] = useState(false);
+
+  // City autocomplete — nationwide endpoint scoped server-side to
+  // Hawaii + Florida. Returns { city, state } pairs.
   useEffect(() => {
     if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
-    if (!selectedState || cityInput.trim().length < 2) {
+    if (cityInput.trim().length < 2) {
       setCitySuggestions([]);
       setCitySuggestionsLoading(false);
       return;
@@ -141,7 +167,7 @@ export default function AddSingleListing() {
     cityDebounceRef.current = setTimeout(async () => {
       try {
         const r = await fetch(
-          `/api/community/city-suggest?state=${encodeURIComponent(selectedState)}&query=${encodeURIComponent(cityInput.trim())}`,
+          `/api/community/city-suggest-any?query=${encodeURIComponent(cityInput.trim())}`,
         );
         const data = await r.json();
         if (mySeq !== cityRequestSeqRef.current) return;
@@ -156,7 +182,57 @@ export default function AddSingleListing() {
     return () => {
       if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
     };
-  }, [cityInput, selectedState]);
+  }, [cityInput]);
+
+  // Picking a city kicks off the top-20 community research call.
+  // Mirrors add-community Step 2's research scan, but feeds the
+  // single-listing flow instead of the combo flow. We treat the
+  // returned CommunityResult.unitTypes as a hint — the operator
+  // ultimately confirms the property type on Step 4.
+  const pickCity = useCallback(async (s: CitySuggestion) => {
+    setPickedCity(s);
+    setCityInput(`${s.city}, ${s.state}`);
+    setShowCitySuggestions(false);
+    setSelectedCommunity(null);
+    setCommunities([]);
+    setManualMode(false);
+    setResearchLoading(true);
+    try {
+      const res = await apiRequest("POST", "/api/community/research", {
+        city: s.city,
+        state: s.state,
+      });
+      const data = await res.json();
+      const list: CommunityResult[] = Array.isArray(data?.communities)
+        ? data.communities.slice(0, 20)
+        : [];
+      setCommunities(list);
+      if (list.length === 0) {
+        toast({
+          title: "No communities found",
+          description: `Couldn't find vacation rental communities in ${s.city}, ${s.state}. You can still proceed by entering the property manually.`,
+        });
+      }
+    } catch (e: any) {
+      toast({ title: "Research failed", description: e.message, variant: "destructive" });
+    } finally {
+      setResearchLoading(false);
+    }
+  }, [toast]);
+
+  const pickCommunity = useCallback((c: CommunityResult) => {
+    setSelectedCommunity(c);
+    setPropertyName(c.name);
+    setManualMode(false);
+  }, []);
+
+  // Escape hatch for unit-types that don't show up in the research
+  // scan (or markets where the scan returns nothing).
+  const enterManualMode = useCallback(() => {
+    setManualMode(true);
+    setSelectedCommunity(null);
+    setPropertyName("");
+  }, []);
 
   // Step 2 — OTA qualifier
   const [qualifierLoading, setQualifierLoading] = useState(false);
@@ -199,7 +275,7 @@ export default function AddSingleListing() {
 
   // ── Step 2: OTA qualifier ──────────────────────────────────
   const runQualifier = useCallback(async () => {
-    if (!streetAddress.trim() || !cityInput.trim() || !selectedState) {
+    if (!streetAddress.trim() || !pickedCity) {
       toast({ title: "Enter the full street address, city, and state first", variant: "destructive" });
       return;
     }
@@ -208,8 +284,8 @@ export default function AddSingleListing() {
     try {
       const res = await apiRequest("POST", "/api/single-listing/qualify", {
         address: streetAddress.trim(),
-        city: cityInput.trim(),
-        state: selectedState,
+        city: pickedCity.city,
+        state: pickedCity.state,
       });
       const data: QualifierResult = await res.json();
       setQualifierResult(data);
@@ -227,7 +303,7 @@ export default function AddSingleListing() {
     } finally {
       setQualifierLoading(false);
     }
-  }, [streetAddress, cityInput, selectedState, toast]);
+  }, [streetAddress, pickedCity, toast]);
 
   // ── Step 3: Fetch photos from Zillow ───────────────────────
   const fetchZillowPhotos = useCallback(async () => {
@@ -261,6 +337,10 @@ export default function AddSingleListing() {
       toast({ title: "Need a property name or address before generating", variant: "destructive" });
       return;
     }
+    if (!pickedCity) {
+      toast({ title: "Pick a city first", variant: "destructive" });
+      return;
+    }
     setListingLoading(true);
     try {
       const res = await apiRequest("POST", "/api/community/generate-listing", {
@@ -268,8 +348,8 @@ export default function AddSingleListing() {
         // shape on the server — see /api/community/generate-listing.
         singleListing: true,
         communityName: propertyName.trim() || streetAddress.trim(),
-        city: cityInput.trim(),
-        state: selectedState,
+        city: pickedCity.city,
+        state: pickedCity.state,
         unit1: {
           bedrooms: bedrooms || 2,
           url: zillowSourceUrl,
@@ -287,8 +367,8 @@ export default function AddSingleListing() {
       setEditedTransit(data.transit || "");
       setEditedUnitA(data.unitA ?? null);
       // Seed pricing-area suggestion from city/state (same logic as combo flow).
-      if (!editedPricingArea && cityInput && selectedState) {
-        const suggested = suggestPricingArea(cityInput, selectedState);
+      if (!editedPricingArea) {
+        const suggested = suggestPricingArea(pickedCity.city, pickedCity.state);
         if (suggested) setEditedPricingArea(suggested);
       }
       if (!strPermit && data.strPermitSample) {
@@ -302,11 +382,11 @@ export default function AddSingleListing() {
     } finally {
       setListingLoading(false);
     }
-  }, [propertyName, streetAddress, cityInput, selectedState, bedrooms, zillowSourceUrl, suggestedRate, editedPricingArea, strPermit, toast]);
+  }, [propertyName, streetAddress, pickedCity, bedrooms, zillowSourceUrl, suggestedRate, editedPricingArea, strPermit, toast]);
 
   // ── Save to dashboard ──────────────────────────────────────
   const handleSave = useCallback(async () => {
-    if (!cityInput.trim() || !selectedState) {
+    if (!pickedCity) {
       toast({ title: "Missing city/state", variant: "destructive" });
       return;
     }
@@ -319,9 +399,9 @@ export default function AddSingleListing() {
         // (adapt-draft.ts) to skip Unit B and render this as a
         // single-unit property.
         singleListing: true,
-        name: propertyName.trim() || streetAddress.trim() || `${cityInput.trim()} listing`,
-        city: cityInput.trim(),
-        state: selectedState,
+        name: propertyName.trim() || streetAddress.trim() || `${pickedCity.city} listing`,
+        city: pickedCity.city,
+        state: pickedCity.state,
         // Pass a unitTypes hint that satisfies checkCommunityType
         // (must contain "condo" or "townhouse"). The operator picks
         // the actual property type below; we tag the draft as a
@@ -395,7 +475,7 @@ export default function AddSingleListing() {
     } finally {
       setSaving(false);
     }
-  }, [propertyName, streetAddress, cityInput, selectedState, editedPropertyType, zillowSourceUrl, bedrooms, zillowFacts, editedUnitA, suggestedRate, editedTitle, editedBookingTitle, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, strPermit, unit1Photos, queryClient, toast, navigate]);
+  }, [propertyName, streetAddress, pickedCity, editedPropertyType, zillowSourceUrl, bedrooms, zillowFacts, editedUnitA, suggestedRate, editedTitle, editedBookingTitle, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, strPermit, unit1Photos, queryClient, toast, navigate]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -436,100 +516,195 @@ export default function AddSingleListing() {
         </div>
         <p className="text-sm text-muted-foreground mb-6">Step {step} of {STEPS.length}: {STEPS[step - 1]}</p>
 
-        {/* ── STEP 1: Property identification ───────────── */}
+        {/* ── STEP 1: City → community → address ──────────
+            Three-substage screen:
+              1. City autocomplete (Hawaii + Florida only)
+              2. Top-20 community research scan kicked off automatically on city pick
+              3. Operator selects a community OR enters manual mode, then types
+                 the unit's specific street address (still required for the OTA
+                 qualifier on Step 2).
+            CODEX NOTE (2026-05-04, claude/single-listing): replaces the
+            original 4-field property-details form. Operator directive
+            was: "type a city → drop down list of cities → top 20 best
+            vacation rental communities to choose from." */}
         {step === 1 && (
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <MapPin className="h-5 w-5 text-primary" />
-              <h2 className="text-lg font-semibold">Step 1: Property details</h2>
+              <h2 className="text-lg font-semibold">Step 1: Pick a city &amp; community</h2>
             </div>
             <p className="text-muted-foreground text-sm mb-6">
-              Enter the standalone unit's full street address. We'll use it on the next step
-              to verify the property isn't already listed on Airbnb, VRBO, or Booking.com.
+              Start by typing the city. We'll find the top vacation rental communities there
+              for you to pick from. (Currently scoped to Hawaii and Florida.)
             </p>
-            <div className="space-y-4 mb-6">
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Property / building name (optional)</label>
+
+            {/* — City autocomplete — */}
+            <div className="mb-6">
+              <label className="text-sm font-medium mb-1.5 block">City</label>
+              <div className="relative">
                 <Input
-                  placeholder="e.g. The Surfrider, Building 4 Unit 12, …"
-                  value={propertyName}
-                  onChange={(e) => setPropertyName(e.target.value)}
-                  data-testid="input-property-name"
+                  placeholder="Start typing — e.g. Lihue, Kissimmee, Princeville…"
+                  value={cityInput}
+                  onChange={(e) => {
+                    setCityInput(e.target.value);
+                    setShowCitySuggestions(true);
+                    // Typing again after a city was picked clears the
+                    // research and the unit-level fields so the operator
+                    // doesn't carry stale state across cities.
+                    if (pickedCity) {
+                      setPickedCity(null);
+                      setSelectedCommunity(null);
+                      setCommunities([]);
+                      setPropertyName("");
+                    }
+                  }}
+                  onFocus={() => setShowCitySuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
+                  data-testid="input-city"
+                  autoComplete="off"
                 />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Leave blank if it's a standalone home with no complex name.
-                </p>
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Street address</label>
-                <Input
-                  placeholder="e.g. 4460 Nehe Rd #122"
-                  value={streetAddress}
-                  onChange={(e) => setStreetAddress(e.target.value)}
-                  data-testid="input-street-address"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Used for the OTA cross-listing check on the next step.
-                </p>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm font-medium mb-1.5 block">State</label>
-                  <Select value={selectedState} onValueChange={setSelectedState}>
-                    <SelectTrigger data-testid="select-state">
-                      <SelectValue placeholder="Select a state…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {US_STATES.map((s) => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <label className="text-sm font-medium mb-1.5 block">City</label>
-                  <div className="relative">
-                    <Input
-                      placeholder={selectedState ? "Start typing — e.g. Lihue, Kissimmee…" : "Pick a state first…"}
-                      value={cityInput}
-                      onChange={(e) => {
-                        setCityInput(e.target.value);
-                        setShowCitySuggestions(true);
-                      }}
-                      onFocus={() => setShowCitySuggestions(true)}
-                      onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
-                      disabled={!selectedState}
-                      data-testid="input-city"
-                      autoComplete="off"
-                    />
-                    {showCitySuggestions && (citySuggestionsLoading || citySuggestions.length > 0) && (
-                      <div className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-md shadow-lg z-20 max-h-60 overflow-auto">
-                        {citySuggestionsLoading && citySuggestions.length === 0 && (
-                          <div className="px-3 py-2 text-xs text-muted-foreground italic">Looking up cities…</div>
-                        )}
-                        {citySuggestions.map((c) => (
-                          <button
-                            key={c}
-                            type="button"
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              setCityInput(c);
-                              setShowCitySuggestions(false);
-                            }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-muted focus:bg-muted focus:outline-none"
-                          >
-                            {c}
-                          </button>
-                        ))}
-                      </div>
+                {showCitySuggestions && (citySuggestionsLoading || citySuggestions.length > 0) && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-md shadow-lg z-20 max-h-60 overflow-auto">
+                    {citySuggestionsLoading && citySuggestions.length === 0 && (
+                      <div className="px-3 py-2 text-xs text-muted-foreground italic">Looking up cities…</div>
                     )}
+                    {citySuggestions.map((s) => (
+                      <button
+                        key={`${s.city}|${s.state}`}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          pickCity(s);
+                        }}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-muted focus:bg-muted focus:outline-none"
+                        data-testid={`city-suggestion-${s.city.replace(/\s+/g, "-")}`}
+                      >
+                        {s.city}, {s.state}
+                      </button>
+                    ))}
                   </div>
+                )}
+              </div>
+              {pickedCity && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Selected: <strong>{pickedCity.city}, {pickedCity.state}</strong>
+                </p>
+              )}
+            </div>
+
+            {/* — Community research results — */}
+            {researchLoading && (
+              <div className="text-center py-8 text-muted-foreground border rounded-lg mb-6">
+                <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                Finding top vacation rental communities in {pickedCity?.city}…
+              </div>
+            )}
+
+            {!researchLoading && communities.length > 0 && (
+              <div className="mb-6">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">
+                    Top {communities.length} {communities.length === 1 ? "community" : "communities"} in {pickedCity?.city}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={enterManualMode}
+                    className="text-xs text-blue-700 hover:underline"
+                  >
+                    None of these — enter manually
+                  </button>
+                </div>
+                <div className="space-y-2 max-h-96 overflow-auto pr-1">
+                  {communities.map((c, i) => {
+                    const isSelected = selectedCommunity?.name === c.name && selectedCommunity?.city === c.city;
+                    return (
+                      <Card
+                        key={`${c.name}-${i}`}
+                        className={`p-3 cursor-pointer transition-colors ${
+                          isSelected ? "border-primary bg-primary/5" : "hover:border-muted-foreground/40"
+                        }`}
+                        onClick={() => pickCommunity(c)}
+                        data-testid={`community-card-${i}`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Building2 className="h-4 w-4 text-muted-foreground shrink-0" />
+                              <p className="font-semibold text-sm">{c.name}</p>
+                              {c.fromWorldKnowledge && (
+                                <Badge variant="outline" className="text-[10px]">AI knowledge</Badge>
+                              )}
+                              <Badge variant="secondary" className="text-[10px]">
+                                <Star className="h-2.5 w-2.5 mr-0.5" />
+                                {c.confidenceScore}
+                              </Badge>
+                            </div>
+                            {c.unitTypes && (
+                              <p className="text-xs text-muted-foreground mt-1 italic">{c.unitTypes}</p>
+                            )}
+                            {c.researchSummary && (
+                              <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{c.researchSummary}</p>
+                            )}
+                            {(c.estimatedLowRate || c.estimatedHighRate) && (
+                              <p className="text-xs mt-1">
+                                <span className="text-muted-foreground">Est. nightly:</span>{" "}
+                                <span className="font-medium">
+                                  {c.estimatedLowRate ? `$${c.estimatedLowRate}` : "?"}
+                                  {c.estimatedHighRate ? ` – $${c.estimatedHighRate}` : ""}
+                                </span>
+                              </p>
+                            )}
+                          </div>
+                          {isSelected && <CheckCircle2 className="h-5 w-5 text-primary shrink-0" />}
+                        </div>
+                      </Card>
+                    );
+                  })}
                 </div>
               </div>
-            </div>
+            )}
+
+            {!researchLoading && pickedCity && communities.length === 0 && !manualMode && (
+              <div className="mb-6 p-4 border border-amber-300 bg-amber-50/50 rounded-lg text-sm">
+                <p className="mb-2">No communities found for {pickedCity.city}, {pickedCity.state}.</p>
+                <Button size="sm" variant="outline" onClick={enterManualMode}>
+                  Enter property manually
+                </Button>
+              </div>
+            )}
+
+            {/* — Specific unit fields. Shown once a community is picked
+                  OR the operator switched to manual mode. — */}
+            {(selectedCommunity || manualMode) && (
+              <div className="space-y-4 border-t pt-5 mb-6">
+                <h3 className="text-sm font-semibold">Unit details</h3>
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">Property / building name {!manualMode && <span className="text-xs font-normal text-muted-foreground">(prefilled — edit if needed)</span>}</label>
+                  <Input
+                    placeholder="e.g. The Surfrider, Building 4 Unit 12, …"
+                    value={propertyName}
+                    onChange={(e) => setPropertyName(e.target.value)}
+                    data-testid="input-property-name"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block">Street address</label>
+                  <Input
+                    placeholder="e.g. 4460 Nehe Rd #122"
+                    value={streetAddress}
+                    onChange={(e) => setStreetAddress(e.target.value)}
+                    data-testid="input-street-address"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    The specific unit's address — used for the OTA cross-listing check on the next step.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <Button
               onClick={() => setStep(2)}
-              disabled={!streetAddress.trim() || !cityInput.trim() || !selectedState}
+              disabled={!pickedCity || !streetAddress.trim() || (!selectedCommunity && !manualMode)}
               data-testid="button-step-1-next"
             >
               Continue to OTA Check
@@ -551,7 +726,7 @@ export default function AddSingleListing() {
             </p>
             <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
               <strong>Address being checked:</strong>
-              <div className="mt-1">{streetAddress || "—"}, {cityInput || "—"}, {selectedState || "—"}</div>
+              <div className="mt-1">{streetAddress || "—"}, {pickedCity?.city || "—"}, {pickedCity?.state || "—"}</div>
             </div>
 
             {!qualifierResult && (
