@@ -199,6 +199,10 @@ This confirms your reservation at {property_name} for {check_in_date} through {c
 
 Confirmation code: {confirmation_code}
 
+What to expect: this is a bundled stay, and the listing photos are representative sample photos. Your assigned units will match the bedroom count and resort/community standard, but the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. We will send final unit/access details closer to arrival.
+
+If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.
+
 We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
 
 Thanks,
@@ -496,6 +500,10 @@ function buildBookingConfirmationBody(args: {
     if (paid > 0) lines.push(`Paid to date: ${formatMoney(paid)}`);
     if (total > 0) lines.push(`Remaining balance: ${formatMoney(balance)}`);
   }
+  lines.push(``);
+  lines.push(`What to expect: this is a bundled stay, and the listing photos are representative sample photos. Your assigned units will match the bedroom count and resort/community standard, but the exact unit interiors, views, furnishings, and layout may vary from the sample photos shown in the listing. We will send final unit/access details closer to arrival.`);
+  lines.push(``);
+  lines.push(`If this is not what you expected when booking, we sincerely apologize. Please reply here as soon as possible and we will issue a full refund and cancel the reservation without penalty.`);
   lines.push(``);
   lines.push(`We will send your detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.`);
   lines.push(``);
