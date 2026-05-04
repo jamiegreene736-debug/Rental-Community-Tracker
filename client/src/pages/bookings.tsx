@@ -73,12 +73,27 @@ interface GuestyReservation {
 
 interface GuestyPayment {
   amount?: number | string;
+  value?: number | string;
+  paidAmount?: number | string;
+  expectedAmount?: number | string;
+  scheduledAmount?: number | string;
+  total?: number | string;
   paidAt?: string;
   collectedAt?: string;
   processedAt?: string;
+  paymentDate?: string;
+  dueAt?: string;
+  dueDate?: string;
+  scheduledAt?: string;
+  chargeDate?: string;
   createdAt?: string;
   date?: string;
   status?: string;
+  description?: string;
+  note?: string;
+  label?: string;
+  type?: string;
+  kind?: string;
   [key: string]: unknown;
 }
 
@@ -668,8 +683,9 @@ function parseDateCandidate(value: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-type DepositStatus = "airbnb_expected" | "collected" | "partial" | "not_collected" | "unknown";
+type DepositStatus = "airbnb_expected" | "collected" | "scheduled" | "partial" | "not_collected" | "unknown";
 type PaymentSourceKind = "airbnb" | "guesty_card" | "booking_vcc" | "booking_payout" | "not_visible" | "unknown";
+type DepositTriggerSource = "airbnb_arrival" | "payment" | "schedule" | "reservation" | "unknown";
 
 function channelKindOf(r: GuestyReservation): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
   const raw = `${r.integration?.platform ?? ""} ${r.source ?? ""}`.toLowerCase();
@@ -700,6 +716,48 @@ function collectedPaymentDateOf(r: GuestyReservation): { date: Date | null; sour
   const created = parseDateCandidate(r.createdAt);
   if ((r.money?.totalPaid ?? 0) > 0 && created) return { date: created, source: "reservation" };
   return { date: null, source: "unknown" };
+}
+
+function reservationPaymentItems(r: GuestyReservation): GuestyPayment[] {
+  return [
+    ...(Array.isArray(r.payments) ? r.payments : []),
+    ...(Array.isArray(r.money?.payments) ? r.money.payments : []),
+    ...(Array.isArray(r.money?.paymentSchedule) ? r.money.paymentSchedule : []),
+  ];
+}
+
+function paymentAmountOf(p: GuestyPayment): number {
+  return asMoneyNumber(
+    p.amount ?? p.value ?? p.paidAmount ?? p.expectedAmount ?? p.scheduledAmount ?? p.total,
+  );
+}
+
+function paymentDateOf(p: GuestyPayment): Date | null {
+  return parseDateCandidate(p.paidAt ?? p.collectedAt ?? p.processedAt ?? p.paymentDate ?? p.date ?? p.createdAt);
+}
+
+function scheduledDateOf(p: GuestyPayment): Date | null {
+  return parseDateCandidate(p.dueAt ?? p.dueDate ?? p.scheduledAt ?? p.chargeDate ?? p.paymentDate ?? p.date ?? p.createdAt);
+}
+
+function paymentDescriptionOf(p: GuestyPayment): string {
+  return String(p.description ?? p.note ?? p.label ?? p.type ?? p.kind ?? "");
+}
+
+function paymentLooksCollected(p: GuestyPayment): boolean {
+  const status = String(p.status ?? "").toLowerCase();
+  const description = paymentDescriptionOf(p).toLowerCase();
+  if (/(refund|void|fail|declin|cancel)/.test(status) || /(refund|void|fail|declin|cancel)/.test(description)) return false;
+  if (/(scheduled|pending|unpaid|due|future)/.test(status)) return false;
+  if (p.paidAt || p.collectedAt || p.processedAt) return true;
+  return /(paid|captured|collected|succeeded|settled|payment|charge)/.test(status + " " + description);
+}
+
+function paymentLooksScheduled(p: GuestyPayment): boolean {
+  const status = String(p.status ?? "").toLowerCase();
+  const description = paymentDescriptionOf(p).toLowerCase();
+  if (paymentLooksCollected(p)) return false;
+  return /(scheduled|pending|unpaid|due|future|installment|payment)/.test(status + " " + description);
 }
 
 function getBuyInCost(r: GuestyReservation): number {
@@ -763,7 +821,7 @@ function paymentSourceOf(r: GuestyReservation): { kind: PaymentSourceKind; label
 
 function depositTimingFor(r: GuestyReservation): {
   triggerDate: Date | null;
-  triggerSource: "airbnb_arrival" | "payment" | "reservation" | "unknown";
+  triggerSource: DepositTriggerSource;
   expectedPayout: Date | null;
   expectedBank: Date | null;
 } {
@@ -791,6 +849,99 @@ function depositTimingFor(r: GuestyReservation): {
     expectedPayout,
     expectedBank: expectedPayout ? nextBusinessDay(expectedPayout) : null,
   };
+}
+
+function depositInstallmentsFor(r: GuestyReservation): Array<{
+  installmentLabel: string;
+  status: DepositStatus;
+  amount: number;
+  triggerDate: Date | null;
+  triggerSource: DepositTriggerSource;
+  expectedPayout: Date | null;
+  expectedBank: Date | null;
+}> {
+  if (channelKindOf(r) === "airbnb") {
+    const timing = depositTimingFor(r);
+    return [{
+      installmentLabel: "Airbnb payout",
+      status: "airbnb_expected",
+      amount: getDepositAmount(r),
+      triggerDate: timing.triggerDate,
+      triggerSource: timing.triggerSource,
+      expectedPayout: timing.expectedPayout,
+      expectedBank: timing.expectedBank,
+    }];
+  }
+
+  const items = reservationPaymentItems(r);
+  const installments: Array<{
+    installmentLabel: string;
+    status: DepositStatus;
+    amount: number;
+    triggerDate: Date | null;
+    triggerSource: DepositTriggerSource;
+    expectedPayout: Date | null;
+    expectedBank: Date | null;
+  }> = [];
+  const seen = new Set<string>();
+
+  const addInstallment = (
+    status: DepositStatus,
+    amount: number,
+    triggerDate: Date | null,
+    triggerSource: DepositTriggerSource,
+    label: string,
+  ) => {
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    const key = `${status}|${triggerDate?.toISOString().slice(0, 10) ?? ""}|${amount.toFixed(2)}|${label}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const expectedPayout = triggerDate ? addDays(triggerDate, 7) : null;
+    installments.push({
+      installmentLabel: label,
+      status,
+      amount,
+      triggerDate,
+      triggerSource,
+      expectedPayout,
+      expectedBank: expectedPayout ? nextBusinessDay(expectedPayout) : null,
+    });
+  };
+
+  for (const item of items) {
+    const amount = paymentAmountOf(item);
+    if (paymentLooksCollected(item)) {
+      addInstallment("collected", amount, paymentDateOf(item), "payment", paymentDescriptionOf(item) || "Collected payment");
+    } else if (paymentLooksScheduled(item)) {
+      addInstallment("scheduled", amount, scheduledDateOf(item), "schedule", paymentDescriptionOf(item) || "Scheduled payment");
+    }
+  }
+
+  if (installments.length > 0) {
+    return installments.sort((a, b) => {
+      const ad = a.triggerDate?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const bd = b.triggerDate?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      return ad - bd;
+    }).map((row, index) => ({
+      ...row,
+      installmentLabel: /^collected payment$|^scheduled payment$/i.test(row.installmentLabel)
+        ? `Payment ${index + 1}`
+        : row.installmentLabel,
+    }));
+  }
+
+  const status = depositStatusOf(r);
+  const timing = depositTimingFor(r);
+  const amount = status === "collected" || status === "partial" ? getDepositAmount(r) : 0;
+  return [{
+    installmentLabel: "Reservation balance",
+    status,
+    amount,
+    triggerDate: timing.triggerDate,
+    triggerSource: timing.triggerSource,
+    expectedPayout: timing.expectedPayout,
+    expectedBank: timing.expectedBank,
+  }];
 }
 
 // Prefer Guesty's timezone-normalized date field when present, fall back to
@@ -1567,30 +1718,29 @@ export default function Bookings() {
   }, [reservations]);
 
   const depositRows = useMemo(() => {
-    return reservations.map((r) => {
-      const status = depositStatusOf(r);
-      const timing = depositTimingFor(r);
+    return reservations.flatMap((r) => {
       const guestPaid = asMoneyNumber(r.money?.totalPaid);
       const balanceDue = asMoneyNumber(r.money?.balanceDue);
-      const isExpected = status === "airbnb_expected" || status === "collected" || status === "partial";
-      const amount = isExpected ? getDepositAmount(r) : 0;
       const buyInCost = getBuyInCost(r);
       const paymentSource = paymentSourceOf(r);
-      return {
+      const installments = depositInstallmentsFor(r);
+      return installments.map((installment, index) => ({
         reservation: r,
-        triggerDate: timing.triggerDate,
-        triggerSource: timing.triggerSource,
-        expectedPayout: timing.expectedPayout,
-        expectedBank: timing.expectedBank,
-        amount,
+        rowId: `${r._id}-${index}-${installment.triggerDate?.toISOString().slice(0, 10) ?? "unknown"}-${installment.amount.toFixed(2)}`,
+        installmentLabel: installments.length > 1 ? `Payment ${index + 1}` : installment.installmentLabel,
+        triggerDate: installment.triggerDate,
+        triggerSource: installment.triggerSource,
+        expectedPayout: installment.expectedPayout,
+        expectedBank: installment.expectedBank,
+        amount: installment.amount,
         guestPaid,
         balanceDue,
-        openBalance: channelKindOf(r) === "airbnb" ? 0 : balanceDue,
-        buyInCost,
-        netAfterBuyIns: amount > 0 ? amount - buyInCost : 0,
+        openBalance: installment.status === "not_collected" ? balanceDue : 0,
+        buyInCost: index === 0 ? buyInCost : 0,
+        netAfterBuyIns: installment.amount > 0 ? installment.amount - (index === 0 ? buyInCost : 0) : 0,
         paymentSource,
-        status,
-      };
+        status: installment.status,
+      }));
     }).sort((a, b) => {
       const ad = a.expectedBank?.getTime() ?? Number.MAX_SAFE_INTEGER;
       const bd = b.expectedBank?.getTime() ?? Number.MAX_SAFE_INTEGER;
@@ -2142,7 +2292,7 @@ export default function Bookings() {
                     {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
                   </CardTitle>
                   <CardDescription>
-                    Airbnb is estimated from arrival/check-in. Booking.com, VRBO, and manual rows only get bank dates after Guesty shows a collected payment.
+                    Split-payment reservations show each collected or scheduled installment separately when Guesty exposes the payment schedule.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -2171,6 +2321,7 @@ export default function Bookings() {
                             const statusClasses = {
                               airbnb_expected: "bg-blue-600 text-white",
                               collected: "bg-green-600 text-white",
+                              scheduled: "bg-blue-600 text-white",
                               partial: "bg-amber-500 text-white",
                               not_collected: "bg-red-600 text-white",
                               unknown: "",
@@ -2178,19 +2329,21 @@ export default function Bookings() {
                             const statusLabel = {
                               airbnb_expected: "arrival payout",
                               collected: "collected",
+                              scheduled: "scheduled",
                               partial: "partial",
                               not_collected: "not collected",
                               unknown: "unknown",
                             }[row.status];
                             return (
                               <div
-                                key={`deposit-${r._id}`}
+                                key={`deposit-${row.rowId}`}
                                 className="grid grid-cols-[1.35fr_1.15fr_.95fr_.95fr_.9fr_.9fr_.9fr_.85fr] gap-3 px-3 py-3 items-center text-sm"
                                 data-testid={`deposit-row-${r._id}`}
                               >
                                 <div className="min-w-0">
                                   <p className="font-medium truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
                                   <p className="text-[10px] text-muted-foreground font-mono truncate">{r.confirmationCode ?? r._id}</p>
+                                  <p className="text-[10px] text-muted-foreground truncate">{row.installmentLabel}</p>
                                 </div>
                                 <div className="min-w-0">
                                   <p>{fmtDate(checkInOf(r))} → {fmtDate(checkOutOf(r))}</p>
@@ -2214,9 +2367,11 @@ export default function Bookings() {
                                       ? "arrival"
                                       : row.triggerSource === "payment"
                                         ? "payment"
-                                        : row.triggerSource === "reservation"
-                                          ? "reservation"
-                                          : "unknown"}
+                                        : row.triggerSource === "schedule"
+                                          ? "scheduled"
+                                          : row.triggerSource === "reservation"
+                                            ? "reservation"
+                                            : "unknown"}
                                   </p>
                                 </div>
                                 <div>
