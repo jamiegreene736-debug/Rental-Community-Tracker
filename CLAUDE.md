@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04 (follow-up to the same-day inbox-v2 fix below): the previous
+  fix taught the client to READ `state.lastMessage.{body,date}` and
+  `state.readByNonUser` / `state.isLastPostFromGuest`, but Jamie spotted
+  that Michelle's Kaha Lani thread (`69ea7b4608e5bc000f8e89ef`) was still
+  pinned at its Apr 23 creation date with no unread dot — the May 3 + Apr
+  30 follow-ups appeared in the THREAD VIEW (so the renderer was OK), but
+  the LIST row was unchanged. Root cause: Guesty's
+  `/communication/conversations` LIST endpoint returns a STRIPPED `state`
+  object by default — only `{read, status}`, no `lastMessage`,
+  `readByNonUser`, or `isLastPostFromGuest`. Guesty's `state` only
+  expands to its full shape when the request includes a `fields=` query
+  param (even empty `?fields=`). Our previous request was just
+  `?limit=30`. Fix: append `&fields=` to the inbox client list query
+  (`client/src/pages/inbox.tsx`) and the auto-reply scheduler list query
+  (`server/auto-reply.ts` `fetchOpenConversations`). Inline `NOTE FOR
+  CODEX` comments at both call sites flag this as load-bearing — the
+  empty `fields=` looks like a typo and would be tempting to strip, but
+  removing it silently degrades the list back to creation-date timestamps
+  and disables the unread indicator.
 - 2026-05-04: Claude Code fixed the Guest Inbox so it actually surfaces
   new guest messages on Guesty's inbox-v2 shape. Jamie spotted that
   Michelle's thread (`69ea7b4608e5bc000f8e89ef`) had two follow-up

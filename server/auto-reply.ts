@@ -200,9 +200,18 @@ function unwrapConversations(raw: any): GuestyConversation[] {
 // here, then `pickPostToReplyTo` (per-thread) decides whether the
 // guest's latest message is actually awaiting a host reply.
 async function fetchOpenConversations(limit = 30): Promise<GuestyConversation[]> {
+  // CRITICAL: trailing `&fields=` IS LOAD-BEARING — see the matching note in
+  // client/src/pages/inbox.tsx. Without it Guesty returns a stripped state
+  // (`{read, status}` only) and we lose `state.lastMessage`,
+  // `state.readByNonUser`, `state.isLastPostFromGuest`. The OPEN/NEW filter
+  // below still works on the stripped shape, but the rich state is needed
+  // to keep behavior aligned with the inbox UI and to surface an accurate
+  // sort order for any downstream consumers.
+  // NOTE FOR CODEX: Guesty's /conversations returns the full document only
+  // when `fields=` is present. Don't strip it as a redundant query param.
   const data = await guestyRequest(
     "GET",
-    `/communication/conversations?limit=${limit}&sort=-lastMessageAt`
+    `/communication/conversations?limit=${limit}&sort=-lastMessageAt&fields=`
   );
   const results = unwrapConversations(data);
   return results.filter((c) => {

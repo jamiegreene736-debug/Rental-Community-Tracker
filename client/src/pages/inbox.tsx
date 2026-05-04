@@ -1119,7 +1119,23 @@ export default function InboxPage() {
   const { data: convData, isLoading: convLoading, error: convError } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/communication/conversations"],
     queryFn: async () => {
-      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=30");
+      // CRITICAL: the trailing `&fields=` IS LOAD-BEARING — do not delete.
+      // Guesty's /communication/conversations list endpoint returns a
+      // STRIPPED state object by default (`{read, status}` only). Passing
+      // `fields=` (even empty) flips it to "return the full document",
+      // which expands `state` to include `state.lastMessage.{body, date}`,
+      // `state.readByNonUser`, `state.isLastPostFromGuest`, plus
+      // `updatedAt`, `lastMessageFrom`, etc. Without it, every conversation
+      // row falls back to the THREAD creation date for its timestamp and
+      // never shows an unread dot — which is exactly how Michelle's Kaha
+      // Lani thread (69ea7b4608e5bc000f8e89ef) stayed pinned at Apr 23
+      // even after her May 3 follow-up. NOTE FOR CODEX: this is a Guesty
+      // API quirk, not a typo. The previous PR added the client-side
+      // unwrapping logic but missed that the data wasn't being requested
+      // in the first place — adding `fields=` is what actually makes the
+      // unwrapping useful. Verified 2026-05-04 against production: omit
+      // it and `state.lastMessage` is missing on every list row.
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=30&fields=");
       if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
       return r.json();
     },
