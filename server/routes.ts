@@ -36,7 +36,13 @@ import {
   fetchAmortizedNightlyByBR,
   medianRate,
 } from "./community-research";
-import { BUY_IN_RATES, getCommunityRegion } from "@shared/pricing-rates";
+import {
+  BUY_IN_RATES,
+  getCommunityRegion,
+  getBuyInRate,
+  getSeasonForMonth,
+  suggestPricingArea,
+} from "@shared/pricing-rates";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -2006,6 +2012,153 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
+    }
+  });
+
+  // GET /api/inbox/buy-in-estimate?listingId=X&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD&cleaningFeePerUnit=N
+  //
+  // Inquiry-time estimator for the Guest Inbox right panel. Given a Guesty
+  // listingId + the dates the guest is asking about, returns the operator's
+  // expected cost to acquire the inventory (sum across all units in the
+  // property): per-unit nightly rate from `getBuyInRate(pricingArea, BR,
+  // propertyId, season)` × nights, plus a flat per-unit cleaning fee that
+  // gets amortized over the stay length so short stays surface as
+  // unprofitable. Used to answer "is this 4-nighter worth taking, or do we
+  // need to send a higher Special Offer?" from inside the inbox without
+  // running the full /find-buy-in flow (which is 60+s and burns SearchAPI
+  // budget — overkill for a quick is-this-profitable check).
+  //
+  // NOTE FOR CODEX: this is intentionally a STATIC-TABLE estimate, not a
+  // live SearchAPI call. The static table in shared/pricing-rates.ts is
+  // operator-validated and within ~±20% of current market — plenty for
+  // the "is this worth it?" decision the operator is making at inquiry
+  // time. The full live search lives at /api/operations/find-buy-in and
+  // remains the canonical path when the operator is about to actually
+  // accept and book.
+  app.get("/api/inbox/buy-in-estimate", async (req, res) => {
+    try {
+      const listingId = String(req.query.listingId ?? "").trim();
+      const checkInRaw = String(req.query.checkIn ?? "").trim();
+      const checkOutRaw = String(req.query.checkOut ?? "").trim();
+      // Default cleaning fee mirrors buy-in-tracker.tsx (`nexstay_cleaning_fee`
+      // localStorage default = 250). Operator can override per-call from the
+      // inbox UI if their actual cleaning charges differ.
+      const cleaningFeePerUnit = Math.max(
+        0,
+        Math.min(2000, Number(req.query.cleaningFeePerUnit ?? 250) || 0),
+      );
+
+      if (!listingId || !checkInRaw || !checkOutRaw) {
+        return res.status(400).json({ error: "listingId, checkIn, checkOut required" });
+      }
+
+      const checkInDate = new Date(checkInRaw);
+      const checkOutDate = new Date(checkOutRaw);
+      if (Number.isNaN(checkInDate.getTime()) || Number.isNaN(checkOutDate.getTime())) {
+        return res.status(400).json({ error: "Invalid checkIn or checkOut date" });
+      }
+      const nights = Math.max(
+        1,
+        Math.round((checkOutDate.getTime() - checkInDate.getTime()) / 86_400_000),
+      );
+
+      // Map Guesty listingId → local propertyId via guestyPropertyMap table.
+      const propMap = await storage.getGuestyPropertyMap();
+      const mapping = propMap.find((m) => m.guestyListingId === listingId);
+      if (!mapping) {
+        return res.json({ ok: false, reason: "Listing not connected to a local property" });
+      }
+
+      // Static unit-builder data carries the per-unit bedroom counts and
+      // complex name we need. Drafts (community_drafts table) aren't covered
+      // here — v1 scope is the inbox flow for the operator's existing
+      // portfolio. If/when an inquiry comes in for a draft listing, this
+      // returns ok:false and the UI shows "estimate not available."
+      const property = getUnitBuilderByPropertyId(mapping.propertyId);
+      if (!property) {
+        return res.json({ ok: false, reason: "Property data not found in unit-builder" });
+      }
+      if (!property.units || property.units.length === 0) {
+        return res.json({ ok: false, reason: "Property has no units configured" });
+      }
+
+      // Derive pricingArea from address + complexName via the same
+      // suggestPricingArea helper the Add Community wizard uses. Order
+      // matters: name-match against BUY_IN_RATES keys runs first, then
+      // city/state fallback. For Kaha Lani specifically the complexName
+      // doesn't match any key but the address city ("Lihue" or "Kapaa")
+      // resolves to "Kapaa Beachfront" via the Hawaii city regex —
+      // matching what AGENTS.md decision #21 says.
+      // NOTE FOR CODEX: address parsing assumes the LAST two comma-separated
+      // tokens are "City" then "ST ZIP" — e.g. "4460 Nehe Rd, Lihue, HI 96766"
+      // → city="Lihue", state="HI". unit-builder-data addresses follow that
+      // shape consistently. The off-by-one trap is real here: an earlier
+      // version of this code used `length - 3` for city and pulled the
+      // street ("4460 Nehe Rd") instead of the city, which then failed
+      // suggestPricingArea's regex match. If a future static property
+      // uses a different shape, suggestPricingArea will fall through to
+      // "" and we'll return ok:false — better than guessing the wrong
+      // region (Hawaii vs Florida differ ~3.5x in cost).
+      const addressParts = property.address.split(",").map((s) => s.trim()).filter(Boolean);
+      const city = addressParts.length >= 2 ? addressParts[addressParts.length - 2] ?? "" : "";
+      const stateZip = addressParts[addressParts.length - 1] ?? "";
+      const state = stateZip.split(/\s+/)[0] ?? "";
+      const pricingArea = suggestPricingArea(city, state, property.complexName);
+      if (!pricingArea) {
+        return res.json({
+          ok: false,
+          reason: `No pricing area mapping for ${property.complexName} (${city}, ${state})`,
+        });
+      }
+
+      // Season is keyed off the CHECK-IN month. A stay that straddles a
+      // season boundary still gets a single rate — the cost-basis tables
+      // are coarse and the inbox is a triage view, not a billing system.
+      const yearMonth = `${checkInDate.getUTCFullYear()}-${String(checkInDate.getUTCMonth() + 1).padStart(2, "0")}`;
+      const region = getCommunityRegion(pricingArea);
+      const season = getSeasonForMonth(yearMonth, region);
+
+      // Per-unit line items. propertyId passes through to getBuyInRate so
+      // the live per-property market-rate cache (PR #282) is honored when
+      // populated — falls back to BUY_IN_RATES[pricingArea][${BR}BR] ×
+      // season multiplier otherwise.
+      const units = property.units.map((u, idx) => {
+        const nightlyRate = getBuyInRate(pricingArea, u.bedrooms, mapping.propertyId, season);
+        const lineTotal = nightlyRate * nights;
+        return {
+          label: u.unitNumber ? `Unit ${u.unitNumber}` : `Unit ${String.fromCharCode(65 + idx)}`,
+          bedrooms: u.bedrooms,
+          nightlyRate,
+          lineTotal,
+        };
+      });
+
+      const accommodationTotal = units.reduce((s, u) => s + u.lineTotal, 0);
+      const cleaningTotal = cleaningFeePerUnit * property.units.length;
+      const grandTotal = accommodationTotal + cleaningTotal;
+      const perNightAmortized = Math.round(grandTotal / nights);
+
+      return res.json({
+        ok: true,
+        propertyId: mapping.propertyId,
+        complexName: property.complexName,
+        pricingArea,
+        region,
+        season,
+        nights,
+        checkIn: checkInRaw,
+        checkOut: checkOutRaw,
+        units,
+        accommodationTotal,
+        cleaningFeePerUnit,
+        cleaningTotal,
+        unitCount: property.units.length,
+        grandTotal,
+        perNightAmortized,
+      });
+    } catch (err: any) {
+      console.error("[buy-in-estimate] error:", err);
+      res.status(500).json({ error: "Failed to compute buy-in estimate", message: err.message });
     }
   });
 
