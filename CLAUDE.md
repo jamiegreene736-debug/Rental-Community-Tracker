@@ -43,6 +43,23 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04 (special-offer quick-discount presets): added 5% / 10% / 15%
+  preset buttons inside the Send Special Offer dialog (`inbox.tsx` near
+  the price input around line ~3318). Use case: Jamie kept telling guests
+  he'd give them a 5% discount but had to do `currentTotal × 0.95` in his
+  head before opening the dialog — error-prone, especially across
+  multiple inquiries. Buttons compute `Math.round(currentTotal × (1 −
+  pct/100))` and write the result into the price input. The currently-
+  applied preset is highlighted by comparing the price field back to the
+  preset value (within $1 to absorb integer rounding). A "Reset" button
+  restores the original quote, and a small green line under the buttons
+  confirms the actual $ off and % applied (e.g. "$283 off (5.0% discount)
+  — guest pays $5,369"). NOTE FOR CODEX: discount is applied to the
+  GUEST-FACING total (`specialOfferDialog.currentTotal`), NOT to host
+  payout — that's what Airbnb's Special Offer overrides. Airbnb adds its
+  service fee on top of whatever total we set, so the guest sees the
+  discount applied to the base accommodation+cleaning rather than the
+  all-in.
 - 2026-05-04 (inbox buy-in estimate): added an inquiry-time buy-in cost
   estimator to the Guest Inbox right panel. Use case: Jamie was getting
   short-stay inquiries (Michelle's Kaha Lani 4-nighter on Nov 17–21)

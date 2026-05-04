@@ -3310,10 +3310,75 @@ export default function InboxPage() {
                 data-testid="input-special-offer-price"
               />
               {specialOfferDialog.currentTotal > 0 && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  Currently quoted to guest: ${specialOfferDialog.currentTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
-                  This is the total before Airbnb's guest service fee — Airbnb adds their fee on top of whatever you set here.
-                </p>
+                <>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Currently quoted to guest: ${specialOfferDialog.currentTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
+                    This is the total before Airbnb's guest service fee — Airbnb adds their fee on top of whatever you set here.
+                  </p>
+                  {/* Quick-discount presets so operator doesn't have to do
+                      the math. Each button computes
+                      `Math.round(currentTotal × (1 − pct/100))` and writes
+                      it into the price input. The currently-applied % is
+                      highlighted by comparing the price input back to the
+                      preset value (within $1 to absorb integer rounding).
+                      NOTE FOR CODEX: discount % is applied to the GUEST-
+                      facing total (`currentTotal`) — NOT to host payout —
+                      because that's what Airbnb's Special Offer overrides.
+                      Airbnb adds its service fee on top of whatever total
+                      we set, so the guest sees the discount applied to the
+                      base accommodation+cleaning, not to the all-in. */}
+                  <div className="mt-2 space-y-1">
+                    <div className="text-[11px] text-muted-foreground font-medium">Quick discount</div>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {[5, 10, 15].map((pct) => {
+                        const discounted = Math.round(specialOfferDialog.currentTotal * (1 - pct / 100));
+                        const dollarsOff = specialOfferDialog.currentTotal - discounted;
+                        const currentVal = parseFloat(specialOfferPrice);
+                        const isApplied = Number.isFinite(currentVal) && Math.abs(currentVal - discounted) <= 1;
+                        return (
+                          <Button
+                            key={pct}
+                            type="button"
+                            size="sm"
+                            variant={isApplied ? "default" : "outline"}
+                            className="h-7 px-2.5 text-[11px]"
+                            onClick={() => setSpecialOfferPrice(String(discounted))}
+                            data-testid={`button-special-offer-discount-${pct}`}
+                          >
+                            {pct}% off
+                            <span className="ml-1.5 text-[10px] opacity-70">
+                              −${dollarsOff.toLocaleString()}
+                            </span>
+                          </Button>
+                        );
+                      })}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2.5 text-[11px]"
+                        onClick={() => setSpecialOfferPrice(String(Math.round(specialOfferDialog.currentTotal)))}
+                        data-testid="button-special-offer-reset"
+                      >
+                        Reset
+                      </Button>
+                    </div>
+                    {(() => {
+                      const currentVal = parseFloat(specialOfferPrice);
+                      if (!Number.isFinite(currentVal) || currentVal <= 0) return null;
+                      const dollarsOff = specialOfferDialog.currentTotal - currentVal;
+                      if (dollarsOff <= 0) return null;
+                      const pct = (dollarsOff / specialOfferDialog.currentTotal) * 100;
+                      return (
+                        <p className="text-[11px] text-green-700">
+                          ${dollarsOff.toLocaleString(undefined, { maximumFractionDigits: 0 })} off
+                          {" "}({pct.toFixed(1)}% discount)
+                          {" "}— guest pays ${currentVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
+                        </p>
+                      );
+                    })()}
+                  </div>
+                </>
               )}
             </div>
             <div>
