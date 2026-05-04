@@ -915,6 +915,66 @@ established it so you can read the rationale in the commit message.
     also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
     that added this entry.
 
+### Portal authentication
+
+35. **Portal-wide auth gate is a single shared password keyed by
+    `ADMIN_SECRET` env var, with FOUR exclusions that are load-bearing:
+    sidecar endpoints, loopback self-calls, static assets, and the
+    /login flow itself.** Lives in `server/auth.ts`. The middleware
+    is mounted in `server/index.ts` BEFORE `registerRoutes` and
+    `serveStatic`. **No-op when `ADMIN_SECRET` is unset** — that's
+    the default state on the deploy as of 2026-05-04, kept for
+    backward compat so cold deploys + local dev work without env
+    config. The operator opts in by setting the env var on Railway.
+
+    The four exclusions and why each one is load-bearing:
+    - **`/login` + `/logout`** — auth flow itself. Gating them is a
+      chicken-and-egg.
+    - **`/api/admin/vrbo-sidecar/*`** — the local-Chrome sidecar
+      worker (Decision Log 2026-04-29) on the operator's Mac polls
+      `/next` / `/heartbeat` / `/result` / `/cookies` /
+      `/visual-date-controls`. Gating these breaks find-buy-in's
+      most-reliable Vrbo path. The sidecar runs on the operator's
+      own machine; the channel is implicitly trusted, and the
+      sidecar can't easily be redeployed with a fresh secret every
+      rotation.
+    - **`/assets/*` + `/photos/*` + favicon / manifest / robots** —
+      the SPA shell + login page can't render without their JS/CSS,
+      and PWA shells / crawlers expect those root files.
+    - **`127.0.0.1` loopback** — `availability-scheduler.ts` does an
+      HTTP self-call to `/api/admin/refresh-all-market-rates` once
+      per scheduled tick. The bypass uses `req.socket.remoteAddress`,
+      NOT `req.ip` / `X-Forwarded-For` — Railway's edge sets XFF to
+      the client IP and an attacker could spoof "127.0.0.1" via XFF;
+      the raw socket is the only safe signal.
+
+    Auth modes: (a) browser cookie set by POST /login — value is
+    `HMAC-SHA256(secret, "nexstay-portal-authenticated-v1")`, no
+    server-side session storage; rotating the env var invalidates
+    every existing session. (b) `X-Admin-Secret` request header for
+    CLI/curl/scripts — same secret, matches Load-Bearing #32's
+    pattern.
+
+    Cookie is HttpOnly + SameSite=Lax + Secure-in-prod, 30-day
+    Max-Age. Open-redirect guard on POST /login: `next` param must be
+    a same-site relative path. Login page is INTENTIONALLY inline
+    HTML (not React) so the unauthenticated request doesn't load the
+    ~1 MB SPA bundle.
+
+    Client side: `client/src/lib/queryClient.ts` `apiRequest` and
+    `getQueryFn` detect 401 responses and redirect to
+    `/login?next=...`. A `_redirectedToLogin` one-shot guard prevents
+    parallel 401s (TanStack Query fans queries out aggressively)
+    from racing multiple navigations.
+
+    **Do NOT widen the public path list** without a matching
+    Decision Log entry. Each whitelisted prefix is a hole in the
+    gate — every other `/api/*` route can reach the operator's
+    Guesty session cookies, Anthropic key, etc., so the bar for
+    adding a new exception is high. If a future workflow needs an
+    open path, prefer carrying the secret in the
+    `X-Admin-Secret` header from the calling code.
+
 ## Conventions
 
 ### Branches

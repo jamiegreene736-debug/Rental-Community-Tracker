@@ -43,6 +43,47 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04 (single-password portal gate, OFF by default): added
+  `server/auth.ts` middleware that gates the entire portal behind one
+  shared password. Activated by setting the `ADMIN_SECRET` env var on
+  Railway; when unset (default state on this deploy) the middleware is
+  a no-op so the deploy itself doesn't change anything for the
+  operator. To turn it on: set `ADMIN_SECRET=<long random string>` in
+  Railway's env vars; the next deploy enforces it.
+  
+  Auth modes: (1) browser cookie set by POST /login — value is
+  HMAC-SHA256(secret, "nexstay-portal-authenticated-v1"), no
+  server-side session storage; (2) `X-Admin-Secret` request header for
+  CLI/curl, matching Load-Bearing #32's existing pattern.
+  
+  FOUR EXCLUSIONS (load-bearing — same list AGENTS.md scan flagged):
+  /login + /logout, /api/admin/vrbo-sidecar/* (so the operator's
+  local-Chrome sidecar from Decision Log 2026-04-29 keeps working
+  without needing the secret), /assets/* + /photos/* + favicon /
+  manifest / robots (so the SPA shell + login page can render),
+  127.0.0.1 loopback (because availability-scheduler.ts does an HTTP
+  self-call to /api/admin/refresh-all-market-rates). Loopback bypass
+  reads from `req.socket.remoteAddress`, NOT `req.ip` / X-Forwarded-
+  For — Railway's edge sets XFF to the client IP and an attacker
+  could spoof "127.0.0.1" via XFF; the raw socket is the only safe
+  signal. Inline NOTE FOR CODEX comments in `server/auth.ts` cover
+  every exclusion.
+  
+  Client side: `client/src/lib/queryClient.ts` `apiRequest` and
+  `getQueryFn` now detect 401 responses and `window.location.href`
+  to `/login?next=...` instead of bubbling a cryptic 401 toast. A
+  one-shot `_redirectedToLogin` guard prevents a burst of parallel
+  401s (TanStack Query fans queries out aggressively) from racing
+  multiple navigations.
+  
+  Login UI is a small inline-HTML form served from `/login` —
+  intentionally NOT React, so the SPA bundle doesn't need to load
+  before authentication (saves ~1 MB on the unauthenticated request).
+  Cookie is HttpOnly + SameSite=Lax + Secure (in prod), 30-day
+  Max-Age; rotating ADMIN_SECRET invalidates every existing session.
+  Open-redirect guard on POST /login: `next` param must be a
+  same-site relative path (starts with "/" but not "//") or it
+  defaults to "/".
 - 2026-05-04 (special-offer pivoted to clipboard + open-in-Guesty): the
   earlier preset-discount work surfaced a downstream issue — the actual
   POST to Guesty 502'd because Guesty's Open API

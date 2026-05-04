@@ -10,6 +10,7 @@ import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
+import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "./auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -67,6 +68,23 @@ app.use((req, res, next) => {
 
   next();
 });
+
+// Single-password gate. No-op when ADMIN_SECRET env var is unset, so
+// cold deploys + local dev keep working. See server/auth.ts for the
+// full whitelist (sidecar, loopback, /login, static assets) and the
+// "FOUR EXCLUSIONS" inline comment for why each one is load-bearing.
+//
+// Login routes are registered BEFORE requireAuth even though the
+// middleware whitelists them — Express short-circuits on the first
+// matching route, which avoids touching the auth check for the most
+// common public-path requests. NOTE FOR CODEX: this ordering is not
+// strictly required (the whitelist would handle it either way), but
+// it keeps the hot path one function call shorter and makes the auth
+// flow easier to reason about.
+app.get("/login", loginPageHandler);
+app.post("/login", loginPostHandler);
+app.post("/logout", logoutHandler);
+app.use(requireAuth);
 
 (async () => {
   await ensureRuntimeSchema();
