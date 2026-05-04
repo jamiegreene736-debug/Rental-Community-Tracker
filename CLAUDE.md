@@ -43,6 +43,37 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-05-04: Claude Code fixed the Guest Inbox so it actually surfaces
+  new guest messages on Guesty's inbox-v2 shape. Jamie spotted that
+  Michelle's thread (`69ea7b4608e5bc000f8e89ef`) had two follow-up
+  messages on Apr 30 + May 3 visible in Guesty's UI but invisible (or
+  miscategorised) in our Guest Inbox. Root cause: Guesty inbox-v2
+  posts use `sentBy: "guest" | "host" | "log"` and conversations expose
+  the latest activity at `state.lastMessage.{body,date}` plus
+  `state.readByNonUser` + `state.isLastPostFromGuest`. The legacy
+  `isIncoming` / `direction` / `authorType` / `senderType` fields are
+  null on every current production conversation, and `state` is now an
+  object instead of the old `"NEW"` / `"UNREAD"` strings. Effects: list
+  rows showed an empty preview, the timestamp dropped to the thread's
+  `createdAt` (so Michelle's row stayed pinned at Apr 23), no unread
+  dot ever rendered, and inside the thread every message rendered as a
+  guest bubble because `isHost` couldn't tell guest from host. Worse,
+  `auto-reply.ts` `pickPostToReplyTo` returned null for every thread
+  (no posts looked "incoming"), so the auto-reply scheduler silently
+  skipped real guest messages — no log entry, no draft, no flag — for
+  weeks before this surfaced. Fix: `client/src/pages/inbox.tsx`
+  `normalizeConversation` now reads `state.lastMessage` for
+  preview/timestamp and treats `readByNonUser=false &&
+  isLastPostFromGuest=true` as the unread signal; the conversation
+  list is now sorted client-side by latest activity (Guesty's default
+  ordering is creation date, which freezes long threads); the thread
+  renderer adds `sentBy === "host"` to the `isHost` heuristic and
+  filters `sentBy === "log"` system entries (e.g. "New guest
+  inquiry"). `server/auto-reply.ts` `isIncomingPost`, `isHostPost`,
+  and `isSystemPost` all add `sentBy` as the highest-priority signal.
+  Legacy field checks are kept for older cached fixtures and any
+  non-Guesty inbox source we add later. Notes for Codex are inline in
+  both files at every changed block (search `NOTE FOR CODEX`).
 - 2026-05-01: Codex changed find-buy-in PM discovery so Google searches
   are SearchAPI-only. The local Chrome sidecar should no longer be used
   to visit google.com for PM sourcing; it should only open concrete

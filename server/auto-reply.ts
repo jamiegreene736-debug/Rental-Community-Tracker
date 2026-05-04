@@ -129,6 +129,10 @@ interface GuestyPost {
   isIncoming?: boolean;
   direction?: string;
   authorType?: string;
+  // Inbox-v2 authoritative origin marker — see isIncomingPost / isHostPost
+  // for the priority order. NOTE FOR CODEX: legacy fields above are kept
+  // for older fixtures; do NOT remove them.
+  sentBy?: "guest" | "host" | "log" | string;
 }
 
 interface GuestyConversation {
@@ -226,8 +230,18 @@ async function fetchConversationThread(id: string): Promise<GuestyConversation |
 // Identify which posts are FROM the guest vs FROM the host. Guesty
 // doesn't always populate every field — it's `isIncoming` on some
 // account shapes, `direction` on others, `authorType: "guest"` on
-// the inbox-v2 shape. We accept any of them.
+// older inbox-v2 fixtures. The CURRENT inbox-v2 shape (verified on
+// real production conversations 2026-05-04) sets `sentBy: "guest" |
+// "host" | "log"` and leaves all the other fields null. Without the
+// `sentBy` check, `pickPostToReplyTo` returned null for every thread
+// because no post looked "incoming" — auto-reply silently skipped
+// real guest messages (e.g. Michelle's May-3 follow-up about a 5%
+// discount) for two weeks before the bug was noticed in the inbox UI.
+// NOTE FOR CODEX: keep the legacy field checks in place for old
+// fixtures and for any non-Guesty inbox source we might add later;
+// `sentBy` is just the most authoritative signal for current Guesty.
 function isIncomingPost(p: any): boolean {
+  if (p.sentBy === "guest") return true;
   if (p.isIncoming === true) return true;
   if (p.direction === "incoming" || p.direction === "in" || p.direction === "inbound") return true;
   if (p.authorType && p.authorType.toLowerCase() === "guest") return true;
@@ -236,6 +250,11 @@ function isIncomingPost(p: any): boolean {
 }
 
 function isSystemPost(p: any): boolean {
+  // Inbox-v2 marks the auto-generated "New guest inquiry" log entry
+  // with `sentBy: "log"` (and also `module.type: "log"`). The body
+  // patterns below catch older fixtures and any future system post
+  // that doesn't carry the explicit log markers.
+  if (p.sentBy === "log") return true;
   const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
   if (moduleType === "log" || moduleType === "system" || moduleType === "internal" || moduleType === "note") return true;
   const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
@@ -248,6 +267,7 @@ function isSystemPost(p: any): boolean {
 }
 
 function isHostPost(p: any): boolean {
+  if (p.sentBy === "host") return true;
   if (p.isIncoming === false) return true;
   if (p.direction === "outgoing" || p.direction === "out" || p.direction === "outbound") return true;
   if (p.authorType && p.authorType.toLowerCase() === "host") return true;

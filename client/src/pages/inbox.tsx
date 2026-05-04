@@ -793,7 +793,19 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.listing ??
     firstReservation?.listingObj ??
     {};
-  const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? {};
+  // Inbox-v2 stores the last-message preview at `state.lastMessage`
+  // ({ body, date }) — NOT at `lastPost` / `meta.lastMessage`. Both of
+  // those are null on every current Guesty conversation we've checked
+  // (e.g. Michelle 69ea7b4608e5bc000f8e89ef on 2026-05-04). Without
+  // this fallback the list row preview was empty and `displayTimestamp`
+  // dropped to `createdAt`, so threads with brand-new activity looked
+  // dormant — the operator missed Michelle's May-3 follow-up entirely
+  // and only spotted it in Guesty's own UI. NOTE FOR CODEX: do NOT
+  // remove the legacy `lastPost` / `meta.lastMessage` paths; cached
+  // older fixtures still hit them.
+  const stateObj = (c?.state && typeof c.state === "object") ? c.state as any : null;
+  const stateLastMsg = stateObj?.lastMessage ?? null;
+  const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? stateLastMsg ?? {};
   const mod = c?.module ?? meta.module ?? meta.lastMessage?.module ?? undefined;
 
   const guestName =
@@ -820,22 +832,44 @@ function normalizeConversation(c: any): GuestyConversation & {
       "",
   );
 
-  // v2 list endpoint doesn't return a last-message timestamp, so fall back to
-  // the conversation's createdAt so rows at least show some date.
+  // v2 list endpoint doesn't populate `lastMessageAt` — Guesty moved
+  // the timestamp to `state.lastMessage.date`. Fall through to that
+  // before resorting to `createdAt` (which is the THREAD creation date,
+  // not the latest activity, so it would freeze list ordering on
+  // long-running conversations). NOTE FOR CODEX: stateLastMsg.date is
+  // the source of truth for "most recent activity"; the field was
+  // missing from this list before 2026-05-04 (Michelle inbox bug).
   const timestamp =
     c?.lastMessageAt ??
     meta.lastMessageAt ??
     lastMsg.createdAt ??
+    stateLastMsg?.date ??
     c?.createdAt ??
     undefined;
 
+  // Inbox-v2 unread signal lives on `state.readByNonUser` (host hasn't
+  // read it) AND `state.isLastPostFromGuest` (the last message was from
+  // the guest, so a host reply is owed). The legacy string-form checks
+  // (`state === "NEW"` etc.) never fire on the current shape because
+  // `state` is now an object — that's why Michelle's thread had no
+  // unread dot in the list even after two follow-up messages on Apr 30
+  // and May 3. Keep the legacy string checks for old fixtures.
+  // NOTE FOR CODEX: a `readByNonUser: false` alone is not sufficient —
+  // the host might be in the middle of typing a reply, or the guest
+  // might have only acknowledged a previous host message. We need BOTH
+  // halves: unread AND last-from-guest.
+  const stateObjShape =
+    stateObj &&
+    stateObj.readByNonUser === false &&
+    stateObj.isLastPostFromGuest === true;
   const unread =
     (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
     c?.unread === true ||
     meta.unreadCount > 0 ||
     c?.state === "NEW" ||
     c?.state === "UNREAD" ||
-    c?.state === "UNANSWERED";
+    c?.state === "UNANSWERED" ||
+    stateObjShape;
 
   const reservationId =
     c?.reservationId ??
@@ -1114,9 +1148,26 @@ export default function InboxPage() {
   }, [conversations]);
 
   // Apply the property filter. "all" passes everything through.
+  // Then sort by latest activity (newest first) using the same timestamp
+  // resolution as `normalizeConversation` — Guesty's default list
+  // ordering is by conversation creation date, which freezes a stale
+  // thread (e.g. Michelle's inquiry created Apr 23) at the position
+  // it had on creation even after she sends new messages on May 3.
+  // The list endpoint doesn't accept `&sort=-state.lastMessage.date`,
+  // so we sort client-side after normalizing. NOTE FOR CODEX: this
+  // is intentionally not a `useMemo` over `normalizeConversation`
+  // because that helper isn't memoized — re-walking 30 conversations
+  // per render is cheap (sub-ms) and avoids a stale-memo trap.
   const filteredConversations = useMemo(() => {
-    if (propertyFilter === "all") return conversations;
-    return conversations.filter((c) => normalizeConversation(c).displayListingName === propertyFilter);
+    const matched = propertyFilter === "all"
+      ? conversations
+      : conversations.filter((c) => normalizeConversation(c).displayListingName === propertyFilter);
+    const ts = (c: any): number => {
+      const v = normalizeConversation(c).displayTimestamp;
+      const t = v ? new Date(v).getTime() : NaN;
+      return Number.isFinite(t) ? t : 0;
+    };
+    return [...matched].sort((a, b) => ts(b) - ts(a));
   }, [conversations, propertyFilter]);
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
@@ -1960,6 +2011,23 @@ export default function InboxPage() {
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
                       {[...posts]
+                        // Filter system log posts (e.g. "New guest inquiry"
+                        // module=log) — they're metadata for Guesty's UI,
+                        // not a message either side actually wrote, and
+                        // rendering them as a left-aligned bubble made
+                        // the thread look like the guest sent boilerplate
+                        // before her real first message. Identified by
+                        // `sentBy === "log"` OR `module.type === "log"`.
+                        // NOTE FOR CODEX: server-side `isSystemPost` in
+                        // auto-reply.ts also filters these — keep the
+                        // two definitions in sync if Guesty adds a new
+                        // system module type.
+                        .filter((p: any) => {
+                          if (p.sentBy === "log") return false;
+                          const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
+                          if (["log", "system", "internal", "note"].includes(moduleType)) return false;
+                          return true;
+                        })
                         .sort((a: any, b: any) => {
                           const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
                           const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
@@ -1968,7 +2036,21 @@ export default function InboxPage() {
                         .map((p: any) => {
                           const bodyText = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
                           const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
+                          // Guesty inbox-v2 uses `sentBy: "guest" | "host"`.
+                          // Older shapes used `authorType` / `direction` /
+                          // `isIncoming`. Without the `sentBy` check,
+                          // every post on a current Guesty thread fell
+                          // through to the default "not host" branch and
+                          // rendered on the left side as a guest bubble —
+                          // making it impossible to tell who said what
+                          // (Michelle's thread on 2026-05-04 had John's
+                          // replies indistinguishable from her own
+                          // messages). NOTE FOR CODEX: the `sentBy`
+                          // check should win over the legacy fields if
+                          // they ever conflict — Guesty stopped
+                          // populating the legacy ones in inbox-v2.
                           const isHost =
+                            p.sentBy === "host" ||
                             p.authorType === "host" ||
                             p.authorRole === "host" ||
                             p.senderType === "host" ||
