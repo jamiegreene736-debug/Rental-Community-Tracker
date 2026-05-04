@@ -144,14 +144,55 @@ export default function AddSingleListing() {
   const [researchLoading, setResearchLoading] = useState(false);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
 
-  // The specific unit fields the rest of the wizard depends on.
-  // `propertyName` is filled from the picked community (or from a
-  // manual override). `streetAddress` is still entered by the
-  // operator — even after picking a community, we need the unit-
-  // level address for the OTA qualifier.
+  // CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+  // streetAddress / propertyName are no longer operator-typed.
+  // After picking a community + bedroom count, the wizard calls
+  // /api/single-listing/find-clean-unit which auto-discovers a
+  // qualifying Zillow listing (matching BR + clean across OTAs)
+  // and fills these in. `manualMode` is kept as an escape hatch
+  // for cases where the operator wants to type the address by hand
+  // (rare — e.g. when a known resort isn't on Zillow yet).
   const [streetAddress, setStreetAddress] = useState("");
   const [propertyName, setPropertyName] = useState("");
   const [manualMode, setManualMode] = useState(false);
+  const [selectedBedrooms, setSelectedBedrooms] = useState<number | null>(null);
+
+  // Auto-discovery results from /api/single-listing/find-clean-unit
+  type FindAttempt = {
+    url: string;
+    bedrooms: number | null;
+    bathrooms: number | null;
+    address: string | null;
+    bedroomMatches: boolean;
+    qualifies: boolean | null;
+    qualifierReason: string | null;
+    rejectedBecause: string;
+  };
+  type FindResult =
+    | {
+        found: true;
+        unit: {
+          url: string;
+          address: string;
+          bedrooms: number;
+          bathrooms: number | null;
+          photos: Array<{ url: string; label: string }>;
+          qualifier: QualifierResult;
+        };
+        attempts: FindAttempt[];
+        attemptCount: number;
+        totalCandidates: number;
+      }
+    | {
+        found: false;
+        reason: string;
+        attempts: FindAttempt[];
+        attemptCount: number;
+        totalCandidates: number;
+      };
+  const [findLoading, setFindLoading] = useState(false);
+  const [findResult, setFindResult] = useState<FindResult | null>(null);
+  const [skipUrls, setSkipUrls] = useState<string[]>([]);
 
   // City autocomplete — nationwide endpoint scoped server-side to
   // Hawaii + Florida. Returns { city, state } pairs.
@@ -201,6 +242,12 @@ export default function AddSingleListing() {
       const res = await apiRequest("POST", "/api/community/research", {
         city: s.city,
         state: s.state,
+        // CODEX NOTE (2026-05-04, claude/single-listing-research):
+        // mode=single drops the combinability filter, lifts the
+        // world-knowledge cap to 15, and runs on Sonnet so niche
+        // named resorts (e.g. Santa Maria Resort in Fort Myers
+        // Beach) reliably surface in the top 20.
+        mode: "single",
       });
       const data = await res.json();
       const list: CommunityResult[] = Array.isArray(data?.communities)
@@ -224,6 +271,11 @@ export default function AddSingleListing() {
     setSelectedCommunity(c);
     setPropertyName(c.name);
     setManualMode(false);
+    // Reset auto-discovery state when switching communities.
+    setSelectedBedrooms(null);
+    setFindResult(null);
+    setSkipUrls([]);
+    setStreetAddress("");
   }, []);
 
   // Escape hatch for unit-types that don't show up in the research
@@ -232,7 +284,72 @@ export default function AddSingleListing() {
     setManualMode(true);
     setSelectedCommunity(null);
     setPropertyName("");
+    setSelectedBedrooms(null);
+    setFindResult(null);
+    setSkipUrls([]);
   }, []);
+
+  // ── Auto-discover a clean unit ────────────────────────────
+  // Calls /api/single-listing/find-clean-unit which:
+  //   1. Searches Zillow for {community, city, state, bedrooms}
+  //   2. Iterates candidates (skipping any in skipUrlsArg), scrapes each
+  //   3. Runs the OTA qualifier on each candidate's address
+  //   4. Returns the first clean match (or { found: false, attempts })
+  // The wizard advances to Step 2 to display the result.
+  const findCleanUnit = useCallback(async (skipUrlsArg: string[] = []) => {
+    if (!pickedCity || !selectedCommunity || !selectedBedrooms) {
+      toast({ title: "Pick a community and bedroom count first", variant: "destructive" });
+      return;
+    }
+    setFindLoading(true);
+    setFindResult(null);
+    try {
+      const res = await apiRequest("POST", "/api/single-listing/find-clean-unit", {
+        communityName: selectedCommunity.name,
+        city: pickedCity.city,
+        state: pickedCity.state,
+        bedrooms: selectedBedrooms,
+        skipUrls: skipUrlsArg,
+      });
+      const data: FindResult = await res.json();
+      setFindResult(data);
+      if (data.found) {
+        // Pre-populate the downstream fields so Step 2/3/4 work without
+        // any further operator typing.
+        setStreetAddress(data.unit.address);
+        setZillowSourceUrl(data.unit.url);
+        setUnit1Photos(data.unit.photos);
+        setZillowFacts({
+          bedrooms: data.unit.bedrooms,
+          bathrooms: data.unit.bathrooms ?? undefined,
+        });
+        setQualifierResult(data.unit.qualifier);
+        toast({
+          title: "Found a clean unit",
+          description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
+        });
+        setStep(2);
+      } else {
+        toast({
+          title: "No clean unit found",
+          description: data.reason,
+          variant: "destructive",
+        });
+      }
+    } catch (e: any) {
+      toast({ title: "Search failed", description: e.message, variant: "destructive" });
+    } finally {
+      setFindLoading(false);
+    }
+  }, [pickedCity, selectedCommunity, selectedBedrooms, toast]);
+
+  const tryAnotherUnit = useCallback(() => {
+    if (findResult?.found) {
+      const newSkip = [...skipUrls, findResult.unit.url];
+      setSkipUrls(newSkip);
+      findCleanUnit(newSkip);
+    }
+  }, [findResult, skipUrls, findCleanUnit]);
 
   // Step 2 — OTA qualifier
   const [qualifierLoading, setQualifierLoading] = useState(false);
@@ -673,13 +790,55 @@ export default function AddSingleListing() {
               </div>
             )}
 
-            {/* — Specific unit fields. Shown once a community is picked
-                  OR the operator switched to manual mode. — */}
-            {(selectedCommunity || manualMode) && (
+            {/* — Bedroom selector + auto-discovery trigger. Shown once
+                  a community is picked. CODEX NOTE
+                  (2026-05-04, claude/single-listing-find-unit): replaced
+                  the operator-typed propertyName + streetAddress fields
+                  with a bedroom-count picker. The /find-clean-unit
+                  endpoint discovers the address + Zillow URL + photos
+                  automatically, so the operator only picks the BR. — */}
+            {selectedCommunity && (
               <div className="space-y-4 border-t pt-5 mb-6">
-                <h3 className="text-sm font-semibold">Unit details</h3>
+                <h3 className="text-sm font-semibold">How many bedrooms?</h3>
+                <p className="text-xs text-muted-foreground -mt-2">
+                  We'll search Zillow for a {selectedBedrooms ?? "?"}BR unit at {selectedCommunity.name},
+                  then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
+                  If the first candidate is listed somewhere, we'll automatically try another.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {[1, 2, 3, 4, 5].map((br) => {
+                    const active = selectedBedrooms === br;
+                    return (
+                      <button
+                        key={br}
+                        type="button"
+                        onClick={() => setSelectedBedrooms(br)}
+                        className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
+                          active
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-card hover:border-primary/50"
+                        }`}
+                        data-testid={`button-bedrooms-${br}`}
+                      >
+                        {br}BR
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* — Manual mode: keep the typed-address path as escape
+                  hatch for resorts not on Zillow. — */}
+            {manualMode && (
+              <div className="space-y-4 border-t pt-5 mb-6">
+                <h3 className="text-sm font-semibold">Manual entry</h3>
+                <p className="text-xs text-muted-foreground -mt-2">
+                  Couldn't find your resort? Type the unit's name + street address manually.
+                  We'll still verify it's not on Airbnb/VRBO/Booking.com on the next step.
+                </p>
                 <div>
-                  <label className="text-sm font-medium mb-1.5 block">Property / building name {!manualMode && <span className="text-xs font-normal text-muted-foreground">(prefilled — edit if needed)</span>}</label>
+                  <label className="text-sm font-medium mb-1.5 block">Property / building name</label>
                   <Input
                     placeholder="e.g. The Surfrider, Building 4 Unit 12, …"
                     value={propertyName}
@@ -695,52 +854,165 @@ export default function AddSingleListing() {
                     onChange={(e) => setStreetAddress(e.target.value)}
                     data-testid="input-street-address"
                   />
-                  <p className="text-xs text-muted-foreground mt-1">
-                    The specific unit's address — used for the OTA cross-listing check on the next step.
-                  </p>
                 </div>
               </div>
             )}
 
-            <Button
-              onClick={() => setStep(2)}
-              disabled={!pickedCity || !streetAddress.trim() || (!selectedCommunity && !manualMode)}
-              data-testid="button-step-1-next"
-            >
-              Continue to OTA Check
-              <ArrowRight className="h-4 w-4 ml-2" />
-            </Button>
+            {/* Continue button:
+                  - Auto-discovery path: picks community + BR → "Find a clean unit" calls the API
+                  - Manual path: requires typed address → "Continue to OTA check" advances normally */}
+            {selectedCommunity && (
+              <Button
+                onClick={() => findCleanUnit([])}
+                disabled={!selectedBedrooms || findLoading}
+                data-testid="button-find-clean-unit"
+              >
+                {findLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                {findLoading ? `Searching Zillow + verifying OTAs…` : `Find a clean ${selectedBedrooms ?? "?"}BR unit`}
+                {!findLoading && <ArrowRight className="h-4 w-4 ml-2" />}
+              </Button>
+            )}
+            {manualMode && (
+              <Button
+                onClick={() => setStep(2)}
+                disabled={!pickedCity || !streetAddress.trim()}
+                data-testid="button-step-1-next"
+              >
+                Continue to OTA Check
+                <ArrowRight className="h-4 w-4 ml-2" />
+              </Button>
+            )}
           </Card>
         )}
 
-        {/* ── STEP 2: OTA Qualifier ─────────────────────── */}
+        {/* ── STEP 2: Auto-discovered unit + OTA results ───
+            CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+            replaces the manual "type-an-address-and-run-OTA-check"
+            screen. Now it just renders whatever
+            /api/single-listing/find-clean-unit returned for the
+            picked community + bedroom count, plus a "Try another
+            unit" button that re-runs the search with the current
+            URL appended to skipUrls. Manual mode (operator-typed
+            address) still calls runQualifier and shows the same
+            per-platform breakdown. — */}
         {step === 2 && (
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <ShieldCheck className="h-5 w-5 text-primary" />
               <h2 className="text-lg font-semibold">Step 2: OTA cross-listing check</h2>
             </div>
-            <p className="text-muted-foreground text-sm mb-6">
-              For a standalone unit to qualify, it must NOT already be listed on Airbnb, VRBO, or Booking.com.
-              We'll search each platform for your address and show what we find.
-            </p>
-            <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
-              <strong>Address being checked:</strong>
-              <div className="mt-1">{streetAddress || "—"}, {pickedCity?.city || "—"}, {pickedCity?.state || "—"}</div>
-            </div>
 
-            {!qualifierResult && (
-              <Button
-                onClick={runQualifier}
-                disabled={qualifierLoading}
-                data-testid="button-run-qualifier"
-              >
-                {qualifierLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
-                {qualifierLoading ? "Checking Airbnb / VRBO / Booking…" : "Run OTA check"}
-              </Button>
+            {/* Auto-discovery path */}
+            {findResult?.found && qualifierResult && (
+              <>
+                <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm space-y-1">
+                  <div><strong>Auto-discovered unit:</strong></div>
+                  <div className="text-foreground">{streetAddress}, {pickedCity?.city}, {pickedCity?.state}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {zillowFacts.bedrooms ?? "?"} BR · {zillowFacts.bathrooms ?? "?"} BA · sourced from{" "}
+                    <a href={findResult.unit.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
+                      Zillow <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Tried {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} before finding a clean match.
+                  </div>
+                </div>
+
+                <div className={`p-4 rounded-lg mb-4 border ${qualifierResult.qualifies ? "border-green-500 bg-green-50/40" : "border-red-500 bg-red-50/40"}`}>
+                  <div className="flex items-center gap-2 font-semibold">
+                    {qualifierResult.qualifies ? (
+                      <><ShieldCheck className="h-5 w-5 text-green-700" /> <span className="text-green-900">Qualifies as a standalone listing</span></>
+                    ) : (
+                      <><ShieldX className="h-5 w-5 text-red-700" /> <span className="text-red-900">Does not qualify</span></>
+                    )}
+                  </div>
+                  <p className="text-sm mt-1">{qualifierResult.reason}</p>
+                </div>
+
+                <div className="space-y-2">
+                  {(["airbnb", "vrbo", "booking"] as const).map((key) => {
+                    const r = qualifierResult.platforms[key];
+                    const label = key === "airbnb" ? "Airbnb" : key === "vrbo" ? "VRBO" : "Booking.com";
+                    return (
+                      <Card key={key} className={`p-3 ${r.listed ? "border-red-300 bg-red-50/30" : "border-green-200 bg-green-50/30"}`}>
+                        <div className="font-semibold text-sm flex items-center gap-2">
+                          {r.listed ? <XCircle className="h-4 w-4 text-red-700" /> : <CheckCircle2 className="h-4 w-4 text-green-700" />}
+                          {label}
+                          <Badge variant={r.listed ? "destructive" : "secondary"}>
+                            {r.listed ? `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}` : "Clean"}
+                          </Badge>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-wrap gap-2 mt-6">
+                  <Button variant="outline" onClick={() => setStep(1)}>
+                    <ArrowLeft className="h-4 w-4 mr-2" /> Back
+                  </Button>
+                  <Button variant="outline" onClick={tryAnotherUnit} disabled={findLoading}>
+                    {findLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                    Try another unit
+                  </Button>
+                  <Button
+                    onClick={() => setStep(3)}
+                    disabled={!qualifierResult.qualifies}
+                    data-testid="button-step-2-next"
+                  >
+                    Continue to Photos
+                    <ArrowRight className="h-4 w-4 ml-2" />
+                  </Button>
+                </div>
+
+                {findResult.attempts.length > 1 && (
+                  <details className="mt-4 text-xs">
+                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                      Why we skipped {findResult.attempts.length - 1} other candidate{findResult.attempts.length - 1 === 1 ? "" : "s"}
+                    </summary>
+                    <ul className="mt-2 space-y-1 pl-3">
+                      {findResult.attempts.slice(0, -1).map((a, i) => (
+                        <li key={`${a.url}-${i}`} className="text-muted-foreground">
+                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
+                            Candidate {i + 1}
+                          </a>: {a.rejectedBecause || "skipped"}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </>
             )}
 
-            {qualifierResult && (
+            {/* Manual mode path: typed address, manual OTA check */}
+            {!findResult?.found && !qualifierLoading && !qualifierResult && (
+              <>
+                <p className="text-muted-foreground text-sm mb-6">
+                  For a standalone unit to qualify, it must NOT already be listed on Airbnb, VRBO, or Booking.com.
+                  We'll search each platform for your address and show what we find.
+                </p>
+                <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
+                  <strong>Address being checked:</strong>
+                  <div className="mt-1">{streetAddress || "—"}, {pickedCity?.city || "—"}, {pickedCity?.state || "—"}</div>
+                </div>
+                <Button
+                  onClick={runQualifier}
+                  disabled={qualifierLoading}
+                  data-testid="button-run-qualifier"
+                >
+                  {qualifierLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                  {qualifierLoading ? "Checking Airbnb / VRBO / Booking…" : "Run OTA check"}
+                </Button>
+              </>
+            )}
+            {qualifierLoading && (
+              <div className="text-center py-6 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                Checking Airbnb, VRBO, and Booking.com…
+              </div>
+            )}
+            {!findResult?.found && !qualifierLoading && qualifierResult && (
               <>
                 <div className={`p-4 rounded-lg mb-4 border ${qualifierResult.qualifies ? "border-green-500 bg-green-50/40" : "border-red-500 bg-red-50/40"}`}>
                   <div className="flex items-center gap-2 font-semibold">
@@ -752,49 +1024,11 @@ export default function AddSingleListing() {
                   </div>
                   <p className="text-sm mt-1">{qualifierResult.reason}</p>
                 </div>
-                <div className="space-y-2">
-                  {(["airbnb", "vrbo", "booking"] as const).map((key) => {
-                    const r = qualifierResult.platforms[key];
-                    const label = key === "airbnb" ? "Airbnb" : key === "vrbo" ? "VRBO" : "Booking.com";
-                    return (
-                      <Card key={key} className={`p-3 ${r.listed ? "border-red-300 bg-red-50/30" : "border-green-200 bg-green-50/30"}`}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="font-semibold text-sm flex items-center gap-2">
-                              {r.listed ? <XCircle className="h-4 w-4 text-red-700" /> : <CheckCircle2 className="h-4 w-4 text-green-700" />}
-                              {label}
-                              <Badge variant={r.listed ? "destructive" : "secondary"}>
-                                {r.listed ? `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}` : "Clean"}
-                              </Badge>
-                            </div>
-                            {r.matches.length > 0 && (
-                              <ul className="mt-2 space-y-1 text-xs">
-                                {r.matches.slice(0, 5).map((m) => (
-                                  <li key={m.url}>
-                                    <a href={m.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
-                                      {m.title.slice(0, 80)} <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                    {m.snippet && <div className="text-muted-foreground">{m.snippet.slice(0, 140)}</div>}
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                            {r.error && <p className="text-xs text-red-700 mt-1">Error: {r.error}</p>}
-                          </div>
-                        </div>
-                      </Card>
-                    );
-                  })}
-                </div>
-                <div className="flex gap-2 mt-6">
+                <div className="flex gap-2 mt-4">
                   <Button variant="outline" onClick={() => setQualifierResult(null)}>
                     Re-run check
                   </Button>
-                  <Button
-                    onClick={() => setStep(3)}
-                    disabled={!qualifierResult.qualifies}
-                    data-testid="button-step-2-next"
-                  >
+                  <Button onClick={() => setStep(3)} disabled={!qualifierResult.qualifies}>
                     Continue to Photos
                     <ArrowRight className="h-4 w-4 ml-2" />
                   </Button>
@@ -804,31 +1038,54 @@ export default function AddSingleListing() {
           </Card>
         )}
 
-        {/* ── STEP 3: Photos via Zillow ──────────────────── */}
+        {/* ── STEP 3: Auto-loaded photos ──────────────────
+            CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+            in the auto-discovery flow, photos are already loaded
+            from the find-clean-unit response. This step now just
+            displays them and lets the operator continue. The manual-
+            mode "paste a Zillow URL" path is kept for the escape
+            hatch — when no Zillow listing was auto-discovered yet. — */}
         {step === 3 && (
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <Camera className="h-5 w-5 text-primary" />
-              <h2 className="text-lg font-semibold">Step 3: Zillow URL & photos</h2>
+              <h2 className="text-lg font-semibold">Step 3: Photos</h2>
             </div>
-            <p className="text-muted-foreground text-sm mb-6">
-              Paste the Zillow listing URL for this property. We'll grab the photos and basic facts (bedrooms, bathrooms).
-            </p>
-            <div className="space-y-3 mb-4">
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Zillow URL</label>
-                <Input
-                  placeholder="https://www.zillow.com/homedetails/…"
-                  value={zillowUrl}
-                  onChange={(e) => setZillowUrl(e.target.value)}
-                  data-testid="input-zillow-url"
-                />
-              </div>
-              <Button onClick={fetchZillowPhotos} disabled={photosLoading || !zillowUrl.trim()}>
-                {photosLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
-                {photosLoading ? "Scraping Zillow…" : "Fetch photos"}
-              </Button>
-            </div>
+
+            {/* Auto-discovered unit already has its photos loaded. */}
+            {unit1Photos.length > 0 && zillowSourceUrl && (
+              <p className="text-muted-foreground text-sm mb-4">
+                Photos auto-loaded from{" "}
+                <a href={zillowSourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
+                  Zillow <ExternalLink className="h-3 w-3" />
+                </a>{" "}
+                — review and continue, or re-fetch if needed.
+              </p>
+            )}
+
+            {/* Manual fetch path (escape hatch when no auto-discovery happened) */}
+            {unit1Photos.length === 0 && (
+              <>
+                <p className="text-muted-foreground text-sm mb-4">
+                  Paste the Zillow listing URL for this property. We'll grab the photos and basic facts (bedrooms, bathrooms).
+                </p>
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Zillow URL</label>
+                    <Input
+                      placeholder="https://www.zillow.com/homedetails/…"
+                      value={zillowUrl}
+                      onChange={(e) => setZillowUrl(e.target.value)}
+                      data-testid="input-zillow-url"
+                    />
+                  </div>
+                  <Button onClick={fetchZillowPhotos} disabled={photosLoading || !zillowUrl.trim()}>
+                    {photosLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+                    {photosLoading ? "Scraping Zillow…" : "Fetch photos"}
+                  </Button>
+                </div>
+              </>
+            )}
 
             {(zillowFacts.bedrooms != null || zillowFacts.bathrooms != null) && (
               <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">

@@ -351,22 +351,51 @@ export function medianRate(arr: number[]): number | null {
 export async function researchCommunitiesForCity(
   city: string,
   state: string,
+  // CODEX NOTE (2026-05-04, claude/single-listing-research): mode
+  // parameter added to support the single-listing wizard's
+  // discovery flow. Combo mode (default) keeps the original behavior
+  // — combinabilityScore-gated, max 10 results, max 3 world-
+  // knowledge entries, Haiku model. Single mode drops the
+  // combinability filter (irrelevant for standalone listings),
+  // lifts the world-knowledge cap to 15, returns up to 20, runs on
+  // Sonnet for better recall on niche named resorts (e.g. Santa
+  // Maria Resort in Fort Myers Beach), and uses extra targeted
+  // SearchAPI queries that hit lists/round-ups instead of just
+  // listing snippets. See Load-Bearing #36.
+  mode: "combo" | "single" = "combo",
 ): Promise<ResearchedCommunity[]> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!searchApiKey) throw new Error("SEARCHAPI_API_KEY not configured");
 
-  const queries = [
-    `"${city}" "${state}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned -villa -"single family" -efficiency -studio -hotel`,
-    `"${city}" "${state}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned -villa -"single family" -studio`,
-    `"${city}" "${state}" beach condo resort 2BR 3BR individually owned vacation rental -hotel -timeshare -efficiency`,
-  ];
+  // Combo queries focus on individually-owned 2BR/3BR mix (combinable).
+  // Single-listing queries expand to lists/round-ups of "best vacation
+  // rental resorts/condos in {city}" — those pages routinely name 5–10
+  // specific resorts (Santa Maria Resort, Sandcastle Beach Club, etc.)
+  // that the bare site:airbnb-style queries miss.
+  const queries = mode === "single"
+    ? [
+        `"${city}" "${state}" condo OR condominium resort vacation rental airbnb vrbo -villa -"single family" -hotel`,
+        `"${city}" "${state}" "best" condo resort vacation rental airbnb vrbo`,
+        `"${city}" "${state}" condo townhome vacation rental "individually owned" OR "owner rents" airbnb`,
+        `"top" condo resorts "${city}" "${state}" airbnb vrbo`,
+        `"${city}" "${state}" beach resort condo 2BR 3BR vacation rental airbnb -hotel -timeshare`,
+      ]
+    : [
+        `"${city}" "${state}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned -villa -"single family" -efficiency -studio -hotel`,
+        `"${city}" "${state}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned -villa -"single family" -studio`,
+        `"${city}" "${state}" beach condo resort 2BR 3BR individually owned vacation rental -hotel -timeshare -efficiency`,
+      ];
 
   const allResults: Array<{ title: string; link: string; snippet: string }> = [];
+  // Single-listing scans pull more results per query so Claude has
+  // wider context to surface niche named resorts. Combo flow stays
+  // tight to keep wall time bounded for the top-markets sweep.
+  const numPerQuery = mode === "single" ? 12 : 8;
   for (const q of queries) {
     try {
       const resp = await fetch(
-        `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=8&api_key=${searchApiKey}`,
+        `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=${numPerQuery}&api_key=${searchApiKey}`,
       );
       if (!resp.ok) continue;
       const data = await resp.json() as any;
@@ -378,14 +407,21 @@ export async function researchCommunitiesForCity(
   }
 
   const seen = new Set<string>();
+  const uniqueCap = mode === "single" ? 30 : 15;
   const unique = allResults.filter(r => {
     const key = r.title?.toLowerCase().slice(0, 60) ?? r.link;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 15);
+  }).slice(0, uniqueCap);
 
-  if (unique.length === 0) return [];
+  // Single-listing mode tolerates an empty SearchAPI response — the
+  // world-knowledge fallback below can still surface known named
+  // resorts in major markets (e.g. Fort Myers Beach → Santa Maria
+  // Resort) without any organic results to anchor on. Combo mode
+  // keeps the original "no results = no results" behavior because
+  // its prompt is too combinability-focused to work cold.
+  if (unique.length === 0 && mode === "combo") return [];
 
   // Spot-check the typical per-unit nightly rate for a community by
   // hitting SearchAPI's airbnb engine for a 7-night window 30 days out
@@ -416,7 +452,56 @@ export async function researchCommunitiesForCity(
   const results: ResearchedCommunity[] = [];
 
   if (anthropicKey) {
-    const prompt = `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
+    // Single-listing prompt: focused on naming as many qualifying
+    // condo/townhouse resorts as possible (no combinability angle).
+    // Lifts world-knowledge cap to 15 and explicitly enumerates
+    // example resorts per major Florida market so Claude has a
+    // strong grounding for niche resorts that don't always show up
+    // in SearchAPI's organic results (the documented bug:
+    // Santa Maria Resort missing from Fort Myers Beach scans).
+    //
+    // Combo prompt: unchanged — combinabilityScore-gated, max 3
+    // world-knowledge entries, max 10 results.
+    const prompt = mode === "single"
+      ? `You are sourcing standalone vacation-rental condo/townhouse resorts for Magical Island Rentals's "Add a Single Listing" tool, which onboards individually-owned condos and townhouses one unit at a time.
+
+THE BUSINESS MODEL (single-listing mode):
+  We onboard ONE unit at a time from a known condo or townhouse resort. The unit is rented as a standalone listing — NOT combined with another unit.
+  So the VALUE of a community = whether it is a recognizable, individually-owned condo/townhouse resort with active vacation rental inventory.
+  We do NOT care about "combinability" — single-unit standalones, large 4BR townhouses, small 1BR condos all qualify if the resort fits.
+
+QUALIFYING CRITERIA:
+1. PROPERTY TYPE: Condos in a multi-unit building OR townhouses with shared walls. NO villas, detached homes, or single-family residences.
+2. OWNERSHIP MODEL: Individually owned (each unit has its own deed), not a single-owner timeshare/hotel.
+3. VACATION RENTAL USAGE: Primarily nightly vacation rentals on Airbnb/VRBO/Booking.
+4. SIZE: 10+ units of any size. Studio/1BR resorts qualify too.
+
+EXAMPLES of resorts that qualify (use these as a recall anchor):
+  Fort Myers Beach, FL: Santa Maria Resort, Sandcastle Beach Club, Diamond Head Beach Resort, Pointe Estero Resort, Surf & Sun Beach Resort, Casa Playa Beach Resort, Estero Beach & Tennis Club, Sea Castle Condominiums, Mariner's Boathouse & Beach Resort, The Sunset Beach Club.
+  Destin, FL: Silver Shells Beach Resort, Sandestin Beach Resort, Henderson Park Inn, Crystal Beach, Emerald Towers, Sterling Shores, Mainsail Condominiums.
+  Panama City Beach, FL: Edgewater Beach Resort, Calypso Resort, Splash Resort, Aqua Resort, Long Beach Resort, Shores of Panama.
+  Kissimmee/Orlando, FL: Windsor Hills Resort, Caribe Cove Resort, Reunion Resort, Encore Resort, Solterra Resort, Champions Gate, Vista Cay Resort, Storey Lake Resort.
+  Lihue/Kapaa/Poipu, HI: Pili Mai, Kaha Lani Resort, Lae Nani, Lawai Beach Resort, Whalers Cove, Poipu Kapili, Regency at Poipu Kai.
+
+DISQUALIFIED:
+  ❌ Pure-villa or single-family-home resorts (no shared walls).
+  ❌ Marriott / Hilton / Westin / Sheraton timeshares (single-owner-corp).
+  ❌ Hotels with front-desk check-in and centrally-managed inventory.
+
+SCORING:
+  confidenceScore (0–100): sure this is individually-owned condo/townhouse? 90+ household name, 70–89 very likely, 50–69 probably, <50 don't include.
+  (No combinabilityScore for single-listing mode — leave it null.)
+
+Use (1) the search results below AND (2) your own world knowledge. **You MAY (and should) add UP TO 15 well-known condo/townhouse resorts from your own knowledge** that fit "${city}, ${state}", marked fromWorldKnowledge:true. Aim for 15–20 total entries when the city has that many known resorts. **For any city named in the EXAMPLES list above, you MUST surface every example resort listed for that city as fromWorldKnowledge entries** unless you have a specific reason to disqualify one.
+
+SEARCH RESULTS for "${city}, ${state}":
+${unique.length > 0 ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n") : "(no organic results — rely on world knowledge)"}
+
+Output JSON array. Each element:
+{"communityName":"...","bedroomMix":"...","unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
+
+Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
+      : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
 
 THE BUSINESS MODEL:
   We rent unit A (e.g. 3BR) + unit B (e.g. 3BR) in the same building → list them together as one "6BR sleeps 14" villa-style product.
@@ -466,16 +551,15 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          // Haiku 4.5 — current model, fast, structured-JSON friendly.
-          // Previous ID `claude-3-5-sonnet-20241022` is a legacy alias
-          // that Anthropic was returning errors for, which silently
-          // emptied this endpoint's response (every market reported
-          // "0 qualifying" — see /api/inbox/ai-draft for the same
-          // migration). Bumped max_tokens to 4000 because the JSON
-          // output for a market with multiple communities can run
-          // long and the old 3000 truncated mid-array.
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 4000,
+          // Single-listing mode runs on Sonnet (better world-
+          // knowledge recall for niche named resorts like Santa
+          // Maria Resort or Casa Playa Beach Resort). Combo mode
+          // stays on Haiku — it's used inside the top-markets sweep
+          // which iterates 12+ markets, so the Haiku speed/cost
+          // advantage matters there. Single mode is per-operator-
+          // click, so the per-call latency is acceptable.
+          model: mode === "single" ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001",
+          max_tokens: mode === "single" ? 8000 : 4000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
@@ -507,7 +591,9 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           } catch (parseErr: any) {
             console.error(`[research] JSON.parse failed for ${city}, ${state}: ${parseErr.message}. Head: ${jsonMatch[0].slice(0, 200)}`);
           }
-          for (const s of scored.slice(0, 10)) {
+          // Single mode keeps up to 20; combo mode keeps the original 10.
+          const sliceCap = mode === "single" ? 20 : 10;
+          for (const s of scored.slice(0, sliceCap)) {
             // Hard post-filter. The prompt warns against villas/SFH, but
             // Claude occasionally lets one through. Drop anything whose
             // unitTypes or reason contains a disqualifying term.
@@ -529,7 +615,10 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               sourceUrl: s.sourceUrl || "",
               bedroomMix: s.bedroomMix,
               combinedBedroomsTypical: s.combinedBedroomsTypical,
-              combinabilityScore: s.combinabilityScore,
+              // Single mode doesn't ask for combinabilityScore — it
+              // can come back undefined. The downstream sort uses 50
+              // as the default when undefined, which is fine.
+              combinabilityScore: typeof s.combinabilityScore === "number" ? s.combinabilityScore : undefined,
               fromWorldKnowledge: s.fromWorldKnowledge === true,
             });
           }
