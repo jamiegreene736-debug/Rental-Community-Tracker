@@ -15100,40 +15100,46 @@ Return ONLY compact JSON with this exact shape:
   //
   // Returns `{ qualifies: true, platforms: { airbnb: { listed: false, ... }, ... } }`
   // when zero confirmed matches are found across all three platforms.
-  app.post("/api/single-listing/qualify", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-
-    const { address, city, state } = req.body as {
-      address?: string;
-      city?: string;
-      state?: string;
+  // CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+  // Extracted into a helper so the new find-clean-unit endpoint can
+  // call it per Zillow candidate without re-implementing the OTA
+  // search logic. The /qualify endpoint still wraps it for the
+  // "type an address manually" path; find-clean-unit calls it for
+  // each Zillow candidate it iterates.
+  type SingleListingPlatformResult = {
+    listed: boolean;
+    matches: Array<{ url: string; title: string; snippet: string }>;
+    query: string;
+    error?: string;
+  };
+  type SingleListingQualifyResult = {
+    qualifies: boolean;
+    platforms: {
+      airbnb: SingleListingPlatformResult;
+      vrbo: SingleListingPlatformResult;
+      booking: SingleListingPlatformResult;
     };
-    if (!address || !city || !state) {
-      return res.status(400).json({ error: "address, city, state required" });
-    }
-
+    reason: string;
+    address: string;
+    city: string;
+    state: string;
+  };
+  async function runOtaQualifier(
+    apiKey: string,
+    address: string,
+    city: string,
+    state: string,
+  ): Promise<SingleListingQualifyResult> {
     const PLATFORMS: Array<{ key: "airbnb" | "vrbo" | "booking"; site: string; urlPattern: RegExp }> = [
       { key: "airbnb", site: "airbnb.com",  urlPattern: /airbnb\.com\/(rooms|h)\// },
       { key: "vrbo",   site: "vrbo.com",    urlPattern: /vrbo\.com\/\d+/ },
       { key: "booking",site: "booking.com", urlPattern: /booking\.com\/(hotel|apartments)\// },
     ];
 
-    // The street portion of the address is the strongest signal —
-    // a Booking listing card mentioning "4460 Nehe Rd" is a real
-    // match; a card just mentioning "Lihue, HI" is not. Falls back
-    // to the full address when no commas are present.
     const streetPortion = address.includes(",") ? address.split(",")[0].trim() : address.trim();
     const streetLower = streetPortion.toLowerCase();
 
-    type PlatformResult = {
-      listed: boolean;
-      matches: Array<{ url: string; title: string; snippet: string }>;
-      query: string;
-      error?: string;
-    };
-
-    const checkPlatform = async (p: typeof PLATFORMS[0]): Promise<PlatformResult> => {
+    const checkPlatform = async (p: typeof PLATFORMS[0]): Promise<SingleListingPlatformResult> => {
       const query = `site:${p.site} "${streetPortion}" "${city}"`;
       try {
         const url = `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(query)}&num=10&api_key=${apiKey}`;
@@ -15148,9 +15154,7 @@ Return ONLY compact JSON with this exact shape:
           const link = String(r?.link || "");
           const title = String(r?.title || "");
           const snippet = String(r?.snippet || "");
-          // Must look like a real listing URL on this platform
           if (!p.urlPattern.test(link)) continue;
-          // Must mention the street in title or snippet
           const haystack = `${title} ${snippet}`.toLowerCase();
           if (!haystack.includes(streetLower)) continue;
           matches.push({ url: link, title, snippet });
@@ -15164,17 +15168,239 @@ Return ONLY compact JSON with this exact shape:
     const [airbnb, vrbo, booking] = await Promise.all(PLATFORMS.map(checkPlatform));
     const platforms = { airbnb, vrbo, booking };
     const qualifies = !airbnb.listed && !vrbo.listed && !booking.listed;
-
-    res.json({
+    return {
       qualifies,
       platforms,
-      address,
-      city,
-      state,
-      // Surface a one-line operator-facing reason when not qualifying
       reason: qualifies
         ? "No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing."
         : `Found existing listing(s) on: ${[airbnb.listed && "Airbnb", vrbo.listed && "VRBO", booking.listed && "Booking.com"].filter(Boolean).join(", ")}.`,
+      address,
+      city,
+      state,
+    };
+  }
+
+  app.post("/api/single-listing/qualify", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { address, city, state } = req.body as {
+      address?: string;
+      city?: string;
+      state?: string;
+    };
+    if (!address || !city || !state) {
+      return res.status(400).json({ error: "address, city, state required" });
+    }
+
+    const result = await runOtaQualifier(apiKey, address, city, state);
+    res.json(result);
+  });
+
+  // CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
+  // The "auto-discover a clean unit" endpoint that powers the
+  // simplified single-listing wizard. Operator picks
+  // {community, city, state, bedrooms} on Step 1; this endpoint
+  // does the rest:
+  //   1. SearchAPI Google site:zillow.com for the community + BR
+  //      (multi-query staged search, same pattern as
+  //      /api/community/fetch-unit-photos).
+  //   2. For each Zillow candidate (up to ~8), scrape facts +
+  //      address.
+  //   3. Verify the bedroom count matches the requested BR.
+  //   4. Run runOtaQualifier on the candidate's address.
+  //   5. Return the FIRST candidate that (a) matches BR and
+  //      (b) qualifies (clean across Airbnb/VRBO/Booking).
+  // If none qualify, returns `{ found: false, attempts: [...] }`
+  // so the operator can see why each one was rejected.
+  //
+  // Wallet: ~3 SearchAPI calls (3 staged Zillow queries) + N×3
+  // SearchAPI qualifier calls + N Zillow scrape calls. Capped at
+  // 8 candidates so worst case is ~32 SearchAPI calls.
+  app.post("/api/single-listing/find-clean-unit", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { communityName, city, state, bedrooms, skipUrls } = req.body as {
+      communityName?: string;
+      city?: string;
+      state?: string;
+      bedrooms?: number;
+      // CODEX NOTE: when the operator clicks "Try another unit" in
+      // the wizard, we re-call this endpoint with the previously-
+      // returned URL appended to skipUrls so the next match wins.
+      skipUrls?: string[];
+    };
+    if (!communityName || !city || !state || typeof bedrooms !== "number" || bedrooms < 1) {
+      return res.status(400).json({ error: "communityName, city, state, bedrooms required" });
+    }
+    const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
+
+    // Stage-1: discover Zillow homedetails URLs for this community.
+    // Mirror the multi-query pattern from /api/community/fetch-unit-photos:
+    // most-specific first, then progressively-broader fallbacks.
+    const queries = [
+      `site:zillow.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`.replace(/\s+/g, " ").trim(),
+      `site:zillow.com "${communityName}" ${bedrooms} bedroom`.replace(/\s+/g, " ").trim(),
+      `site:zillow.com "${communityName}" ${city} ${state}`.replace(/\s+/g, " ").trim(),
+    ];
+
+    const candidateUrls: string[] = [];
+    const seen = new Set<string>();
+    for (const q of queries) {
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+        );
+        if (!resp.ok) continue;
+        const data = await resp.json() as any;
+        const organic = (data.organic_results || []) as Array<{ link?: string }>;
+        for (const r of organic) {
+          const link = String(r.link ?? "");
+          if (!/zillow\.com\/homedetails\//i.test(link)) continue;
+          const lower = link.toLowerCase();
+          if (seen.has(lower)) continue;
+          if (skipSet.has(lower)) continue;
+          seen.add(lower);
+          candidateUrls.push(link);
+        }
+      } catch (e: any) {
+        console.warn(`[find-clean-unit] SearchAPI error for "${q}": ${e?.message ?? e}`);
+      }
+    }
+
+    if (candidateUrls.length === 0) {
+      return res.json({
+        found: false,
+        reason: `No Zillow listings found for "${communityName}" (${bedrooms}BR) in ${city}, ${state}.`,
+        attempts: [],
+      });
+    }
+
+    // Stage-2: walk candidates in order; first match wins. We only
+    // try the top 8 to keep worst-case latency bounded (each
+    // candidate does a Zillow scrape + 3 SearchAPI qualifier calls).
+    type Attempt = {
+      url: string;
+      bedrooms: number | null;
+      bathrooms: number | null;
+      address: string | null;
+      bedroomMatches: boolean;
+      qualifies: boolean | null;
+      qualifierReason: string | null;
+      rejectedBecause: string;
+    };
+    const attempts: Attempt[] = [];
+    for (const url of candidateUrls.slice(0, 8)) {
+      // Scrape Zillow for facts + photos. We need the address; we
+      // pass an empty `facts` object so scrapeListingPhotos
+      // populates it via the Apify/ScrapingBee path.
+      const facts: ListingFacts = {};
+      let photos: ScrapedPhoto[] = [];
+      try {
+        photos = await scrapeListingPhotos(url, undefined, facts);
+      } catch (e: any) {
+        attempts.push({
+          url,
+          bedrooms: null,
+          bathrooms: null,
+          address: null,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Zillow scrape failed: ${e?.message ?? e}`,
+        });
+        continue;
+      }
+
+      const scrapedBR = facts.bedrooms ?? null;
+      const scrapedBA = facts.bathrooms ?? null;
+
+      // Pull the address from the Zillow URL slug — homedetails URLs
+      // bake the street address into the path
+      // (e.g. /homedetails/4460-Nehe-Rd-Lihue-HI-96766/...).
+      // Falls back to null if parse fails (rare).
+      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
+      let addressGuess: string | null = null;
+      if (slugMatch) {
+        const raw = slugMatch[1].replace(/-/g, " ").trim();
+        // Strip trailing zip + state code if present (so the
+        // qualifier query targets the street + city explicitly)
+        addressGuess = raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
+      }
+
+      if (!addressGuess) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: null,
+          bedroomMatches: scrapedBR === bedrooms,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: "Could not parse address from Zillow URL slug.",
+        });
+        continue;
+      }
+
+      // Hard requirement: bedroom count must match the operator's
+      // selection. Zillow's scrape returns a precise integer; if it
+      // doesn't match the requested BR, skip — combining a 2BR
+      // listing into a "3BR standalone" draft would be wrong.
+      if (scrapedBR !== null && scrapedBR !== bedrooms) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${bedrooms}BR.`,
+        });
+        continue;
+      }
+
+      // OTA qualifier on this candidate's address.
+      const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state);
+      attempts.push({
+        url,
+        bedrooms: scrapedBR,
+        bathrooms: scrapedBA,
+        address: addressGuess,
+        bedroomMatches: scrapedBR === bedrooms || scrapedBR === null,
+        qualifies: qualifier.qualifies,
+        qualifierReason: qualifier.reason,
+        rejectedBecause: qualifier.qualifies ? "" : `Listed on OTA: ${qualifier.reason}`,
+      });
+
+      if (qualifier.qualifies) {
+        // First clean unit wins. Return the candidate plus its
+        // photos (so the wizard can skip the photo-fetch step) and
+        // the qualifier result (so the wizard can show it).
+        return res.json({
+          found: true,
+          unit: {
+            url,
+            address: addressGuess,
+            bedrooms: scrapedBR ?? bedrooms,
+            bathrooms: scrapedBA,
+            photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+            qualifier,
+          },
+          attempts,
+          attemptCount: attempts.length,
+          totalCandidates: candidateUrls.length,
+        });
+      }
+    }
+
+    res.json({
+      found: false,
+      reason: `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none were clean of OTA listings.`,
+      attempts,
+      attemptCount: attempts.length,
+      totalCandidates: candidateUrls.length,
     });
   });
 
@@ -15933,11 +16159,15 @@ Return ONLY compact JSON with this exact shape:
   // Step 2: Research communities in a city/state via SearchAPI + Claude scoring
   // ============================================================
   app.post("/api/community/research", async (req, res) => {
-    const { city, state } = req.body as { city: string; state: string };
+    const { city, state, mode } = req.body as { city: string; state: string; mode?: "combo" | "single" };
     if (!city || !state) return res.status(400).json({ error: "city and state required" });
 
     try {
-      const communities = await researchCommunitiesForCity(city, state);
+      // CODEX NOTE (2026-05-04, claude/single-listing-research): mode
+      // is forwarded through to researchCommunitiesForCity. Combo
+      // mode (default) keeps the original gating; single mode lifts
+      // caps and uses Sonnet — see Load-Bearing #36.
+      const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
       return res.json({ communities });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
