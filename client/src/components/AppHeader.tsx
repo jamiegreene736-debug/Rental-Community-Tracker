@@ -6,7 +6,7 @@ export default function AppHeader() {
   const isHome = location === "/";
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header className="sticky top-0 z-50 w-full border-b bg-background shadow-sm">
       <div className="max-w-[1400px] mx-auto px-4 h-11 flex items-center gap-3">
         <Link
           href="/"
@@ -22,7 +22,7 @@ export default function AppHeader() {
         </Link>
         <span className="text-muted-foreground/40 text-xs select-none">|</span>
         <img
-          src="/brand/vacation-rental-expertz-horizontal.png"
+          src="/brand/vacation-rental-expertz-horizontal-transparent.png"
           alt="VacationRentalExpertz"
           className="h-8 w-auto max-w-[220px] object-contain select-none"
           draggable={false}
