@@ -18,6 +18,12 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured buy_ins arrival detail columns");
 
   await db.execute(sql`
+    ALTER TABLE message_templates
+      ADD COLUMN IF NOT EXISTS delivery_channel text NOT NULL DEFAULT 'guesty'
+  `);
+  console.log("[schema] ensured message_templates delivery channel column");
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS quo_sms_messages (
       id serial PRIMARY KEY,
       provider_message_id text NOT NULL UNIQUE,

@@ -314,6 +314,7 @@ export type LodgifyPropertyMap = typeof lodgifyPropertyMap.$inferSelect;
 export const messageTemplates = pgTable("message_templates", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
+  deliveryChannel: text("delivery_channel").notNull().default("guesty"),
   trigger: text("trigger").notNull(),
   daysOffset: integer("days_offset").notNull().default(0),
   body: text("body").notNull(),

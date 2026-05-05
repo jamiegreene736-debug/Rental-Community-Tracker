@@ -193,9 +193,23 @@ const MERGE_TAGS = [
   "{confirmation_code}", "{num_nights}",
 ];
 
+const TEMPLATE_CHANNEL_OPTIONS = [
+  { value: "guesty", label: "Guesty / OTA / email" },
+  { value: "sms", label: "Text message" },
+];
+
+function templateChannelLabel(channel?: string): string {
+  return channel === "sms" ? "Text message" : "Guesty / OTA / email";
+}
+
+function templateChannelBadgeVariant(channel?: string): "default" | "secondary" | "outline" {
+  return channel === "sms" ? "secondary" : "outline";
+}
+
 const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
   {
-    name: "Booking Confirmation / Payment Receipt",
+    name: "Booking Confirmation / Next Steps",
+    deliveryChannel: "guesty",
     trigger: "booking_confirmed",
     daysOffset: 0,
     isActive: true,
@@ -215,6 +229,7 @@ VacationRentalExpertz`,
   },
   {
     name: "Unit Setup Confirmation",
+    deliveryChannel: "guesty",
     trigger: "days_after_booking",
     daysOffset: 1,
     isActive: true,
@@ -232,6 +247,7 @@ VacationRentalExpertz`,
   },
   {
     name: "Guesty Agreement & Card Authorization Request",
+    deliveryChannel: "guesty",
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: true,
@@ -252,6 +268,7 @@ VacationRentalExpertz`,
   },
   {
     name: "Guesty Invoice / Payment Method Request",
+    deliveryChannel: "guesty",
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: true,
@@ -268,7 +285,38 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
+    name: "SMS: Secure Pre-Arrival Form",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name}, please complete the secure pre-arrival form for {property_name}: {{checkin_form}}
+
+This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, John`,
+  },
+  {
+    name: "SMS: Reminder to Complete Pre-Arrival Form",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 1,
+    isActive: true,
+    body: `Hi {guest_name}, quick reminder to complete the secure pre-arrival form for {property_name}: {{checkin_form}}
+
+Once that is complete, you are all set for the next step. Thanks, John`,
+  },
+  {
+    name: "SMS: Secure Payment Link",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: false,
+    body: `Hi {guest_name}, please use this secure Guesty link to add your payment method or complete any remaining balance for {property_name}: {{guest_invoice}}
+
+Please do not text card details. Thanks, John`,
+  },
+  {
     name: "14-Day Arrival Details",
+    deliveryChannel: "guesty",
     trigger: "days_before_checkin",
     daysOffset: 14,
     isActive: true,
@@ -289,7 +337,8 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
-    name: "3-Day Local Tips",
+    name: "Parking + Travel Reminder",
+    deliveryChannel: "guesty",
     trigger: "days_before_checkin",
     daysOffset: 3,
     isActive: true,
@@ -308,7 +357,24 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
+    name: "SMS: Arrival Details Reminder",
+    deliveryChannel: "sms",
+    trigger: "days_before_checkin",
+    daysOffset: 14,
+    isActive: true,
+    body: `Hi {guest_name}, your arrival details for {property_name} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, John`,
+  },
+  {
+    name: "SMS: Day-Of Arrival Help",
+    deliveryChannel: "sms",
+    trigger: "day_of_checkin",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name}, hope your travel day is going smoothly. Your arrival details were sent in the booking thread/email. Reply here if you need help with access or parking. - John`,
+  },
+  {
     name: "Day-Before Final Check-In",
+    deliveryChannel: "guesty",
     trigger: "days_before_checkin",
     daysOffset: 1,
     isActive: true,
@@ -326,6 +392,7 @@ VacationRentalExpertz`,
   },
   {
     name: "Post-Stay Thank You / Review Request",
+    deliveryChannel: "guesty",
     trigger: "days_after_checkout",
     daysOffset: 2,
     isActive: true,
@@ -340,6 +407,14 @@ We would be happy to host you again anytime.
 Thanks,
 John Carpenter
 VacationRentalExpertz`,
+  },
+  {
+    name: "SMS: Post-Stay Review Request",
+    deliveryChannel: "sms",
+    trigger: "days_after_checkout",
+    daysOffset: 2,
+    isActive: true,
+    body: `Hi {guest_name}, thank you again for staying at {property_name}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - John`,
   },
 ];
 
@@ -650,6 +725,18 @@ function buildAgreementRequestBody(args: {
   return lines.join("\n");
 }
 
+function buildAgreementRequestSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return [
+    `Hi ${args.guestFirstName || "there"}, please complete the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    `{{checkin_form}}`,
+    ``,
+    `This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
+  ].join("\n");
+}
+
 function buildGuestyInvoicePaymentBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -672,6 +759,18 @@ function buildGuestyInvoicePaymentBody(args: {
   lines.push(OUTBOUND_SENDER_NAME);
   lines.push(OUTBOUND_BRAND_NAME);
   return lines.join("\n");
+}
+
+function buildGuestyInvoicePaymentSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return [
+    `Hi ${args.guestFirstName || "there"}, please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    `{{guest_invoice}}`,
+    ``,
+    `Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
+  ].join("\n");
 }
 
 function buildArrivalDetailsBody(args: {
@@ -718,6 +817,13 @@ function buildArrivalDetailsBody(args: {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function buildArrivalDetailsSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, your arrival details${args.propertyName ? ` for ${args.propertyName}` : ""} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, ${OUTBOUND_SENDER_NAME}`;
+}
+
 function buildLocalTipsBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -741,6 +847,13 @@ function buildLocalTipsBody(args: {
     OUTBOUND_BRAND_NAME,
   ];
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildLocalTipsSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, quick travel reminder${args.propertyName ? ` for ${args.propertyName}` : ""}: please keep your arrival/access and parking details handy before you leave. Reply here if you need help. - ${OUTBOUND_SENDER_NAME}`;
 }
 
 function buildDayBeforeBody(args: {
@@ -773,6 +886,13 @@ function buildDayBeforeBody(args: {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function buildDayBeforeSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy. Reply here if anything comes up. Safe travels, ${OUTBOUND_SENDER_NAME}`;
+}
+
 function buildPostStayBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -790,6 +910,20 @@ function buildPostStayBody(args: {
     OUTBOUND_SENDER_NAME,
     OUTBOUND_BRAND_NAME,
   ].join("\n");
+}
+
+function buildPostStaySmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - ${OUTBOUND_SENDER_NAME}`;
+}
+
+function buildUnitSetupSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, quick note${args.propertyName ? ` for ${args.propertyName}` : ""}: this stay is set up as nearby units, and final arrival details will come before check-in. Reply here with any questions. - ${OUTBOUND_SENDER_NAME}`;
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -1073,6 +1207,7 @@ function TemplateEditor({
   onClose: () => void;
 }) {
   const [name, setName] = useState(template?.name ?? "");
+  const [deliveryChannel, setDeliveryChannel] = useState(template?.deliveryChannel ?? "guesty");
   const [trigger, setTrigger] = useState(template?.trigger ?? "booking_confirmed");
   const [daysOffset, setDaysOffset] = useState(template?.daysOffset ?? 0);
   const [body, setBody] = useState(template?.body ?? "");
@@ -1096,6 +1231,22 @@ function TemplateEditor({
             placeholder="e.g. Check-in Instructions"
             className="mt-1"
           />
+        </div>
+        <div>
+          <Label>Delivery Channel</Label>
+          <Select value={deliveryChannel} onValueChange={setDeliveryChannel}>
+            <SelectTrigger className="mt-1" data-testid="select-template-channel">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TEMPLATE_CHANNEL_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Text templates should stay short and link-focused. Guesty/email templates are the formal guest record.
+          </p>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -1162,7 +1313,7 @@ function TemplateEditor({
       <DialogFooter>
         <Button variant="outline" onClick={onClose} data-testid="button-template-cancel">Cancel</Button>
         <Button
-          onClick={() => onSave({ name, trigger, daysOffset, body, isActive })}
+          onClick={() => onSave({ name, deliveryChannel, trigger, daysOffset, body, isActive })}
           disabled={!name || !body}
           data-testid="button-template-save"
         >
@@ -1182,7 +1333,7 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
   const [templateDialog, setTemplateDialog] = useState<{ open: boolean; template: Partial<MessageTemplate> | null }>({ open: false, template: null });
-  const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string }>({ open: false, title: "", body: "" });
+  const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
   const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
   const [guestPhoneInput, setGuestPhoneInput] = useState("");
   // Property filter for the conversation list — narrows the visible
@@ -1216,8 +1367,8 @@ export default function InboxPage() {
   const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
 
-  const previewTemplateBody = (title: string, body: string) => {
-    setTemplatePreview({ open: true, title, body });
+  const previewTemplateBody = (title: string, body: string, channel: "guesty" | "sms" = "guesty") => {
+    setTemplatePreview({ open: true, title, body, channel });
   };
 
   const rememberAirbnbPreapproval = (reservationId: string) => {
@@ -1472,26 +1623,31 @@ export default function InboxPage() {
 
   const draftArrivalDetails = ({
     title = "14-day arrival details",
+    channel = "guesty",
     guestFirstName,
     propertyName,
     checkInIso,
   }: {
     title?: string;
+    channel?: "guesty" | "sms";
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
   }) => {
-    const body = buildArrivalDetailsBody({
-      guestFirstName,
-      propertyName,
-      checkInIso,
-      units: arrivalDetails?.units ?? [],
-    });
-    previewTemplateBody(title, body);
+    const body = channel === "sms"
+      ? buildArrivalDetailsSmsBody({ guestFirstName, propertyName })
+      : buildArrivalDetailsBody({
+        guestFirstName,
+        propertyName,
+        checkInIso,
+        units: arrivalDetails?.units ?? [],
+      });
+    previewTemplateBody(title, body, channel);
   };
 
   const draftStayTemplate = ({
     title = "Template preview",
+    channel = "guesty",
     kind,
     guestFirstName,
     propertyName,
@@ -1503,6 +1659,7 @@ export default function InboxPage() {
     totalPaid,
   }: {
     title?: string;
+    channel?: "guesty" | "sms";
     kind: "booking" | "agreement-request" | "guesty-invoice-payment" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
     guestFirstName: string;
     propertyName: string;
@@ -1514,7 +1671,19 @@ export default function InboxPage() {
     totalPaid?: number;
   }) => {
     const units = arrivalDetails?.units ?? [];
-    const body = kind === "booking"
+    const body = channel === "sms" && kind === "agreement-request"
+      ? buildAgreementRequestSmsBody({ guestFirstName, propertyName })
+      : channel === "sms" && kind === "guesty-invoice-payment"
+        ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName })
+      : channel === "sms" && kind === "representative-follow-up"
+        ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
+      : channel === "sms" && kind === "local-tips"
+        ? buildLocalTipsSmsBody({ guestFirstName, propertyName })
+      : channel === "sms" && kind === "day-before"
+        ? buildDayBeforeSmsBody({ guestFirstName, propertyName })
+      : channel === "sms" && kind === "post-stay"
+        ? buildPostStaySmsBody({ guestFirstName, propertyName })
+      : kind === "booking"
       ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
       : kind === "agreement-request"
         ? buildAgreementRequestBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
@@ -1527,7 +1696,7 @@ export default function InboxPage() {
           : kind === "day-before"
             ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
             : buildPostStayBody({ guestFirstName, propertyName });
-    previewTemplateBody(title, body);
+    previewTemplateBody(title, body, channel);
   };
 
   const sendMessage = useMutation({
@@ -2945,13 +3114,13 @@ export default function InboxPage() {
                             };
                             const timeline = [
                               {
-                                title: "Booking confirmation / receipt",
+                                title: "Booking confirmation / next steps",
                                 due: null as Date | null,
                                 dueLabel: "At booking",
                                 sent: wasSent(/this confirms your reservation|mahalo for booking with us|confirmation code|booking total|paid to date|remaining balance|this stay is set up as two units|two separate units|detailed arrival information|reservation.+confirmed|booking.+confirmed|two units.+minute/i),
                                 detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
                                 testId: "button-draft-booking-confirmation",
-                                onClick: () => draftStayTemplate({ title: "Booking confirmation / receipt", kind: "booking", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Booking confirmation / next steps", kind: "booking", ...draftCommon }),
                               },
                               ...(needsAgreement ? [{
                                 title: "Agreement + card authorization",
@@ -2961,6 +3130,8 @@ export default function InboxPage() {
                                 detail: "Guesty Guest App · agreement/check-in form",
                                 testId: "button-draft-agreement-request",
                                 onClick: () => draftStayTemplate({ title: "Agreement + card authorization", kind: "agreement-request", ...draftCommon }),
+                                smsTestId: "button-draft-sms-agreement-request",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: secure pre-arrival form", channel: "sms", kind: "agreement-request", ...draftCommon }),
                               },
                               {
                                 title: "Guesty invoice / payment method",
@@ -2970,6 +3141,8 @@ export default function InboxPage() {
                                 detail: "Guesty invoice/payment link",
                                 testId: "button-draft-guesty-invoice-payment",
                                 onClick: () => draftStayTemplate({ title: "Guesty invoice / payment method", kind: "guesty-invoice-payment", ...draftCommon }),
+                                smsTestId: "button-draft-sms-payment-link",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: secure payment link", channel: "sms", kind: "guesty-invoice-payment", ...draftCommon }),
                               }] : []),
                               {
                                 title: "Unit setup confirmation",
@@ -2979,6 +3152,8 @@ export default function InboxPage() {
                                 detail: "Confirms nearby units and sample photos",
                                 testId: "button-draft-representative-follow-up",
                                 onClick: () => draftStayTemplate({ title: "Unit setup confirmation", kind: "representative-follow-up", ...draftCommon }),
+                                smsTestId: "button-draft-sms-unit-setup",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: unit setup note", channel: "sms", kind: "representative-follow-up", ...draftCommon }),
                               },
                               {
                                 title: "14-day arrival details",
@@ -2989,15 +3164,19 @@ export default function InboxPage() {
                                 testId: "button-draft-arrival-details",
                                 disabled: arrivalDetailsLoading,
                                 onClick: () => draftArrivalDetails({ title: "14-day arrival details", guestFirstName: firstName, propertyName, checkInIso }),
+                                smsTestId: "button-draft-sms-arrival-details",
+                                smsOnClick: () => draftArrivalDetails({ title: "SMS: arrival details reminder", channel: "sms", guestFirstName: firstName, propertyName, checkInIso }),
                               },
                               {
-                                title: "3-day local tips / parking reminder",
+                                title: "Parking + travel reminder",
                                 due: checkInDate ? addDays(checkInDate, -3) : null,
                                 dueLabel: "3 days before arrival",
                                 sent: wasSent(/local area|restaurant|restaurants|parking notes|few days away/i),
                                 detail: "Restaurants, travel day, parking",
                                 testId: "button-draft-local-tips",
-                                onClick: () => draftStayTemplate({ title: "3-day local tips / parking reminder", kind: "local-tips", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Parking + travel reminder", kind: "local-tips", ...draftCommon }),
+                                smsTestId: "button-draft-sms-local-tips",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: parking + travel reminder", channel: "sms", kind: "local-tips", ...draftCommon }),
                               },
                               {
                                 title: "Day-before final check-in reminder",
@@ -3007,6 +3186,8 @@ export default function InboxPage() {
                                 detail: "Final access and parking reminder",
                                 testId: "button-draft-day-before-checkin",
                                 onClick: () => draftStayTemplate({ title: "Day-before final check-in reminder", kind: "day-before", ...draftCommon }),
+                                smsTestId: "button-draft-sms-day-before",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: day-before arrival nudge", channel: "sms", kind: "day-before", ...draftCommon }),
                               },
                               {
                                 title: "Post-stay thank-you / review request",
@@ -3016,6 +3197,8 @@ export default function InboxPage() {
                                 detail: "Review and repeat guest note",
                                 testId: "button-draft-post-stay-review",
                                 onClick: () => draftStayTemplate({ title: "Post-stay thank-you / review request", kind: "post-stay", ...draftCommon }),
+                                smsTestId: "button-draft-sms-post-stay-review",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: post-stay review request", channel: "sms", kind: "post-stay", ...draftCommon }),
                               },
                             ];
                             return (
@@ -3034,17 +3217,33 @@ export default function InboxPage() {
                                           {item.sent ? "Completed" : item.detail}
                                         </p>
                                       </div>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        className="h-7 px-2 text-[11px] shrink-0"
-                                        disabled={Boolean(item.disabled)}
-                                        onClick={item.onClick}
-                                        data-testid={item.testId}
-                                      >
-                                        <FileText className="h-3 w-3 mr-1" />
-                                        Preview
-                                      </Button>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 px-2 text-[11px]"
+                                          disabled={Boolean(item.disabled)}
+                                          onClick={item.onClick}
+                                          data-testid={item.testId}
+                                        >
+                                          <FileText className="h-3 w-3 mr-1" />
+                                          Guesty
+                                        </Button>
+                                        {item.smsOnClick && (
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-7 px-2 text-[11px]"
+                                            disabled={Boolean(item.disabled) || !effectiveGuestPhone}
+                                            onClick={item.smsOnClick}
+                                            title={effectiveGuestPhone ? `Draft text for ${effectiveGuestPhone}` : "Add a guest SMS phone number first"}
+                                            data-testid={item.smsTestId}
+                                          >
+                                            <MessageCircle className="h-3 w-3 mr-1" />
+                                            Text
+                                          </Button>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
                                 ))}
@@ -3300,10 +3499,15 @@ export default function InboxPage() {
                         />
                         <div className="min-w-0">
                           <p className="font-medium text-sm">{t.name}</p>
-                          <Badge variant="outline" className="text-[10px] mt-0.5">
-                            <Clock className="h-2.5 w-2.5 mr-1" />
-                            {triggerLabel(t.trigger, t.daysOffset)}
-                          </Badge>
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            <Badge variant={templateChannelBadgeVariant(t.deliveryChannel)} className="text-[10px]">
+                              {templateChannelLabel(t.deliveryChannel)}
+                            </Badge>
+                            <Badge variant="outline" className="text-[10px]">
+                              <Clock className="h-2.5 w-2.5 mr-1" />
+                              {triggerLabel(t.trigger, t.daysOffset)}
+                            </Badge>
+                          </div>
                           <p className="text-xs text-muted-foreground mt-2 line-clamp-2 whitespace-pre-wrap">
                             {t.body}
                           </p>
@@ -3509,6 +3713,16 @@ export default function InboxPage() {
           <DialogHeader>
             <DialogTitle>{templatePreview.title || "Template preview"}</DialogTitle>
           </DialogHeader>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant={templateChannelBadgeVariant(templatePreview.channel)}>
+              {templateChannelLabel(templatePreview.channel)}
+            </Badge>
+            <span>
+              {templatePreview.channel === "sms"
+                ? "Short draft intended for the Text button."
+                : "Formal draft intended for Guesty/OTA/email messaging."}
+            </span>
+          </div>
           <Textarea
             value={templatePreview.body}
             readOnly
@@ -3524,7 +3738,7 @@ export default function InboxPage() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setTemplatePreview({ open: false, title: "", body: "" })}
+              onClick={() => setTemplatePreview({ open: false, title: "", body: "", channel: "guesty" })}
               data-testid="button-template-preview-cancel"
             >
               Cancel
@@ -3532,8 +3746,13 @@ export default function InboxPage() {
             <Button
               onClick={() => {
                 setReplyText(templatePreview.body);
-                setTemplatePreview({ open: false, title: "", body: "" });
-                toast({ title: "Draft loaded", description: "Review in the composer, then send." });
+                setTemplatePreview({ open: false, title: "", body: "", channel: "guesty" });
+                toast({
+                  title: "Draft loaded",
+                  description: templatePreview.channel === "sms"
+                    ? "Review in the composer, then use Send Text."
+                    : "Review in the composer, then send in Guesty.",
+                });
               }}
               disabled={!templatePreview.body.trim()}
               data-testid="button-template-preview-use"
