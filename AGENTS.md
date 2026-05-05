@@ -871,21 +871,42 @@ established it so you can read the rationale in the commit message.
     badly-formed Claude response can't pollute the wizard with
     `[0, 1.5, 99]` chaos.
 
-40. **`APIFY_ZILLOW_ACTOR` env var picks which Apify actor scrapes
-    Zillow listings.** Default is `maxcopell~zillow-detail-scraper`.
+40. **`APIFY_ZILLOW_ACTOR` and `APIFY_REALTOR_ACTOR` env vars
+    pick which Apify actor scrapes each platform.** Both
+    operator-overridable so the actor choice doesn't require a
+    code change.
+
+    Defaults:
+    - `APIFY_ZILLOW_ACTOR` → `maxcopell~zillow-detail-scraper`
+    - `APIFY_REALTOR_ACTOR` → `epctex~realtor-scraper`
+
     Per Grok's 2026-05-04 architectural review of the find-clean-
-    unit + photo-scraper system, `jaroslavhejlek~zillow-scraper` is
-    the recommended alternative — better photo extraction (handles
-    Zillow's carousel JSON more reliably, extracts up to 50+ photos
-    via `resoFacts.photos`), better resoFacts coverage (lower rate
-    of partial-payload responses where bedrooms is present but
-    bathrooms is null). Cost is roughly equivalent. **To switch:**
-    set `APIFY_ZILLOW_ACTOR=jaroslavhejlek~zillow-scraper` on
-    Railway (note tilde, not slash — the value is passed straight
-    into the Apify URL path). The runtime URL becomes
-    `https://api.apify.com/v2/acts/jaroslavhejlek~zillow-scraper/run-sync-get-dataset-items?...`.
-    No code changes required; `scrapeZillowViaApify` reads the env
-    var at call time.
+    unit + photo-scraper system, `jaroslavhejlek~zillow-scraper`
+    is the recommended Zillow alternative — better photo extraction
+    (handles Zillow's carousel JSON more reliably, extracts up to
+    50+ photos via `resoFacts.photos`), better resoFacts coverage
+    (lower rate of partial-payload responses where bedrooms is
+    present but bathrooms is null). Cost is roughly equivalent.
+    **To switch:** set the env var on Railway (note tilde, not
+    slash — the value is passed straight into the Apify URL path).
+    The runtime URL becomes
+    `https://api.apify.com/v2/acts/<actor>/run-sync-get-dataset-items?...`.
+
+    Realtor.com integration order (added 2026-05-05):
+    1. **Apify primary** (`scrapeRealtorViaApify`, this Load-Bearing)
+    2. **Direct fetch** (`scrapeRealtorViaFetch`) — JSON-LD + text
+       regex on Realtor's HTML. Cheap; Realtor's anti-bot is light
+       enough that direct fetch usually works.
+    3. **ScrapingBee** — JS-rendered HTML, last resort.
+
+    The Apify-primary chain mirrors Zillow's
+    Apify→ScrapingBee→sidecar. No sidecar tier yet for Realtor.com
+    (operator's residential Chrome can be wired up later if all
+    three datacenter scrapers fail consistently).
+
+    Most Apify Realtor actors accept `{ startUrls: [{url}] }`;
+    epctex actors also accept `{ urls: [...] }`. The helper sends
+    both — actors ignore unknown fields.
 
     The other big architectural recommendations from the same Grok
     consult are NOT yet implemented and gated on operator decisions:
