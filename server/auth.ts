@@ -66,8 +66,12 @@ const PUBLIC_PATH_EXACT = new Set<string>([
   "/logout",
   "/favicon.ico",
   "/favicon.png",
+  "/favicon-16x16.png",
+  "/favicon-32x32.png",
   "/apple-touch-icon.png",
+  "/apple-touch-icon-precomposed.png",
   "/manifest.json",
+  "/site.webmanifest",
   "/robots.txt",
 ]);
 
@@ -149,9 +153,14 @@ const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
 <meta charset="utf-8">
 <title>Sign in — VacationRentalExpertz</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="/favicon.ico?v=2" sizes="any">
-<link rel="icon" type="image/png" href="/favicon.png?v=2">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
+<link rel="shortcut icon" href="/favicon.ico?v=3">
+<link rel="icon" href="/favicon.ico?v=3" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=3">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=3">
+<link rel="icon" type="image/png" href="/favicon.png?v=3">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3">
+<link rel="apple-touch-icon-precomposed" href="/apple-touch-icon-precomposed.png?v=3">
+<link rel="manifest" href="/site.webmanifest?v=3">
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
   .card { background: white; padding: 32px 36px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); width: 320px; }
