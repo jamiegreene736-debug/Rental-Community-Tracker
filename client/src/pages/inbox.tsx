@@ -1504,6 +1504,16 @@ export default function InboxPage() {
     refetchInterval: 15_000,
   });
 
+  const { data: smsStatus } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/status"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/sms/status");
+      if (!r.ok) throw new Error(`SMS status returned HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 30_000,
+  });
+
   const { data: phoneData } = useQuery<any>({
     queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"],
     enabled: !!selectedConvId,
@@ -1536,6 +1546,12 @@ export default function InboxPage() {
   const threadPosts = [...posts, ...smsPosts];
   const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
   const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
+  const smsConfigured = smsStatus?.configured !== false;
+  const smsDisabledReason = !smsConfigured
+    ? (smsStatus?.message ?? "SMS is not configured yet in Railway")
+    : !effectiveGuestPhone
+      ? "No guest phone number found on this thread"
+      : undefined;
 
   useEffect(() => {
     setGuestPhoneInput(effectiveGuestPhone);
@@ -2567,8 +2583,8 @@ export default function InboxPage() {
                           variant="outline"
                           size="sm"
                           onClick={() => sendTextMessage.mutate()}
-                          disabled={!replyText.trim() || sendTextMessage.isPending || !effectiveGuestPhone}
-                          title={effectiveGuestPhone ? `Send SMS to ${effectiveGuestPhone}` : "No guest phone number found on this thread"}
+                          disabled={!replyText.trim() || sendTextMessage.isPending || Boolean(smsDisabledReason)}
+                          title={smsDisabledReason ?? `Send SMS to ${effectiveGuestPhone}`}
                           data-testid="button-send-text"
                         >
                           <MessageCircle className="h-3.5 w-3.5 mr-1.5" />
@@ -3234,9 +3250,9 @@ export default function InboxPage() {
                                             size="sm"
                                             variant="outline"
                                             className="h-7 px-2 text-[11px]"
-                                            disabled={Boolean(item.disabled) || !effectiveGuestPhone}
+                                            disabled={Boolean(item.disabled) || Boolean(smsDisabledReason)}
                                             onClick={item.smsOnClick}
-                                            title={effectiveGuestPhone ? `Draft text for ${effectiveGuestPhone}` : "Add a guest SMS phone number first"}
+                                            title={smsDisabledReason ?? `Draft text for ${effectiveGuestPhone}`}
                                             data-testid={item.smsTestId}
                                           >
                                             <MessageCircle className="h-3 w-3 mr-1" />

@@ -28,6 +28,17 @@ export function getQuoFromNumber(): string {
   return from;
 }
 
+export function getQuoSmsConfigStatus(): { configured: boolean; missing: string[] } {
+  const missing: string[] = [];
+  if (!process.env.QUO_API_KEY) missing.push("QUO_API_KEY");
+  try {
+    getQuoFromNumber();
+  } catch {
+    missing.push("QUO_FROM_NUMBER");
+  }
+  return { configured: missing.length === 0, missing };
+}
+
 function collectPhoneNumbers(node: unknown, out = new Set<string>(), depth = 0): Set<string> {
   if (!node || depth > 6) return out;
   if (typeof node === "string" || typeof node === "number") {
@@ -117,7 +128,7 @@ export async function sendQuoSms(input: {
   body: string;
 }): Promise<QuoSmsMessage> {
   const apiKey = process.env.QUO_API_KEY;
-  if (!apiKey) throw new Error("QUO_API_KEY is required to send SMS");
+  if (!apiKey) throw new Error("SMS is not configured yet. Add QUO_API_KEY in Railway before sending texts.");
   const from = getQuoFromNumber();
   const to = normalizePhone(input.to);
   if (!phoneLast10(to)) throw new Error("Guest phone number is missing or invalid");

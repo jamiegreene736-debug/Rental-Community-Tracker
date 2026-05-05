@@ -28,7 +28,7 @@ import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
-import { findGuestyConversationByPhone, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
+import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -20920,6 +20920,17 @@ CONSTRAINTS
 
   // ========== INBOX — Quo SMS ==========
 
+  app.get("/api/inbox/sms/status", async (_req, res) => {
+    const status = getQuoSmsConfigStatus();
+    return res.json({
+      configured: status.configured,
+      missing: status.missing,
+      message: status.configured
+        ? "SMS is configured"
+        : `SMS is not configured yet. Add ${status.missing.join(" and ")} in Railway.`,
+    });
+  });
+
   app.get("/api/inbox/sms/conversations/:conversationId/messages", async (req, res) => {
     try {
       const conversationId = req.params.conversationId;
@@ -20980,6 +20991,14 @@ CONSTRAINTS
         guestName?: string | null;
       };
       if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const config = getQuoSmsConfigStatus();
+      if (!config.configured) {
+        return res.status(503).json({
+          error: "SMS is not configured",
+          message: `Add ${config.missing.join(" and ")} in Railway before sending texts.`,
+          missing: config.missing,
+        });
+      }
       const message = await sendQuoSms({
         conversationId,
         reservationId: reservationId ?? null,
