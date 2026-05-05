@@ -16040,6 +16040,7 @@ Return ONLY compact JSON with this exact shape:
       const pst = (facts.propertySubType || "").toLowerCase();
       const DISQUALIFYING_SUB_TYPES = ["lot", "land", "mobile", "co-op", "co op"];
       if (pst && DISQUALIFYING_SUB_TYPES.some((t) => pst.includes(t))) {
+        const reason = `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -16048,8 +16049,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -16064,6 +16066,7 @@ Return ONLY compact JSON with this exact shape:
       // failure mode Jamie reported with Santa Maria Resort Condo
       // Hdr).
       if (typeof facts.photoCount === "number" && facts.photoCount < 3) {
+        const reason = `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -16072,8 +16075,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
