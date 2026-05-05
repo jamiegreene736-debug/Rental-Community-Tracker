@@ -668,10 +668,10 @@ export default function Home() {
         <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-              VacationRentalExpertz — Property Research
+              VacationRentalExpertz Operations Portal
             </h1>
             <p className="text-muted-foreground mt-1">
-              VacationRentalExpertz portfolio of vacation rental communities with pricing and performance data
+              Manage vacation-rental listings, guest messaging, buy-ins, and revenue workflows from one dashboard
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

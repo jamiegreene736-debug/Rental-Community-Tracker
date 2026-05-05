@@ -25,9 +25,10 @@
 //     operator's Mac. Gating would break the find-buy-in flow's
 //     most-reliable Vrbo path. The sidecar already runs on the
 //     operator's own machine and the channel is implicitly trusted.
-//   - /assets/* + /photos/* + /favicon.ico + /manifest.json +
-//     /robots.txt — the page can't render the login form without
-//     its own JS/CSS, and crawlers/PWA shells expect those files.
+//   - /assets/* + /photos/* + /brand/* + favicon/touch icons +
+//     /manifest.json + /robots.txt — the page can't render the
+//     login form without its own JS/CSS/brand assets, and browsers
+//     request favicons before the operator has authenticated.
 //   - 127.0.0.1 loopback — availability-scheduler.ts does an HTTP
 //     self-call to /api/admin/refresh-all-market-rates once per
 //     scheduled tick. The bypass uses req.socket.remoteAddress, NOT
@@ -52,6 +53,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/logout",
   "/assets/",
   "/photos/",
+  "/brand/",
   "/api/admin/vrbo-sidecar/",
 ];
 
@@ -59,6 +61,8 @@ const PUBLIC_PATH_EXACT = new Set<string>([
   "/login",
   "/logout",
   "/favicon.ico",
+  "/favicon.png",
+  "/apple-touch-icon.png",
   "/manifest.json",
   "/robots.txt",
 ]);
@@ -141,6 +145,9 @@ const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
 <meta charset="utf-8">
 <title>Sign in — VacationRentalExpertz</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.ico?v=2" sizes="any">
+<link rel="icon" type="image/png" href="/favicon.png?v=2">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
   .card { background: white; padding: 32px 36px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); width: 320px; }
