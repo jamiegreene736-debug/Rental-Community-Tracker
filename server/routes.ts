@@ -811,6 +811,169 @@ async function scrapeRealtorViaApify(url: string): Promise<{ urls: string[]; fac
   }
 }
 
+// CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+// SEARCH-results-page Apify actors. Different from the per-URL
+// detail scrapers above — these crawl Zillow/Realtor's own search
+// pages for an entire city, paginate through all results, and
+// return arrays of detail-page URLs. Used by find-clean-unit
+// city-wide mode to bypass Google's site:zillow.com index ceiling
+// (~35 unique URLs no matter how the queries are phrased).
+//
+// Recommended by Grok consult 2026-05-04 — actor IDs are env-
+// configurable so the operator can swap if a different Apify
+// actor proves more reliable. Defaults match Grok's recs.
+//
+// Each actor accepts startUrls + maxItems; the returned dataset
+// is array-of-property-objects with various URL fields. The
+// helpers below normalize to a flat string[] of detail URLs,
+// filtered by the URL pattern that find-clean-unit's iteration
+// loop expects (so we don't promote category pages or photo
+// gallery URLs as candidates).
+function citySlugForZillow(city: string, state: string): string {
+  // "Fort Myers Beach" + "Florida" -> "fort-myers-beach-fl"
+  const stateAbbrev = stateToAbbrev(state);
+  const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${slug}-${stateAbbrev.toLowerCase()}`;
+}
+function citySlugForRealtor(city: string, state: string): string {
+  // "Fort Myers Beach" + "Florida" -> "Fort-Myers-Beach_FL"
+  const stateAbbrev = stateToAbbrev(state);
+  const slug = city.split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join("-");
+  return `${slug}_${stateAbbrev.toUpperCase()}`;
+}
+function stateToAbbrev(state: string): string {
+  const s = state.trim();
+  if (s.length === 2) return s.toUpperCase();
+  const map: Record<string, string> = {
+    florida: "FL", hawaii: "HI",
+    california: "CA", texas: "TX", "new york": "NY",
+    // Add more as scope expands — currently FL + HI per AGENTS.md.
+  };
+  return map[s.toLowerCase()] ?? s.slice(0, 2).toUpperCase();
+}
+
+// Pull URLs from any of the common fields Apify search actors
+// return them under. Filters by the platform's detail-URL regex.
+function extractUrlsFromApifyDataset(items: any[], pattern: RegExp): string[] {
+  const found = new Set<string>();
+  const visit = (val: unknown, depth: number): void => {
+    if (depth > 4 || val == null) return;
+    if (typeof val === "string") {
+      if (pattern.test(val)) found.add(val);
+      return;
+    }
+    if (Array.isArray(val)) {
+      for (const v of val) visit(v, depth + 1);
+      return;
+    }
+    if (typeof val === "object") {
+      for (const v of Object.values(val as Record<string, unknown>)) {
+        visit(v, depth + 1);
+      }
+    }
+  };
+  for (const item of items) visit(item, 0);
+  return Array.from(found);
+}
+
+async function harvestZillowUrlsViaApifySearch(
+  city: string,
+  state: string,
+  maxItems: number = 500,
+): Promise<string[]> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) {
+    console.warn(`[harvestZillow:Apify] APIFY_API_TOKEN not set — falling back to Google`);
+    return [];
+  }
+  const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper").replace("/", "~");
+  const slug = citySlugForZillow(city, state);
+  const searchUrl = `https://www.zillow.com/${slug}/condos/`;
+  try {
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startUrls: [{ url: searchUrl }],
+        maxItems,
+        // Active-listings filter (Grok rec 2026-05-04): excludes
+        // off-market stubs at discovery time — saves ~60% of
+        // per-candidate scrape budget. Actor either honors these
+        // or ignores them silently; either way they're free to
+        // include.
+        filters: {
+          isForSaleByAgent: true,
+          isForSaleByOwner: true,
+          isForRent: true,
+          isAuction: false,
+          isPending: false,
+          isSold: false,
+        },
+        propertyTypes: ["condo", "townhouse"],
+        proxy: { useApifyProxy: true, groups: ["RESIDENTIAL"] },
+      }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[harvestZillow:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
+      return [];
+    }
+    const items: any[] = await r.json().catch(() => []);
+    if (!Array.isArray(items)) return [];
+    const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i);
+    console.log(`[harvestZillow:Apify] ${searchUrl} → ${items.length} dataset items, ${urls.length} unique homedetails URLs`);
+    return urls;
+  } catch (e: any) {
+    console.warn(`[harvestZillow:Apify] error: ${e?.message ?? e}`);
+    return [];
+  }
+}
+
+async function harvestRealtorUrlsViaApifySearch(
+  city: string,
+  state: string,
+  maxItems: number = 500,
+): Promise<string[]> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) return [];
+  const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper").replace("/", "~");
+  const slug = citySlugForRealtor(city, state);
+  const searchUrl = `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
+  try {
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startUrls: [{ url: searchUrl }],
+        maxItems,
+        // Realtor's status filter — actors either accept this
+        // top-level field, embed it in the search URL, or ignore
+        // it. Including it is harmless; honoring it filters stubs
+        // upstream.
+        status: ["for_sale", "for_rent"],
+        sort: "newest",
+      }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[harvestRealtor:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
+      return [];
+    }
+    const items: any[] = await r.json().catch(() => []);
+    if (!Array.isArray(items)) return [];
+    const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i);
+    console.log(`[harvestRealtor:Apify] ${searchUrl} → ${items.length} dataset items, ${urls.length} unique detail URLs`);
+    return urls;
+  } catch (e: any) {
+    console.warn(`[harvestRealtor:Apify] error: ${e?.message ?? e}`);
+    return [];
+  }
+}
+
 // CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
 // scraper via direct fetch + JSON-LD parsing. Realtor.com's
 // anti-bot is much lighter than Zillow's — straight fetch with a
@@ -16310,6 +16473,53 @@ Return ONLY compact JSON with this exact shape:
         }
       }
     };
+    // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+    // City-wide mode tries Apify SEARCH actors first
+    // (epctex~zillow-scraper / epctex~realtor-scraper) — they hit
+    // Zillow's/Realtor's own search APIs and return 200-500+
+    // candidate URLs vs Google site:'s hard ceiling at ~35.
+    // Recommended by Grok consult 2026-05-04. Falls back to the
+    // existing Google site: discovery if Apify is not configured
+    // (no APIFY_API_TOKEN), the actor errors out, or it returns
+    // zero URLs. Community-anchored mode skips this — direct
+    // Apify SEARCH with a community name doesn't filter as well
+    // as a community-anchored Google site: query, and the
+    // existing Google flow already harvests enough URLs for a
+    // single resort.
+    if (isCityWide) {
+      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
+        harvestZillowUrlsViaApifySearch(city, state, 500),
+        harvestRealtorUrlsViaApifySearch(city, state, 500),
+      ]);
+      for (const link of zillowApifyUrls) {
+        const lower = link.toLowerCase();
+        if (seen.has(lower)) continue;
+        if (skipSet.has(lower)) continue;
+        seen.add(lower);
+        candidateUrls.push(link);
+        platformCounts.zillow++;
+      }
+      for (const link of realtorApifyUrls) {
+        const lower = link.toLowerCase();
+        if (seen.has(lower)) continue;
+        if (skipSet.has(lower)) continue;
+        seen.add(lower);
+        candidateUrls.push(link);
+        platformCounts.realtor++;
+      }
+      console.log(
+        `[find-clean-unit] city-wide Apify search: ` +
+        `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
+        `(deduped to total=${candidateUrls.length})`,
+      );
+    }
+
+    // Google site: queries — runs unconditionally. Acts as a
+    // fallback when Apify returned 0 in city-wide mode (key
+    // missing, actor error), and as the PRIMARY discovery path
+    // for community-anchored mode (where the resort name in the
+    // query restricts hits in a way the Apify city-search can't
+    // match). Dedup is automatic via the `seen` Set above.
     await Promise.all([
       harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
       harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
@@ -16462,16 +16672,15 @@ Return ONLY compact JSON with this exact shape:
     let textOnlyFallback: FallbackMatch | null = null;
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // Candidate cap is mode-aware. Community-anchored stays at 15
-    // because a single resort's Zillow inventory rarely tops that
-    // and we want to leave wall-budget headroom for the per-
-    // candidate Apify+OTA round-trip. City-wide mode caps at 60 so
-    // we can actually walk a meaningful slice of a city's condos
-    // (Fort Myers Beach saw "15 of the whole city checked" before
-    // this bump). The wall budget (12 min for city-wide) gates
-    // total runtime — at ~15-25s/candidate the loop typically
-    // bails on budget around candidate 30-40, but on fast scrape
-    // days we want to keep going up to 60.
-    const RAW_CAP = isCityWide ? 60 : 15;
+    // because a single resort's Zillow inventory rarely tops that.
+    // City-wide bumped to 80 now that Apify search actors surface
+    // 200-500+ URLs; the active-listings filter strips stubs
+    // upstream so each remaining candidate has a much higher
+    // chance of qualifying than the old Google-site: pool. Wall
+    // budget (12 min) still gates total runtime — at ~15-25s
+    // each, the loop bails around candidate 30-50 on slow scrape
+    // days but walks the full 80 on fast days.
+    const RAW_CAP = isCityWide ? 80 : 15;
     const candidateCap = Math.min(candidateUrls.length, RAW_CAP);
 
     // CODEX NOTE (2026-05-04, claude/verify-then-discover): helper
