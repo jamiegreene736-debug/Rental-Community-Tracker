@@ -1517,7 +1517,15 @@ export default function AddSingleListing() {
                 ("Discovering candidates" → "Walking N/M") + a per-
                 candidate detail line ("Scraping…" / "Checking
                 Airbnb/VRBO/Booking" / "Listed on VRBO" / "Clean ✓"). */}
-            {selectedCommunity && findLoading && (
+            {/* CODEX NOTE (2026-05-04, claude/single-listing-citywide-progress):
+                Was previously gated to `selectedCommunity && findLoading`
+                only. Bug: in city-wide mode the operator clicked Find,
+                the button vanished (gated on `!findLoading`), but the
+                progress block never rendered — so the page looked
+                completely dead. Now gated on
+                `(selectedCommunity || cityWideMode) && findLoading`
+                so the progress bar covers both paths. */}
+            {(selectedCommunity || cityWideMode) && findLoading && (
               <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -1629,7 +1637,12 @@ export default function AddSingleListing() {
                 per-candidate list is the same data as Step 2's
                 "Why we skipped" disclosure but surfaced in-line so
                 it's visible without expanding. */}
-            {selectedCommunity && !findLoading && findResult && !findResult.found && (
+            {/* CODEX NOTE (2026-05-04, claude/single-listing-citywide-progress):
+                Same fix as the progress block above — was gated on
+                selectedCommunity only, now `selectedCommunity ||
+                cityWideMode` so the no-unit-found diagnostic also
+                renders for city-wide searches. */}
+            {(selectedCommunity || cityWideMode) && !findLoading && findResult && !findResult.found && (
               <div className="border border-red-300 bg-red-50/30 rounded-lg p-4 space-y-3">
                 <div className="flex items-center gap-2 font-semibold text-red-900">
                   <ShieldX className="h-4 w-4" />
