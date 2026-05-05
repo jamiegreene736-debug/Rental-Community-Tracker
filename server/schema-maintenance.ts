@@ -59,9 +59,16 @@ export async function ensureRuntimeSchema(): Promise<void> {
       guest_name text,
       phone text NOT NULL,
       source_phone text,
+      pre_arrival_form_url text,
+      payment_url text,
       updated_at timestamp NOT NULL DEFAULT now(),
       created_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  await db.execute(sql`
+    ALTER TABLE guest_phone_overrides
+      ADD COLUMN IF NOT EXISTS pre_arrival_form_url text,
+      ADD COLUMN IF NOT EXISTS payment_url text
   `);
   console.log("[schema] ensured guest_phone_overrides table");
 }

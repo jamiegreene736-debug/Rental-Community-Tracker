@@ -717,6 +717,8 @@ export class DatabaseStorage implements IStorage {
           guestName: input.guestName ?? null,
           phone: input.phone,
           sourcePhone: input.sourcePhone ?? null,
+          preArrivalFormUrl: input.preArrivalFormUrl ?? null,
+          paymentUrl: input.paymentUrl ?? null,
           updatedAt: new Date(),
         },
       })

@@ -444,6 +444,8 @@ export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   guestName: text("guest_name"),
   phone: text("phone").notNull(),
   sourcePhone: text("source_phone"),
+  preArrivalFormUrl: text("pre_arrival_form_url"),
+  paymentUrl: text("payment_url"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });

@@ -64,6 +64,18 @@ import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { unitBuilderData, getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 
+function normalizeHttpsUrl(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") throw new Error("URL must start with https://");
+    return url.toString();
+  } catch {
+    throw new Error("Enter a valid secure URL starting with https://");
+  }
+}
+
 // Fetch the latest Guesty login verification code from the operator's Gmail
 // inbox via IMAP. Polls for up to 90s (checking every 5s) so the server can
 // tolerate some email-delivery lag. Only considers messages received AFTER
@@ -20956,11 +20968,13 @@ CONSTRAINTS
   app.put("/api/inbox/sms/conversations/:conversationId/phone", async (req, res) => {
     try {
       const conversationId = req.params.conversationId;
-      const { phone, reservationId, guestName, sourcePhone } = req.body as {
+      const { phone, reservationId, guestName, sourcePhone, preArrivalFormUrl, paymentUrl } = req.body as {
         phone?: string;
         reservationId?: string | null;
         guestName?: string | null;
         sourcePhone?: string | null;
+        preArrivalFormUrl?: string | null;
+        paymentUrl?: string | null;
       };
       if (!conversationId) return res.status(400).json({ error: "conversationId required" });
       const normalized = normalizePhone(phone);
@@ -20974,10 +20988,44 @@ CONSTRAINTS
         guestName: guestName ?? null,
         phone: normalized,
         sourcePhone: normalizePhone(sourcePhone) || null,
+        preArrivalFormUrl: normalizeHttpsUrl(preArrivalFormUrl),
+        paymentUrl: normalizeHttpsUrl(paymentUrl),
       });
       return res.json({ ok: true, override });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to save guest phone", message: err.message });
+    }
+  });
+
+  app.put("/api/inbox/sms/conversations/:conversationId/links", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      const { phone, reservationId, guestName, sourcePhone, preArrivalFormUrl, paymentUrl } = req.body as {
+        phone?: string;
+        reservationId?: string | null;
+        guestName?: string | null;
+        sourcePhone?: string | null;
+        preArrivalFormUrl?: string | null;
+        paymentUrl?: string | null;
+      };
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const normalized = normalizePhone(phone);
+      const digits = normalized.replace(/\D/g, "");
+      if (digits.length < 10 || digits.length > 15) {
+        return res.status(400).json({ error: "Save a valid guest phone number before saving SMS links" });
+      }
+      const override = await storage.upsertGuestPhoneOverride({
+        conversationId,
+        reservationId: reservationId ?? null,
+        guestName: guestName ?? null,
+        phone: normalized,
+        sourcePhone: normalizePhone(sourcePhone) || null,
+        preArrivalFormUrl: normalizeHttpsUrl(preArrivalFormUrl),
+        paymentUrl: normalizeHttpsUrl(paymentUrl),
+      });
+      return res.json({ ok: true, override });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to save SMS links", message: err.message });
     }
   });
 
@@ -20996,6 +21044,12 @@ CONSTRAINTS
         return res.status(400).json({
           error: "Unresolved Guesty variable",
           message: "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Remove the placeholder before sending by text.",
+        });
+      }
+      if (/\[(?:PASTE|ADD) [^\]]+\]/i.test(smsBody)) {
+        return res.status(400).json({
+          error: "Missing SMS link",
+          message: "Paste the real secure Guesty link before sending this text.",
         });
       }
       const config = getQuoSmsConfigStatus();

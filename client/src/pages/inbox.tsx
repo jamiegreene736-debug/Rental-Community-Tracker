@@ -194,6 +194,7 @@ const MERGE_TAGS = [
 ];
 
 const GUESTY_VARIABLE_PATTERN = /\{\{[^}]+\}\}/;
+const SMS_PLACEHOLDER_PATTERN = /\[(?:PASTE|ADD) [^\]]+\]/i;
 
 const TEMPLATE_CHANNEL_OPTIONS = [
   { value: "guesty", label: "Guesty / OTA / email" },
@@ -206,6 +207,38 @@ function templateChannelLabel(channel?: string): string {
 
 function templateChannelBadgeVariant(channel?: string): "default" | "secondary" | "outline" {
   return channel === "sms" ? "secondary" : "outline";
+}
+
+function normalizeHttpsUrl(value: string): string {
+  const raw = value.trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" ? url.toString() : raw;
+  } catch {
+    return raw;
+  }
+}
+
+function extractUrlsFromText(value: string): string[] {
+  return Array.from(value.matchAll(/https?:\/\/[^\s<>"')]+/gi)).map((match) =>
+    match[0].replace(/[.,;:!?]+$/, ""),
+  );
+}
+
+function findRelevantThreadUrl(posts: GuestyPost[], kind: "prearrival" | "payment"): string {
+  const urlRows = posts
+    .map((p) => cleanMessageBody(p.body ?? p.text ?? (p as any).message ?? ""))
+    .flatMap((body) => extractUrlsFromText(body).map((url) => ({ body: body.toLowerCase(), url })));
+  const preferred = urlRows.find(({ body, url }) => {
+    const urlLower = url.toLowerCase();
+    if (kind === "prearrival") {
+      return /guest-app|check[- ]?in|pre[- ]?arrival|rental agreement|agreement/.test(body) ||
+        /guest-app|guesty/.test(urlLower);
+    }
+    return /invoice|payment|balance|card/.test(body) || /invoice|payment|checkout|pay/.test(urlLower);
+  });
+  return preferred?.url ?? urlRows[0]?.url ?? "";
 }
 
 const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
@@ -730,9 +763,13 @@ function buildAgreementRequestBody(args: {
 function buildAgreementRequestSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  preArrivalFormUrl?: string;
 }): string {
+  const link = args.preArrivalFormUrl?.trim() || "[PASTE SECURE GUESTY FORM LINK]";
   return [
-    `Hi ${args.guestFirstName || "there"}, I just sent the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""} in the booking thread/email. Please complete it there when you have a moment.`,
+    `Hi ${args.guestFirstName || "there"}, please complete the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    link,
+    ``,
     `This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
   ].join("\n");
 }
@@ -764,9 +801,13 @@ function buildGuestyInvoicePaymentBody(args: {
 function buildGuestyInvoicePaymentSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  paymentUrl?: string;
 }): string {
+  const link = args.paymentUrl?.trim() || "[PASTE SECURE GUESTY PAYMENT LINK]";
   return [
-    `Hi ${args.guestFirstName || "there"}, I sent the secure Guesty payment request${args.propertyName ? ` for ${args.propertyName}` : ""} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.`,
+    `Hi ${args.guestFirstName || "there"}, please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    link,
+    ``,
     `Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
   ].join("\n");
 }
@@ -1334,6 +1375,8 @@ export default function InboxPage() {
   const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
   const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
   const [guestPhoneInput, setGuestPhoneInput] = useState("");
+  const [guestPreArrivalFormUrlInput, setGuestPreArrivalFormUrlInput] = useState("");
+  const [guestPaymentUrlInput, setGuestPaymentUrlInput] = useState("");
   // Property filter for the conversation list — narrows the visible
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
@@ -1544,12 +1587,21 @@ export default function InboxPage() {
   const threadPosts = [...posts, ...smsPosts];
   const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
   const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
+  const detectedPreArrivalFormUrl = findRelevantThreadUrl(threadPosts, "prearrival");
+  const detectedPaymentUrl = findRelevantThreadUrl(threadPosts, "payment");
+  const savedPreArrivalFormUrl = String(phoneData?.override?.preArrivalFormUrl ?? "");
+  const savedPaymentUrl = String(phoneData?.override?.paymentUrl ?? "");
+  const effectivePreArrivalFormUrl = savedPreArrivalFormUrl || detectedPreArrivalFormUrl;
+  const effectivePaymentUrl = savedPaymentUrl || detectedPaymentUrl;
   const hasUnresolvedGuestyVariable = GUESTY_VARIABLE_PATTERN.test(replyText);
+  const hasSmsPlaceholder = SMS_PLACEHOLDER_PATTERN.test(replyText);
   const smsConfigured = smsStatus?.configured !== false;
   const smsDisabledReason = !smsConfigured
     ? (smsStatus?.message ?? "SMS is not configured yet in Railway")
     : hasUnresolvedGuestyVariable
       ? "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Use Send in Guesty or remove the placeholder before texting."
+    : hasSmsPlaceholder
+      ? "Paste the real secure Guesty link before texting this draft."
     : !effectiveGuestPhone
       ? "No guest phone number found on this thread"
       : undefined;
@@ -1557,6 +1609,11 @@ export default function InboxPage() {
   useEffect(() => {
     setGuestPhoneInput(effectiveGuestPhone);
   }, [selectedConvId, effectiveGuestPhone]);
+
+  useEffect(() => {
+    setGuestPreArrivalFormUrlInput(effectivePreArrivalFormUrl);
+    setGuestPaymentUrlInput(effectivePaymentUrl);
+  }, [selectedConvId, effectivePreArrivalFormUrl, effectivePaymentUrl]);
 
   useEffect(() => {
     if (threadRef.current) {
@@ -1689,9 +1746,9 @@ export default function InboxPage() {
   }) => {
     const units = arrivalDetails?.units ?? [];
     const body = channel === "sms" && kind === "agreement-request"
-      ? buildAgreementRequestSmsBody({ guestFirstName, propertyName })
+      ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, preArrivalFormUrl: effectivePreArrivalFormUrl })
       : channel === "sms" && kind === "guesty-invoice-payment"
-        ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName })
+        ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
       : channel === "sms" && kind === "representative-follow-up"
         ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
       : channel === "sms" && kind === "local-tips"
@@ -1771,6 +1828,9 @@ export default function InboxPage() {
       if (GUESTY_VARIABLE_PATTERN.test(replyText)) {
         throw new Error("Guesty variables like {{checkin_form}} do not expand in Quo texts. Send this through Guesty or remove the placeholder before texting.");
       }
+      if (SMS_PLACEHOLDER_PATTERN.test(replyText)) {
+        throw new Error("Paste the real secure Guesty link before sending this text.");
+      }
       const r = await apiRequest("POST", `/api/inbox/sms/conversations/${selectedConvId}/send`, {
         to,
         body: replyText,
@@ -1805,6 +1865,8 @@ export default function InboxPage() {
         reservationId: selectedConv.reservationId ?? null,
         guestName: selectedConv.displayGuestName ?? null,
         sourcePhone: selectedConv.displayGuestPhone ?? null,
+        preArrivalFormUrl: guestPreArrivalFormUrlInput.trim() || null,
+        paymentUrl: guestPaymentUrlInput.trim() || null,
       });
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
@@ -1819,6 +1881,34 @@ export default function InboxPage() {
       toast({ title: "Guest phone saved", description: phone });
     },
     onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
+  });
+
+  const saveGuestSmsLinks = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const normalized = normalizePhone(guestPhoneInput || effectiveGuestPhone);
+      if (!normalized) throw new Error("Save a valid guest SMS phone number before saving SMS links");
+      const r = await apiRequest("PUT", `/api/inbox/sms/conversations/${selectedConvId}/links`, {
+        phone: normalized,
+        reservationId: selectedConv.reservationId ?? null,
+        guestName: selectedConv.displayGuestName ?? null,
+        sourcePhone: selectedConv.displayGuestPhone ?? null,
+        preArrivalFormUrl: guestPreArrivalFormUrlInput.trim() || null,
+        paymentUrl: guestPaymentUrlInput.trim() || null,
+      });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      setGuestPreArrivalFormUrlInput(String(data?.override?.preArrivalFormUrl ?? ""));
+      setGuestPaymentUrlInput(String(data?.override?.paymentUrl ?? ""));
+      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"] });
+      toast({ title: "SMS links saved" });
+    },
+    onError: (e: any) => toast({ title: "Links not saved", description: e.message, variant: "destructive" }),
   });
 
   // Regenerate the receipt body whenever any input changes — but only
@@ -2843,6 +2933,51 @@ export default function InboxPage() {
                               : selectedConv.displayGuestPhone
                                 ? "Pulled from Guesty"
                                 : "Enter a number with area code before texting"}
+                          </div>
+                          <div className="pt-1 space-y-1.5">
+                            <Label htmlFor="guest-prearrival-link" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                              Agreement link
+                            </Label>
+                            <Input
+                              id="guest-prearrival-link"
+                              value={guestPreArrivalFormUrlInput}
+                              onChange={(e) => setGuestPreArrivalFormUrlInput(e.target.value)}
+                              onBlur={() => setGuestPreArrivalFormUrlInput((value) => normalizeHttpsUrl(value))}
+                              placeholder="https://guest-app.guesty.com/..."
+                              className="h-8 text-xs"
+                              data-testid="input-guest-prearrival-link"
+                            />
+                            <Label htmlFor="guest-payment-link" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                              Payment link
+                            </Label>
+                            <Input
+                              id="guest-payment-link"
+                              value={guestPaymentUrlInput}
+                              onChange={(e) => setGuestPaymentUrlInput(e.target.value)}
+                              onBlur={() => setGuestPaymentUrlInput((value) => normalizeHttpsUrl(value))}
+                              placeholder="https://..."
+                              className="h-8 text-xs"
+                              data-testid="input-guest-payment-link"
+                            />
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[10px] text-muted-foreground">
+                                {savedPreArrivalFormUrl || savedPaymentUrl
+                                  ? "Saved for SMS templates"
+                                  : detectedPreArrivalFormUrl || detectedPaymentUrl
+                                    ? "Detected from the thread; save to pin it"
+                                    : "Paste Guesty links here before texting them"}
+                              </div>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => saveGuestSmsLinks.mutate()}
+                                disabled={saveGuestSmsLinks.isPending || !effectiveGuestPhone}
+                                data-testid="button-save-guest-sms-links"
+                              >
+                                Save links
+                              </Button>
+                            </div>
                           </div>
                         </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
