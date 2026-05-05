@@ -20,6 +20,7 @@ import { getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { consultGrokAboutFindUnit } from "./grok-find-unit-consult";
+import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -241,13 +242,23 @@ interface ScrapedPhoto {
   sourceLink: string;
 }
 
-// Structured listing facts (bed/bath counts) pulled from the scraper's
-// response. Callers pass a mutable object and read it after the scrape —
-// this keeps scrapeListingPhotos' photo-array return signature stable for
-// the ~8 existing callers while letting new callers opt into the metadata.
+// Structured listing facts (bed/bath counts + property type / status)
+// pulled from the scraper's response. Callers pass a mutable object and
+// read it after the scrape — this keeps scrapeListingPhotos' photo-array
+// return signature stable for the ~8 existing callers while letting new
+// callers opt into the metadata.
+//
+// CODEX NOTE (2026-05-04, claude/single-listing-stub-filter): added
+// `homeType` and `homeStatus` so the single-listing find-clean-unit
+// endpoint can filter out off-market stubs / land lots / single-family
+// homes that occasionally make it through the Zillow homedetails URL
+// filter (Jamie hit a "Santa Maria Resort Condo Hdr" listing that was
+// off-market with no beds/baths/sqft and "SingleFamily" type).
 export interface ListingFacts {
   bedrooms?: number;
   bathrooms?: number;
+  homeType?: string;
+  homeStatus?: string;
 }
 
 // Pick plausible bed/bath counts from a Zillow scraper payload. The various
@@ -259,7 +270,7 @@ export interface ListingFacts {
 function extractListingFacts(payload: any): ListingFacts {
   const facts: ListingFacts = {};
   function walk(o: any, depth: number): void {
-    if (depth > 8 || !o || typeof o !== "object") return;
+    if (depth > 12 || !o || typeof o !== "object") return;
     if (Array.isArray(o)) { for (const v of o) walk(v, depth + 1); return; }
     if (facts.bedrooms == null && typeof o.bedrooms === "number" && o.bedrooms > 0 && o.bedrooms < 50) {
       facts.bedrooms = Math.round(o.bedrooms);
@@ -274,11 +285,32 @@ function extractListingFacts(payload: any): ListingFacts {
       else if (typeof o.bathroomsFull === "number") {
         b = o.bathroomsFull + (typeof o.bathroomsHalf === "number" ? o.bathroomsHalf * 0.5 : 0);
       } else if (typeof o.bathroomsTotalInteger === "number") b = o.bathroomsTotalInteger;
+      else if (typeof o.numberOfBathrooms === "number") b = o.numberOfBathrooms;
+      else if (typeof o.numberOfBathroomsTotal === "number") b = o.numberOfBathroomsTotal;
       if (typeof b === "number" && b > 0 && b < 50) {
         // Snap to nearest 0.5 — Zillow half-baths are always multiples of
         // 0.5, so a non-half fractional is almost certainly noise.
         facts.bathrooms = Math.round(b * 2) / 2;
       }
+    }
+    // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
+    // homeType / homeStatus extraction. Zillow's payload uses both
+    // `homeType` (CONDO, SINGLE_FAMILY, TOWNHOUSE, LOT, ...) and
+    // `propertyTypeDimension` (display variant). Same for status —
+    // `homeStatus` is the canonical (FOR_SALE, RECENTLY_SOLD,
+    // OFF_MARKET, ...). The single-listing find-clean-unit endpoint
+    // uses these to reject candidates that aren't valid vacation
+    // rental candidates (off-market stubs, raw lots, single-family
+    // detached, etc.) before running the OTA qualifier.
+    if (facts.homeType == null) {
+      if (typeof o.homeType === "string" && o.homeType.length > 0) {
+        facts.homeType = o.homeType;
+      } else if (typeof o.propertyTypeDimension === "string" && o.propertyTypeDimension.length > 0) {
+        facts.homeType = o.propertyTypeDimension;
+      }
+    }
+    if (facts.homeStatus == null && typeof o.homeStatus === "string" && o.homeStatus.length > 0) {
+      facts.homeStatus = o.homeStatus;
     }
     for (const v of Object.values(o)) walk(v, depth + 1);
   }
@@ -2646,6 +2678,21 @@ export async function registerRoutes(
   app.get("/api/operations/grok-find-unit-consult", async (_req, res) => {
     try {
       const text = await consultGrokAboutFindUnit();
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(text);
+    } catch (e: any) {
+      res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
+  });
+
+  // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
+  // Grok consult endpoint focused on the single-listing wizard's
+  // find-clean-unit + photo-scraper architecture. Sister to the
+  // find-unit-consult above. Brief in
+  // server/grok-single-listing-consult.ts. Plain-text response.
+  app.get("/api/operations/grok-single-listing-consult", async (_req, res) => {
+    try {
+      const text = await consultGrokAboutSingleListing();
       res.set("Content-Type", "text/plain; charset=utf-8");
       res.send(text);
     } catch (e: any) {
@@ -15655,12 +15702,37 @@ Return ONLY compact JSON with this exact shape:
       const scrapedBR = facts.bedrooms ?? null;
       const scrapedBA = facts.bathrooms ?? null;
 
+      // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
+      // Hard reject candidates whose Zillow scrape returned NO
+      // bedroom data at all. A real condo unit ALWAYS has a
+      // bedroom count; an empty scrape means the listing is a
+      // stub — typically off-market with no public details, a raw
+      // lot, or a building-level page with no unit-specific data.
+      // Jamie hit a "Santa Maria Resort Condo Hdr" Zillow listing
+      // with "Off market" + `--` beds/baths/sqft + propertyType
+      // SingleFamily that was passing the text-only fallback path
+      // because the OTA address-search returned no matches (there's
+      // no real unit at that URL to be on Airbnb either). Without
+      // bedroom data we can't even seed the bedding/maxGuests
+      // defaults on the listing draft, so skipping is the right
+      // call.
+      if (scrapedBR === null) {
+        attempts.push({
+          url,
+          bedrooms: null,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Stub listing — no bedroom data extracted (likely off-market, lot, or building-level page).`,
+        });
+        continue;
+      }
+
       // Bedroom-count gate: skip when scrape returned a number that
-      // doesn't match. When the scrape returned NO bedroom info
-      // (null), we let the candidate through — better to surface a
-      // text-only-clean fallback than to discard it on incomplete
-      // data.
-      if (scrapedBR !== null && scrapedBR !== bedrooms) {
+      // doesn't match the operator's pick.
+      if (scrapedBR !== bedrooms) {
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15670,6 +15742,55 @@ Return ONLY compact JSON with this exact shape:
           qualifies: null,
           qualifierReason: null,
           rejectedBecause: `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${bedrooms}BR.`,
+        });
+        continue;
+      }
+
+      // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
+      // Property type filter. Zillow homedetails URLs sometimes
+      // return single-family homes / lots / manufactured housing
+      // disguised under a "Condo Hdr" / community-name slug. We
+      // want condo / townhouse / apartment only. The check is
+      // tolerant — homeType missing → don't reject (Apify
+      // sometimes returns partial payload but with valid bed/bath
+      // counts). Only rejects on POSITIVE detection of a
+      // disqualifying type.
+      const ht = (facts.homeType || "").toLowerCase();
+      const DISQUALIFYING_HOME_TYPES = [
+        "single_family", "single family", "singlefamily",
+        "lot", "land",
+        "manufactured", "mobile",
+      ];
+      if (ht && DISQUALIFYING_HOME_TYPES.some((t) => ht.includes(t))) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Wrong property type: ${facts.homeType} (need condo / townhouse / apartment).`,
+        });
+        continue;
+      }
+
+      // Status filter — reject obvious stubs and sold listings.
+      // OFF_MARKET on its own is fine (some vacation rentals
+      // aren't for sale); we only reject when status indicates
+      // the listing is incomplete or a sold/auction record.
+      const hs = (facts.homeStatus || "").toUpperCase();
+      const DISQUALIFYING_STATUS = ["RECENTLY_SOLD", "SOLD", "FORE_AUCTION", "AUCTION", "PENDING"];
+      if (hs && DISQUALIFYING_STATUS.includes(hs)) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Listing status is ${hs} (need an active or off-market unit, not sold/auctioned).`,
         });
         continue;
       }
@@ -15760,10 +15881,16 @@ Return ONLY compact JSON with this exact shape:
     const scrapeFailures = attempts.filter((a) => /scrape (returned 0 photos|failed)/i.test(a.rejectedBecause)).length;
     const otaMatches = attempts.filter((a) => /^Listed on OTA/i.test(a.rejectedBecause)).length;
     const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
+    const stubs = attempts.filter((a) => /^Stub listing/i.test(a.rejectedBecause)).length;
+    const wrongType = attempts.filter((a) => /^Wrong property type/i.test(a.rejectedBecause)).length;
+    const wrongStatus = attempts.filter((a) => /^Listing status is/i.test(a.rejectedBecause)).length;
     const reasonParts: string[] = [];
     if (otaMatches > 0) reasonParts.push(`${otaMatches} listed on Airbnb/VRBO/Booking`);
     if (scrapeFailures > 0) reasonParts.push(`${scrapeFailures} Zillow scrape failed/empty`);
     if (wrongBR > 0) reasonParts.push(`${wrongBR} wrong bedroom count`);
+    if (stubs > 0) reasonParts.push(`${stubs} stub listings (off-market with no data)`);
+    if (wrongType > 0) reasonParts.push(`${wrongType} wrong property type`);
+    if (wrongStatus > 0) reasonParts.push(`${wrongStatus} sold/auction status`);
     const reason = `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
     res.json({
       found: false,
