@@ -269,6 +269,14 @@ export default function AddSingleListing() {
     rejected: number;
     prefilteredCount: number;
     otaIndex?: { airbnb: number; vrbo: number; booking: number; addressTokens: number };
+    // CODEX NOTE (2026-05-04, claude/single-listing-rejection-tally):
+    // Running tally of rejection reasons, bucketed. Shown live
+    // during the search so the operator sees WHY candidates are
+    // being rejected (e.g. "10 Listed on OTA, 2 Wrong property
+    // type") instead of staring at "12 rejected" with no context.
+    // Buckets are derived from the reason string via the same
+    // regex categorization the post-search diagnostic uses.
+    rejectionsByReason: Record<string, number>;
   }>({
     phase: "discovering",
     totalCandidates: 0,
@@ -276,6 +284,7 @@ export default function AddSingleListing() {
     current: null,
     rejected: 0,
     prefilteredCount: 0,
+    rejectionsByReason: {},
   });
 
   // City autocomplete — nationwide endpoint scoped server-side to
@@ -449,6 +458,7 @@ export default function AddSingleListing() {
       candidatesProcessed: 0,
       current: null,
       rejected: 0,
+      rejectionsByReason: {},
       prefilteredCount: 0,
     });
     // Reset ETA tracking + abort controller for this run.
@@ -494,6 +504,25 @@ export default function AddSingleListing() {
       // Track per-URL state across events so we can render a
       // running list of candidates with their current phase.
       const candidateState = new Map<string, CandidateProgress>();
+
+      // CODEX NOTE (2026-05-04, claude/single-listing-rejection-tally):
+      // Categorize a rejection reason string into a stable bucket
+      // label. Mirrors the post-search diagnostic categorization in
+      // routes.ts (scrapeFailures / otaMatches / prefilterMatches /
+      // wrongBR / stubs / wrongType / wrongStatus). Keep these
+      // labels short — they render in the live progress UI.
+      const bucketReason = (reason: string): string => {
+        const r = reason || "";
+        if (/^Pre-filtered/i.test(r)) return "Pre-filtered (on OTA index)";
+        if (/^Listed on OTA/i.test(r)) return "Listed on Airbnb / VRBO / Booking";
+        if (/^Wrong bedroom count/i.test(r)) return "Wrong bedroom count";
+        if (/^Stub listing/i.test(r)) return "Stub / off-market listing";
+        if (/^Wrong property (type|sub-type)/i.test(r)) return "Wrong property type";
+        if (/^Listing status is/i.test(r)) return "Sold / auction / pending";
+        if (/scrape (returned 0 photos|failed)/i.test(r)) return "Scrape failed";
+        if (/Could not parse address/i.test(r)) return "Bad URL slug";
+        return "Other";
+      };
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -543,6 +572,7 @@ export default function AddSingleListing() {
               detail: `Pre-filtered: ${evt.address ?? "address"} on OTA`,
             };
             candidateState.set(evt.url, cp);
+            const bucket = bucketReason(String(evt.reason ?? "Pre-filtered"));
             setFindProgress((prev) => ({
               ...prev,
               phase: "candidates",
@@ -550,6 +580,10 @@ export default function AddSingleListing() {
               rejected: prev.rejected + 1,
               prefilteredCount: prev.prefilteredCount + 1,
               current: cp,
+              rejectionsByReason: {
+                ...prev.rejectionsByReason,
+                [bucket]: (prev.rejectionsByReason[bucket] ?? 0) + 1,
+              },
             }));
           } else if (evt.type === "candidate-start") {
             const cp: CandidateProgress = {
@@ -559,8 +593,15 @@ export default function AddSingleListing() {
               phase: "scraping",
             };
             candidateState.set(evt.url, cp);
+            // CODEX NOTE (2026-05-04, claude/single-listing-citywide-progress):
+            // Bump phase to "candidates" here. In city-wide mode the
+            // verify-first prefilter is OFF (ota-index-done never
+            // fires), so without this the phase label is stuck at
+            // "Discovering Zillow candidates…" forever even though
+            // we're actually walking candidates.
             setFindProgress((prev) => ({
               ...prev,
+              phase: "candidates",
               current: cp,
             }));
           } else if (evt.type === "candidate-scrape") {
@@ -582,12 +623,17 @@ export default function AddSingleListing() {
             // ETA calculation. ETA = avg (now - findStartedAt /
             // candidatesProcessed) × candidatesRemaining.
             candidateCompletionsRef.current.push(Date.now());
+            const bucket = bucketReason(String(evt.reason ?? "rejected"));
             setFindProgress((prev) => {
               const next = {
                 ...prev,
                 candidatesProcessed: prev.candidatesProcessed + 1,
                 rejected: prev.rejected + 1,
                 current: existing ?? prev.current,
+                rejectionsByReason: {
+                  ...prev.rejectionsByReason,
+                  [bucket]: (prev.rejectionsByReason[bucket] ?? 0) + 1,
+                },
               };
               if (findStartedAtRef.current && next.totalCandidates > 0 && next.candidatesProcessed > 0) {
                 const elapsed = Date.now() - findStartedAtRef.current;
@@ -621,12 +667,23 @@ export default function AddSingleListing() {
               candidateState.set(evt.url, existing);
             }
             candidateCompletionsRef.current.push(Date.now());
+            // CODEX NOTE (2026-05-04, claude/single-listing-rejection-tally):
+            // Bump the OTA-listed bucket only when the qualifier
+            // came back not-qualifying. Successful qualifications
+            // don't bump anything (they advance to the result).
+            const otaBucket = !evt.qualifies ? "Listed on Airbnb / VRBO / Booking" : null;
             setFindProgress((prev) => {
               const next = {
                 ...prev,
                 candidatesProcessed: prev.candidatesProcessed + 1,
                 rejected: evt.qualifies ? prev.rejected : prev.rejected + 1,
                 current: existing ?? prev.current,
+                rejectionsByReason: otaBucket
+                  ? {
+                      ...prev.rejectionsByReason,
+                      [otaBucket]: (prev.rejectionsByReason[otaBucket] ?? 0) + 1,
+                    }
+                  : prev.rejectionsByReason,
               };
               if (findStartedAtRef.current && next.totalCandidates > 0 && next.candidatesProcessed > 0) {
                 const elapsed = Date.now() - findStartedAtRef.current;
@@ -1585,6 +1642,27 @@ export default function AddSingleListing() {
                     <div className="font-mono text-[10px] text-muted-foreground/70 truncate">
                       {findProgress.current.url.replace(/^https?:\/\/(www\.)?/, "")}
                     </div>
+                  </div>
+                )}
+                {/* CODEX NOTE (2026-05-04, claude/single-listing-rejection-tally):
+                    Live breakdown of WHY candidates were rejected,
+                    bucketed. So when the operator sees "12/12
+                    rejected" they immediately see "10 listed on
+                    Airbnb, 2 wrong property type" instead of
+                    wondering whether the checks are even working.
+                    Sorted desc so the dominant bucket appears
+                    first. */}
+                {Object.keys(findProgress.rejectionsByReason).length > 0 && (
+                  <div className="text-[11px] text-muted-foreground border-l-2 border-amber-300 pl-2 space-y-0.5">
+                    <div className="font-medium text-foreground">Why rejected so far:</div>
+                    {Object.entries(findProgress.rejectionsByReason)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([reason, count]) => (
+                        <div key={reason} className="flex items-center gap-1.5">
+                          <span className="font-mono tabular-nums">{count}×</span>
+                          <span>{reason}</span>
+                        </div>
+                      ))}
                   </div>
                 )}
                 <div className="flex items-center justify-between gap-2 flex-wrap">
