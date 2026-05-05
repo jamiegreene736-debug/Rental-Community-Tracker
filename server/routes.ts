@@ -16509,12 +16509,47 @@ Return ONLY compact JSON with this exact shape:
         `site:realtor.com "${communityName}" ${city} ${state}`,
       ];
     };
+    // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
+    // Add Redfin as a third discovery source — matches /api/replacement/
+    // find-unit which already searches Redfin (PR #325, Grok recs).
+    // Redfin pulls from MLS feeds Zillow misses, especially in coastal
+    // FL — for Fort Myers Beach this typically adds 100-300 unique
+    // condos. URL pattern: redfin.com/<state>/<city>/<address>/home/<id>.
+    const buildRedfinQueries = (): string[] => {
+      if (isCityWide) {
+        if (isAnyBedroom) {
+          return [
+            `site:redfin.com condo "${city}" "${state}"`,
+            `site:redfin.com townhouse "${city}" "${state}"`,
+            `site:redfin.com condo for sale "${city}" "${state}"`,
+            `site:redfin.com "${city}" "${state}" condo`,
+          ];
+        }
+        return [
+          `site:redfin.com condo "${city}" "${state}" ${brTerm}`,
+          `site:redfin.com "${city}" "${state}" ${brTerm} condo`,
+          `site:redfin.com townhouse "${city}" "${state}" ${brTerm}`,
+        ];
+      }
+      if (isAnyBedroom) {
+        return [
+          `site:redfin.com "${communityName}" ${city} ${state}`,
+          `site:redfin.com "${communityName}" "for sale"`,
+          `site:redfin.com "${communityName}" condo`,
+        ];
+      }
+      return [
+        `site:redfin.com "${communityName}" ${city} ${state} ${brTerm}`,
+        `site:redfin.com "${communityName}" ${brTerm}`,
+      ];
+    };
     const zillowQueries = buildZillowQueries().map((q) => q.replace(/\s+/g, " ").trim());
     const realtorQueries = buildRealtorQueries().map((q) => q.replace(/\s+/g, " ").trim());
+    const redfinQueries = buildRedfinQueries().map((q) => q.replace(/\s+/g, " ").trim());
 
     const candidateUrls: string[] = [];
     const seen = new Set<string>();
-    const platformCounts = { zillow: 0, realtor: 0 };
+    const platformCounts = { zillow: 0, realtor: 0, redfin: 0 };
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // num=20 in city-wide mode (vs num=10 default) so each query
     // harvests up to 20 raw URLs. Combined with the wider candidate
@@ -16524,7 +16559,7 @@ Return ONLY compact JSON with this exact shape:
     // search space is small enough that more pagination just
     // returns garbage from outside the resort.
     const searchApiNum = isCityWide ? 20 : 10;
-    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: "zillow" | "realtor") => {
+    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: "zillow" | "realtor" | "redfin") => {
       const results = await Promise.all(queries.map(async (q) => {
         try {
           const resp = await fetch(
@@ -16603,10 +16638,13 @@ Return ONLY compact JSON with this exact shape:
     await Promise.all([
       harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
       harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+      // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
+      // Redfin discovery — matches replacement-tool's three-source pattern.
+      harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
     ]);
     console.log(
       `[find-clean-unit] discovery for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}): ` +
-      `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} total=${candidateUrls.length}`,
+      `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} redfin=${platformCounts.redfin} total=${candidateUrls.length}`,
     );
 
     emit({
@@ -16789,6 +16827,14 @@ Return ONLY compact JSON with this exact shape:
         if (segments.length === 0) return null;
         return segments[0].replace(/-/g, " ").trim();
       }
+      // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
+      // Redfin URL: /<state>/<city>/<address-slug>/home/<id>
+      // The address-slug is the third path segment (after state + city).
+      // Parse out the dashed street portion only.
+      const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)\/home\//i);
+      if (redfinMatch) {
+        return redfinMatch[1].replace(/-/g, " ").trim();
+      }
       return null;
     };
     const matchesOtaIndex = (zAddress: string | null): boolean => {
@@ -16868,23 +16914,58 @@ Return ONLY compact JSON with this exact shape:
         total: candidateCap,
       });
 
-      // CODEX NOTE (2026-05-04, claude/verify-then-discover):
-      // Pre-filter against the OTA address index — if the
-      // candidate's slug-derived street appears in any OTA
-      // platform's snippet, skip without scraping. Saves the
-      // Apify+ScrapingBee+sidecar scrape AND the ~6 SearchAPI
-      // qualifier calls per skipped candidate. Only applies when
-      // verifyFirst is on AND the index is non-empty (otherwise
-      // every candidate falls through to the existing flow).
+      // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
+      // PER-CANDIDATE FLOW REORDER. Mirrors the proven /api/replacement/
+      // find-unit methodology — text-OTA-check FIRST (cheap, ~3-5s),
+      // then scrape (expensive, ~15-25s) ONLY for OTA-clean candidates.
+      // Old flow scraped every candidate up front (~25s × N), then OTA
+      // checked. For Fort Myers Beach city-wide that meant 36 × 25s =
+      // 15 min ETA where most candidates would be rejected on OTA
+      // grounds anyway. New flow OTA-checks all 36 quickly, scrapes
+      // only the ~5-10 that pass.
+      //
+      // Order:
+      //   1. Parse slug-derived address (free)
+      //   2. Pre-filter against OTA address index (free)
+      //   3. OTA qualifier — TEXT ONLY (no Lens reverse-image-search;
+      //      replacement tool doesn't use Lens, and Lens added ~10s
+      //      per candidate. Photo-listing safety net via Stage 2
+      //      Step 2's qualifier still runs Lens on the chosen
+      //      candidate.)
+      //   4. Apify scrape — ONLY if OTA-clean. Extracts bed/bath/
+      //      photoCount/homeType/propertySubType.
+      //   5. Stub / wrong-type / wrong-BR / sold rejects (post-scrape).
+      //   6. Photo-count gate (≥3, matches old behavior)
+      //   7. Return on first match.
+
+      // 1) Parse address from URL slug.
+      const addressGuess = addressFromSlug(url);
+      if (!addressGuess) {
+        const reason = "Could not parse address from listing URL slug.";
+        attempts.push({
+          url,
+          bedrooms: null,
+          bathrooms: null,
+          address: null,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: reason,
+        });
+        emit({ type: "candidate-rejected", url, reason });
+        continue;
+      }
+
+      // 2) Pre-filter against OTA index (community-anchored mode only —
+      // verifyFirst is OFF in city-wide because the index isn't built).
       if (verifyFirst && otaAddressTokens.size > 0) {
-        const slugAddress = addressFromSlug(url);
-        if (slugAddress && matchesOtaIndex(slugAddress)) {
-          const reason = `Pre-filtered: address "${slugAddress}" appears in OTA index (Airbnb/VRBO/Booking listing snippet for this community).`;
+        if (matchesOtaIndex(addressGuess)) {
+          const reason = `Pre-filtered: address "${addressGuess}" appears in OTA index (Airbnb/VRBO/Booking listing snippet for this community).`;
           attempts.push({
             url,
             bedrooms: null,
             bathrooms: null,
-            address: slugAddress,
+            address: addressGuess,
             bedroomMatches: false,
             qualifies: null,
             qualifierReason: null,
@@ -16895,25 +16976,50 @@ Return ONLY compact JSON with this exact shape:
             url,
             index: candidateIdx + 1,
             total: candidateCap,
-            address: slugAddress,
+            address: addressGuess,
             reason,
           });
           continue;
         }
       }
 
+      // 3) OTA qualifier — TEXT ONLY. No photos passed → runOtaQualifier
+      // automatically skips the Lens step. Drops ~10s per candidate.
+      emit({ type: "candidate-qualifier", url, phase: "ota-check", photoCount: 0 });
+      const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state, []);
+
+      emit({
+        type: "candidate-qualifier-done",
+        url,
+        qualifies: qualifier.qualifies,
+        listed: {
+          airbnb: qualifier.platforms.airbnb.listed,
+          vrbo: qualifier.platforms.vrbo.listed,
+          booking: qualifier.platforms.booking.listed,
+        },
+        photoScrapeFailed: false,
+      });
+
+      if (!qualifier.qualifies) {
+        attempts.push({
+          url,
+          bedrooms: null,
+          bathrooms: null,
+          address: addressGuess,
+          bedroomMatches: false,
+          qualifies: false,
+          qualifierReason: qualifier.reason,
+          rejectedBecause: `Listed on OTA: ${qualifier.reason}`,
+        });
+        emit({ type: "candidate-rejected", url, reason: `Listed on OTA: ${qualifier.reason}` });
+        continue;
+      }
+
+      // 4) Apify scrape — only candidates that passed OTA reach here.
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
       try {
-        // CODEX NOTE (2026-05-05, claude/find-clean-unit-sidecar-budget):
-        // sidecar is enabled in the iteration loop, but with a
-        // shorter wallet (25s vs the default 90s) so a hung daemon
-        // doesn't 22-minute-stall the wizard across 15 candidates.
-        // 25s is plenty for a Zillow detail page on the operator's
-        // residential-IP Chrome (~10-20s typical); if it's not
-        // back by then, daemon's stuck on a bot wall and we're
-        // better off moving on to the next candidate.
         photos = await scrapeListingPhotos(url, undefined, facts, { sidecarWalletMs: 25_000 });
       } catch (e: any) {
         scrapeError = e?.message ?? String(e);
@@ -16929,32 +17035,13 @@ Return ONLY compact JSON with this exact shape:
         },
         scrapeError: scrapeError ?? undefined,
       });
-
-      // Surface scrape outcome to Railway logs so we can see why
-      // photos aren't landing. Apify-token-exhausted /
-      // ScrapingBee-not-configured / Zillow-blocking all show up
-      // here.
       console.log(
         `[find-clean-unit] candidate ${url}: photos=${photos.length}` +
         ` facts={br:${facts.bedrooms ?? "?"},ba:${facts.bathrooms ?? "?"}}` +
         (scrapeError ? ` scrapeError=${scrapeError.slice(0, 200)}` : ""),
       );
 
-      // CODEX NOTE (2026-05-04, claude/grok-bathroom-html-fallback):
-      // When Apify returns photos but partial facts (typically:
-      // bedrooms but no bathrooms — Apify's actor doesn't always
-      // surface resoFacts.bathrooms even though Zillow's
-      // __NEXT_DATA__ has it), fetch the listing's HTML directly
-      // and extract bathrooms from JSON-LD + visible-text. This
-      // mirrors the path scrapeZillowViaScrapingBee already takes
-      // for ScrapingBee responses; for Apify responses the
-      // fallback was missing, so partial data leaked through and
-      // the wizard rendered "? BA" on Step 2.
-      //
-      // Only fires when bedrooms is present (so the candidate has
-      // already cleared the stub-listing gate) AND bathrooms is
-      // missing — avoids paying the ~1-2s HTML fetch cost on
-      // candidates we'd reject anyway.
+      // HTML bathroom fallback when Apify returned BR but not BA.
       if (facts.bedrooms != null && facts.bathrooms == null) {
         try {
           const htmlResp = await fetch(url, {
@@ -16967,234 +17054,70 @@ Return ONLY compact JSON with this exact shape:
           });
           if (htmlResp.ok) {
             const html = await htmlResp.text();
-            const jsonLdFacts = extractFactsFromJsonLd(html);
-            const textFacts = extractFactsFromText(html);
-            const merged = mergeFacts(jsonLdFacts, textFacts);
-            if (merged.bathrooms != null) {
-              facts.bathrooms = merged.bathrooms;
-              console.log(
-                `[find-clean-unit] candidate ${url}: HTML fallback recovered bathrooms=${facts.bathrooms}`,
-              );
-            }
+            const merged = mergeFacts(extractFactsFromJsonLd(html), extractFactsFromText(html));
+            if (merged.bathrooms != null) facts.bathrooms = merged.bathrooms;
           }
-        } catch (e: any) {
-          // Best-effort — silent failure is fine.
-          console.warn(`[find-clean-unit] HTML bathroom fallback failed for ${url}: ${e?.message ?? e}`);
-        }
-      }
-
-      // Parse address from the URL slug. addressFromSlug handles
-      // both Zillow (/homedetails/4460-Nehe-Rd-Lihue-HI-96766/)
-      // AND Realtor.com (/realestateandhomes-detail/4460-Nehe-Rd_Lihue_HI_96766_M12345)
-      // URL formats. Returns just the street portion.
-      const addressGuess = addressFromSlug(url);
-      if (!addressGuess) {
-        const reason = "Could not parse address from listing URL slug.";
-        attempts.push({
-          url,
-          bedrooms: facts.bedrooms ?? null,
-          bathrooms: facts.bathrooms ?? null,
-          address: null,
-          bedroomMatches: false,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
-        emit({ type: "candidate-rejected", url, reason });
-        continue;
+        } catch { /* best-effort */ }
       }
 
       const scrapedBR = facts.bedrooms ?? null;
       const scrapedBA = facts.bathrooms ?? null;
 
-      // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
-      // Hard reject candidates whose Zillow scrape returned NO
-      // bedroom data at all. A real condo unit ALWAYS has a
-      // bedroom count; an empty scrape means the listing is a
-      // stub — typically off-market with no public details, a raw
-      // lot, or a building-level page with no unit-specific data.
-      // Jamie hit a "Santa Maria Resort Condo Hdr" Zillow listing
-      // with "Off market" + `--` beds/baths/sqft + propertyType
-      // SingleFamily that was passing the text-only fallback path
-      // because the OTA address-search returned no matches (there's
-      // no real unit at that URL to be on Airbnb either). Without
-      // bedroom data we can't even seed the bedding/maxGuests
-      // defaults on the listing draft, so skipping is the right
-      // call.
+      // 5) Post-scrape rejects: stub / wrong type / wrong BR / sold.
       if (scrapedBR === null) {
         const reason = `Stub listing — no bedroom data extracted (likely off-market, lot, or building-level page).`;
-        attempts.push({
-          url,
-          bedrooms: null,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: false,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: null, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: false, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-
-      // Bedroom-count gate: skip when scrape returned a number that
-      // doesn't match the operator's pick.
-      // CODEX NOTE (2026-05-05, claude/any-bedroom): when operator
-      // picked "Any", skip this gate — every BR count is acceptable.
       if (!isAnyBedroom && scrapedBR !== numericBedrooms) {
         const reason = `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${numericBedrooms}BR.`;
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: false,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: false, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-
-      // CODEX NOTE (2026-05-04, claude/single-listing-stub-filter):
-      // Property type filter. Zillow homedetails URLs sometimes
-      // return single-family homes / lots / manufactured housing
-      // disguised under a "Condo Hdr" / community-name slug. We
-      // want condo / townhouse / apartment only. The check is
-      // tolerant — homeType missing → don't reject (Apify
-      // sometimes returns partial payload but with valid bed/bath
-      // counts). Only rejects on POSITIVE detection of a
-      // disqualifying type.
       const ht = (facts.homeType || "").toLowerCase();
-      const DISQUALIFYING_HOME_TYPES = [
-        "single_family", "single family", "singlefamily",
-        "lot", "land",
-        "manufactured", "mobile",
-      ];
+      const DISQUALIFYING_HOME_TYPES = ["single_family", "single family", "singlefamily", "lot", "land", "manufactured", "mobile"];
       if (ht && DISQUALIFYING_HOME_TYPES.some((t) => ht.includes(t))) {
         const reason = `Wrong property type: ${facts.homeType} (need condo / townhouse / apartment).`;
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: true,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: true, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-
-      // CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension):
-      // propertySubType-based rejection per Grok's review. Some
-      // listings have a generic homeType ("CONDO") but a sub-type
-      // that disqualifies them (Lot / Land / Co-Op / Mobile). Only
-      // rejects on positive detection — missing sub-type passes.
       const pst = (facts.propertySubType || "").toLowerCase();
       const DISQUALIFYING_SUB_TYPES = ["lot", "land", "mobile", "co-op", "co op"];
       if (pst && DISQUALIFYING_SUB_TYPES.some((t) => pst.includes(t))) {
         const reason = `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`;
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: true,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: true, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-
-      // CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension):
-      // photoCount stub-listing signal per Grok's review. Real
-      // vacation-rentable units have ≥5 photos by carrier-set
-      // standards; stubs / off-market lots have 0-1. We only
-      // reject when photoCount is EXPLICITLY present and low —
-      // missing photoCount falls through to the existing photo-
-      // length / text-only fallback handling. Skips the trap where
-      // a Zillow URL has only an aerial satellite photo (the
-      // failure mode Jamie reported with Santa Maria Resort Condo
-      // Hdr).
       if (typeof facts.photoCount === "number" && facts.photoCount < 3) {
         const reason = `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`;
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: true,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: true, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-
-      // Status filter — reject obvious stubs and sold listings.
-      // OFF_MARKET on its own is fine (some vacation rentals
-      // aren't for sale); we only reject when status indicates
-      // the listing is incomplete or a sold/auction record.
       const hs = (facts.homeStatus || "").toUpperCase();
       const DISQUALIFYING_STATUS = ["RECENTLY_SOLD", "SOLD", "FORE_AUCTION", "AUCTION", "PENDING"];
       if (hs && DISQUALIFYING_STATUS.includes(hs)) {
         const reason = `Listing status is ${hs} (need an active or off-market unit, not sold/auctioned).`;
-        attempts.push({
-          url,
-          bedrooms: scrapedBR,
-          bathrooms: scrapedBA,
-          address: addressGuess,
-          bedroomMatches: true,
-          qualifies: null,
-          qualifierReason: null,
-          rejectedBecause: reason,
-        });
+        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: true, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
-      // Emit qualifier-start so the wizard can show "Verifying OTAs"
-      // for the current candidate while the SearchAPI calls run.
-      emit({ type: "candidate-qualifier", url, phase: "ota-check", photoCount: photos.length });
-
-      // Run the qualifier. When photos is empty the qualifier
-      // automatically skips the photo-reverse-search step (text-
-      // only check). When photos exist we send up to 3 to Lens.
-      const photoUrls = photos.map((p) => p.url).slice(0, 3);
-      const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state, photoUrls);
+      // 6) All gates passed. Push success row + return.
       const photoScrapeFailed = photos.length === 0;
       attempts.push({
         url,
         bedrooms: scrapedBR,
         bathrooms: scrapedBA,
         address: addressGuess,
-        bedroomMatches: isAnyBedroom || scrapedBR === numericBedrooms || scrapedBR === null,
-        qualifies: qualifier.qualifies,
+        bedroomMatches: true,
+        qualifies: true,
         qualifierReason: qualifier.reason,
-        rejectedBecause: qualifier.qualifies
-          ? (photoScrapeFailed ? "Clean (text-only — photo scrape failed)" : "")
-          : `Listed on OTA: ${qualifier.reason}`,
-      });
-
-      // Emit qualifier-done so the wizard can update the per-
-      // candidate row in the progress UI ("Listed on Airbnb",
-      // "Clean ✓", etc).
-      emit({
-        type: "candidate-qualifier-done",
-        url,
-        qualifies: qualifier.qualifies,
-        listed: {
-          airbnb: qualifier.platforms.airbnb.listed,
-          vrbo: qualifier.platforms.vrbo.listed,
-          booking: qualifier.platforms.booking.listed,
-        },
-        photoScrapeFailed,
+        rejectedBecause: photoScrapeFailed ? "Clean (text-only — photo scrape failed)" : "",
       });
 
       if (qualifier.qualifies && !photoScrapeFailed) {
