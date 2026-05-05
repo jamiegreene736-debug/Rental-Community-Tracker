@@ -254,11 +254,19 @@ interface ScrapedPhoto {
 // homes that occasionally make it through the Zillow homedetails URL
 // filter (Jamie hit a "Santa Maria Resort Condo Hdr" listing that was
 // off-market with no beds/baths/sqft and "SingleFamily" type).
+//
+// CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension): added
+// `propertySubType` and `photoCount` per Grok's architectural review.
+// propertySubType catches "Lot" / "Land" sub-types that share homeType
+// with legitimate condos. photoCount is a stub-listing signal — real
+// vacation-rentable units have ≥5 photos; stubs have 0-1.
 export interface ListingFacts {
   bedrooms?: number;
   bathrooms?: number;
   homeType?: string;
   homeStatus?: string;
+  propertySubType?: string;
+  photoCount?: number;
 }
 
 // Pick plausible bed/bath counts from a Zillow scraper payload. The various
@@ -280,10 +288,25 @@ function extractListingFacts(payload: any): ListingFacts {
       // 2.5 / 3.5 half-bath increments; `bathroomsFull` + `bathroomsHalf`
       // reconstructs the same value when the combined field is absent.
       // `bathroomsTotalInteger` is the last-resort integer-only fallback.
+      //
+      // CODEX NOTE (2026-05-04, claude/grok-bathroom-fields): Grok's
+      // architectural review flagged additional Zillow resoFacts paths
+      // we were missing — `bathroomsFloat` (decimal aggregate),
+      // `bathroomsThreeQuarter` / `bathroomsOneQuarter` (rare splits
+      // surfaced from MLS feeds), and `partialBathrooms` (older
+      // half-bath alias). Walking these in priority order: most-
+      // aggregate decimal → component reconstruction → integer
+      // fallback. Three-quarter baths count as 0.75; one-quarter
+      // counts as 0.25.
       let b: number | undefined;
       if (typeof o.bathrooms === "number") b = o.bathrooms;
+      else if (typeof o.bathroomsFloat === "number") b = o.bathroomsFloat;
       else if (typeof o.bathroomsFull === "number") {
-        b = o.bathroomsFull + (typeof o.bathroomsHalf === "number" ? o.bathroomsHalf * 0.5 : 0);
+        b = o.bathroomsFull
+          + (typeof o.bathroomsHalf === "number" ? o.bathroomsHalf * 0.5 : 0)
+          + (typeof o.partialBathrooms === "number" ? o.partialBathrooms * 0.5 : 0)
+          + (typeof o.bathroomsThreeQuarter === "number" ? o.bathroomsThreeQuarter * 0.75 : 0)
+          + (typeof o.bathroomsOneQuarter === "number" ? o.bathroomsOneQuarter * 0.25 : 0);
       } else if (typeof o.bathroomsTotalInteger === "number") b = o.bathroomsTotalInteger;
       else if (typeof o.numberOfBathrooms === "number") b = o.numberOfBathrooms;
       else if (typeof o.numberOfBathroomsTotal === "number") b = o.numberOfBathroomsTotal;
@@ -311,6 +334,20 @@ function extractListingFacts(payload: any): ListingFacts {
     }
     if (facts.homeStatus == null && typeof o.homeStatus === "string" && o.homeStatus.length > 0) {
       facts.homeStatus = o.homeStatus;
+    }
+    // CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension):
+    // propertySubType catches "Lot" / "Land" sub-types that share a
+    // top-level homeType with real condo/townhouse units (e.g.
+    // homeType "CONDO" + propertySubType "Lot" — rare but real).
+    if (facts.propertySubType == null && typeof o.propertySubType === "string" && o.propertySubType.length > 0) {
+      facts.propertySubType = o.propertySubType;
+    }
+    // photoCount sourced from any of the common payload positions.
+    // Some actor variants expose `photoCount`, others nest as
+    // `responsivePhotos.length` or `originalPhotos.length`. The
+    // walker hits all of them by depth.
+    if (facts.photoCount == null && typeof o.photoCount === "number" && o.photoCount >= 0 && o.photoCount < 1000) {
+      facts.photoCount = o.photoCount;
     }
     for (const v of Object.values(o)) walk(v, depth + 1);
   }
@@ -15677,6 +15714,49 @@ Return ONLY compact JSON with this exact shape:
         (scrapeError ? ` scrapeError=${scrapeError.slice(0, 200)}` : ""),
       );
 
+      // CODEX NOTE (2026-05-04, claude/grok-bathroom-html-fallback):
+      // When Apify returns photos but partial facts (typically:
+      // bedrooms but no bathrooms — Apify's actor doesn't always
+      // surface resoFacts.bathrooms even though Zillow's
+      // __NEXT_DATA__ has it), fetch the listing's HTML directly
+      // and extract bathrooms from JSON-LD + visible-text. This
+      // mirrors the path scrapeZillowViaScrapingBee already takes
+      // for ScrapingBee responses; for Apify responses the
+      // fallback was missing, so partial data leaked through and
+      // the wizard rendered "? BA" on Step 2.
+      //
+      // Only fires when bedrooms is present (so the candidate has
+      // already cleared the stub-listing gate) AND bathrooms is
+      // missing — avoids paying the ~1-2s HTML fetch cost on
+      // candidates we'd reject anyway.
+      if (facts.bedrooms != null && facts.bathrooms == null) {
+        try {
+          const htmlResp = await fetch(url, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml",
+              "Accept-Language": "en-US,en;q=0.9",
+            },
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (htmlResp.ok) {
+            const html = await htmlResp.text();
+            const jsonLdFacts = extractFactsFromJsonLd(html);
+            const textFacts = extractFactsFromText(html);
+            const merged = mergeFacts(jsonLdFacts, textFacts);
+            if (merged.bathrooms != null) {
+              facts.bathrooms = merged.bathrooms;
+              console.log(
+                `[find-clean-unit] candidate ${url}: HTML fallback recovered bathrooms=${facts.bathrooms}`,
+              );
+            }
+          }
+        } catch (e: any) {
+          // Best-effort — silent failure is fine.
+          console.warn(`[find-clean-unit] HTML bathroom fallback failed for ${url}: ${e?.message ?? e}`);
+        }
+      }
+
       // Parse address from the Zillow URL slug
       // (/homedetails/4460-Nehe-Rd-Lihue-HI-96766/...).
       const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
@@ -15771,6 +15851,51 @@ Return ONLY compact JSON with this exact shape:
           qualifies: null,
           qualifierReason: null,
           rejectedBecause: `Wrong property type: ${facts.homeType} (need condo / townhouse / apartment).`,
+        });
+        continue;
+      }
+
+      // CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension):
+      // propertySubType-based rejection per Grok's review. Some
+      // listings have a generic homeType ("CONDO") but a sub-type
+      // that disqualifies them (Lot / Land / Co-Op / Mobile). Only
+      // rejects on positive detection — missing sub-type passes.
+      const pst = (facts.propertySubType || "").toLowerCase();
+      const DISQUALIFYING_SUB_TYPES = ["lot", "land", "mobile", "co-op", "co op"];
+      if (pst && DISQUALIFYING_SUB_TYPES.some((t) => pst.includes(t))) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`,
+        });
+        continue;
+      }
+
+      // CODEX NOTE (2026-05-04, claude/grok-listingfacts-extension):
+      // photoCount stub-listing signal per Grok's review. Real
+      // vacation-rentable units have ≥5 photos by carrier-set
+      // standards; stubs / off-market lots have 0-1. We only
+      // reject when photoCount is EXPLICITLY present and low —
+      // missing photoCount falls through to the existing photo-
+      // length / text-only fallback handling. Skips the trap where
+      // a Zillow URL has only an aerial satellite photo (the
+      // failure mode Jamie reported with Santa Maria Resort Condo
+      // Hdr).
+      if (typeof facts.photoCount === "number" && facts.photoCount < 3) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`,
         });
         continue;
       }
