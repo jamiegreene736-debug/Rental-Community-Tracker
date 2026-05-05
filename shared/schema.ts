@@ -407,6 +407,55 @@ export const insertBookingConfirmationSchema = createInsertSchema(bookingConfirm
 export type InsertBookingConfirmation = z.infer<typeof insertBookingConfirmationSchema>;
 export type BookingConfirmation = typeof bookingConfirmations.$inferSelect;
 
+// ── Quo / OpenPhone SMS messages mirrored into the Guesty inbox ──
+// Guesty remains the reservation + conversation source of truth. These rows
+// store SMS messages sent/received through the 808 Quo number and attach them
+// to a Guesty conversation when we can match the guest phone number.
+export const quoSmsMessages = pgTable("quo_sms_messages", {
+  id: serial("id").primaryKey(),
+  providerMessageId: text("provider_message_id").notNull().unique(),
+  conversationId: text("conversation_id"),
+  reservationId: text("reservation_id"),
+  guestName: text("guest_name"),
+  guestPhone: text("guest_phone").notNull(),
+  fromNumber: text("from_number").notNull(),
+  toNumber: text("to_number").notNull(),
+  direction: text("direction").notNull(), // inbound | outbound
+  body: text("body").notNull(),
+  status: text("status"),
+  rawPayload: text("raw_payload"),
+  sentAt: timestamp("sent_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertQuoSmsMessageSchema = createInsertSchema(quoSmsMessages).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertQuoSmsMessage = z.infer<typeof insertQuoSmsMessageSchema>;
+export type QuoSmsMessage = typeof quoSmsMessages.$inferSelect;
+
+export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
+  id: serial("id").primaryKey(),
+  conversationId: text("conversation_id").notNull().unique(),
+  reservationId: text("reservation_id"),
+  guestName: text("guest_name"),
+  phone: text("phone").notNull(),
+  sourcePhone: text("source_phone"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertGuestPhoneOverrideSchema = createInsertSchema(guestPhoneOverrides).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertGuestPhoneOverride = z.infer<typeof insertGuestPhoneOverrideSchema>;
+export type GuestPhoneOverride = typeof guestPhoneOverrides.$inferSelect;
+
 // ── Guesty OAuth token cache ──
 // Guesty's token endpoint is rate-limited to ~5 requests per 24h. Storing
 // the token here (rather than on a Railway-ephemeral filesystem) means

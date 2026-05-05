@@ -28,6 +28,7 @@ import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
+import { findGuestyConversationByPhone, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -20542,71 +20543,54 @@ CONSTRAINTS
     }
   });
 
-  // ========== INBOX — Airbnb Pre-Approval / Decline / Special Offer ==========
-  //
-  // Guesty surfaces Airbnb-specific inquiry actions via several paths; their
-  // schema has drifted across API versions so we try known-good URLs in order
-  // until one works. This lets the host pre-approve an Airbnb inquiry directly
-  // from the inbox without clicking over to Guesty's UI.
+  // ========== INBOX — Airbnb Pre-Approval / Decline ==========
   //
   // POST /api/inbox/reservations/:reservationId/airbnb/preapprove
   //      body: {} (nothing required)
   // POST /api/inbox/reservations/:reservationId/airbnb/decline
   //      body: { reason?: string, message?: string }
-  // POST /api/inbox/reservations/:reservationId/airbnb/special-offer
-  //      body: { price: number, message?: string, expirationDays?: number }
+
+  async function preApproveAirbnbReservation(
+    reservationId: string,
+  ): Promise<{ success: true; via: string; data: any; alreadyRequested?: boolean } | { success: false; error: string; status?: number }> {
+    try {
+      const data = await guestyRequest("POST", `/reservations-v3/${reservationId}/pre-approve`, {}) as any;
+      return { success: true, via: `POST /reservations-v3/${reservationId}/pre-approve`, data };
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const m = /Guesty\s+(\d{3})/.exec(message);
+      const status = m ? parseInt(m[1], 10) : undefined;
+      if (status === 400 && /duplicate|already/i.test(message)) {
+        return {
+          success: true,
+          via: `POST /reservations-v3/${reservationId}/pre-approve`,
+          data: null,
+          alreadyRequested: true,
+        };
+      }
+      return { success: false, error: message, status };
+    }
+  }
 
   async function callGuestyAirbnbAction(
     reservationId: string,
-    action: "preapprove" | "decline" | "special-offer",
+    action: "decline",
     body: Record<string, unknown> = {},
   ): Promise<{ success: true; via: string; data: any } | { success: false; error: string; attempts: Array<{ path: string; method: string; status?: number; error: string }> }> {
-    // Diagnostic on reservation 69e6…1d8c revealed a `preApproveState: false`
-    // field and no POST action endpoints. Guesty tracks pre-approval as a
-    // writable flag on the reservation document — PUT to update.
-    // We keep the POST variants as fallbacks in case any account exposes them.
-    //
-    // Also added: `/reservations/{id}/preapprove` and PATCH variants that
-    // some community threads mention work on specific Guesty tenants.
     const candidates: Record<typeof action, Array<{ method: "POST" | "PUT" | "PATCH"; path: string; body?: Record<string, unknown> }>> = {
-      preapprove: [
-        // Primary: update the preApproveState field directly
-        { method: "PUT",   path: `/reservations/${reservationId}`, body: { preApproveState: true } },
-        { method: "PATCH", path: `/reservations/${reservationId}`, body: { preApproveState: true } },
-        // Bare verb endpoints reported by some tenants
-        { method: "POST",  path: `/reservations/${reservationId}/preapprove` },
-        { method: "POST",  path: `/reservations/${reservationId}/pre-approve` },
-        // Status-transition pattern
-        { method: "PUT",   path: `/reservations/${reservationId}`, body: { status: "preApproved" } },
-        // Channel-prefixed fallbacks (already known-404 on your tenant but kept
-        // so another account's response doesn't regress)
-        { method: "POST",  path: `/airbnb2/reservations/${reservationId}/preapprove` },
-        { method: "POST",  path: `/airbnb/reservations/${reservationId}/preapprove` },
-      ],
       decline: [
         { method: "PUT",   path: `/reservations/${reservationId}`, body: { status: "declined" } },
         { method: "POST",  path: `/reservations/${reservationId}/decline` },
         { method: "POST",  path: `/airbnb2/reservations/${reservationId}/decline` },
         { method: "POST",  path: `/airbnb/reservations/${reservationId}/decline` },
       ],
-      "special-offer": [
-        { method: "POST",  path: `/reservations/${reservationId}/special-offer` },
-        { method: "POST",  path: `/airbnb2/reservations/${reservationId}/special-offer` },
-        { method: "POST",  path: `/airbnb/reservations/${reservationId}/special-offer` },
-      ],
     };
 
     const attempts: Array<{ path: string; method: string; status?: number; error: string }> = [];
     let lastError = "";
 
-    // Expected state-change per action — we check this via GET afterward to
-    // confirm Guesty actually applied the change (some endpoints return 200
-    // but ignore the field). For special-offer we have no reliable field to
-    // verify; null tells the loop below to skip the verify step entirely.
-    const verifyExpectations: Record<typeof action, ((r: any) => boolean) | null> = {
-      preapprove: (r) => r?.preApproveState === true || r?.status === "preApproved" || r?.status === "accepted",
+    const verifyExpectations: Record<typeof action, (r: any) => boolean> = {
       decline:    (r) => r?.status === "declined" || r?.status === "canceled",
-      "special-offer": null,
     };
 
     // Verify with up to N attempts, 1s apart, to absorb Guesty's
@@ -20790,7 +20774,7 @@ CONSTRAINTS
   app.post("/api/inbox/reservations/:reservationId/airbnb/preapprove", async (req, res) => {
     const reservationId = req.params.reservationId;
     if (!reservationId) return res.status(400).json({ error: "reservationId required" });
-    const result = await callGuestyAirbnbAction(reservationId, "preapprove");
+    const result = await preApproveAirbnbReservation(reservationId);
     if (!result.success) return res.status(502).json(result);
     return res.json(result);
   });
@@ -20807,22 +20791,113 @@ CONSTRAINTS
     return res.json(result);
   });
 
-  app.post("/api/inbox/reservations/:reservationId/airbnb/special-offer", async (req, res) => {
-    const reservationId = req.params.reservationId;
-    if (!reservationId) return res.status(400).json({ error: "reservationId required" });
-    const { price, message, expirationDays } = req.body as {
-      price?: number; message?: string; expirationDays?: number;
-    };
-    if (!price || typeof price !== "number" || price <= 0) {
-      return res.status(400).json({ error: "price (number > 0) required" });
+  // ========== INBOX — Quo SMS ==========
+
+  app.get("/api/inbox/sms/conversations/:conversationId/messages", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const messages = await storage.getQuoSmsMessagesByConversation(conversationId, 100);
+      return res.json({ messages });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load SMS messages", message: err.message });
     }
-    const result = await callGuestyAirbnbAction(reservationId, "special-offer", {
-      price,
-      ...(message ? { message } : {}),
-      ...(expirationDays ? { expirationDays } : {}),
-    });
-    if (!result.success) return res.status(502).json(result);
-    return res.json(result);
+  });
+
+  app.get("/api/inbox/sms/conversations/:conversationId/phone", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const override = await storage.getGuestPhoneOverride(conversationId);
+      return res.json({ override });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load guest phone", message: err.message });
+    }
+  });
+
+  app.put("/api/inbox/sms/conversations/:conversationId/phone", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      const { phone, reservationId, guestName, sourcePhone } = req.body as {
+        phone?: string;
+        reservationId?: string | null;
+        guestName?: string | null;
+        sourcePhone?: string | null;
+      };
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const normalized = normalizePhone(phone);
+      const digits = normalized.replace(/\D/g, "");
+      if (digits.length < 10 || digits.length > 15) {
+        return res.status(400).json({ error: "Enter a valid phone number, including area code" });
+      }
+      const override = await storage.upsertGuestPhoneOverride({
+        conversationId,
+        reservationId: reservationId ?? null,
+        guestName: guestName ?? null,
+        phone: normalized,
+        sourcePhone: normalizePhone(sourcePhone) || null,
+      });
+      return res.json({ ok: true, override });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to save guest phone", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/sms/conversations/:conversationId/send", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      const { to, body, reservationId, guestName } = req.body as {
+        to?: string;
+        body?: string;
+        reservationId?: string | null;
+        guestName?: string | null;
+      };
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const message = await sendQuoSms({
+        conversationId,
+        reservationId: reservationId ?? null,
+        guestName: guestName ?? null,
+        to: normalizePhone(to),
+        body: String(body ?? ""),
+      });
+      return res.json({ ok: true, message });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to send SMS", message: err.message });
+    }
+  });
+
+  app.post("/api/quo/webhooks/messages", async (req, res) => {
+    try {
+      const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
+      if (!secret && process.env.NODE_ENV === "production") {
+        return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
+      }
+      if (secret) {
+        const supplied =
+          req.headers["x-quo-webhook-secret"] ??
+          req.headers["x-webhook-secret"] ??
+          req.query.secret;
+        if (supplied !== secret) {
+          return res.status(401).json({ error: "Invalid webhook secret" });
+        }
+      }
+      const result = await recordQuoWebhook(req.body);
+      return res.json({ ok: true, matched: result.matched, conversationId: result.message.conversationId });
+    } catch (err: any) {
+      console.error(`[quo-webhook] ${err.message}`);
+      return res.status(400).json({ error: "Failed to process Quo webhook", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/sms/match", async (req, res) => {
+    try {
+      const phone = normalizePhone(req.query.phone);
+      if (!phone) return res.status(400).json({ error: "phone query param required" });
+      const match = await findGuestyConversationByPhone(phone);
+      return res.json({ phone, match });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to match phone", message: err.message });
+    }
   });
 
   // ========== INBOX — Message Templates ==========

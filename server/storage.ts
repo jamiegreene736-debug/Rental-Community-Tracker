@@ -11,6 +11,8 @@ import {
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
   type BookingConfirmation, type InsertBookingConfirmation,
+  type QuoSmsMessage, type InsertQuoSmsMessage,
+  type GuestPhoneOverride, type InsertGuestPhoneOverride,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
   type PhotoListingAlert, type InsertPhotoListingAlert,
@@ -20,7 +22,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -183,6 +185,12 @@ export interface IStorage {
   createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
   getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
   getRecentBookingConfirmations(limit?: number): Promise<BookingConfirmation[]>;
+
+  createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
+  getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
+  getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined>;
+  upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride>;
+  getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -656,6 +664,72 @@ export class DatabaseStorage implements IStorage {
 
   async getRecentBookingConfirmations(limit = 100): Promise<BookingConfirmation[]> {
     return db.select().from(bookingConfirmations).orderBy(desc(bookingConfirmations.sentAt)).limit(limit);
+  }
+
+  // ── Quo SMS mirror ──
+  async createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage> {
+    const [row] = await db
+      .insert(quoSmsMessages)
+      .values(m)
+      .onConflictDoUpdate({
+        target: quoSmsMessages.providerMessageId,
+        set: {
+          conversationId: m.conversationId ?? null,
+          reservationId: m.reservationId ?? null,
+          guestName: m.guestName ?? null,
+          guestPhone: m.guestPhone,
+          fromNumber: m.fromNumber,
+          toNumber: m.toNumber,
+          direction: m.direction,
+          body: m.body,
+          status: m.status ?? null,
+          rawPayload: m.rawPayload ?? null,
+          sentAt: m.sentAt ?? new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getQuoSmsMessagesByConversation(conversationId: string, limit = 100): Promise<QuoSmsMessage[]> {
+    return db.select()
+      .from(quoSmsMessages)
+      .where(eq(quoSmsMessages.conversationId, conversationId))
+      .orderBy(desc(quoSmsMessages.sentAt))
+      .limit(limit);
+  }
+
+  async getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined> {
+    const [row] = await db.select()
+      .from(quoSmsMessages)
+      .where(eq(quoSmsMessages.providerMessageId, providerMessageId))
+      .limit(1);
+    return row;
+  }
+
+  async upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride> {
+    const [row] = await db.insert(guestPhoneOverrides)
+      .values(input)
+      .onConflictDoUpdate({
+        target: guestPhoneOverrides.conversationId,
+        set: {
+          reservationId: input.reservationId ?? null,
+          guestName: input.guestName ?? null,
+          phone: input.phone,
+          sourcePhone: input.sourcePhone ?? null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined> {
+    const [row] = await db.select()
+      .from(guestPhoneOverrides)
+      .where(eq(guestPhoneOverrides.conversationId, conversationId))
+      .limit(1);
+    return row;
   }
 
   // ── Photo labels ──

@@ -21,7 +21,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText, ExternalLink,
+  FileText,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -155,6 +155,9 @@ interface GuestyPost {
   postedAt?: string;
   authorType?: string;
   authorRole?: string;
+  sentBy?: string;
+  direction?: string;
+  isIncoming?: boolean;
   module?: GuestyModule;
 }
 
@@ -228,20 +231,37 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
-    name: "Guesty Guest App Agreement Request",
+    name: "Guesty Agreement & Card Authorization Request",
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: true,
     body: `Hi {guest_name},
 
-For reservations made through VRBO or Booking.com, we ask the primary guest to complete our secure Guesty Guest App check-in form for the stay at {property_name}.
+Please have the primary guest complete our secure Guesty Guest App pre-arrival form for the stay at {property_name}.
 
 Please complete it here:
 {{checkin_form}}
 
-This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.
+This lets us confirm the booking details, house rules, authorized guest, signed rental agreement, and any required secure payment/card authorization details before arrival. Please do not send credit card details in this message thread.
 
 Once completed, you are all set. We will send final arrival/access details 14 days before check-in.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "Guesty Invoice / Payment Method Request",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance for your stay at {property_name}.
+
+{{guest_invoice}}
+
+For security, please do not send credit card details in this message thread.
 
 Thanks,
 John Carpenter
@@ -406,6 +426,7 @@ function isHostPost(p: any): boolean {
     p.authorType === "host" ||
     p.authorRole === "host" ||
     p.senderType === "host" ||
+    p.sentBy === "host" ||
     p.direction === "outbound" ||
     p.direction === "out" ||
     p.direction === "outgoing" ||
@@ -414,7 +435,7 @@ function isHostPost(p: any): boolean {
 }
 
 function isSignedHostTemplateBody(body: string): boolean {
-  return /john carpenter/i.test(body) && /magical island rentals/i.test(body);
+  return /john carpenter/i.test(body) && /(magical island rentals|vacationrentalexpertz|nexstay)/i.test(body);
 }
 
 function normalizeGuestyManualMessageBody(body: string): string {
@@ -428,6 +449,27 @@ function normalizeGuestyManualMessageBody(body: string): string {
 // Guesty data per-message.
 const OUTBOUND_SENDER_NAME = "John Carpenter";
 const OUTBOUND_BRAND_NAME = "VacationRentalExpertz";
+const AIRBNB_PREAPPROVAL_STORAGE_KEY = "nexstay_airbnb_preapproved_reservation_ids";
+
+function readStoredAirbnbPreapprovals(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(AIRBNB_PREAPPROVAL_STORAGE_KEY);
+    const ids = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredAirbnbPreapprovals(ids: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(AIRBNB_PREAPPROVAL_STORAGE_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // localStorage can fail in private windows; the live Guesty state still refetches.
+  }
+}
 
 const formatMoney = (n: number): string =>
   `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -590,7 +632,7 @@ function buildAgreementRequestBody(args: {
   const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
-    `For reservations made through VRBO or Booking.com, we ask the primary guest to complete our secure Guesty Guest App check-in form${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
+    `Please have the primary guest complete our secure Guesty Guest App pre-arrival form${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
@@ -598,9 +640,33 @@ function buildAgreementRequestBody(args: {
   lines.push(`Please complete it here:`);
   lines.push(`{{checkin_form}}`);
   lines.push(``);
-  lines.push(`This lets us confirm the booking details, house rules, authorized guest, and signed terms before arrival.`);
+  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and any required secure payment/card authorization details before arrival. Please do not send credit card details in this message thread.`);
   lines.push(``);
   lines.push(`Once completed, you are all set. We will send final arrival/access details 14 days before check-in.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildGuestyInvoicePaymentBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  confirmationCode?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance${args.propertyName ? ` for your stay at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  lines.push(``);
+  lines.push(`{{guest_invoice}}`);
+  lines.push(``);
+  lines.push(`For security, please do not send credit card details in this message thread.`);
   lines.push(``);
   lines.push(`Thanks,`);
   lines.push(OUTBOUND_SENDER_NAME);
@@ -760,6 +826,40 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
   return visit(raw, 0) ?? [];
 }
 
+function normalizePhone(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (raw.startsWith("+") && digits.length >= 10) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return digits ? `+${digits}` : "";
+}
+
+function findPhoneInObject(node: unknown, depth = 0): string {
+  if (!node || depth > 5) return "";
+  if (typeof node === "string" || typeof node === "number") {
+    const phone = normalizePhone(node);
+    return phone.replace(/\D/g, "").length >= 10 ? phone : "";
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findPhoneInObject(item, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof node === "object") {
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (/phone|mobile|cell|tel|number/i.test(key) || typeof value === "object") {
+        const found = findPhoneInObject(value, depth + 1);
+        if (found) return found;
+      }
+    }
+  }
+  return "";
+}
+
 // Normalize a conversation object across Guesty API versions.
 // v1 puts guest/listing/last-message data at the top level.
 // v2 (inbox-v2) nests it under `meta`: meta.guest, meta.listing, meta.lastMessage, etc.
@@ -769,6 +869,7 @@ function normalizeConversation(c: any): GuestyConversation & {
   displayListingName: string;
   displayPreview: string;
   displayTimestamp: string | undefined;
+  displayGuestPhone: string;
   isUnread: boolean;
   reservationId?: string;
   // Indicators surfaced on the list row beside the guest name. Each
@@ -814,6 +915,15 @@ function normalizeConversation(c: any): GuestyConversation & {
     guest.name ??
     [guest.firstName, guest.lastName].filter(Boolean).join(" ") ??
     "Guest";
+  const guestPhone = normalizePhone(
+    guest.phone ??
+    guest.phoneNumber ??
+    guest.mobile ??
+    guest.mobilePhone ??
+    firstReservation?.guest?.phone ??
+    firstReservation?.guest?.phoneNumber ??
+    findPhoneInObject({ guest, firstReservation }),
+  );
 
   const listingName =
     c?.listingNickname ??
@@ -940,6 +1050,7 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayListingName: listingName || "—",
     displayPreview: typeof preview === "string" ? preview : "",
     displayTimestamp: timestamp,
+    displayGuestPhone: guestPhone,
     isUnread: !!unread,
     needsReply: !!unread,
     needsPreapprove,
@@ -1071,21 +1182,13 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
   const [templateDialog, setTemplateDialog] = useState<{ open: boolean; template: Partial<MessageTemplate> | null }>({ open: false, template: null });
+  const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string }>({ open: false, title: "", body: "" });
+  const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
+  const [guestPhoneInput, setGuestPhoneInput] = useState("");
   // Property filter for the conversation list — narrows the visible
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
   const [propertyFilter, setPropertyFilter] = useState<string>("all");
-  // Special-offer dialog state. Only one offer in flight at a time
-  // — there's only ever one selected conversation. The dialog opens
-  // pre-filled with the current quoted rate so the host just types
-  // the new total they're willing to take.
-  const [specialOfferDialog, setSpecialOfferDialog] = useState<{
-    open: boolean;
-    reservationId: string | null;
-    currentTotal: number;
-  }>({ open: false, reservationId: null, currentTotal: 0 });
-  const [specialOfferPrice, setSpecialOfferPrice] = useState<string>("");
-  const [specialOfferMessage, setSpecialOfferMessage] = useState<string>("");
   // Receipt template state. Pre-populated from Guesty's money fields
   // when the dialog opens; every value is editable so the operator can
   // correct stale Guesty data on the spot. The body regenerates from
@@ -1112,6 +1215,28 @@ export default function InboxPage() {
   const [receiptBody, setReceiptBody] = useState<string>("");
   const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
+
+  const previewTemplateBody = (title: string, body: string) => {
+    setTemplatePreview({ open: true, title, body });
+  };
+
+  const rememberAirbnbPreapproval = (reservationId: string) => {
+    setAirbnbPreapprovedIds((prev) => {
+      const next = new Set(prev);
+      next.add(reservationId);
+      writeStoredAirbnbPreapprovals(next);
+      return next;
+    });
+  };
+
+  const forgetAirbnbPreapproval = (reservationId: string) => {
+    setAirbnbPreapprovedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(reservationId);
+      writeStoredAirbnbPreapprovals(next);
+      return next;
+    });
+  };
 
   // ── Conversations ──
   // Guesty Open API mounts conversations under /communication/ — see
@@ -1217,6 +1342,27 @@ export default function InboxPage() {
     refetchInterval: 30_000,
   });
 
+  const { data: smsData, isLoading: smsLoading } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/sms/conversations/${selectedConvId}/messages`);
+      if (!r.ok) throw new Error(`SMS returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 15_000,
+  });
+
+  const { data: phoneData } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/sms/conversations/${selectedConvId}/phone`);
+      if (!r.ok) throw new Error(`Phone override returned HTTP ${r.status}`);
+      return r.json();
+    },
+  });
+
   const posts: GuestyPost[] = (() => {
     // postsData from the /posts endpoint is the authoritative source.
     const fromPosts = unwrapList<GuestyPost>(postsData, ["posts", "results", "messages"]);
@@ -1227,11 +1373,28 @@ export default function InboxPage() {
     return selectedConv?.posts ?? [];
   })();
 
+  const smsPosts: GuestyPost[] = unwrapList<any>(smsData, ["messages"]).map((m: any) => ({
+    _id: `quo-sms-${m.providerMessageId ?? m.id}`,
+    body: m.body,
+    sentAt: m.sentAt ?? m.createdAt,
+    sentBy: m.direction === "outbound" ? "host" : "guest",
+    direction: m.direction === "outbound" ? "outbound" : "inbound",
+    module: { type: "sms", provider: "quo" },
+  }));
+
+  const threadPosts = [...posts, ...smsPosts];
+  const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
+  const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
+
+  useEffect(() => {
+    setGuestPhoneInput(effectiveGuestPhone);
+  }, [selectedConvId, effectiveGuestPhone]);
+
   useEffect(() => {
     if (threadRef.current) {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
     }
-  }, [posts.length]);
+  }, [threadPosts.length]);
 
   // Full reservation details (money breakdown, pre-approval status, etc.)
   // The conversation endpoint only gives us a minimal reservation stub.
@@ -1308,10 +1471,12 @@ export default function InboxPage() {
   });
 
   const draftArrivalDetails = ({
+    title = "14-day arrival details",
     guestFirstName,
     propertyName,
     checkInIso,
   }: {
+    title?: string;
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
@@ -1322,11 +1487,11 @@ export default function InboxPage() {
       checkInIso,
       units: arrivalDetails?.units ?? [],
     });
-    setReplyText(body);
-    toast({ title: "Arrival details drafted", description: "Review the message, then click Send." });
+    previewTemplateBody(title, body);
   };
 
   const draftStayTemplate = ({
+    title = "Template preview",
     kind,
     guestFirstName,
     propertyName,
@@ -1337,7 +1502,8 @@ export default function InboxPage() {
     bookingTotal,
     totalPaid,
   }: {
-    kind: "booking" | "agreement-request" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
+    title?: string;
+    kind: "booking" | "agreement-request" | "guesty-invoice-payment" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
@@ -1352,6 +1518,8 @@ export default function InboxPage() {
       ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
       : kind === "agreement-request"
         ? buildAgreementRequestBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
+      : kind === "guesty-invoice-payment"
+        ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
       : kind === "representative-follow-up"
         ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
         : kind === "local-tips"
@@ -1359,8 +1527,7 @@ export default function InboxPage() {
           : kind === "day-before"
             ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
             : buildPostStayBody({ guestFirstName, propertyName });
-    setReplyText(body);
-    toast({ title: "Template drafted", description: "Review the message, then click Send." });
+    previewTemplateBody(title, body);
   };
 
   const sendMessage = useMutation({
@@ -1408,6 +1575,61 @@ export default function InboxPage() {
       toast({ title: "Message sent!" });
     },
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
+  });
+
+  const sendTextMessage = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const to = effectiveGuestPhone;
+      if (!to) throw new Error("No guest phone number found on this Guesty thread");
+      const r = await apiRequest("POST", `/api/inbox/sms/conversations/${selectedConvId}/send`, {
+        to,
+        body: replyText,
+        reservationId: selectedConv.reservationId ?? null,
+        guestName: selectedConv.displayGuestName ?? null,
+      });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      setReplyText("");
+      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Text sent via Quo" });
+    },
+    onError: (e: any) => toast({ title: "Text failed", description: e.message, variant: "destructive" }),
+  });
+
+  const saveGuestPhone = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const normalized = normalizePhone(guestPhoneInput);
+      const digits = normalized.replace(/\D/g, "");
+      if (digits.length < 10 || digits.length > 15) {
+        throw new Error("Enter a valid phone number with area code");
+      }
+      const r = await apiRequest("PUT", `/api/inbox/sms/conversations/${selectedConvId}/phone`, {
+        phone: normalized,
+        reservationId: selectedConv.reservationId ?? null,
+        guestName: selectedConv.displayGuestName ?? null,
+        sourcePhone: selectedConv.displayGuestPhone ?? null,
+      });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      const phone = normalizePhone(data?.override?.phone);
+      setGuestPhoneInput(phone);
+      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"] });
+      toast({ title: "Guest phone saved", description: phone });
+    },
+    onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
   });
 
   // Regenerate the receipt body whenever any input changes — but only
@@ -1506,7 +1728,7 @@ export default function InboxPage() {
     // Mirror the rendering's isHost detection (line ~1079) so a host
     // post tagged with `direction: "outbound"` or `senderType: "host"`
     // — but no `authorType`/`authorRole` — is correctly excluded.
-    const sortedAsc = [...posts].sort((a: any, b: any) => {
+    const sortedAsc = [...threadPosts].sort((a: any, b: any) => {
       const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
       const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
       return ta - tb;
@@ -1710,13 +1932,9 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed to approve", description: e.message, variant: "destructive" }),
   });
 
-  // Pre-approve an Airbnb inquiry directly from the inbox. Hits our server
-  // wrapper that PUTs the reservation with preApproveState:true (with fallback
-  // candidate endpoints). On success we:
-  //   1. Optimistically patch the react-query cache so the banner flips green
-  //      immediately, without waiting for the GET round-trip
-  //   2. Invalidate the reservation + conversation queries so the authoritative
-  //      server state is refetched in the background
+  // Pre-approve an Airbnb inquiry directly from the inbox. The server uses
+  // Guesty's reservation-v3 pre-approve action, then we keep a tiny local
+  // acknowledgement so the green state survives Guesty's read-after-write lag.
   const preapproveAirbnb = useMutation({
     mutationFn: async (reservationId: string) => {
       const r = await apiRequest("POST", `/api/inbox/reservations/${reservationId}/airbnb/preapprove`, {});
@@ -1726,7 +1944,8 @@ export default function InboxPage() {
       }
       return r.json();
     },
-    onSuccess: (_data, reservationId) => {
+    onSuccess: (data, reservationId) => {
+      rememberAirbnbPreapproval(reservationId);
       // Optimistically flip preApproveState=true on the cached reservation
       qc.setQueryData(["/api/guesty-proxy/reservations", reservationId], (old: any) => {
         if (!old) return old;
@@ -1745,59 +1964,11 @@ export default function InboxPage() {
       // pre-approved. Falls back to "Guest" if the name isn't available.
       const who = selectedConv?.guestName || "Guest";
       toast({
-        title: "Pre-approved on Airbnb",
+        title: data?.alreadyRequested ? "Already pre-approved on Airbnb" : "Pre-approved on Airbnb",
         description: `${who} can now book without further host action.`,
       });
     },
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
-  });
-
-  // "Send Special Offer" — pivoted 2026-05-04 from API call to
-  // clipboard-copy + open-in-Guesty. NOTE FOR CODEX: Guesty's Open API
-  // (`open-api.guesty.com/v1`) does NOT expose an Airbnb special-offer
-  // endpoint for this tenant — every plausible path returns 404
-  // (verified across 13 variants on 2026-05-04: `/reservations/{id}/
-  // special-offer`, `/airbnb2/...`, `/channels/airbnb/special-offers`,
-  // `/airbnb-special-offer-requests`, `/listings/{id}/special-offer`,
-  // and conversation-namespaced variants). Pre-approve and decline
-  // work because they're writable FIELDS on the reservation document
-  // (`preApproveState`, `status`); special-offer needs a channel-
-  // action endpoint that Guesty doesn't ship in v1. The legitimate
-  // alternative would be a Playwright workflow against
-  // app.guesty.com (per Load-Bearing #25–32), but that's heavy for a
-  // workflow the operator can complete in ~10s by pasting a number.
-  // So: copy the discounted price to clipboard, open Guesty's
-  // inbox-v2 URL for this conversation in a new tab, and let the
-  // operator paste into Guesty's native Special Offer dialog. The
-  // discount-preset buttons still do the math (the actual painful
-  // part). If/when Guesty ships the API endpoint, swap this back to
-  // the `apiRequest("POST", ...)` form — the server endpoint at
-  // `/api/inbox/reservations/.../airbnb/special-offer` remains in
-  // place for that future swap.
-  const sendSpecialOffer = useMutation({
-    mutationFn: async (vars: { reservationId: string; conversationId: string; price: number; message?: string }) => {
-      const priceStr = String(Math.round(vars.price));
-      try {
-        await navigator.clipboard.writeText(priceStr);
-      } catch {
-        // Some browsers refuse clipboard.writeText outside a user gesture;
-        // if it fails we still open the tab — operator can re-type the
-        // price if needed (it's also still in the dialog before close).
-      }
-      const url = `https://app.guesty.com/inbox-v2/${vars.conversationId}/reservation`;
-      window.open(url, "_blank", "noopener,noreferrer");
-      return { ok: true, price: priceStr };
-    },
-    onSuccess: (data) => {
-      setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
-      setSpecialOfferPrice("");
-      setSpecialOfferMessage("");
-      toast({
-        title: `Price $${Number(data.price).toLocaleString()} copied to clipboard`,
-        description: "Guesty opened in a new tab — paste into their Special Offer dialog.",
-      });
-    },
-    onError: (e: any) => toast({ title: "Couldn't open Guesty", description: e.message, variant: "destructive" }),
   });
 
   // Decline an Airbnb inquiry.
@@ -1810,7 +1981,8 @@ export default function InboxPage() {
       }
       return r.json();
     },
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
+      forgetAirbnbPreapproval(vars.reservationId);
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       toast({ title: "Inquiry declined" });
@@ -2088,10 +2260,10 @@ export default function InboxPage() {
 
                     {/* Messages — sorted oldest → newest, each with channel badge + full timestamp */}
                     <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-                      {(threadLoading || postsLoading) && posts.length === 0 && (
+                      {(threadLoading || postsLoading || smsLoading) && threadPosts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
-                      {[...posts]
+                      {[...threadPosts]
                         // Filter system log posts (e.g. "New guest inquiry"
                         // module=log) — they're metadata for Guesty's UI,
                         // not a message either side actually wrote, and
@@ -2167,7 +2339,7 @@ export default function InboxPage() {
                           );
                         })}
                       {/* Thread debug: only shown when both queries settled and still no posts */}
-                      {!threadLoading && !postsLoading && posts.length === 0 && (threadData || postsData) && (
+                      {!threadLoading && !postsLoading && !smsLoading && threadPosts.length === 0 && (threadData || postsData || smsData) && (
                         <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
                           <summary className="cursor-pointer font-semibold text-amber-800">🐞 No posts parsed — debug</summary>
                           <div className="mt-1 space-y-1 text-amber-900">
@@ -2223,13 +2395,24 @@ export default function InboxPage() {
                           {draftLoading ? "Drafting…" : "AI Draft"}
                         </Button>
                         <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => sendTextMessage.mutate()}
+                          disabled={!replyText.trim() || sendTextMessage.isPending || !effectiveGuestPhone}
+                          title={effectiveGuestPhone ? `Send SMS to ${effectiveGuestPhone}` : "No guest phone number found on this thread"}
+                          data-testid="button-send-text"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5 mr-1.5" />
+                          {sendTextMessage.isPending ? "Texting…" : "Send Text"}
+                        </Button>
+                        <Button
                           size="sm"
                           onClick={() => sendMessage.mutate()}
-                          disabled={!replyText.trim() || sendMessage.isPending}
+                          disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
                         >
                           <Send className="h-3.5 w-3.5 mr-1.5" />
-                          Send
+                          Send in Guesty
                         </Button>
                       </div>
                     </div>
@@ -2273,6 +2456,7 @@ export default function InboxPage() {
                   // accounts/docs also reference preApproved / preApprovalStatus,
                   // so we check all three.
                   const preApproved =
+                    (res?._id ? airbnbPreapprovedIds.has(res._id) : false) ||
                     res?.preApproveState === true ||
                     res?.preApproved === true ||
                     String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
@@ -2385,9 +2569,8 @@ export default function InboxPage() {
                                         inquiry path. Inquiries auto-expire
                                         after 24h if you don't respond, so
                                         the right "no thanks" action on an
-                                        inquiry is to either send a Special
-                                        Offer at a number that works, send a
-                                        polite reply, or just let it lapse.
+                                        inquiry is to send a polite reply, or
+                                        just let it lapse.
                                         We hide the Decline button on
                                         inquiries to avoid the user clicking
                                         into a 502 from Guesty's API. */}
@@ -2424,7 +2607,7 @@ export default function InboxPage() {
                                     of leaving a no-op Decline button. */}
                                 {phase === "inquiry" && (
                                   <div className="text-[10px] text-amber-800/80 italic mt-1">
-                                    Airbnb inquiries can't be declined — they auto-expire after 24h. To pass, send a Special Offer at a workable price or just let the inquiry lapse.
+                                    Airbnb inquiries can't be declined — they auto-expire after 24h. To pass, send a polite reply or just let the inquiry lapse.
                                   </div>
                                 )}
                               </div>
@@ -2437,7 +2620,42 @@ export default function InboxPage() {
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Guest</div>
                         <div className="mt-0.5 font-medium">{guest.fullName ?? selectedConv.displayGuestName}</div>
-                        {guest.phone && <div className="text-xs text-muted-foreground">{guest.phone}</div>}
+                        <div className="mt-2 space-y-1.5">
+                          <Label htmlFor="guest-sms-phone" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                            SMS phone
+                          </Label>
+                          <div className="flex gap-1.5">
+                            <Input
+                              id="guest-sms-phone"
+                              value={guestPhoneInput}
+                              onChange={(e) => setGuestPhoneInput(e.target.value)}
+                              onBlur={() => {
+                                const normalized = normalizePhone(guestPhoneInput);
+                                if (normalized) setGuestPhoneInput(normalized);
+                              }}
+                              placeholder="+18085551234"
+                              className="h-8 text-xs"
+                              data-testid="input-guest-sms-phone"
+                            />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 px-2 text-[11px]"
+                              onClick={() => saveGuestPhone.mutate()}
+                              disabled={saveGuestPhone.isPending || !guestPhoneInput.trim()}
+                              data-testid="button-save-guest-sms-phone"
+                            >
+                              Save
+                            </Button>
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {savedGuestPhone
+                              ? `Saved override${selectedConv.displayGuestPhone && selectedConv.displayGuestPhone !== savedGuestPhone ? ` · Guesty: ${selectedConv.displayGuestPhone}` : ""}`
+                              : selectedConv.displayGuestPhone
+                                ? "Pulled from Guesty"
+                                : "Enter a number with area code before texting"}
+                          </div>
+                        </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
                       </div>
 
@@ -2504,21 +2722,6 @@ export default function InboxPage() {
                               </div>
                             )}
                           </div>
-                          {isAirbnb && res?._id && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 mt-2 px-2.5 text-[11px] w-full"
-                              onClick={() => {
-                                setSpecialOfferDialog({ open: true, reservationId: res._id, currentTotal: guestGross });
-                                setSpecialOfferPrice(String(Math.round(guestGross)));
-                                setSpecialOfferMessage("");
-                              }}
-                              data-testid="button-special-offer-airbnb"
-                            >
-                              <DollarSign className="h-3 w-3 mr-1" /> Send Special Offer
-                            </Button>
-                          )}
                         </div>
                       )}
 
@@ -2531,8 +2734,8 @@ export default function InboxPage() {
                           unprofitable (a 4-night stay with $250×2 cleaning
                           adds $125/night vs ~$71/night on a 7-night stay).
                           Compare against `guestGross / nights` above to
-                          decide whether to send a Special Offer at a
-                          higher number or pass on the inquiry.
+                          decide whether the inquiry makes sense at the
+                          quoted number or should be passed.
                           NOTE FOR CODEX: this is a STATIC-table estimate
                           (BUY_IN_RATES × season multiplier), NOT a live
                           /find-buy-in call. The full live search lives
@@ -2683,12 +2886,11 @@ export default function InboxPage() {
                             const checkInDate = parseStayDate(checkInIso);
                             const checkOutDate = parseStayDate(checkOutIso);
                             const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
-                            const channelLower = String(channelRaw ?? "").toLowerCase();
-                            const needsAgreement = channelLower.includes("vrbo") || channelLower.includes("homeaway") || channelLower.includes("booking");
-                            const postBodies = posts
+                            const needsAgreement = true;
+                            const postBodies = threadPosts
                               .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""))
                               .filter((body: string) => body.trim().length > 0);
-                            const outboundTemplateBodies = posts
+                            const outboundTemplateBodies = threadPosts
                               .map((p: any) => ({
                                 body: cleanMessageBody(p.body ?? p.text ?? p.message ?? ""),
                                 host: isHostPost(p),
@@ -2749,25 +2951,34 @@ export default function InboxPage() {
                                 sent: wasSent(/this confirms your reservation|mahalo for booking with us|confirmation code|booking total|paid to date|remaining balance|this stay is set up as two units|two separate units|detailed arrival information|reservation.+confirmed|booking.+confirmed|two units.+minute/i),
                                 detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
                                 testId: "button-draft-booking-confirmation",
-                                onClick: () => draftStayTemplate({ kind: "booking", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Booking confirmation / receipt", kind: "booking", ...draftCommon }),
                               },
                               ...(needsAgreement ? [{
-                                title: "Rental agreement request",
+                                title: "Agreement + card authorization",
                                 due: bookingDate,
                                 dueLabel: "After booking",
-                                sent: wasSent(/guest app|rental agreement|signed terms|complete it here|check-in form/i),
-                                detail: "Guesty Guest App · email/SMS preferred",
+                                sent: wasSent(/guest app|pre-arrival form|rental agreement|signed terms|complete it here|check-in form|card authorization/i),
+                                detail: "Guesty Guest App · agreement/check-in form",
                                 testId: "button-draft-agreement-request",
-                                onClick: () => draftStayTemplate({ kind: "agreement-request", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Agreement + card authorization", kind: "agreement-request", ...draftCommon }),
+                              },
+                              {
+                                title: "Guesty invoice / payment method",
+                                due: bookingDate,
+                                dueLabel: "After booking",
+                                sent: wasSent(/guest invoice|secure guesty invoice|payment method|remaining balance|guest_invoice|credit card details/i),
+                                detail: "Guesty invoice/payment link",
+                                testId: "button-draft-guesty-invoice-payment",
+                                onClick: () => draftStayTemplate({ title: "Guesty invoice / payment method", kind: "guesty-invoice-payment", ...draftCommon }),
                               }] : []),
                               {
                                 title: "Unit setup confirmation",
                                 due: bookingDate ? addDays(bookingDate, 1) : null,
                                 dueLabel: "1 day after booking",
-                                sent: wasSent(/unit setup|two nearby units|representative of the resort|unit style/i),
+                                sent: wasSent(/two nearby units|representative of the resort\/community|representative of the resort|unit style|assigned units will match/i),
                                 detail: "Confirms nearby units and sample photos",
                                 testId: "button-draft-representative-follow-up",
-                                onClick: () => draftStayTemplate({ kind: "representative-follow-up", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Unit setup confirmation", kind: "representative-follow-up", ...draftCommon }),
                               },
                               {
                                 title: "14-day arrival details",
@@ -2777,7 +2988,7 @@ export default function InboxPage() {
                                 detail: `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`,
                                 testId: "button-draft-arrival-details",
                                 disabled: arrivalDetailsLoading,
-                                onClick: () => draftArrivalDetails({ guestFirstName: firstName, propertyName, checkInIso }),
+                                onClick: () => draftArrivalDetails({ title: "14-day arrival details", guestFirstName: firstName, propertyName, checkInIso }),
                               },
                               {
                                 title: "3-day local tips / parking reminder",
@@ -2786,7 +2997,7 @@ export default function InboxPage() {
                                 sent: wasSent(/local area|restaurant|restaurants|parking notes|few days away/i),
                                 detail: "Restaurants, travel day, parking",
                                 testId: "button-draft-local-tips",
-                                onClick: () => draftStayTemplate({ kind: "local-tips", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "3-day local tips / parking reminder", kind: "local-tips", ...draftCommon }),
                               },
                               {
                                 title: "Day-before final check-in reminder",
@@ -2795,7 +3006,7 @@ export default function InboxPage() {
                                 sent: wasSent(/check-in.+tomorrow|tomorrow.+check-in|safe travels/i),
                                 detail: "Final access and parking reminder",
                                 testId: "button-draft-day-before-checkin",
-                                onClick: () => draftStayTemplate({ kind: "day-before", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Day-before final check-in reminder", kind: "day-before", ...draftCommon }),
                               },
                               {
                                 title: "Post-stay thank-you / review request",
@@ -2804,7 +3015,7 @@ export default function InboxPage() {
                                 sent: wasSent(/thank you again for staying|appreciate a review|review request/i),
                                 detail: "Review and repeat guest note",
                                 testId: "button-draft-post-stay-review",
-                                onClick: () => draftStayTemplate({ kind: "post-stay", ...draftCommon }),
+                                onClick: () => draftStayTemplate({ title: "Post-stay thank-you / review request", kind: "post-stay", ...draftCommon }),
                               },
                             ];
                             return (
@@ -2832,7 +3043,7 @@ export default function InboxPage() {
                                         data-testid={item.testId}
                                       >
                                         <FileText className="h-3 w-3 mr-1" />
-                                        Draft
+                                        Preview
                                       </Button>
                                     </div>
                                   </div>
@@ -3293,177 +3504,41 @@ export default function InboxPage() {
         />
       </Dialog>
 
-      {/* Special-offer dialog. Pre-populated with the current Airbnb-
-          quoted total so the host just types the new total they're
-          willing to take. Fires the same `callGuestyAirbnbAction`
-          server path as pre-approve / decline (which now verifies
-          every candidate per PR #99). */}
-      <Dialog
-        open={specialOfferDialog.open}
-        onOpenChange={(open) => {
-          if (!open) {
-            setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
-            setSpecialOfferPrice("");
-            setSpecialOfferMessage("");
-          }
-        }}
-      >
-        <DialogContent className="max-w-md">
+      <Dialog open={templatePreview.open} onOpenChange={(open) => setTemplatePreview((prev) => ({ ...prev, open }))}>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Prepare Special Offer for Airbnb</DialogTitle>
+            <DialogTitle>{templatePreview.title || "Template preview"}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3 py-1">
-            {/* Explainer for the indirect flow. NOTE FOR CODEX: not a UI
-                preference — Guesty's Open API doesn't expose the Airbnb
-                special-offer endpoint for this tenant (verified across
-                13 path variants), so the dialog computes the price and
-                hands it to Guesty's UI via clipboard + new tab. See the
-                NOTE FOR CODEX on `sendSpecialOffer` for the full
-                investigation. */}
-            <p className="text-[11px] text-muted-foreground bg-muted/50 border rounded-md px-2.5 py-1.5">
-              Guesty's API doesn't accept Airbnb special offers from outside their app, so this <b>copies the price</b> and <b>opens Guesty</b> in a new tab — paste it into Guesty's Special Offer dialog there.
+          <Textarea
+            value={templatePreview.body}
+            readOnly
+            rows={16}
+            className="font-mono text-sm leading-relaxed"
+            data-testid="textarea-template-preview"
+          />
+          {/\{\{guest_invoice\}\}/i.test(templatePreview.body) && (
+            <p className="text-[11px] text-muted-foreground border rounded-md bg-muted/40 px-2.5 py-2">
+              Guesty note: the invoice/payment variable requires Guesty invoice/payment processing to be configured for this reservation. If the channel does not expand the variable, send the invoice from Guesty and keep this inbox message as the audit-trail request.
             </p>
-            <div>
-              <Label htmlFor="special-offer-price">New total guest price (USD)</Label>
-              <Input
-                id="special-offer-price"
-                type="number"
-                min={1}
-                step={1}
-                value={specialOfferPrice}
-                onChange={(e) => setSpecialOfferPrice(e.target.value)}
-                placeholder="7000"
-                data-testid="input-special-offer-price"
-              />
-              {specialOfferDialog.currentTotal > 0 && (
-                <>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Currently quoted to guest: ${specialOfferDialog.currentTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
-                    This is the total before Airbnb's guest service fee — Airbnb adds their fee on top of whatever you set here.
-                  </p>
-                  {/* Quick-discount presets so operator doesn't have to do
-                      the math. Each button computes
-                      `Math.round(currentTotal × (1 − pct/100))` and writes
-                      it into the price input. The currently-applied % is
-                      highlighted by comparing the price input back to the
-                      preset value (within $1 to absorb integer rounding).
-                      NOTE FOR CODEX: discount % is applied to the GUEST-
-                      facing total (`currentTotal`) — NOT to host payout —
-                      because that's what Airbnb's Special Offer overrides.
-                      Airbnb adds its service fee on top of whatever total
-                      we set, so the guest sees the discount applied to the
-                      base accommodation+cleaning, not to the all-in. */}
-                  <div className="mt-2 space-y-1">
-                    <div className="text-[11px] text-muted-foreground font-medium">Quick discount</div>
-                    <div className="flex gap-1.5 flex-wrap">
-                      {[5, 10, 15].map((pct) => {
-                        const discounted = Math.round(specialOfferDialog.currentTotal * (1 - pct / 100));
-                        const dollarsOff = specialOfferDialog.currentTotal - discounted;
-                        const currentVal = parseFloat(specialOfferPrice);
-                        const isApplied = Number.isFinite(currentVal) && Math.abs(currentVal - discounted) <= 1;
-                        return (
-                          <Button
-                            key={pct}
-                            type="button"
-                            size="sm"
-                            variant={isApplied ? "default" : "outline"}
-                            className="h-7 px-2.5 text-[11px]"
-                            onClick={() => setSpecialOfferPrice(String(discounted))}
-                            data-testid={`button-special-offer-discount-${pct}`}
-                          >
-                            {pct}% off
-                            <span className="ml-1.5 text-[10px] opacity-70">
-                              −${dollarsOff.toLocaleString()}
-                            </span>
-                          </Button>
-                        );
-                      })}
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2.5 text-[11px]"
-                        onClick={() => setSpecialOfferPrice(String(Math.round(specialOfferDialog.currentTotal)))}
-                        data-testid="button-special-offer-reset"
-                      >
-                        Reset
-                      </Button>
-                    </div>
-                    {(() => {
-                      const currentVal = parseFloat(specialOfferPrice);
-                      if (!Number.isFinite(currentVal) || currentVal <= 0) return null;
-                      const dollarsOff = specialOfferDialog.currentTotal - currentVal;
-                      if (dollarsOff <= 0) return null;
-                      const pct = (dollarsOff / specialOfferDialog.currentTotal) * 100;
-                      return (
-                        <p className="text-[11px] text-green-700">
-                          ${dollarsOff.toLocaleString(undefined, { maximumFractionDigits: 0 })} off
-                          {" "}({pct.toFixed(1)}% discount)
-                          {" "}— guest pays ${currentVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.
-                        </p>
-                      );
-                    })()}
-                  </div>
-                </>
-              )}
-            </div>
-            <div>
-              <Label htmlFor="special-offer-message">Message to guest (optional)</Label>
-              <Textarea
-                id="special-offer-message"
-                value={specialOfferMessage}
-                onChange={(e) => setSpecialOfferMessage(e.target.value)}
-                rows={3}
-                placeholder="A short note explaining the offer (optional)."
-                data-testid="textarea-special-offer-message"
-              />
-            </div>
-          </div>
+          )}
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => {
-                setSpecialOfferDialog({ open: false, reservationId: null, currentTotal: 0 });
-                setSpecialOfferPrice("");
-                setSpecialOfferMessage("");
-              }}
-              data-testid="button-special-offer-cancel"
+              onClick={() => setTemplatePreview({ open: false, title: "", body: "" })}
+              data-testid="button-template-preview-cancel"
             >
               Cancel
             </Button>
             <Button
               onClick={() => {
-                const price = parseFloat(specialOfferPrice);
-                if (!Number.isFinite(price) || price <= 0) {
-                  toast({ title: "Enter a valid price greater than 0", variant: "destructive" });
-                  return;
-                }
-                if (!specialOfferDialog.reservationId) return;
-                // Pass `selectedConvId` (the conversation that owns
-                // this dialog) so the new tab lands on Guesty's
-                // inbox-v2 page for the correct thread. The
-                // reservationId is kept for future reactivation of the
-                // Guesty API path — see the NOTE FOR CODEX on
-                // sendSpecialOffer.
-                sendSpecialOffer.mutate({
-                  reservationId: specialOfferDialog.reservationId,
-                  conversationId: selectedConvId ?? "",
-                  price,
-                  message: specialOfferMessage.trim() || undefined,
-                });
+                setReplyText(templatePreview.body);
+                setTemplatePreview({ open: false, title: "", body: "" });
+                toast({ title: "Draft loaded", description: "Review in the composer, then send." });
               }}
-              disabled={sendSpecialOffer.isPending || !specialOfferPrice || !selectedConvId}
-              data-testid="button-special-offer-send"
+              disabled={!templatePreview.body.trim()}
+              data-testid="button-template-preview-use"
             >
-              {sendSpecialOffer.isPending ? (
-                <>
-                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Opening Guesty…
-                </>
-              ) : (
-                <>
-                  <ExternalLink className="h-3 w-3 mr-1" /> Copy & Open in Guesty
-                </>
-              )}
+              <FileText className="h-3 w-3 mr-1" /> Use in Composer
             </Button>
           </DialogFooter>
         </DialogContent>
