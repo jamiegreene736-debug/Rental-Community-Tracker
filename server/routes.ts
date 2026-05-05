@@ -17153,6 +17153,53 @@ Return ONLY compact JSON with this exact shape:
       );
       return m?.[1]?.trim() ?? null;
     };
+    const streetRootFromAddress = (address: string | null): string | null => {
+      if (!address) return null;
+      const m = address
+        .toLowerCase()
+        .replace(/&[#a-z0-9]+;/gi, " ")
+        .replace(/[^a-z0-9.'#\s-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .match(/\b(\d{3,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
+      if (!m) return null;
+      const typeMap: Record<string, string> = {
+        boulevard: "blvd",
+        road: "rd",
+        street: "st",
+        avenue: "ave",
+        drive: "dr",
+        lane: "ln",
+        circle: "cir",
+        court: "ct",
+        parkway: "pkwy",
+        place: "pl",
+        terrace: "ter",
+      };
+      const streetName = m[2].replace(/\s+/g, " ").trim();
+      const streetType = typeMap[m[3]] ?? m[3];
+      return `${m[1]} ${streetName} ${streetType}`;
+    };
+    const platformForCandidate = (url: string): SingleListingSource => (
+      candidateMeta.get(url.toLowerCase())?.platform
+        ?? (/zillow\.com/i.test(url) ? "zillow" : /redfin\.com/i.test(url) ? "redfin" : /realtor\.com/i.test(url) ? "realtor" : "brokerage")
+    );
+    const communityAddressRoots = new Set<string>();
+    if (!isCityWide) {
+      for (const candidate of candidateUrls) {
+        const platform = platformForCandidate(candidate);
+        if (platform === "brokerage") continue;
+        const metaForCandidate = candidateMeta.get(candidate.toLowerCase());
+        const root = streetRootFromAddress(
+          addressFromSlug(candidate) ?? addressFromSearchText(`${metaForCandidate?.title ?? ""} ${metaForCandidate?.snippet ?? ""}`),
+        );
+        if (root) communityAddressRoots.add(root);
+      }
+      if (communityAddressRoots.size > 0) {
+        console.log(
+          `[find-clean-unit] community address roots for "${communityName}": ${Array.from(communityAddressRoots).join(", ")}`,
+        );
+      }
+    }
     const matchesOtaIndex = (zAddress: string | null): boolean => {
       if (!zAddress || otaAddressTokens.size === 0) return false;
       const norm = zAddress.toLowerCase().replace(/\s+/g, " ");
@@ -17264,6 +17311,29 @@ Return ONLY compact JSON with this exact shape:
           bedrooms: null,
           bathrooms: null,
           address: null,
+          bedroomMatches: false,
+          qualifies: null,
+          qualifierReason: null,
+          rejectedBecause: reason,
+        });
+        emit({ type: "candidate-rejected", url, reason });
+        continue;
+      }
+      const candidatePlatform = platformForCandidate(url);
+      const candidateStreetRoot = streetRootFromAddress(addressGuess);
+      if (
+        !isCityWide &&
+        candidatePlatform === "brokerage" &&
+        communityAddressRoots.size > 0 &&
+        candidateStreetRoot &&
+        !communityAddressRoots.has(candidateStreetRoot)
+      ) {
+        const reason = `Outside selected resort: address "${addressGuess}" does not match discovered ${communityName} address roots.`;
+        attempts.push({
+          url,
+          bedrooms: null,
+          bathrooms: null,
+          address: addressGuess,
           bedroomMatches: false,
           qualifies: null,
           qualifierReason: null,
