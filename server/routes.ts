@@ -324,8 +324,11 @@ function extractListingFacts(payload: any): ListingFacts {
     // `homeStatus` is the canonical (FOR_SALE, RECENTLY_SOLD,
     // OFF_MARKET, ...). The single-listing find-clean-unit endpoint
     // uses these to reject candidates that aren't valid vacation
-    // rental candidates (off-market stubs, raw lots, single-family
-    // detached, etc.) before running the OTA qualifier.
+    // rental candidates (raw lots, single-family detached, etc.)
+    // before running the OTA qualifier. Status is retained for
+    // diagnostics, but the single-listing wizard no longer rejects
+    // SOLD / RECENTLY_SOLD sale-history pages because those are often
+    // the cleanest non-OTA photo source for a sample unit.
     if (facts.homeType == null) {
       if (typeof o.homeType === "string" && o.homeType.length > 0) {
         facts.homeType = o.homeType;
@@ -416,6 +419,10 @@ function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts
   return {
     bedrooms: primary.bedrooms ?? fallback.bedrooms,
     bathrooms: primary.bathrooms ?? fallback.bathrooms,
+    homeType: primary.homeType ?? fallback.homeType,
+    homeStatus: primary.homeStatus ?? fallback.homeStatus,
+    propertySubType: primary.propertySubType ?? fallback.propertySubType,
+    photoCount: primary.photoCount ?? fallback.photoCount,
   };
 }
 
@@ -1100,6 +1107,106 @@ async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; fac
 // fast on a wedged daemon. Set to 0 to disable the sidecar
 // fallback entirely.
 type ScrapeOptions = { sidecarWalletMs?: number };
+
+async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) return { urls: [], facts: {} };
+    const html = await resp.text();
+    if (html.length < 1000) return { urls: [], facts: {} };
+
+    const plain = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;|&#160;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    let facts = mergeFacts(extractFactsFromJsonLd(html), extractFactsFromText(plain));
+    if (facts.bedrooms == null) {
+      const m = plain.match(/\bBedrooms?\s+(\d+(?:\.\d+)?)\b/i) || plain.match(/\b(\d+(?:\.\d+)?)\s+Beds?\b/i);
+      const n = m ? Number(m[1]) : NaN;
+      if (Number.isFinite(n) && n > 0 && n < 50) facts.bedrooms = Math.round(n);
+    }
+    if (facts.bathrooms == null) {
+      const label = plain.match(/\bBathrooms?\s+(\d+(?:\.\d+)?)(?:\s+Full)?(?:\s*\/?\s*(\d+)\s+Half)?\b/i)
+        || plain.match(/\b(\d+(?:\.\d+)?)\s+Full\s+(\d+)\s+Half\s+Baths?\b/i)
+        || plain.match(/\b(\d+(?:\.\d+)?)\s+Baths?\b/i);
+      if (label) {
+        const full = Number(label[1]);
+        const half = label[2] ? Number(label[2]) : 0;
+        if (Number.isFinite(full) && full > 0 && full < 50) facts.bathrooms = full + (Number.isFinite(half) ? half * 0.5 : 0);
+      }
+    }
+
+    const seen = new Set<string>();
+    const urls: string[] = [];
+    const pushPhoto = (raw: unknown) => {
+      if (typeof raw !== "string") return;
+      let u = raw.trim().replace(/\\u002F/g, "/").replace(/&amp;/g, "&");
+      if (u.startsWith("//")) u = `https:${u}`;
+      if (!/^https?:\/\//i.test(u)) return;
+      if (!/\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(u)) return;
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent|agent|broker|team|award|flag|main-bg|hero/i.test(u)) return;
+      if (!/(?:listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/|photos?|mls|media|cdn)/i.test(u)) return;
+      const key = u.replace(/[?#].*$/, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      urls.push(u);
+    };
+    const pushSrcset = (raw: string | null) => {
+      if (!raw) return;
+      for (const part of raw.split(",")) {
+        const u = part.trim().split(/\s+/)[0];
+        pushPhoto(u);
+      }
+    };
+
+    for (const m of Array.from(html.matchAll(/<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["'][^>]*>/gi))) {
+      pushPhoto(m[1]);
+    }
+    for (const m of Array.from(html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi))) {
+      try {
+        const parsed = JSON.parse(m[1]);
+        const visit = (obj: any, depth: number) => {
+          if (!obj || depth > 5) return;
+          if (Array.isArray(obj)) { for (const v of obj) visit(v, depth + 1); return; }
+          if (typeof obj !== "object") return;
+          const image = obj.image;
+          if (Array.isArray(image)) for (const i of image) pushPhoto(typeof i === "string" ? i : i?.url);
+          else pushPhoto(typeof image === "string" ? image : image?.url);
+          for (const v of Object.values(obj)) visit(v, depth + 1);
+        };
+        visit(parsed, 0);
+      } catch {}
+    }
+    for (const m of Array.from(html.matchAll(/https?:\/\/[^"'\s<>)]+(?:listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/)[^"'\s<>)]+/gi))) {
+      pushPhoto(m[0]);
+    }
+    for (const m of Array.from(html.matchAll(/<img[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["'][^>]*>/gi))) {
+      pushPhoto(m[1]);
+    }
+    for (const m of Array.from(html.matchAll(/<img[^>]+(?:srcset|data-srcset)=["']([^"']+)["'][^>]*>/gi))) {
+      pushSrcset(m[1]);
+    }
+
+    console.log(`[scrapeGenericRealEstate] ${url} → ${urls.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls, facts };
+  } catch (e: any) {
+    console.warn(`[scrapeGenericRealEstate] ${url}: ${e?.message ?? e}`);
+    return { urls: [], facts: {} };
+  }
+}
+
 async function scrapeListingPhotos(
   primaryUrl: string,
   fallbackUrl?: string,
@@ -1302,8 +1409,30 @@ async function scrapeListingPhotos(
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
   }
 
+  const isKnownRealEstateHost = /(?:zillow\.com|realtor\.com|redfin\.com|homes\.com)/i.test(primaryUrl);
+  if (!isKnownRealEstateHost) {
+    const result = await scrapeGenericRealEstateViaFetch(primaryUrl);
+    if (listingFacts) {
+      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
+      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+      if (result.facts.homeType != null) listingFacts.homeType = result.facts.homeType;
+      if (result.facts.homeStatus != null) listingFacts.homeStatus = result.facts.homeStatus;
+      if (result.facts.propertySubType != null) listingFacts.propertySubType = result.facts.propertySubType;
+      if (result.facts.photoCount != null) listingFacts.photoCount = result.facts.photoCount;
+    }
+    if (result.urls.length > 0) {
+      const host = new URL(primaryUrl).hostname.replace(/^www\./, "");
+      return result.urls.map((u) => ({ url: u, title: `${host} listing photo`, source: host, sourceLink: primaryUrl }));
+    }
+    if (!fallbackUrl) return [];
+  }
+
+  const chromiumExecutable =
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+    (fs.existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined);
   const browser = await chromium.launch({
     headless: true,
+    ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}),
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
   });
 
@@ -16351,7 +16480,7 @@ Return ONLY compact JSON with this exact shape:
             `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=20&api_key=${apiKey}`,
             { signal: AbortSignal.timeout(15_000) },
           );
-          if (!resp.ok) return [] as string[];
+          if (!resp.ok) return [] as Array<{ link: string; title: string; snippet: string }>;
           const data = await resp.json() as any;
           const organic = (data.organic_results || []) as Array<{ link?: string }>;
           const urls: string[] = [];
@@ -16633,15 +16762,51 @@ Return ONLY compact JSON with this exact shape:
       return [
         `site:redfin.com "${communityName}" ${city} ${state} ${brTerm}`,
         `site:redfin.com "${communityName}" ${brTerm}`,
+        // Redfin often indexes subdivision/community pages without
+        // bedroom text in the Google snippet. Keep this broad
+        // community query in numeric mode, then let the post-scrape
+        // bedroom gate reject non-matching units.
+        `site:redfin.com "${communityName}" ${city} ${state}`,
+        `site:redfin.com "${communityName}" condo`,
       ];
     };
     const zillowQueries = buildZillowQueries().map((q) => q.replace(/\s+/g, " ").trim());
     const realtorQueries = buildRealtorQueries().map((q) => q.replace(/\s+/g, " ").trim());
     const redfinQueries = buildRedfinQueries().map((q) => q.replace(/\s+/g, " ").trim());
+    const brokerageQueries = isCityWide
+      ? []
+      : [
+        `"${communityName}" "${city}" "${state}" ${brTerm} "for sale" -airbnb -vrbo -booking`,
+        `"${communityName}" "${city}" "${state}" "condo for sale" -airbnb -vrbo -booking`,
+        `"${communityName}" "${city}" "${state}" MLS -airbnb -vrbo -booking`,
+      ].map((q) => q.replace(/\s+/g, " ").trim());
 
     const candidateUrls: string[] = [];
     const seen = new Set<string>();
-    const platformCounts = { zillow: 0, realtor: 0, redfin: 0 };
+    type SingleListingSource = "zillow" | "realtor" | "redfin" | "brokerage";
+    const candidateMeta = new Map<string, { platform: SingleListingSource; title: string; snippet: string }>();
+    const platformCounts = { zillow: 0, realtor: 0, redfin: 0, brokerage: 0 };
+    const citySlugForFilter = city.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const cityTextForFilter = city.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+    const communityTokensForFilter = String(communityName ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 2)
+      .filter((token) => !new Set([
+        "the", "and", "resort", "condo", "condos", "condominium", "condominiums",
+        "villa", "villas", "beach", "club", "community", "townhome", "townhomes",
+        "townhouse", "townhouses", "apartment", "apartments",
+      ]).has(token));
+    const looksCommunityAnchored = (link: string, title: string, snippet: string): boolean => {
+      if (isCityWide) return true;
+      const lowerUrl = link.toLowerCase();
+      const haystack = `${title} ${snippet}`.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+      const hasCity = haystack.includes(cityTextForFilter) || lowerUrl.includes(citySlugForFilter);
+      const hasCommunity = communityTokensForFilter.length === 0
+        || communityTokensForFilter.every((token) => haystack.includes(token));
+      return hasCity && hasCommunity;
+    };
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // num=20 in city-wide mode (vs num=10 default) so each query
     // harvests up to 20 raw URLs. Combined with the wider candidate
@@ -16651,7 +16816,20 @@ Return ONLY compact JSON with this exact shape:
     // search space is small enough that more pagination just
     // returns garbage from outside the resort.
     const searchApiNum = isCityWide ? 20 : 10;
-    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: "zillow" | "realtor" | "redfin") => {
+    const isBrokerageCandidateUrl = (link: string): boolean => {
+      try {
+        const u = new URL(link);
+        const host = u.hostname.toLowerCase().replace(/^www\./, "");
+        if (!/^https?:$/i.test(u.protocol)) return false;
+        if (/\.(?:pdf|doc|docx|xls|xlsx|zip)$/i.test(u.pathname)) return false;
+        if (/(?:airbnb|vrbo|booking|homeaway|tripadvisor|expedia|hotels|facebook|instagram|youtube|google|zillow|realtor|redfin)\./i.test(host)) return false;
+        if (/\.(?:gov|edu)$/i.test(host)) return false;
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: SingleListingSource) => {
       const results = await Promise.all(queries.map(async (q) => {
         try {
           const resp = await fetch(
@@ -16660,22 +16838,34 @@ Return ONLY compact JSON with this exact shape:
           );
           if (!resp.ok) return [] as string[];
           const data = await resp.json() as any;
-          const organic = (data.organic_results || []) as Array<{ link?: string }>;
+          const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
           return organic
-            .map((r) => String(r.link ?? ""))
-            .filter((l) => urlPattern.test(l));
+            .map((r) => ({
+              link: String(r.link ?? ""),
+              title: String(r.title ?? ""),
+              snippet: String(r.snippet ?? ""),
+            }))
+            .filter((r) => urlPattern.test(r.link))
+            .filter((r) => platform !== "brokerage" || isBrokerageCandidateUrl(r.link))
+            .filter((r) => looksCommunityAnchored(r.link, r.title, r.snippet));
         } catch (e: any) {
           console.warn(`[find-clean-unit] SearchAPI error for "${q}": ${e?.message ?? e}`);
-          return [] as string[];
+          return [] as Array<{ link: string; title: string; snippet: string }>;
         }
       }));
-      for (const urls of results) {
-        for (const link of urls) {
+      for (const hits of results) {
+        for (const hit of hits) {
+          const link = hit.link;
           const lower = link.toLowerCase();
           if (seen.has(lower)) continue;
           if (skipSet.has(lower)) continue;
           seen.add(lower);
           candidateUrls.push(link);
+          candidateMeta.set(lower, {
+            platform,
+            title: hit.title,
+            snippet: hit.snippet,
+          });
           platformCounts[platform]++;
         }
       }
@@ -16733,10 +16923,21 @@ Return ONLY compact JSON with this exact shape:
       // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
       // Redfin discovery — matches replacement-tool's three-source pattern.
       harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
+      harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
     ]);
+    const candidatePriority = (url: string): number => {
+      const platform = candidateMeta.get(url.toLowerCase())?.platform
+        ?? (/zillow\.com/i.test(url) ? "zillow" : /redfin\.com/i.test(url) ? "redfin" : /realtor\.com/i.test(url) ? "realtor" : "brokerage");
+      if (platform === "zillow") return 0;
+      if (platform === "brokerage") return 1;
+      if (platform === "redfin") return 2;
+      if (platform === "realtor") return 3;
+      return 4;
+    };
+    candidateUrls.sort((a, b) => candidatePriority(a) - candidatePriority(b));
     console.log(
       `[find-clean-unit] discovery for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}): ` +
-      `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} redfin=${platformCounts.redfin} total=${candidateUrls.length}`,
+      `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} redfin=${platformCounts.redfin} brokerage=${platformCounts.brokerage} total=${candidateUrls.length}`,
     );
 
     emit({
@@ -16900,13 +17101,23 @@ Return ONLY compact JSON with this exact shape:
       }
       // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
       // Redfin URL: /<state>/<city>/<address-slug>/home/<id>
-      // The address-slug is the third path segment (after state + city).
-      // Parse out the dashed street portion only.
-      const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)\/home\//i);
+      // or /<state>/<city>/<address-slug>/unit-<unit>/home/<id>.
+      // Parse out the dashed street portion and preserve explicit unit
+      // segments when present.
+      const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)(?:\/unit-([^/]+))?\/home\//i);
       if (redfinMatch) {
-        return redfinMatch[1].replace(/-/g, " ").trim();
+        const street = redfinMatch[1].replace(/-/g, " ").trim();
+        const unit = redfinMatch[2]?.replace(/-/g, " ").trim();
+        return unit ? `${street} unit ${unit}` : street;
       }
       return null;
+    };
+    const addressFromSearchText = (text: string): string | null => {
+      const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
+      const m = cleaned.match(
+        /\b(\d{3,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*[A-Za-z0-9-]+)?)\b/i,
+      );
+      return m?.[1]?.trim() ?? null;
     };
     const matchesOtaIndex = (zAddress: string | null): boolean => {
       if (!zAddress || otaAddressTokens.size === 0) return false;
@@ -17005,12 +17216,13 @@ Return ONLY compact JSON with this exact shape:
       //      candidate.)
       //   4. Apify scrape — ONLY if OTA-clean. Extracts bed/bath/
       //      photoCount/homeType/propertySubType.
-      //   5. Stub / wrong-type / wrong-BR / sold rejects (post-scrape).
+      //   5. Stub / wrong-type / wrong-BR rejects (post-scrape).
       //   6. Photo-count gate (≥3, matches old behavior)
       //   7. Return on first match.
 
       // 1) Parse address from URL slug.
-      const addressGuess = addressFromSlug(url);
+      const meta = candidateMeta.get(url.toLowerCase());
+      const addressGuess = addressFromSlug(url) ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
       if (!addressGuess) {
         const reason = "Could not parse address from listing URL slug.";
         attempts.push({
@@ -17112,8 +17324,21 @@ Return ONLY compact JSON with this exact shape:
         (scrapeError ? ` scrapeError=${scrapeError.slice(0, 200)}` : ""),
       );
 
-      // HTML bathroom fallback when Apify returned BR but not BA.
-      if (facts.bedrooms != null && facts.bathrooms == null) {
+      if ((facts.bedrooms == null || facts.bathrooms == null) && meta) {
+        const merged = mergeFacts(facts, extractFactsFromText(`${meta.title} ${meta.snippet}`));
+        if (merged.bedrooms != null) facts.bedrooms = merged.bedrooms;
+        if (merged.bathrooms != null) facts.bathrooms = merged.bathrooms;
+        if (merged.homeType != null) facts.homeType = merged.homeType;
+        if (merged.homeStatus != null) facts.homeStatus = merged.homeStatus;
+        if (merged.propertySubType != null) facts.propertySubType = merged.propertySubType;
+        if (merged.photoCount != null) facts.photoCount = merged.photoCount;
+      }
+
+      // HTML fact fallback when the scraper returned photos but
+      // incomplete facts. This matters on Zillow sale-history pages:
+      // Apify can surface the carousel but miss the bed/bath payload,
+      // while the visible HTML still contains "2 beds / 3 baths".
+      if (facts.bedrooms == null || facts.bathrooms == null) {
         try {
           const htmlResp = await fetch(url, {
             headers: {
@@ -17125,8 +17350,13 @@ Return ONLY compact JSON with this exact shape:
           });
           if (htmlResp.ok) {
             const html = await htmlResp.text();
-            const merged = mergeFacts(extractFactsFromJsonLd(html), extractFactsFromText(html));
+            const merged = mergeFacts(facts, mergeFacts(extractFactsFromJsonLd(html), extractFactsFromText(html)));
+            if (merged.bedrooms != null) facts.bedrooms = merged.bedrooms;
             if (merged.bathrooms != null) facts.bathrooms = merged.bathrooms;
+            if (merged.homeType != null) facts.homeType = merged.homeType;
+            if (merged.homeStatus != null) facts.homeStatus = merged.homeStatus;
+            if (merged.propertySubType != null) facts.propertySubType = merged.propertySubType;
+            if (merged.photoCount != null) facts.photoCount = merged.photoCount;
           }
         } catch { /* best-effort */ }
       }
@@ -17169,14 +17399,14 @@ Return ONLY compact JSON with this exact shape:
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-      const hs = (facts.homeStatus || "").toUpperCase();
-      const DISQUALIFYING_STATUS = ["RECENTLY_SOLD", "SOLD", "FORE_AUCTION", "AUCTION", "PENDING"];
-      if (hs && DISQUALIFYING_STATUS.includes(hs)) {
-        const reason = `Listing status is ${hs} (need an active or off-market unit, not sold/auctioned).`;
-        attempts.push({ url, bedrooms: scrapedBR, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: true, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
-        emit({ type: "candidate-rejected", url, reason });
-        continue;
-      }
+      // Listing status is deliberately NOT a rejection gate in the
+      // single-listing wizard. The product needs a clean example
+      // condo/townhouse photo set, not an active sale listing. In
+      // older/coastal resorts like Santa Maria, the best clean photo
+      // sources are often Zillow/Realtor sale-history pages marked
+      // SOLD or RECENTLY_SOLD. We still reject land/single-family via
+      // type/sub-type above, and OTA contamination via text + Lens
+      // checks below.
 
       if (photos.length === 0) {
         const reason = scrapeError
@@ -17277,7 +17507,6 @@ Return ONLY compact JSON with this exact shape:
     const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
     const stubs = attempts.filter((a) => /^Stub listing/i.test(a.rejectedBecause)).length;
     const wrongType = attempts.filter((a) => /^Wrong property type/i.test(a.rejectedBecause)).length;
-    const wrongStatus = attempts.filter((a) => /^Listing status is/i.test(a.rejectedBecause)).length;
     const totalListedOnOta = otaMatches + prefilterMatches;
     const reasonParts: string[] = [];
     if (totalListedOnOta > 0) reasonParts.push(`${totalListedOnOta} listed on Airbnb/VRBO/Booking${prefilterMatches > 0 ? ` (${prefilterMatches} pre-filtered)` : ""}`);
@@ -17285,7 +17514,6 @@ Return ONLY compact JSON with this exact shape:
     if (wrongBR > 0) reasonParts.push(`${wrongBR} wrong bedroom count`);
     if (stubs > 0) reasonParts.push(`${stubs} stub listings (off-market with no data)`);
     if (wrongType > 0) reasonParts.push(`${wrongType} wrong property type`);
-    if (wrongStatus > 0) reasonParts.push(`${wrongStatus} sold/auction status`);
     const scopeLabel = isCityWide
       ? `in ${city}, ${state} (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`
       : `for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`;
