@@ -891,15 +891,82 @@ established it so you can read the rationale in the commit message.
     consult are NOT yet implemented and gated on operator decisions:
     Bright Data Web Unblocker as primary scraper (~$0.50-1 per 1K
     requests; would replace Apify+ScrapingBee for the highest
-    success rate on Zillow's anti-bot), wiring the residential-IP
-    Chrome sidecar for Zillow scraping (free but adds ~30-90s
-    latency), Redfin / Realtor / Trulia source diversification, and
-    the "verify-then-discover" architecture flip (start from OTA
-    listings index, inverse-filter to find unlisted, enrich photos
-    last). See `server/grok-single-listing-consult.ts` for the full
-    brief — hit `GET /api/operations/grok-single-listing-consult`
-    on Railway to re-run the consult. **Don't ship any of these
-    without operator approval** (cost / scope concerns).
+    success rate on Zillow's anti-bot), and Redfin / Realtor /
+    Trulia source diversification. See
+    `server/grok-single-listing-consult.ts` for the full brief —
+    hit `GET /api/operations/grok-single-listing-consult` on Railway
+    to re-run the consult. **Don't ship Bright Data without operator
+    approval** (cost concern).
+
+    The other two Grok recommendations DID ship:
+    - Residential-IP Chrome sidecar for Zillow scraping (PR #361,
+      Load-Bearing #41) — wired as tertiary fallback in
+      scrapeListingPhotos.
+    - Verify-then-discover architecture flip (Load-Bearing #42) —
+      OTA address index built FIRST, used as a prefilter before
+      Zillow candidates get scraped.
+
+41. **Local Chrome sidecar wired as tertiary Zillow scraper.**
+    `scrapeListingPhotos` chain on Zillow URLs: Apify primary →
+    ScrapingBee secondary → sidecar tertiary (heartbeat-gated).
+    The sidecar's `zillow_photo_scrape` op type extracts photos
+    AND facts from the rendered DOM, so a sidecar success short-
+    circuits the find-clean-unit HTML-fallback step. Operator
+    needs to add `handleZillowPhotoScrape` to their local
+    `worker.mjs` per `docs/sidecar-worker-deltas/zillow-photo-
+    scrape.md` — until they do, sidecar requests time out
+    gracefully (90s wallet) and the chain falls through to its
+    existing behavior. PR #361.
+
+42. **find-clean-unit uses verify-then-discover prefiltering: OTA
+    address index built BEFORE Zillow candidates get scraped.**
+    Old flow walked 15 Zillow candidates × Apify scrape × 6-call
+    qualifier sequentially, even at saturated resorts where 70%+
+    of candidates are already on Airbnb/VRBO/Booking. New flow,
+    feature-flagged on by default (`FIND_CLEAN_UNIT_VERIFY_FIRST`
+    env var; set to `0` to disable):
+
+    1. Build OTA address index — three parallel SearchAPI Google
+       site:airbnb / site:vrbo / site:booking queries against the
+       community + city. Extract street tokens (regex against
+       organic-result snippets).
+    2. For each Zillow candidate, before scraping, parse address
+       from the URL slug and check substring containment against
+       any indexed token. Match → skip without scraping (rejected
+       attempt with reason "Pre-filtered: address appears in OTA
+       index").
+    3. Otherwise fall through to the existing scrape + qualifier
+       chain — preserves the safety net for borderline cases
+       where the OTA index is sparse, has stale data, or fuzzy-
+       matches a clean unit's address tokens.
+
+    Streaming events added: `ota-index-start`, `ota-index-done`
+    (with per-platform counts + token count), `candidate-
+    prefiltered`. Wizard's progress UI shows the OTA-indexing
+    phase + a pre-filtered count in the footer.
+
+    Wallet impact at saturated resorts: ~3 SearchAPI for the index
+    + ~5 surviving candidates × (1 Apify + 4 SearchAPI) ≈ 23
+    SearchAPI + 5 Apify, vs. the old flow's 15 candidates × 5
+    SearchAPI + 15 Apify ≈ 75 SearchAPI + 15 Apify. Net ~70%
+    SearchAPI / 67% Apify reduction on saturated resorts. On
+    sparse resorts the index returns near-empty so every
+    candidate falls through; cost is +3 SearchAPI calls vs the
+    old flow.
+
+    **Skipped from Grok's full plan:** Airbnb engine integration
+    (Airbnb engine returns no street addresses, only fuzzy
+    titles + coords — would require geocoding cache for marginal
+    coverage gain), and coord-cluster matching. The street-token
+    text-match alone catches most of the value; revisit if
+    operator data shows the prefilter missing too many
+    saturated-resort candidates.
+
+    **Don't delete the fall-through to runOtaQualifier** for
+    candidates that DON'T match the OTA index — that's the
+    safety net against the index being stale / fuzzy-matched /
+    incomplete. Pure inverse-filter would lose legitimate clean
+    candidates.
 
 ### Inbox auto-reply
 
