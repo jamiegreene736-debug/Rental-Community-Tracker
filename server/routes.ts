@@ -727,10 +727,21 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 // scrape vrbo.com property pages is dead code. Real-estate sources
 // (Zillow / Realtor / Redfin) all use the Apify+Playwright path
 // below.
+// CODEX NOTE (2026-05-05, claude/find-clean-unit-sidecar-budget):
+// `sidecarWalletMs` lets callers tune the sidecar tertiary fallback
+// per call site. Default 90s for one-shot scrapes (Step 3 photo
+// retry, fetch-unit-photos). find-clean-unit's iteration loop
+// passes 25s — the loop has up to 15 candidates, and a stuck
+// daemon at 90s would compound to 22 minutes; 25s is plenty for a
+// successful sidecar Zillow scrape (~10-20s typical) and bails
+// fast on a wedged daemon. Set to 0 to disable the sidecar
+// fallback entirely.
+type ScrapeOptions = { sidecarWalletMs?: number };
 async function scrapeListingPhotos(
   primaryUrl: string,
   fallbackUrl?: string,
   listingFacts?: ListingFacts,
+  options?: ScrapeOptions,
 ): Promise<ScrapedPhoto[]> {
   // Zillow URLs: run Apify and ScrapingBee in PARALLEL and union the
   // results. Each scraper sometimes returns an incomplete photo set for a
@@ -770,15 +781,20 @@ async function scrapeListingPhotos(
     // Dynamic import follows the rest of the file's pattern for
     // sidecar helpers — keeps the cold-start lean and the import
     // co-located with the conditional that uses it.
-    if (result.urls.length === 0) {
+    //
+    // sidecar wallet defaults to 90s for one-shot callers; tight-
+    // loop callers (find-clean-unit) override to 25s so a wedged
+    // daemon doesn't compound to 22-minute stalls. 0 = disabled.
+    const sidecarWalletMs = options?.sidecarWalletMs ?? 90_000;
+    if (result.urls.length === 0 && sidecarWalletMs > 0) {
       try {
         const { getHeartbeat, scrapeZillowPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
         const heartbeat = getHeartbeat();
         if (heartbeat.isOnline) {
-          console.log(`[scrapeZillow] Apify+ScrapingBee both empty; trying sidecar (Chrome on operator's IP)`);
+          console.log(`[scrapeZillow] Apify+ScrapingBee both empty; trying sidecar (Chrome on operator's IP, wallet=${sidecarWalletMs}ms)`);
           const sidecar = await scrapeZillowPhotosViaSidecar({
             url: primaryUrl,
-            walletBudgetMs: 90_000,
+            walletBudgetMs: sidecarWalletMs,
           });
           if (sidecar.photos.length > 0) {
             console.log(
@@ -15944,7 +15960,15 @@ Return ONLY compact JSON with this exact shape:
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
       try {
-        photos = await scrapeListingPhotos(url, undefined, facts);
+        // CODEX NOTE (2026-05-05, claude/find-clean-unit-sidecar-budget):
+        // sidecar is enabled in the iteration loop, but with a
+        // shorter wallet (25s vs the default 90s) so a hung daemon
+        // doesn't 22-minute-stall the wizard across 15 candidates.
+        // 25s is plenty for a Zillow detail page on the operator's
+        // residential-IP Chrome (~10-20s typical); if it's not
+        // back by then, daemon's stuck on a bot wall and we're
+        // better off moving on to the next candidate.
+        photos = await scrapeListingPhotos(url, undefined, facts, { sidecarWalletMs: 25_000 });
       } catch (e: any) {
         scrapeError = e?.message ?? String(e);
       }
