@@ -17629,6 +17629,9 @@ Return ONLY compact JSON with this exact shape:
     const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
     const stubs = attempts.filter((a) => /^Stub listing/i.test(a.rejectedBecause)).length;
     const wrongType = attempts.filter((a) => /^Wrong property type/i.test(a.rejectedBecause)).length;
+    const tooFewPhotos = attempts.filter((a) => /^Too few usable listing photos/i.test(a.rejectedBecause)).length;
+    const outsideResort = attempts.filter((a) => /^Outside selected resort/i.test(a.rejectedBecause)).length;
+    const noAddress = attempts.filter((a) => /^Could not parse address/i.test(a.rejectedBecause)).length;
     const totalListedOnOta = otaMatches + prefilterMatches;
     const reasonParts: string[] = [];
     if (totalListedOnOta > 0) reasonParts.push(`${totalListedOnOta} listed on Airbnb/VRBO/Booking${prefilterMatches > 0 ? ` (${prefilterMatches} pre-filtered)` : ""}`);
@@ -17636,6 +17639,9 @@ Return ONLY compact JSON with this exact shape:
     if (wrongBR > 0) reasonParts.push(`${wrongBR} wrong bedroom count`);
     if (stubs > 0) reasonParts.push(`${stubs} stub listings (off-market with no data)`);
     if (wrongType > 0) reasonParts.push(`${wrongType} wrong property type`);
+    if (tooFewPhotos > 0) reasonParts.push(`${tooFewPhotos} too few usable photos`);
+    if (outsideResort > 0) reasonParts.push(`${outsideResort} outside the selected resort`);
+    if (noAddress > 0) reasonParts.push(`${noAddress} could not parse address`);
     const scopeLabel = isCityWide
       ? `in ${city}, ${state} (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`
       : `for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`;
