@@ -17175,7 +17175,10 @@ Return ONLY compact JSON with this exact shape:
         place: "pl",
         terrace: "ter",
       };
-      const streetName = m[2].replace(/\s+/g, " ").trim();
+      const streetName = m[2]
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/^(?:n|s|e|w|north|south|east|west)\s+/i, "");
       const streetType = typeMap[m[3]] ?? m[3];
       return `${m[1]} ${streetName} ${streetType}`;
     };
