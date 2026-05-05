@@ -718,7 +718,7 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 
 // CODEX NOTE (2026-05-05, claude/realtor-apify): Realtor.com
 // scraper via Apify (primary path). APIFY_REALTOR_ACTOR picks the
-// actor — defaults to epctex~realtor-scraper which accepts
+// actor — defaults to dz_omar~realtor-scraper which accepts
 // startUrls and returns property JSON with `images` array +
 // numberOfBedrooms/numberOfBathroomsTotal. Operator can override
 // via env var if a different actor proves more reliable. Wired as
@@ -729,7 +729,7 @@ async function scrapeRealtorViaApify(url: string): Promise<{ urls: string[]; fac
   if (!token) {
     return { urls: [], facts: {} };
   }
-  const actor = (process.env.APIFY_REALTOR_ACTOR || "epctex~realtor-scraper").replace("/", "~");
+  const actor = (process.env.APIFY_REALTOR_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
@@ -876,6 +876,35 @@ function extractUrlsFromApifyDataset(items: any[], pattern: RegExp): string[] {
   return Array.from(found);
 }
 
+function buildZillowSearchActorInput(actor: string, city: string, state: string, searchUrl: string, maxItems: number): Record<string, unknown> {
+  const a = actor.toLowerCase();
+  if (a.includes("igolaizola")) {
+    return {
+      location: `${city}, ${stateToAbbrev(state)}`,
+      maxItems,
+    };
+  }
+  if (a.includes("maxcopell") || a.includes("api-ninja")) {
+    return {
+      searchUrls: [{ url: searchUrl }],
+      maxItems,
+    };
+  }
+  return {
+    startUrls: [{ url: searchUrl }],
+    maxItems,
+  };
+}
+
+function buildRealtorSearchActorInput(searchUrl: string, maxItems: number): Record<string, unknown> {
+  return {
+    startUrls: [{ url: searchUrl }],
+    maxItems,
+    status: ["for_sale", "for_rent"],
+    sort: "newest",
+  };
+}
+
 async function harvestZillowUrlsViaApifySearch(
   city: string,
   state: string,
@@ -886,33 +915,16 @@ async function harvestZillowUrlsViaApifySearch(
     console.warn(`[harvestZillow:Apify] APIFY_API_TOKEN not set — falling back to Google`);
     return [];
   }
-  const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper").replace("/", "~");
+  const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "igolaizola~zillow-scraper-ppe").replace("/", "~");
   const slug = citySlugForZillow(city, state);
   const searchUrl = `https://www.zillow.com/${slug}/condos/`;
+  const input = buildZillowSearchActorInput(actor, city, state, searchUrl, maxItems);
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startUrls: [{ url: searchUrl }],
-        maxItems,
-        // Active-listings filter (Grok rec 2026-05-04): excludes
-        // off-market stubs at discovery time — saves ~60% of
-        // per-candidate scrape budget. Actor either honors these
-        // or ignores them silently; either way they're free to
-        // include.
-        filters: {
-          isForSaleByAgent: true,
-          isForSaleByOwner: true,
-          isForRent: true,
-          isAuction: false,
-          isPending: false,
-          isSold: false,
-        },
-        propertyTypes: ["condo", "townhouse"],
-        proxy: { useApifyProxy: true, groups: ["RESIDENTIAL"] },
-      }),
+      body: JSON.stringify(input),
       signal: AbortSignal.timeout(180_000),
     });
     if (!r.ok) {
@@ -923,7 +935,7 @@ async function harvestZillowUrlsViaApifySearch(
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items)) return [];
     const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i);
-    console.log(`[harvestZillow:Apify] ${searchUrl} → ${items.length} dataset items, ${urls.length} unique homedetails URLs`);
+    console.log(`[harvestZillow:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ${urls.length} unique homedetails URLs`);
     return urls;
   } catch (e: any) {
     console.warn(`[harvestZillow:Apify] error: ${e?.message ?? e}`);
@@ -938,24 +950,16 @@ async function harvestRealtorUrlsViaApifySearch(
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) return [];
-  const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper").replace("/", "~");
+  const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
   const slug = citySlugForRealtor(city, state);
   const searchUrl = `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
+  const input = buildRealtorSearchActorInput(searchUrl, maxItems);
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startUrls: [{ url: searchUrl }],
-        maxItems,
-        // Realtor's status filter — actors either accept this
-        // top-level field, embed it in the search URL, or ignore
-        // it. Including it is harmless; honoring it filters stubs
-        // upstream.
-        status: ["for_sale", "for_rent"],
-        sort: "newest",
-      }),
+      body: JSON.stringify(input),
       signal: AbortSignal.timeout(180_000),
     });
     if (!r.ok) {
@@ -966,7 +970,7 @@ async function harvestRealtorUrlsViaApifySearch(
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items)) return [];
     const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i);
-    console.log(`[harvestRealtor:Apify] ${searchUrl} → ${items.length} dataset items, ${urls.length} unique detail URLs`);
+    console.log(`[harvestRealtor:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ${urls.length} unique detail URLs`);
     return urls;
   } catch (e: any) {
     console.warn(`[harvestRealtor:Apify] error: ${e?.message ?? e}`);
@@ -1122,7 +1126,7 @@ async function scrapeListingPhotos(
   // scraper returns exactly what Zillow shows — no need to union.
   // CODEX NOTE (2026-05-05, claude/realtor-apify): Realtor.com
   // branch with three scraper tiers, mirroring the Zillow chain:
-  //   1. Apify primary (epctex~realtor-scraper or operator-set
+  //   1. Apify primary (dz_omar~realtor-scraper or operator-set
   //      APIFY_REALTOR_ACTOR) — best fact + photo coverage.
   //   2. Direct fetch — JSON-LD + text-regex parsing of the
   //      live HTML. Realtor's anti-bot is light enough that
@@ -3313,7 +3317,8 @@ export async function registerRoutes(
     const probeActor = async (
       actor: string,
       input: Record<string, unknown>,
-    ): Promise<{ httpStatus: number; ok: boolean; bodySnippet: string; itemCount: number; sampleUrls: string[]; elapsedMs: number }> => {
+      detailPattern: RegExp,
+    ): Promise<{ httpStatus: number; ok: boolean; bodySnippet: string; itemCount: number; detailUrlCount: number; detailSampleUrls: string[]; sampleUrls: string[]; elapsedMs: number }> => {
       const start = Date.now();
       try {
         const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actor.replace("/", "~"))}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
@@ -3344,6 +3349,8 @@ export async function registerRoutes(
           ok: r.ok,
           bodySnippet: text.slice(0, 600),
           itemCount: Array.isArray(parsedItems) ? parsedItems.length : 0,
+          detailUrlCount: Array.isArray(parsedItems) ? extractUrlsFromApifyDataset(parsedItems, detailPattern).length : 0,
+          detailSampleUrls: Array.isArray(parsedItems) ? extractUrlsFromApifyDataset(parsedItems, detailPattern).slice(0, 5) : [],
           sampleUrls,
           elapsedMs,
         };
@@ -3353,35 +3360,32 @@ export async function registerRoutes(
           ok: false,
           bodySnippet: `EXCEPTION: ${e?.message ?? e}`,
           itemCount: 0,
+          detailUrlCount: 0,
+          detailSampleUrls: [],
           sampleUrls: [],
           elapsedMs: Date.now() - start,
         };
       }
     };
 
-    const zillowActor = process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper";
-    const realtorActor = process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper";
+    const zillowActor = process.env.APIFY_ZILLOW_SEARCH_ACTOR || "igolaizola~zillow-scraper-ppe";
+    const realtorActor = process.env.APIFY_REALTOR_SEARCH_ACTOR || "dz_omar~realtor-scraper";
     const zillowSearchUrl = `https://www.zillow.com/${citySlugForZillow(city, state)}/condos/`;
     const realtorSearchUrl = `https://www.realtor.com/realestateandhomes-search/${citySlugForRealtor(city, state)}/type-condo-townhome-row-home-co-op`;
+    const zillowInput = buildZillowSearchActorInput(zillowActor, city, state, zillowSearchUrl, 50);
+    const realtorInput = buildRealtorSearchActorInput(realtorSearchUrl, 50);
 
     const [zillowResult, realtorResult] = await Promise.all([
-      probeActor(zillowActor, {
-        startUrls: [{ url: zillowSearchUrl }],
-        maxItems: 50,
-        proxy: { useApifyProxy: true, groups: ["RESIDENTIAL"] },
-      }),
-      probeActor(realtorActor, {
-        startUrls: [{ url: realtorSearchUrl }],
-        maxItems: 50,
-      }),
+      probeActor(zillowActor, zillowInput, /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i),
+      probeActor(realtorActor, realtorInput, /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i),
     ]);
 
     return res.json({
       city,
       state,
       hasApifyToken: true,
-      zillow: { actor: zillowActor, searchUrl: zillowSearchUrl, ...zillowResult },
-      realtor: { actor: realtorActor, searchUrl: realtorSearchUrl, ...realtorResult },
+      zillow: { actor: zillowActor, searchUrl: zillowSearchUrl, input: zillowInput, ...zillowResult },
+      realtor: { actor: realtorActor, searchUrl: realtorSearchUrl, input: realtorInput, ...realtorResult },
     });
   });
 
@@ -16073,6 +16077,58 @@ Return ONLY compact JSON with this exact shape:
     photoChecksRun: number;
   };
 
+  function summarizeSingleListingQualifier(
+    platforms: SingleListingQualifyResult["platforms"],
+    photoChecksRun: number,
+  ): { qualifies: boolean; reason: string } {
+    const qualifies = !platforms.airbnb.listed && !platforms.vrbo.listed && !platforms.booking.listed;
+    const listedNames: string[] = [];
+    const pushListed = (label: string, result: SingleListingPlatformResult) => {
+      if (!result.listed) return;
+      const sources: string[] = [];
+      if (result.matches.length > 0) sources.push("address");
+      if (result.photoMatches.length > 0) sources.push("photo match");
+      listedNames.push(`${label} (${sources.join(" + ")})`);
+    };
+    pushListed("Airbnb", platforms.airbnb);
+    pushListed("VRBO", platforms.vrbo);
+    pushListed("Booking.com", platforms.booking);
+    return {
+      qualifies,
+      reason: qualifies
+        ? `No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing.${photoChecksRun > 0 ? ` (Address text-search + reverse-image-search across ${photoChecksRun} photo${photoChecksRun === 1 ? "" : "s"}.)` : ""}`
+        : `Found existing listing(s) on: ${listedNames.join(", ")}.`,
+    };
+  }
+
+  function mergePhotoSearchIntoQualifier(
+    base: SingleListingQualifyResult,
+    photoSearch: { matches: { airbnb: string[]; vrbo: string[]; booking: string[] }; checked: number },
+  ): SingleListingQualifyResult {
+    const platform = (key: "airbnb" | "vrbo" | "booking"): SingleListingPlatformResult => {
+      const current = base.platforms[key];
+      const mergedPhotoMatches = Array.from(new Set([...(current.photoMatches ?? []), ...photoSearch.matches[key]]));
+      return {
+        ...current,
+        photoMatches: mergedPhotoMatches,
+        listed: current.matches.length > 0 || mergedPhotoMatches.length > 0,
+      };
+    };
+    const platforms = {
+      airbnb: platform("airbnb"),
+      vrbo: platform("vrbo"),
+      booking: platform("booking"),
+    };
+    const summary = summarizeSingleListingQualifier(platforms, base.photoChecksRun + photoSearch.checked);
+    return {
+      ...base,
+      platforms,
+      qualifies: summary.qualifies,
+      reason: summary.reason,
+      photoChecksRun: base.photoChecksRun + photoSearch.checked,
+    };
+  }
+
   // Photo reverse-image search via Google Lens. Caps at 3 photo
   // URLs per call to keep wallet bounded (~3 SearchAPI calls /
   // qualifier check). Zillow CDN URLs (photos.zillowstatic.com)
@@ -16207,32 +16263,11 @@ Return ONLY compact JSON with this exact shape:
       vrbo:   buildPlatform(1, "vrbo"),
       booking:buildPlatform(2, "booking"),
     };
-    const qualifies = !platforms.airbnb.listed && !platforms.vrbo.listed && !platforms.booking.listed;
-    const listedNames: string[] = [];
-    if (platforms.airbnb.listed) {
-      const sources: string[] = [];
-      if (platforms.airbnb.matches.length > 0) sources.push("address");
-      if (platforms.airbnb.photoMatches.length > 0) sources.push("photo match");
-      listedNames.push(`Airbnb (${sources.join(" + ")})`);
-    }
-    if (platforms.vrbo.listed) {
-      const sources: string[] = [];
-      if (platforms.vrbo.matches.length > 0) sources.push("address");
-      if (platforms.vrbo.photoMatches.length > 0) sources.push("photo match");
-      listedNames.push(`VRBO (${sources.join(" + ")})`);
-    }
-    if (platforms.booking.listed) {
-      const sources: string[] = [];
-      if (platforms.booking.matches.length > 0) sources.push("address");
-      if (platforms.booking.photoMatches.length > 0) sources.push("photo match");
-      listedNames.push(`Booking.com (${sources.join(" + ")})`);
-    }
+    const summary = summarizeSingleListingQualifier(platforms, photoSearch.checked);
     return {
-      qualifies,
+      qualifies: summary.qualifies,
       platforms,
-      reason: qualifies
-        ? `No matches on Airbnb, VRBO, or Booking.com — qualifies as a standalone listing.${photoSearch.checked > 0 ? ` (Address text-search + reverse-image-search across ${photoSearch.checked} photo${photoSearch.checked === 1 ? "" : "s"}.)` : ""}`
-        : `Found existing listing(s) on: ${listedNames.join(", ")}.`,
+      reason: summary.reason,
       address,
       city,
       state,
@@ -16340,8 +16375,9 @@ Return ONLY compact JSON with this exact shape:
       runQueries(zillowQueries, /zillow\.com\/homedetails\//i),
       runQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i),
     ]);
-    const seen = new Set<string>([...zillowSet, ...realtorSet]);
-    const sampleUrls = [...zillowSet, ...realtorSet].slice(0, 6);
+    const combinedUrls = Array.from(zillowSet).concat(Array.from(realtorSet));
+    const seen = new Set<string>(combinedUrls);
+    const sampleUrls = combinedUrls.slice(0, 6);
     const byPlatform = { zillow: zillowSet.size, realtor: realtorSet.size };
     const count = seen.size;
     console.log(
@@ -16646,7 +16682,7 @@ Return ONLY compact JSON with this exact shape:
     };
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // City-wide mode tries Apify SEARCH actors first
-    // (epctex~zillow-scraper / epctex~realtor-scraper) — they hit
+    // (igolaizola~zillow-scraper-ppe / dz_omar~realtor-scraper) — they hit
     // Zillow's/Realtor's own search APIs and return 200-500+
     // candidate URLs vs Google site:'s hard ceiling at ~35.
     // Recommended by Grok consult 2026-05-04. Falls back to the
@@ -16817,33 +16853,12 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
-    // CODEX NOTE (2026-05-04, claude/single-listing-text-fallback):
-    // Two-pass logic. We PREFER candidates with both text-clean AND
-    // photo-clean qualifiers (full methodology — same as preflight).
-    // But when Apify/ScrapingBee fail to extract photos (rate
-    // limits, Zillow anti-bot, off-market listings), the photo
-    // reverse-search can't run. Rather than failing the whole find-
-    // clean-unit call (which was Jamie's "no clean unit found"
-    // bug), we accept text-only-clean candidates as a fallback and
-    // surface them with `photoScrapeFailed: true` so the wizard's
-    // belt-and-suspenders retry can fire fetch-unit-photos against
-    // the URL on a fresh code path. If even that fails, the
-    // operator gets a clean candidate with zero photos and the
-    // option to manually paste the Zillow URL on Step 3.
-    //
-    // Bumped candidate cap from 12 to 15 — gives more headroom on
-    // bad scraping days. Worst-case wallet still bounded:
-    // 15 candidates × ~6 SearchAPI calls + 15 Apify calls.
-    type FallbackMatch = {
-      url: string;
-      addressGuess: string;
-      scrapedBR: number | null;
-      scrapedBA: number | null;
-      photos: ScrapedPhoto[];
-      qualifier: SingleListingQualifyResult;
-      photoScrapeFailed: boolean;
-    };
-    let textOnlyFallback: FallbackMatch | null = null;
+    // CODEX NOTE (2026-05-05, codex/single-listing-photo-gate):
+    // A candidate must have photos and those photos must pass Lens
+    // against Airbnb / VRBO / Booking before we accept it. Address
+    // text-search is a cheap pre-scrape rejection gate only; it is
+    // not enough to qualify a unit. This mirrors the combo preflight
+    // methodology the operator validated.
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // Candidate cap is mode-aware. Community-anchored stays at 15
     // because a single resort's Zillow inventory rarely tops that.
@@ -16900,7 +16915,7 @@ Return ONLY compact JSON with this exact shape:
       // slug must contain a token from the OTA index. Tokens are
       // already-lowercased "{number} {name} {type}" tuples so a
       // substring check is precise.
-      for (const tok of otaAddressTokens) {
+      for (const tok of Array.from(otaAddressTokens)) {
         if (norm.includes(tok)) return true;
       }
       return false;
@@ -16911,8 +16926,8 @@ Return ONLY compact JSON with this exact shape:
     // candidates and could otherwise exceed Railway's edge timeout
     // or burn excessive operator wait time. When we hit ~80% of
     // the budget we emit a timeout-warning so the wizard can
-    // explain what's happening; at 100% we bail with whatever
-    // we've collected (text-only fallback or no-clean-unit reason).
+    // explain what's happening; at 100% we bail with a no-clean-unit
+    // diagnostic reason.
     //
     // Budgets:
     //   Community-anchored: 8 minutes (15 candidates × 32s avg)
@@ -17039,8 +17054,8 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
-      // 3) OTA qualifier — TEXT ONLY. No photos passed → runOtaQualifier
-      // automatically skips the Lens step. Drops ~10s per candidate.
+      // 3) Cheap OTA qualifier — address text only. This is a rejection
+      // gate before the expensive scrape, not the final acceptance gate.
       emit({ type: "candidate-qualifier", url, phase: "ota-check", photoCount: 0 });
       const qualifier = await runOtaQualifier(apiKey, addressGuess, city, state, []);
 
@@ -17163,8 +17178,57 @@ Return ONLY compact JSON with this exact shape:
         continue;
       }
 
-      // 6) All gates passed. Push success row + return.
-      const photoScrapeFailed = photos.length === 0;
+      if (photos.length === 0) {
+        const reason = scrapeError
+          ? `Photo scrape failed: ${scrapeError}`
+          : `Photo scrape returned 0 photos; cannot run reverse-image OTA check.`;
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: qualifier.reason,
+          rejectedBecause: reason,
+        });
+        emit({ type: "candidate-rejected", url, reason });
+        continue;
+      }
+
+      // 6) Final OTA qualifier — photo Lens check on the scraped
+      // unit photos. A photo match on Airbnb / VRBO / Booking
+      // rejects the candidate even when address text-search was clean.
+      emit({ type: "candidate-qualifier", url, phase: "photo-check", photoCount: Math.min(photos.length, 3) });
+      const photoSearch = await runPhotoReverseSearch(apiKey, photos.map((p) => p.url));
+      const finalQualifier = mergePhotoSearchIntoQualifier(qualifier, photoSearch);
+      emit({
+        type: "candidate-qualifier-done",
+        url,
+        qualifies: finalQualifier.qualifies,
+        listed: {
+          airbnb: finalQualifier.platforms.airbnb.listed,
+          vrbo: finalQualifier.platforms.vrbo.listed,
+          booking: finalQualifier.platforms.booking.listed,
+        },
+        photoChecksRun: finalQualifier.photoChecksRun,
+      });
+      if (!finalQualifier.qualifies) {
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: false,
+          qualifierReason: finalQualifier.reason,
+          rejectedBecause: `Listed on OTA: ${finalQualifier.reason}`,
+        });
+        emit({ type: "candidate-rejected", url, reason: `Listed on OTA: ${finalQualifier.reason}` });
+        continue;
+      }
+
+      // 7) All gates passed. Push success row + return.
       attempts.push({
         url,
         bedrooms: scrapedBR,
@@ -17172,69 +17236,23 @@ Return ONLY compact JSON with this exact shape:
         address: addressGuess,
         bedroomMatches: true,
         qualifies: true,
-        qualifierReason: qualifier.reason,
-        rejectedBecause: photoScrapeFailed ? "Clean (text-only — photo scrape failed)" : "",
+        qualifierReason: finalQualifier.reason,
+        rejectedBecause: "",
       });
-
-      if (qualifier.qualifies && !photoScrapeFailed) {
-        // BEST CASE: clean by text AND photo. Return immediately.
-        finishWithResult({
-          found: true,
-          unit: {
-            url,
-            address: addressGuess,
-            // CODEX NOTE (2026-05-05, claude/any-bedroom): when
-            // bedrooms is "any", we don't have an operator-pick
-            // fallback. Use scrapedBR or 0 (caller should display
-            // "?" or pull from generated listing draft on Step 4).
-            bedrooms: scrapedBR ?? (numericBedrooms ?? 0),
-            bathrooms: scrapedBA,
-            photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
-            qualifier,
-            photoScrapeFailed: false,
-          },
-          attempts,
-          attemptCount: attempts.length,
-          totalCandidates: candidateUrls.length,
-        });
-        return;
-      }
-      if (qualifier.qualifies && photoScrapeFailed && !textOnlyFallback) {
-        // FALLBACK: text-only verified. Keep walking in case a
-        // later candidate has photos AND clean text — full match
-        // wins. Track the first text-only match as the fallback.
-        textOnlyFallback = {
-          url,
-          addressGuess,
-          scrapedBR,
-          scrapedBA,
-          photos,
-          qualifier,
-          photoScrapeFailed: true,
-        };
-      }
-    }
-
-    // No full match found. Use the text-only fallback if we have
-    // one — wizard's belt-and-suspenders retry will hit
-    // /api/community/fetch-unit-photos for a second photo-scrape
-    // attempt, and if THAT also fails the manual Zillow-URL paste
-    // form on Step 3 is the final escape hatch.
-    if (textOnlyFallback) {
-      console.log(
-        `[find-clean-unit] returning text-only fallback for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}) — ` +
-        `${textOnlyFallback.url} (photo scrape failed; OTA text-search clean)`,
-      );
       finishWithResult({
         found: true,
         unit: {
-          url: textOnlyFallback.url,
-          address: textOnlyFallback.addressGuess,
-          bedrooms: textOnlyFallback.scrapedBR ?? (numericBedrooms ?? 0),
-          bathrooms: textOnlyFallback.scrapedBA,
-          photos: [],
-          qualifier: textOnlyFallback.qualifier,
-          photoScrapeFailed: true,
+          url,
+          address: addressGuess,
+          // CODEX NOTE (2026-05-05, claude/any-bedroom): when
+          // bedrooms is "any", we don't have an operator-pick
+          // fallback. Use scrapedBR or 0 (caller should display
+          // "?" or pull from generated listing draft on Step 4).
+          bedrooms: scrapedBR ?? (numericBedrooms ?? 0),
+          bathrooms: scrapedBA,
+          photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+          qualifier: finalQualifier,
+          photoScrapeFailed: false,
         },
         attempts,
         attemptCount: attempts.length,

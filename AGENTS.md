@@ -826,12 +826,12 @@ established it so you can read the rationale in the commit message.
     "X address + Y photo" badges and the operator can see which
     signal triggered the rejection.
 
-    Wallet: ~3 SearchAPI text calls + 3 SearchAPI Lens calls per
-    qualifier = ~6 calls. find-clean-unit walks up to 8 candidates,
-    so a worst-case "no clean unit found" scan is ~3 (Zillow
-    discovery) + 8 × 6 (per-candidate qualifier) + 8 (Apify
-    scrapes) = ~51 SearchAPI calls + 8 Apify calls. First clean
-    candidate short-circuits — common case is 1–3 candidates.
+    Wallet: manual `/qualify` is ~3 SearchAPI text calls + up to 3
+    SearchAPI Lens calls. `/api/single-listing/find-clean-unit`
+    uses the text check as a cheap pre-scrape rejection gate, then
+    runs the Lens/photo half only after the candidate has scraped
+    usable photos and passed bed/type/status gates. A candidate is
+    accepted only after that final photo check passes.
 
     **Don't drop the photo signal to save on credits** — it's the
     only thing catching listings that don't include the street in
@@ -871,14 +871,15 @@ established it so you can read the rationale in the commit message.
     badly-formed Claude response can't pollute the wizard with
     `[0, 1.5, 99]` chaos.
 
-40. **`APIFY_ZILLOW_ACTOR` and `APIFY_REALTOR_ACTOR` env vars
-    pick which Apify actor scrapes each platform.** Both
-    operator-overridable so the actor choice doesn't require a
-    code change.
+40. **Apify actor env vars pick which actors discover and scrape
+    each platform.** All are operator-overridable so the actor
+    choice doesn't require a code change.
 
     Defaults:
     - `APIFY_ZILLOW_ACTOR` → `maxcopell~zillow-detail-scraper`
-    - `APIFY_REALTOR_ACTOR` → `epctex~realtor-scraper`
+    - `APIFY_REALTOR_ACTOR` → `dz_omar~realtor-scraper`
+    - `APIFY_ZILLOW_SEARCH_ACTOR` → `igolaizola~zillow-scraper-ppe`
+    - `APIFY_REALTOR_SEARCH_ACTOR` → `dz_omar~realtor-scraper`
 
     Per Grok's 2026-05-04 architectural review of the find-clean-
     unit + photo-scraper system, `jaroslavhejlek~zillow-scraper`
@@ -905,8 +906,11 @@ established it so you can read the rationale in the commit message.
     three datacenter scrapers fail consistently).
 
     Most Apify Realtor actors accept `{ startUrls: [{url}] }`;
-    epctex actors also accept `{ urls: [...] }`. The helper sends
-    both — actors ignore unknown fields.
+    older epctex actors also accept `{ urls: [...] }`. The detail
+    helper sends both — actors ignore unknown fields. The Zillow
+    search helper is actor-aware because `igolaizola~zillow-scraper-
+    ppe` requires `{ location, maxItems }`, while maxcopell/api-
+    ninja search actors require `searchUrls`.
 
     The other big architectural recommendations from the same Grok
     consult are NOT yet implemented and gated on operator decisions:
@@ -1143,6 +1147,7 @@ Examples:
 2026-05-04 · Jamie followed up with three asks for the find-clean-unit flow: (1) ensure photos are scraped + downloaded with the discovered unit; (2) "is utilizing the same methodology for checking and ensuring the unit isn't on Airbnb, VRBO and/or Booking.com as the pre flight check for when we add a new community/combo listing? That check is very good and thorough and I need to make sure that this new tool utiizes the same methodology"; (3) bedroom selector should reflect what the picked community actually offers (e.g. Santa Maria → 2BR/3BR only, not generic 1-5BR). · ACCEPTED · (1) Already worked end-to-end (find-clean-unit returns photo URLs from scrapeListingPhotos, wizard stashes them in state, persist-photos downloads on save) — verified with the existing flow. (2) Ported preflight's photo-search logic into a new `runPhotoReverseSearch` helper and wired it into `runOtaQualifier`; Lens runs on the first 3 Zillow CDN URLs with no ImgBB upload step (URLs are already public). A platform counts as "listed" when EITHER text-search OR photo-search finds a match. UI surfaces "X address / Y photo" match badges. Load-Bearing #38. (3) `researchCommunitiesForCity` single-mode prompt now asks for `availableBedrooms[]` per community; the wizard's bedroom selector renders only those buttons, with a fallback to 1-5BR when Claude returned an empty array and an inline note telling the operator whether the picker is confirmed or generic. Load-Bearing #39.
 2026-05-04 · Jamie tested Fort Myers Beach in the single-listing wizard and Santa Maria Resort wasn't surfacing in the community list — followed up: "Also, when I click a resort, I should not need to enter a street address etc. I should just like select the say the bedroom count and click continue and then it automatically search Zillow for that resort and that bedroom count and find a unit with that bedroom count and then scan to make sure it's not on Aibnb,VRBO, and/or Booking.com. If it is listed on any of those sites please then find another unit." · ACCEPTED · Two-PR ship: (1) `researchCommunitiesForCity` got a `mode` param — single mode drops combinability filter, lifts world-knowledge cap 3→15, returns up to 20, runs on Sonnet, uses an expanded 5-query SearchAPI sweep, and includes per-market example-resort lists in the prompt as a recall anchor (Load-Bearing #36). (2) New `/api/single-listing/find-clean-unit` endpoint does Zillow discovery + scrape + bedroom-match filter + OTA qualifier per candidate, returning the first clean match with photos pre-loaded; the `runOtaQualifier` helper extracted from the original `/qualify` endpoint is shared between both paths. Wizard Step 1 replaced the operator-typed propertyName + streetAddress fields with a bedroom-count picker + "Find a clean {N}BR unit" button; Step 2 now displays the auto-discovered unit + qualifier with a "Try another unit" button (re-calls the endpoint with skipUrls). Manual-mode escape hatch preserved for resorts not on Zillow. (Load-Bearing #37.)
 2026-05-04 · Jamie reviewed the deployed Step 1 form ("4 fields: name + address + state + city") and asked to switch it to a discovery flow: "type a city → drop down list of cities → top 20 best vacation rental communities to choose from." Follow-up: "for now just keep it focused on Hawaii and Florida." · ACCEPTED · Step 1 of `add-single-listing.tsx` rewritten as: nationwide city autocomplete (new `/api/community/city-suggest-any` endpoint, Photon + state allowlist) → kicks off `/api/community/research` automatically on city pick → top-20 community cards → operator picks a community (or hits "enter manually") → fills the unit-specific street address. Picked community pre-fills `propertyName`. Hawaii + Florida scope lives in `ALLOWED_STATES` set in the new endpoint — see Load-Bearing #35. Combo flow's existing state-scoped city-suggest endpoint is untouched; only the new single-listing wizard uses the nationwide variant.
+2026-05-05 · Jamie reported Add Single Listing could not find clean units and suspected Apify was returning no results · ACCEPTED · Production debug showed the default Zillow search actor was a 404 (`epctex~zillow-scraper`) and the default Realtor actor was not rented (`epctex~realtor-scraper`). Defaults now use runnable actors (`igolaizola~zillow-scraper-ppe`, `dz_omar~realtor-scraper`) with actor-specific input shapes, and find-clean-unit now accepts a candidate only after scraped photos pass the Google Lens OTA check, restoring parity with the combo preflight photo methodology.
 2026-04-29 · Jamie: "You are not running the browser session locally like I asked. You have to run the browser on my PC." After multi-PR investigation showed Vrbo's anti-bot fingerprints every Browserbase residential session even with persistent context + real-Chrome cookies (IP-level flag — "There is a robot on the same network as you"). Direct Chrome MCP test from operator's home IP returned 42 priced properties for the same query that Browserbase couldn't load past the bot wall. · ACCEPTED · New "VRBO local-Chrome sidecar" architecture: in-memory queue on Railway (`server/vrbo-sidecar-queue.ts`) bridges find-buy-in to a `/loop` worker running inside the operator's Claude Code session. find-buy-in calls `searchVrboViaSidecar()` as path 9 (parallel with the existing 8 paths, prioritized FIRST in the dedup chain when results return because it's the only path that beats the IP wall). When the worker is offline, the wallet budget (75s) expires and we gracefully fall back. Endpoints `POST /api/vrbo-sidecar/enqueue`, `GET /api/admin/vrbo-sidecar/next`, `POST /api/admin/vrbo-sidecar/result`, `GET /api/vrbo-sidecar/result/:id`. Worker is a /loop task in Claude Code that polls /next, drives Chrome MCP through Vrbo's search UI on the operator's actual browser, extracts priced cards, and POSTs the result. This is the "OpenClaw"-style local-agent pattern — Claude Code on the operator's Mac is the bridge between Railway and their real-IP browser.
 ```
 

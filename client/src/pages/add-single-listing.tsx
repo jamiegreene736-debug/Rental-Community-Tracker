@@ -205,12 +205,9 @@ export default function AddSingleListing() {
           bathrooms: number | null;
           photos: Array<{ url: string; label: string }>;
           qualifier: QualifierResult;
-          // CODEX NOTE (2026-05-04, claude/single-listing-text-fallback):
-          // true when the candidate qualified by text-only because
-          // the Zillow photo scrape returned empty (Apify/ScrapingBee
-          // both failed). Wizard's auto-retry via fetch-unit-photos
-          // tries to recover photos; if that fails too, Step 3
-          // surfaces the manual paste form.
+          // Legacy flag from the earlier text-only fallback. Current
+          // server accepts auto-discovered units only after photos
+          // scrape and pass the reverse-image OTA check.
           photoScrapeFailed?: boolean;
         };
         attempts: FindAttempt[];
@@ -758,12 +755,8 @@ export default function AddSingleListing() {
           }
         }
         toast({
-          title: data.unit.photoScrapeFailed
-            ? "Found a clean unit (photos pending)"
-            : "Found a clean unit",
-          description: data.unit.photoScrapeFailed
-            ? `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings (text-only; photo scrape retrying).`
-            : `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings.`,
+          title: "Found a clean unit",
+          description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings by address and photo check.`,
         });
         setStep(2);
       } else {
@@ -1878,11 +1871,8 @@ export default function AddSingleListing() {
                   // CODEX NOTE (2026-05-04, claude/single-listing-bath-display):
                   // Filter the disclosure to attempts whose URL doesn't
                   // match the picked unit. Earlier slice(0, -1) was wrong
-                  // for the text-only-fallback case — the matched
-                  // candidate isn't always last in attempts[] (we walk
-                  // every candidate before deciding when no full match
-                  // exists). URL-based filtering correctly identifies the
-                  // skipped set in both cases.
+                  // when retries or expanded candidate pools mean the
+                  // matched candidate isn't the final attempt.
                   const matchedUrl = findResult.unit.url.toLowerCase();
                   const skipped = findResult.attempts.filter((a) => a.url.toLowerCase() !== matchedUrl);
                   if (skipped.length === 0) return null;
