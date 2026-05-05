@@ -231,17 +231,25 @@ export default function AddSingleListing() {
     detail?: string;
   };
   const [findProgress, setFindProgress] = useState<{
-    phase: "discovering" | "candidates" | "done";
+    // CODEX NOTE (2026-05-04, claude/verify-then-discover): added
+    // "ota-indexing" phase + otaIndex / prefilteredCount fields so
+    // the progress UI can show the verify-first step as a distinct
+    // pre-discovery phase. Falls through to "candidates" once the
+    // index is built (or skipped, when feature flag is off).
+    phase: "discovering" | "ota-indexing" | "candidates" | "done";
     totalCandidates: number;
     candidatesProcessed: number;
     current: CandidateProgress | null;
     rejected: number;
+    prefilteredCount: number;
+    otaIndex?: { airbnb: number; vrbo: number; booking: number; addressTokens: number };
   }>({
     phase: "discovering",
     totalCandidates: 0,
     candidatesProcessed: 0,
     current: null,
     rejected: 0,
+    prefilteredCount: 0,
   });
 
   // City autocomplete — nationwide endpoint scoped server-side to
@@ -408,8 +416,43 @@ export default function AddSingleListing() {
           } else if (evt.type === "discovery-done") {
             setFindProgress((prev) => ({
               ...prev,
-              phase: "candidates",
               totalCandidates: evt.totalCandidates ?? 0,
+              // Phase stays "discovering" until either ota-index-start
+              // fires (verify-first on) or we go straight to
+              // "candidates" via the first candidate-start event.
+            }));
+          } else if (evt.type === "ota-index-start") {
+            setFindProgress((prev) => ({ ...prev, phase: "ota-indexing" }));
+          } else if (evt.type === "ota-index-done") {
+            setFindProgress((prev) => ({
+              ...prev,
+              phase: "candidates",
+              otaIndex: {
+                airbnb: evt.counts?.airbnb ?? 0,
+                vrbo: evt.counts?.vrbo ?? 0,
+                booking: evt.counts?.booking ?? 0,
+                addressTokens: evt.addressTokens ?? 0,
+              },
+            }));
+          } else if (evt.type === "candidate-prefiltered") {
+            // Pre-filter skip — candidate matched the OTA index
+            // and was rejected without scraping. Bump processed +
+            // rejected + prefilteredCount, surface in current row.
+            const cp: CandidateProgress = {
+              url: evt.url,
+              index: evt.index,
+              total: evt.total,
+              phase: "rejected",
+              detail: `Pre-filtered: ${evt.address ?? "address"} on OTA`,
+            };
+            candidateState.set(evt.url, cp);
+            setFindProgress((prev) => ({
+              ...prev,
+              phase: "candidates",
+              candidatesProcessed: prev.candidatesProcessed + 1,
+              rejected: prev.rejected + 1,
+              prefilteredCount: prev.prefilteredCount + 1,
+              current: cp,
             }));
           } else if (evt.type === "candidate-start") {
             const cp: CandidateProgress = {
@@ -1176,6 +1219,7 @@ export default function AddSingleListing() {
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
                   {findProgress.phase === "discovering" && "Discovering Zillow candidates…"}
+                  {findProgress.phase === "ota-indexing" && "Indexing OTA listings (Airbnb / VRBO / Booking)…"}
                   {findProgress.phase === "candidates" && (
                     <>
                       Walking candidate{" "}
@@ -1186,6 +1230,16 @@ export default function AddSingleListing() {
                   )}
                   {findProgress.phase === "done" && "Wrapping up…"}
                 </div>
+                {/* CODEX NOTE (2026-05-04, claude/verify-then-discover):
+                    OTA index summary line — shows after the OTA-indexing
+                    phase completes. Tells the operator how many existing
+                    OTA listings the prefilter is screening Zillow
+                    candidates against. */}
+                {findProgress.otaIndex && (
+                  <div className="text-[11px] text-muted-foreground">
+                    OTA index built: airbnb {findProgress.otaIndex.airbnb} · vrbo {findProgress.otaIndex.vrbo} · booking {findProgress.otaIndex.booking} · {findProgress.otaIndex.addressTokens} address{findProgress.otaIndex.addressTokens === 1 ? "" : "es"} extracted
+                  </div>
+                )}
                 {/* Progress bar */}
                 <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
                   <div
@@ -1225,6 +1279,7 @@ export default function AddSingleListing() {
                 <div className="text-[11px] text-muted-foreground">
                   {findProgress.candidatesProcessed} processed
                   {findProgress.rejected > 0 && ` · ${findProgress.rejected} rejected`}
+                  {findProgress.prefilteredCount > 0 && ` (${findProgress.prefilteredCount} pre-filtered, no scrape needed)`}
                 </div>
               </div>
             )}

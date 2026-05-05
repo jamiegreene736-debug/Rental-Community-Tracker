@@ -15749,6 +15749,83 @@ Return ONLY compact JSON with this exact shape:
       return;
     }
 
+    // CODEX NOTE (2026-05-04, claude/verify-then-discover):
+    // Verify-then-discover prefilter. Build an OTA address index
+    // FIRST — three parallel SearchAPI Google site: queries against
+    // airbnb.com / vrbo.com / booking.com for the community name +
+    // city. Extract street tokens (e.g. "4460 Nehe Rd") from
+    // result snippets. Each Zillow candidate's slug-derived
+    // address is then checked against the index BEFORE scraping —
+    // matching candidates skip the expensive Apify scrape +
+    // qualifier round-trip with reason "Pre-filtered: address
+    // appears in OTA index".
+    //
+    // Scope-limited to Google site: queries (no Airbnb engine —
+    // Airbnb engine returns no street addresses, only fuzzy
+    // titles + coords, requiring a geocoding cache to be useful;
+    // adds complexity for marginal gain). Token-only matching;
+    // candidates whose slug-address doesn't appear in any
+    // platform's snippet fall through to the existing per-
+    // candidate qualifier (which is the safety net against false
+    // negatives — stale OTA listings, missing snippets, etc).
+    //
+    // Feature-flag escape hatch: set
+    // FIND_CLEAN_UNIT_VERIFY_FIRST=0 on Railway to skip the OTA
+    // index step and run the original discover-then-verify flow
+    // unchanged. Default ON.
+    const verifyFirst = process.env.FIND_CLEAN_UNIT_VERIFY_FIRST !== "0";
+    const otaAddressTokens = new Set<string>();
+    const otaIndexCounts = { airbnb: 0, vrbo: 0, booking: 0 };
+    if (verifyFirst) {
+      emit({ type: "ota-index-start", communityName, city, state });
+      const OTA_PLATFORMS: Array<{ key: "airbnb" | "vrbo" | "booking"; site: string }> = [
+        { key: "airbnb", site: "airbnb.com" },
+        { key: "vrbo",   site: "vrbo.com" },
+        { key: "booking",site: "booking.com" },
+      ];
+      // Street-portion regex — matches typical US street addresses
+      // in OTA listing snippets ("4460 Nehe Rd", "7307 Estero Blvd",
+      // "2345 Gulf Shore Pkwy"). Tolerant of comma/period suffixes.
+      const STREET_RE = /\b(\d{2,6})\s+([A-Z][a-zA-Z'.]+(?:\s+[A-Z][a-zA-Z'.]+)*)\s+(St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Way|Blvd|Boulevard|Pl|Place|Ct|Court|Ter|Terrace|Cir|Circle|Pkwy|Parkway|Hwy|Highway)\b/g;
+      const indexResults = await Promise.all(OTA_PLATFORMS.map(async (p) => {
+        const q = `site:${p.site} "${communityName}" "${city}"`;
+        try {
+          const resp = await fetch(
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+            { signal: AbortSignal.timeout(20_000) },
+          );
+          if (!resp.ok) return { key: p.key, tokens: [] as string[], count: 0 };
+          const data: any = await resp.json();
+          const organic: any[] = Array.isArray(data?.organic_results) ? data.organic_results : [];
+          const tokens: string[] = [];
+          for (const r of organic) {
+            const text = `${r?.title || ""} ${r?.snippet || ""}`;
+            for (const m of text.matchAll(STREET_RE)) {
+              // Normalize: lowercase + collapse whitespace.
+              const street = `${m[1]} ${m[2]} ${m[3]}`.toLowerCase().replace(/\s+/g, " ").trim();
+              tokens.push(street);
+            }
+          }
+          return { key: p.key, tokens, count: organic.length };
+        } catch (e: any) {
+          console.warn(`[find-clean-unit] OTA index error for site:${p.site}: ${e?.message ?? e}`);
+          return { key: p.key, tokens: [] as string[], count: 0 };
+        }
+      }));
+      for (const r of indexResults) {
+        otaIndexCounts[r.key] = r.count;
+        for (const t of r.tokens) otaAddressTokens.add(t);
+      }
+      emit({
+        type: "ota-index-done",
+        counts: otaIndexCounts,
+        addressTokens: otaAddressTokens.size,
+      });
+      console.log(
+        `[find-clean-unit] ota-index for "${communityName}" (${bedrooms}BR): airbnb=${otaIndexCounts.airbnb}, vrbo=${otaIndexCounts.vrbo}, booking=${otaIndexCounts.booking}, tokens=${otaAddressTokens.size}`,
+      );
+    }
+
     // Stage-2: walk candidates in order; first match wins. We only
     // try the top 8 to keep worst-case latency bounded (each
     // candidate does a Zillow scrape + 3 SearchAPI qualifier calls).
@@ -15792,6 +15869,30 @@ Return ONLY compact JSON with this exact shape:
     let textOnlyFallback: FallbackMatch | null = null;
     const candidateCap = Math.min(candidateUrls.length, 15);
 
+    // CODEX NOTE (2026-05-04, claude/verify-then-discover): helper
+    // that mirrors the same slug-parsing the loop does below. We
+    // need the address BEFORE the scrape so the prefilter can run
+    // without paying for Apify on candidates the OTA index already
+    // marks as listed.
+    const addressFromSlug = (url: string): string | null => {
+      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
+      if (!slugMatch) return null;
+      const raw = slugMatch[1].replace(/-/g, " ").trim();
+      return raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
+    };
+    const matchesOtaIndex = (zAddress: string | null): boolean => {
+      if (!zAddress || otaAddressTokens.size === 0) return false;
+      const norm = zAddress.toLowerCase().replace(/\s+/g, " ");
+      // Exact-substring match: the street portion of the Zillow
+      // slug must contain a token from the OTA index. Tokens are
+      // already-lowercased "{number} {name} {type}" tuples so a
+      // substring check is precise.
+      for (const tok of otaAddressTokens) {
+        if (norm.includes(tok)) return true;
+      }
+      return false;
+    };
+
     for (let candidateIdx = 0; candidateIdx < candidateCap; candidateIdx++) {
       const url = candidateUrls[candidateIdx];
       // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
@@ -15804,6 +15905,41 @@ Return ONLY compact JSON with this exact shape:
         index: candidateIdx + 1,
         total: candidateCap,
       });
+
+      // CODEX NOTE (2026-05-04, claude/verify-then-discover):
+      // Pre-filter against the OTA address index — if the
+      // candidate's slug-derived street appears in any OTA
+      // platform's snippet, skip without scraping. Saves the
+      // Apify+ScrapingBee+sidecar scrape AND the ~6 SearchAPI
+      // qualifier calls per skipped candidate. Only applies when
+      // verifyFirst is on AND the index is non-empty (otherwise
+      // every candidate falls through to the existing flow).
+      if (verifyFirst && otaAddressTokens.size > 0) {
+        const slugAddress = addressFromSlug(url);
+        if (slugAddress && matchesOtaIndex(slugAddress)) {
+          const reason = `Pre-filtered: address "${slugAddress}" appears in OTA index (Airbnb/VRBO/Booking listing snippet for this community).`;
+          attempts.push({
+            url,
+            bedrooms: null,
+            bathrooms: null,
+            address: slugAddress,
+            bedroomMatches: false,
+            qualifies: null,
+            qualifierReason: null,
+            rejectedBecause: reason,
+          });
+          emit({
+            type: "candidate-prefiltered",
+            url,
+            index: candidateIdx + 1,
+            total: candidateCap,
+            address: slugAddress,
+            reason,
+          });
+          continue;
+        }
+      }
+
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
@@ -16160,12 +16296,21 @@ Return ONLY compact JSON with this exact shape:
     // a transient scraping issue worth retrying later.
     const scrapeFailures = attempts.filter((a) => /scrape (returned 0 photos|failed)/i.test(a.rejectedBecause)).length;
     const otaMatches = attempts.filter((a) => /^Listed on OTA/i.test(a.rejectedBecause)).length;
+    // CODEX NOTE (2026-05-04, claude/verify-then-discover):
+    // Pre-filter rejections count under "listed on OTA" too —
+    // they're the same business outcome (candidate is already on
+    // an OTA), just caught at the index step before scraping
+    // rather than after. Without this, the diagnostic reason
+    // would say "0 listed on Airbnb" even though the index
+    // excluded N candidates.
+    const prefilterMatches = attempts.filter((a) => /^Pre-filtered/i.test(a.rejectedBecause)).length;
     const wrongBR = attempts.filter((a) => /^Wrong bedroom count/i.test(a.rejectedBecause)).length;
     const stubs = attempts.filter((a) => /^Stub listing/i.test(a.rejectedBecause)).length;
     const wrongType = attempts.filter((a) => /^Wrong property type/i.test(a.rejectedBecause)).length;
     const wrongStatus = attempts.filter((a) => /^Listing status is/i.test(a.rejectedBecause)).length;
+    const totalListedOnOta = otaMatches + prefilterMatches;
     const reasonParts: string[] = [];
-    if (otaMatches > 0) reasonParts.push(`${otaMatches} listed on Airbnb/VRBO/Booking`);
+    if (totalListedOnOta > 0) reasonParts.push(`${totalListedOnOta} listed on Airbnb/VRBO/Booking${prefilterMatches > 0 ? ` (${prefilterMatches} pre-filtered)` : ""}`);
     if (scrapeFailures > 0) reasonParts.push(`${scrapeFailures} Zillow scrape failed/empty`);
     if (wrongBR > 0) reasonParts.push(`${wrongBR} wrong bedroom count`);
     if (stubs > 0) reasonParts.push(`${stubs} stub listings (off-market with no data)`);
