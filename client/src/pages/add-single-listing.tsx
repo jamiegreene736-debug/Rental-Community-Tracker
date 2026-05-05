@@ -333,6 +333,11 @@ export default function AddSingleListing() {
   // signal (saturated resort), not a scrape bug.
   const [communityInventory, setCommunityInventory] = useState<{
     count: number;
+    // CODEX NOTE (2026-05-05, claude/realtor-source): per-source
+    // counts so the wizard can render "Zillow: 23 / Realtor: 18".
+    // Optional — older cached responses (pre-2026-05-05) won't
+    // have this; the wizard falls back to the combined count.
+    byPlatform?: { zillow: number; realtor: number };
     sampleUrls: string[];
     loading: boolean;
   } | null>(null);
@@ -360,6 +365,9 @@ export default function AddSingleListing() {
         const data = await res.json();
         setCommunityInventory({
           count: typeof data.count === "number" ? data.count : 0,
+          byPlatform: data.byPlatform && typeof data.byPlatform.zillow === "number" && typeof data.byPlatform.realtor === "number"
+            ? { zillow: data.byPlatform.zillow, realtor: data.byPlatform.realtor }
+            : undefined,
           sampleUrls: Array.isArray(data.sampleUrls) ? data.sampleUrls : [],
           loading: false,
         });
@@ -1176,13 +1184,34 @@ export default function AddSingleListing() {
                       </span>
                     )}
                     {communityInventory && !communityInventory.loading && (
-                      <Badge
-                        variant={communityInventory.count > 0 ? "secondary" : "outline"}
-                        className="text-[11px]"
-                        title="This is the count of Zillow homedetails URLs we could find across multiple queries — NOT the total unit count at the resort. Most condo units never appear on Zillow (owner-occupied, long-term rentals). For-sale + recently-sold + indexed off-market listings make up the count."
+                      <div
+                        className="flex items-center gap-1 flex-wrap"
+                        title="This is the count of property-listing URLs we could find on Zillow + Realtor.com across multiple queries — NOT the total unit count at the resort. Most condo units never appear on either site (owner-occupied, long-term rentals). For-sale + recently-sold + indexed off-market listings make up the count."
                       >
-                        ~{communityInventory.count} Zillow listing{communityInventory.count === 1 ? "" : "s"} indexed
-                      </Badge>
+                        {communityInventory.byPlatform ? (
+                          <>
+                            <Badge
+                              variant={communityInventory.byPlatform.zillow > 0 ? "secondary" : "outline"}
+                              className="text-[11px]"
+                            >
+                              ~{communityInventory.byPlatform.zillow} Zillow
+                            </Badge>
+                            <Badge
+                              variant={communityInventory.byPlatform.realtor > 0 ? "secondary" : "outline"}
+                              className="text-[11px]"
+                            >
+                              ~{communityInventory.byPlatform.realtor} Realtor
+                            </Badge>
+                          </>
+                        ) : (
+                          <Badge
+                            variant={communityInventory.count > 0 ? "secondary" : "outline"}
+                            className="text-[11px]"
+                          >
+                            ~{communityInventory.count} listing{communityInventory.count === 1 ? "" : "s"} indexed
+                          </Badge>
+                        )}
+                      </div>
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground -mt-2">
