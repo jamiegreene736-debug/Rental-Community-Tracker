@@ -3067,7 +3067,7 @@ function SidecarStatusBadge() {
     data: null,
     everSeen: false,
   });
-  const [acting, setActing] = useState<"stop" | "start" | null>(null);
+  const [acting, setActing] = useState<"stop" | "start" | "reset" | null>(null);
 
   const refresh = async (): Promise<SidecarHeartbeat | null> => {
     try {
@@ -3111,6 +3111,44 @@ function SidecarStatusBadge() {
       await refresh();
     } catch (e: any) {
       toast({ title: "Stop failed", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setActing(null);
+    }
+  };
+
+  // CODEX NOTE (2026-05-04, claude/sidecar-stop-reset): "Stop &
+  // Reset" cancels in-progress + pending jobs WITHOUT pausing the
+  // queue. Use case: sidecar got stuck on the wrong page / hit a
+  // bot wall, operator just wants to clear it and immediately
+  // start a new search. Differs from plain Stop, which pauses
+  // the queue and forces the operator to click Start before
+  // anything new dispatches. Hits the existing /cancel endpoint
+  // (no pause) — also clears the paused flag if it was already
+  // set so the operator gets a fully clean slate in one click.
+  const stopAndResetSidecar = async () => {
+    setActing("reset");
+    try {
+      const r = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
+        reason: "Stop & Reset button (Operations UI)",
+      });
+      const j = await r.json();
+      // If the queue was paused (operator previously hit Stop), also
+      // unpause it so the reset truly restores a "ready" state in one
+      // click. apiRequest is fire-and-forget here — even if /start
+      // 404s in some unforeseen state, the cancel above already gave
+      // us a clean queue, which is the primary goal.
+      if (data?.paused) {
+        try { await apiRequest("POST", "/api/vrbo-sidecar/start", {}); } catch { /* ignore */ }
+      }
+      toast({
+        title: "Sidecar reset",
+        description: j.cancelled > 0
+          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Ready for a new search.`
+          : "Queue cleared. Ready for a new search.",
+      });
+      await refresh();
+    } catch (e: any) {
+      toast({ title: "Reset failed", description: e?.message ?? String(e), variant: "destructive" });
     } finally {
       setActing(null);
     }
@@ -3230,10 +3268,38 @@ function SidecarStatusBadge() {
           </Button>
         </div>
 
-        <div className="text-[10px] text-muted-foreground leading-snug">
-          Stop cancels any running job AND blocks new jobs. Start unblocks new
-          jobs (cancelled jobs don't auto-restart). Worker keeps polling either
-          way — heartbeat tracks daemon liveness, not pause state.
+        {/* CODEX NOTE (2026-05-04, claude/sidecar-stop-reset):
+            Full-width Stop & Reset on its own row — it's the
+            most-used recovery action when the sidecar gets stuck.
+            Different from Stop (which pauses) — this clears the
+            queue AND leaves it ready for a new search in one
+            click. Disabled while another action is in flight, but
+            usable from any state (running, idle, or paused). */}
+        <Button
+          size="sm"
+          variant="secondary"
+          className="w-full h-8 text-xs"
+          disabled={acting !== null}
+          onClick={stopAndResetSidecar}
+          data-testid="button-sidecar-stop-reset"
+        >
+          <RefreshCw className={`h-3 w-3 mr-1 ${acting === "reset" ? "animate-spin" : ""}`} />
+          {acting === "reset" ? "Resetting…" : "Stop & Reset"}
+        </Button>
+
+        <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
+          <div>
+            <strong>Stop</strong>: cancel running job + block new jobs.
+            Requires Start to resume.
+          </div>
+          <div>
+            <strong>Stop &amp; Reset</strong>: cancel running job + stay
+            ready. Use when the sidecar is stuck and you want to retry
+            immediately.
+          </div>
+          <div>
+            <strong>Start</strong>: unblock new jobs (only after Stop).
+          </div>
         </div>
       </PopoverContent>
     </Popover>
