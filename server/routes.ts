@@ -21,6 +21,7 @@ import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { consultGrokAboutFindUnit } from "./grok-find-unit-consult";
 import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
+import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
@@ -3098,6 +3099,23 @@ export async function registerRoutes(
   app.get("/api/operations/grok-single-listing-consult", async (_req, res) => {
     try {
       const text = await consultGrokAboutSingleListing();
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(text);
+    } catch (e: any) {
+      res.status(500).set("Content-Type", "text/plain").send(`error: ${e?.message ?? e}`);
+    }
+  });
+
+  // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+  // Grok consult endpoint specifically about the city-wide
+  // candidate-pool scarcity. Even after widening queries +
+  // bumping num=20 + cap=60, a Fort Myers Beach search only
+  // surfaces ~35 unique URLs and most are off-market stubs. Brief
+  // in server/grok-citywide-candidate-consult.ts. Plain-text
+  // response. Long timeout because grok-4 takes ~60-180s.
+  app.get("/api/operations/grok-citywide-candidate-consult", async (_req, res) => {
+    try {
+      const text = await consultGrokAboutCitywideCandidates();
       res.set("Content-Type", "text/plain; charset=utf-8");
       res.send(text);
     } catch (e: any) {
