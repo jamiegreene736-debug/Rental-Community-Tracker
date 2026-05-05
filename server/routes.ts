@@ -3286,6 +3286,49 @@ export async function registerRoutes(
     }
   });
 
+  // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+  // Debug endpoint for the city-wide Apify search-actor pipeline.
+  // Calls harvestZillow/RealtorUrlsViaApifySearch directly and
+  // returns counts + first few URLs + raw timing so we can tell
+  // if the actors are returning empty datasets (wrong ID? wrong
+  // input shape?) vs returning URLs that the regex extractor
+  // fails to find. Use case: Jamie sees only ~36 candidates for
+  // an entire city and we need to figure out whether Apify is
+  // contributing or it's all Google.
+  // Usage: GET /api/operations/debug-citywide-apify?city=Fort%20Myers%20Beach&state=Florida
+  app.get("/api/operations/debug-citywide-apify", async (req: Request, res: Response) => {
+    const city = String(req.query.city ?? "").trim();
+    const state = String(req.query.state ?? "").trim();
+    if (!city || !state) {
+      return res.status(400).json({ error: "city and state required" });
+    }
+    const startedAt = Date.now();
+    const [zillowResult, realtorResult] = await Promise.allSettled([
+      harvestZillowUrlsViaApifySearch(city, state, 500),
+      harvestRealtorUrlsViaApifySearch(city, state, 500),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+    const summarize = (r: PromiseSettledResult<string[]>) => {
+      if (r.status === "rejected") return { ok: false, error: String((r as any).reason?.message ?? r.reason) };
+      const urls = r.value;
+      return {
+        ok: true,
+        count: urls.length,
+        sample: urls.slice(0, 5),
+      };
+    };
+    return res.json({
+      city,
+      state,
+      elapsedMs,
+      hasApifyToken: !!process.env.APIFY_API_TOKEN,
+      configuredZillowActor: process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper",
+      configuredRealtorActor: process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper",
+      zillow: summarize(zillowResult),
+      realtor: summarize(realtorResult),
+    });
+  });
+
   // Recon helper: surface unique PM-ish domains from Google's first
   // pages for a community. Operator review tool — no rate scraping.
   // Useful when deciding which PMs to add scrapers for next.
