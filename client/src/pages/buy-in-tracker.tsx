@@ -1451,7 +1451,7 @@ function BestBuyInFinder() {
                 <div className="mt-3 border-t pt-3">
                   <div className="flex items-center gap-3 flex-wrap">
                     <p className="text-xs font-medium text-gray-700 dark:text-gray-300 flex-1">
-                      Platform check — verify NexStay units aren't already listed independently:
+                      Platform check — verify VacationRentalExpertz units aren't already listed independently:
                     </p>
                     {platformCheckState === "idle" && (
                       <Button size="sm" variant="outline" className="text-xs h-7" onClick={runPlatformCheck} data-testid="button-platform-check">

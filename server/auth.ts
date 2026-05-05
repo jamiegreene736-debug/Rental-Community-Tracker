@@ -1,4 +1,4 @@
-// Single-password gate for the NexStay portal.
+// Single-password gate for the VacationRentalExpertz portal.
 //
 // Activated by setting the `ADMIN_SECRET` env var. When unset, this
 // middleware is a no-op so cold deploys, local dev, and the previous
@@ -139,11 +139,12 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
 <html><head>
 <meta charset="utf-8">
-<title>Sign in — NexStay</title>
+<title>Sign in — VacationRentalExpertz</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
   .card { background: white; padding: 32px 36px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); width: 320px; }
+  .brand { display: block; width: 220px; max-width: 100%; margin: 0 auto 18px; }
   h1 { font-size: 20px; margin: 0 0 8px; color: #0f172a; }
   p { font-size: 13px; color: #64748b; margin: 0 0 20px; }
   label { display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 6px; }
@@ -155,7 +156,8 @@ const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
 </style>
 </head><body>
 <form class="card" method="POST" action="/login">
-  <h1>NexStay Portal</h1>
+  <img class="brand" src="/brand/vacation-rental-expertz-horizontal.png" alt="VacationRentalExpertz">
+  <h1>VacationRentalExpertz Portal</h1>
   <p>This portal is private. Sign in with the operator password.</p>
   <input type="hidden" name="next" value="${nextPath.replace(/"/g, "&quot;")}">
   <label for="password">Password</label>

@@ -726,7 +726,7 @@ export default function AddCommunity() {
           </Link>
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Add a New Community</h1>
-            <p className="text-sm text-muted-foreground">Research, validate, and draft a new NexStay bundled listing</p>
+            <p className="text-sm text-muted-foreground">Research, validate, and draft a new VacationRentalExpertz bundled listing</p>
           </div>
         </div>
 

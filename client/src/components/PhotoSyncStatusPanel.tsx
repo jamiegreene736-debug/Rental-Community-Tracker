@@ -308,7 +308,7 @@ export function PhotoSyncStatusPanel({ guestyListingId, communityFolder, bedroom
   // asking follow-up questions.
   const formatDiagnostic = (r: DiagnosticReport): string => {
     const lines: string[] = [];
-    lines.push("# NexStay action failed — diagnostic report");
+    lines.push("# VacationRentalExpertz action failed — diagnostic report");
     lines.push("");
     lines.push(`**Action:** ${r.action}`);
     lines.push(`**Listing ID:** \`${r.listingId}\``);

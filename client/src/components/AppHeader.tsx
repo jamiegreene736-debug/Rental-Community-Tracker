@@ -21,7 +21,12 @@ export default function AppHeader() {
           Home
         </Link>
         <span className="text-muted-foreground/40 text-xs select-none">|</span>
-        <span className="text-sm font-semibold tracking-tight text-foreground/80 select-none">NexStay</span>
+        <img
+          src="/brand/vacation-rental-expertz-horizontal.png"
+          alt="VacationRentalExpertz"
+          className="h-8 w-auto max-w-[220px] object-contain select-none"
+          draggable={false}
+        />
       </div>
     </header>
   );

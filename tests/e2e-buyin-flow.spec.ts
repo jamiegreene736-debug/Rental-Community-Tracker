@@ -73,7 +73,7 @@ async function run() {
     await page.goto(`${URL}/bookings`, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {});
     const title = await page.title();
-    record("Page loads", /NexStay/i.test(title), `title="${title}"`);
+    record("Page loads", /VacationRentalExpertz/i.test(title), `title="${title}"`);
     await shot(page, "01-bookings-loaded");
 
     // ── Step 2: pick property from dropdown ───────────────────────────

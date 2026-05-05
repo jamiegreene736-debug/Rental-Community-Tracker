@@ -668,10 +668,10 @@ export default function Home() {
         <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
-              NexStay — Property Research
+              VacationRentalExpertz — Property Research
             </h1>
             <p className="text-muted-foreground mt-1">
-              NexStay portfolio of vacation rental communities with pricing and performance data
+              VacationRentalExpertz portfolio of vacation rental communities with pricing and performance data
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1265,7 +1265,7 @@ export default function Home() {
             in the table now. */}
 
         <div className="mt-4 text-xs text-muted-foreground text-center">
-          NexStay portfolio data. Prices shown are nightly rates and may vary by season.
+          VacationRentalExpertz portfolio data. Prices shown are nightly rates and may vary by season.
         </div>
       </div>
 

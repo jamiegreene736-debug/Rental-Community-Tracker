@@ -444,7 +444,7 @@ export default function UnitBuilder() {
         </div>
 
         <div className="mt-6 text-xs text-muted-foreground text-center">
-          NexStay property data. Unit status verified against Booking.com and VRBO.
+          VacationRentalExpertz property data. Unit status verified against Booking.com and VRBO.
         </div>
       </div>
     </div>
