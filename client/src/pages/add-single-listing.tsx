@@ -168,7 +168,15 @@ export default function AddSingleListing() {
   const [streetAddress, setStreetAddress] = useState("");
   const [propertyName, setPropertyName] = useState("");
   const [manualMode, setManualMode] = useState(false);
-  const [selectedBedrooms, setSelectedBedrooms] = useState<number | null>(null);
+  // CODEX NOTE (2026-05-05, claude/any-bedroom): "any" is a valid
+  // selection that tells find-clean-unit to skip the bedroom-match
+  // gate. Used when the operator wants the broadest pool, e.g. for
+  // resorts where Claude's typical-mix research came back narrow.
+  const [selectedBedrooms, setSelectedBedrooms] = useState<number | "any" | null>(null);
+  // CODEX NOTE (2026-05-05, claude/city-wide-search): when true,
+  // skip the community picker entirely and search the whole city
+  // for any condo. Mutually exclusive with selectedCommunity.
+  const [cityWideMode, setCityWideMode] = useState(false);
 
   // Auto-discovery results from /api/single-listing/find-clean-unit
   type FindAttempt = {
@@ -213,6 +221,18 @@ export default function AddSingleListing() {
   const [findLoading, setFindLoading] = useState(false);
   const [findResult, setFindResult] = useState<FindResult | null>(null);
   const [skipUrls, setSkipUrls] = useState<string[]>([]);
+  // CODEX NOTE (2026-05-05, claude/find-eta-cancel): track an
+  // AbortController for the active find-clean-unit fetch so the
+  // operator can cancel a long city-wide search in flight. Reset
+  // to null when the fetch completes / fails / aborts.
+  const findAbortRef = useRef<AbortController | null>(null);
+  // ETA tracking: timestamp of the search start + per-candidate
+  // completion log used to compute average time-per-candidate.
+  // Display logic: avg-time-per-processed × candidates-remaining,
+  // shown alongside the progress bar.
+  const findStartedAtRef = useRef<number | null>(null);
+  const candidateCompletionsRef = useRef<number[]>([]);
+  const [findEtaMs, setFindEtaMs] = useState<number | null>(null);
 
   // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
   // Live progress state populated by the NDJSON stream from
@@ -398,8 +418,12 @@ export default function AddSingleListing() {
   //   4. Returns the first clean match (or { found: false, attempts })
   // The wizard advances to Step 2 to display the result.
   const findCleanUnit = useCallback(async (skipUrlsArg: string[] = []) => {
-    if (!pickedCity || !selectedCommunity || !selectedBedrooms) {
-      toast({ title: "Pick a community and bedroom count first", variant: "destructive" });
+    if (!pickedCity || !selectedBedrooms) {
+      toast({ title: "Pick a bedroom count first", variant: "destructive" });
+      return;
+    }
+    if (!cityWideMode && !selectedCommunity) {
+      toast({ title: "Pick a community or use 'Search entire city'", variant: "destructive" });
       return;
     }
     setFindLoading(true);
@@ -410,7 +434,16 @@ export default function AddSingleListing() {
       candidatesProcessed: 0,
       current: null,
       rejected: 0,
+      prefilteredCount: 0,
     });
+    // Reset ETA tracking + abort controller for this run.
+    findStartedAtRef.current = Date.now();
+    candidateCompletionsRef.current = [];
+    setFindEtaMs(null);
+    if (findAbortRef.current) {
+      try { findAbortRef.current.abort(); } catch { /* ignore */ }
+    }
+    findAbortRef.current = new AbortController();
     try {
       // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
       // Endpoint streams NDJSON progress events. We read the body
@@ -422,8 +455,14 @@ export default function AddSingleListing() {
       const resp = await fetch("/api/single-listing/find-clean-unit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: findAbortRef.current.signal,
         body: JSON.stringify({
-          communityName: selectedCommunity.name,
+          // CODEX NOTE (2026-05-05, claude/city-wide-search):
+          // omit communityName when cityWideMode; server then
+          // runs city-wide queries instead of community-anchored.
+          ...(cityWideMode
+            ? { cityWide: true }
+            : { communityName: selectedCommunity?.name }),
           city: pickedCity.city,
           state: pickedCity.state,
           bedrooms: selectedBedrooms,
@@ -523,12 +562,26 @@ export default function AddSingleListing() {
               existing.detail = String(evt.reason ?? "rejected");
               candidateState.set(evt.url, existing);
             }
-            setFindProgress((prev) => ({
-              ...prev,
-              candidatesProcessed: prev.candidatesProcessed + 1,
-              rejected: prev.rejected + 1,
-              current: existing ?? prev.current,
-            }));
+            // CODEX NOTE (2026-05-05, claude/find-eta-cancel):
+            // record this candidate's completion time for the
+            // ETA calculation. ETA = avg (now - findStartedAt /
+            // candidatesProcessed) × candidatesRemaining.
+            candidateCompletionsRef.current.push(Date.now());
+            setFindProgress((prev) => {
+              const next = {
+                ...prev,
+                candidatesProcessed: prev.candidatesProcessed + 1,
+                rejected: prev.rejected + 1,
+                current: existing ?? prev.current,
+              };
+              if (findStartedAtRef.current && next.totalCandidates > 0 && next.candidatesProcessed > 0) {
+                const elapsed = Date.now() - findStartedAtRef.current;
+                const avgPerCandidate = elapsed / next.candidatesProcessed;
+                const remaining = next.totalCandidates - next.candidatesProcessed;
+                setFindEtaMs(remaining > 0 ? Math.round(avgPerCandidate * remaining) : 0);
+              }
+              return next;
+            });
           } else if (evt.type === "candidate-qualifier") {
             const existing = candidateState.get(evt.url);
             if (existing) {
@@ -552,12 +605,22 @@ export default function AddSingleListing() {
                 : `Listed on ${listedNames.join(", ")}`;
               candidateState.set(evt.url, existing);
             }
-            setFindProgress((prev) => ({
-              ...prev,
-              candidatesProcessed: prev.candidatesProcessed + 1,
-              rejected: evt.qualifies ? prev.rejected : prev.rejected + 1,
-              current: existing ?? prev.current,
-            }));
+            candidateCompletionsRef.current.push(Date.now());
+            setFindProgress((prev) => {
+              const next = {
+                ...prev,
+                candidatesProcessed: prev.candidatesProcessed + 1,
+                rejected: evt.qualifies ? prev.rejected : prev.rejected + 1,
+                current: existing ?? prev.current,
+              };
+              if (findStartedAtRef.current && next.totalCandidates > 0 && next.candidatesProcessed > 0) {
+                const elapsed = Date.now() - findStartedAtRef.current;
+                const avgPerCandidate = elapsed / next.candidatesProcessed;
+                const remaining = next.totalCandidates - next.candidatesProcessed;
+                setFindEtaMs(remaining > 0 ? Math.round(avgPerCandidate * remaining) : 0);
+              }
+              return next;
+            });
           } else if (evt.type === "result") {
             finalResult = evt as FindResult;
           }
@@ -639,11 +702,29 @@ export default function AddSingleListing() {
         });
       }
     } catch (e: any) {
-      toast({ title: "Search failed", description: e.message, variant: "destructive" });
+      // CODEX NOTE (2026-05-05, claude/find-eta-cancel): swallow
+      // AbortError silently — operator-initiated cancel doesn't
+      // need a "Search failed" toast. Other errors still surface.
+      if (e?.name === "AbortError") {
+        toast({ title: "Search cancelled" });
+      } else {
+        toast({ title: "Search failed", description: e.message, variant: "destructive" });
+      }
     } finally {
       setFindLoading(false);
+      findAbortRef.current = null;
     }
-  }, [pickedCity, selectedCommunity, selectedBedrooms, toast]);
+  }, [pickedCity, selectedCommunity, selectedBedrooms, cityWideMode, toast]);
+
+  // CODEX NOTE (2026-05-05, claude/find-eta-cancel): cancel handler
+  // for the operator-facing "Cancel search" button. Aborts the
+  // fetch via AbortController; the catch block surfaces a
+  // "Search cancelled" toast and the finally block clears the ref.
+  const cancelFind = useCallback(() => {
+    if (findAbortRef.current) {
+      try { findAbortRef.current.abort(); } catch { /* ignore */ }
+    }
+  }, []);
 
   const tryAnotherUnit = useCallback(() => {
     if (findResult?.found) {
@@ -1072,7 +1153,66 @@ export default function AddSingleListing() {
               </div>
             )}
 
-            {!researchLoading && communities.length > 0 && (
+            {/* CODEX NOTE (2026-05-05, claude/city-wide-search):
+                "Search entire city" prominent button — bypasses
+                community selection. Operator picks a city, hits
+                this, picks a bedroom count (or Any), and the
+                wizard runs find-clean-unit with cityWide=true:
+                discovery queries are condo+city instead of
+                community-anchored, OTA prefilter is skipped (no
+                community anchor), per-candidate qualifier still
+                runs. Useful when the operator can't find a usable
+                resort or wants the broadest candidate pool. */}
+            {pickedCity && !cityWideMode && !manualMode && communities.length > 0 && (
+              <div className="mb-3 p-3 rounded-lg border border-primary/40 bg-primary/5">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <div className="text-sm font-semibold">Or search the entire city</div>
+                    <div className="text-xs text-muted-foreground">
+                      Skip the resort picker. We'll search every condo listing in {pickedCity.city} and verify each.
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={() => {
+                      setCityWideMode(true);
+                      setSelectedCommunity(null);
+                      setCommunityInventory(null);
+                      setManualMode(false);
+                    }}
+                    data-testid="button-city-wide"
+                  >
+                    Search all of {pickedCity.city}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {pickedCity && cityWideMode && (
+              <div className="mb-3 p-3 rounded-lg border border-primary/60 bg-primary/10 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-semibold">City-wide search active</div>
+                    <div className="text-xs text-muted-foreground">
+                      Searching all condo listings in {pickedCity.city}, {pickedCity.state}.
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setCityWideMode(false);
+                      setSelectedBedrooms(null);
+                      setFindResult(null);
+                    }}
+                  >
+                    Pick a community instead
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {!researchLoading && communities.length > 0 && !cityWideMode && (
               <div className="mb-6">
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-semibold">
@@ -1152,21 +1292,31 @@ export default function AddSingleListing() {
                   with a bedroom-count picker. The /find-clean-unit
                   endpoint discovers the address + Zillow URL + photos
                   automatically, so the operator only picks the BR. — */}
-            {selectedCommunity && (() => {
-              // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
-              // Render only the bedroom counts the picked community
-              // actually offers. Falls back to the generic 1-5
-              // picker when the research scan didn't return an
-              // availableBedrooms array (older drafts / Claude
-              // returned an empty array because it didn't know).
-              const validBedrooms = selectedCommunity.availableBedrooms && selectedCommunity.availableBedrooms.length > 0
-                ? selectedCommunity.availableBedrooms
-                : [1, 2, 3, 4, 5];
-              const usedFallback = !selectedCommunity.availableBedrooms || selectedCommunity.availableBedrooms.length === 0;
+            {(selectedCommunity || cityWideMode) && (() => {
+              // CODEX NOTE (2026-05-05, claude/any-bedroom): always
+              // show 1-5 BR + "Any" buttons. Highlight the BR
+              // counts the picked community is known to offer
+              // (from the research scan's availableBedrooms array)
+              // so the operator sees Claude's recommendation
+              // without being LIMITED to it. City-wide mode shows
+              // all five + Any with no highlight (no community
+              // anchor). "Any" tells the server to skip the
+              // BR-match gate.
+              const allBedrooms = [1, 2, 3, 4, 5];
+              const typicalBedrooms = !cityWideMode && selectedCommunity?.availableBedrooms && selectedCommunity.availableBedrooms.length > 0
+                ? new Set(selectedCommunity.availableBedrooms)
+                : null;
               return (
                 <div className="space-y-4 border-t pt-5 mb-6">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <h3 className="text-sm font-semibold">How many bedrooms?</h3>
+                    <h3 className="text-sm font-semibold">
+                      How many bedrooms?
+                      {cityWideMode && (
+                        <span className="ml-2 text-xs font-normal text-muted-foreground">
+                          (searching all of {pickedCity?.city})
+                        </span>
+                      )}
+                    </h3>
                     {/* CODEX NOTE (2026-05-05, claude/community-inventory):
                         Total Zillow listings count for the picked
                         community. Surfaces "this resort has 23 total
@@ -1215,38 +1365,65 @@ export default function AddSingleListing() {
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground -mt-2">
-                    We'll search Zillow for a {selectedBedrooms ?? "?"}BR unit at {selectedCommunity.name},
-                    then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
-                    If the first candidate is listed somewhere, we'll automatically try another.
+                    {cityWideMode ? (
+                      <>
+                        We'll search Zillow + Realtor.com for any condo in {pickedCity?.city}, {pickedCity?.state} (size: {typeof selectedBedrooms === "number" ? `${selectedBedrooms}BR` : selectedBedrooms === "any" ? "any" : "?"}),
+                        then auto-verify each isn't already listed on Airbnb, VRBO, or Booking.com.
+                      </>
+                    ) : (
+                      <>
+                        We'll search Zillow + Realtor.com for a {typeof selectedBedrooms === "number" ? `${selectedBedrooms}BR` : selectedBedrooms === "any" ? "any-size" : "?"} unit at {selectedCommunity?.name},
+                        then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
+                        If the first candidate is listed somewhere, we'll automatically try another.
+                      </>
+                    )}
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {validBedrooms.map((br) => {
+                    {allBedrooms.map((br) => {
                       const active = selectedBedrooms === br;
+                      const isTypical = typicalBedrooms?.has(br) ?? false;
                       return (
                         <button
                           key={br}
                           type="button"
                           onClick={() => setSelectedBedrooms(br)}
+                          title={isTypical ? `${selectedCommunity?.name} typically offers ${br}BR units` : undefined}
                           className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
                             active
                               ? "bg-primary text-primary-foreground border-primary"
-                              : "bg-card hover:border-primary/50"
+                              : isTypical
+                                ? "bg-card border-primary/40 ring-1 ring-primary/20 hover:border-primary"
+                                : "bg-card hover:border-primary/50"
                           }`}
                           data-testid={`button-bedrooms-${br}`}
                         >
-                          {br}BR
+                          {br}BR{isTypical ? " ★" : ""}
                         </button>
                       );
                     })}
+                    {/* "Any" button — operator wants the broadest pool */}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedBedrooms("any")}
+                      title="Skip the bedroom-count filter — accept any unit at this resort/city"
+                      className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
+                        selectedBedrooms === "any"
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-card hover:border-primary/50"
+                      }`}
+                      data-testid="button-bedrooms-any"
+                    >
+                      Any
+                    </button>
                   </div>
-                  {!usedFallback && (
+                  {typicalBedrooms && (
                     <p className="text-xs text-muted-foreground">
-                      {selectedCommunity.name} typically offers {validBedrooms.map(b => `${b}BR`).join(", ")} units.
+                      ★ = sizes {selectedCommunity?.name} typically offers. Pick "Any" to search all sizes.
                     </p>
                   )}
-                  {usedFallback && (
+                  {!typicalBedrooms && !cityWideMode && (
                     <p className="text-xs text-amber-700">
-                      We don't have a confirmed bedroom mix for this community — pick the size you want and we'll search Zillow.
+                      We don't have a confirmed bedroom mix for this community — pick the size you want or use "Any".
                     </p>
                   )}
                 </div>
@@ -1286,14 +1463,25 @@ export default function AddSingleListing() {
             {/* Continue button:
                   - Auto-discovery path: picks community + BR → "Find a clean unit" calls the API
                   - Manual path: requires typed address → "Continue to OTA check" advances normally */}
-            {selectedCommunity && !findLoading && (
+            {(selectedCommunity || cityWideMode) && !findLoading && (
               <Button
                 onClick={() => findCleanUnit([])}
                 disabled={!selectedBedrooms}
                 data-testid="button-find-clean-unit"
               >
                 <Search className="h-4 w-4 mr-2" />
-                Find a clean {selectedBedrooms ?? "?"}BR unit
+                {(() => {
+                  const sizeLabel =
+                    typeof selectedBedrooms === "number"
+                      ? `${selectedBedrooms}BR`
+                      : selectedBedrooms === "any"
+                        ? "any-size"
+                        : "?";
+                  const scopeLabel = cityWideMode
+                    ? `in ${pickedCity?.city ?? "this city"}`
+                    : "unit";
+                  return `Find a clean ${sizeLabel} ${scopeLabel}`;
+                })()}
                 <ArrowRight className="h-4 w-4 ml-2" />
               </Button>
             )}
@@ -1367,10 +1555,42 @@ export default function AddSingleListing() {
                     </div>
                   </div>
                 )}
-                <div className="text-[11px] text-muted-foreground">
-                  {findProgress.candidatesProcessed} processed
-                  {findProgress.rejected > 0 && ` · ${findProgress.rejected} rejected`}
-                  {findProgress.prefilteredCount > 0 && ` (${findProgress.prefilteredCount} pre-filtered, no scrape needed)`}
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="text-[11px] text-muted-foreground">
+                    {findProgress.candidatesProcessed} processed
+                    {findProgress.rejected > 0 && ` · ${findProgress.rejected} rejected`}
+                    {findProgress.prefilteredCount > 0 && ` (${findProgress.prefilteredCount} pre-filtered, no scrape needed)`}
+                  </div>
+                  {/* CODEX NOTE (2026-05-05, claude/find-eta-cancel):
+                      ETA = avg time per processed candidate ×
+                      candidates remaining. Only shown after the
+                      first candidate completes (so the avg is real
+                      data, not a guess). Falls back to "calculating"
+                      while the first candidate is still in flight. */}
+                  {findEtaMs !== null && findEtaMs > 0 && (
+                    <span className="text-[11px] text-muted-foreground">
+                      ~{findEtaMs >= 60_000
+                        ? `${Math.ceil(findEtaMs / 60_000)} min`
+                        : `${Math.ceil(findEtaMs / 1000)}s`} remaining
+                    </span>
+                  )}
+                  {findEtaMs === null && findProgress.candidatesProcessed === 0 && findProgress.totalCandidates > 0 && (
+                    <span className="text-[11px] text-muted-foreground italic">
+                      ETA calculating…
+                    </span>
+                  )}
+                </div>
+                <div className="flex justify-end pt-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={cancelFind}
+                    className="text-xs"
+                    data-testid="button-cancel-find"
+                  >
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Cancel search
+                  </Button>
                 </div>
               </div>
             )}

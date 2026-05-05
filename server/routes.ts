@@ -16112,15 +16112,42 @@ Return ONLY compact JSON with this exact shape:
       return;
     }
 
-    const { communityName, city, state, bedrooms, skipUrls } = req.body as {
+    const { communityName, city, state, bedrooms, skipUrls, cityWide } = req.body as {
       communityName?: string;
       city?: string;
       state?: string;
-      bedrooms?: number;
+      // CODEX NOTE (2026-05-05, claude/any-bedroom): bedrooms can
+      // be a number (1-5) or the string "any". When "any", skip
+      // BR-anchored discovery queries (just search the resort
+      // name) and the BR-match gate. Operator uses "Any" when
+      // they want the broadest possible candidate pool — useful
+      // for resorts where Claude's typical-mix research returned
+      // a narrow band that doesn't reflect the actual inventory.
+      bedrooms?: number | "any";
       skipUrls?: string[];
+      // CODEX NOTE (2026-05-05, claude/city-wide-search): when
+      // true, run a city-wide condo search instead of anchoring
+      // to a specific community. Discovery queries become
+      // generic ("condo for sale" + city) and the OTA-index
+      // prefilter is SKIPPED (city-wide noise would defeat it).
+      // communityName becomes optional; it's used only for
+      // logging when set. Operator uses this for "show me any
+      // clean condo in Fort Myers Beach regardless of resort".
+      cityWide?: boolean;
     };
-    if (!communityName || !city || !state || typeof bedrooms !== "number" || bedrooms < 1) {
-      finishWithResult({ found: false, reason: "communityName, city, state, bedrooms required", attempts: [] });
+    const isAnyBedroom = bedrooms === "any";
+    const numericBedrooms = typeof bedrooms === "number" ? bedrooms : null;
+    const isCityWide = cityWide === true;
+    if (!city || !state) {
+      finishWithResult({ found: false, reason: "city, state required", attempts: [] });
+      return;
+    }
+    if (!isCityWide && !communityName) {
+      finishWithResult({ found: false, reason: "communityName required (or set cityWide=true)", attempts: [] });
+      return;
+    }
+    if (!isAnyBedroom && (!numericBedrooms || numericBedrooms < 1)) {
+      finishWithResult({ found: false, reason: "bedrooms required (number or 'any')", attempts: [] });
       return;
     }
     const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
@@ -16133,16 +16160,78 @@ Return ONLY compact JSON with this exact shape:
     // in markets where the local MLS feeds Realtor preferentially.
     // Each platform has its own URL pattern; the iteration loop
     // downstream branches scrape paths on the URL host.
-    const zillowQueries = [
-      `site:zillow.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`,
-      `site:zillow.com "${communityName}" ${bedrooms} bedroom`,
-      `site:zillow.com "${communityName}" ${city} ${state}`,
-    ].map((q) => q.replace(/\s+/g, " ").trim());
-    const realtorQueries = [
-      `site:realtor.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`,
-      `site:realtor.com "${communityName}" ${bedrooms} bedroom`,
-      `site:realtor.com "${communityName}" ${city} ${state}`,
-    ].map((q) => q.replace(/\s+/g, " ").trim());
+    // CODEX NOTE (2026-05-05, claude/city-wide-search): query
+    // strategy branches on cityWide + bedroom mode:
+    //   - city-wide + numeric BR: condo {N} bedroom queries
+    //     scoped to "{city} {state}" with no resort anchor
+    //   - city-wide + any BR:     condo / condominium / townhouse
+    //     queries scoped to the city
+    //   - community + numeric BR: community-anchored quoted
+    //     queries (existing behavior)
+    //   - community + any BR:     community-anchored without BR
+    //     (existing behavior)
+    const brTerm = isAnyBedroom ? "" : `${numericBedrooms} bedroom`;
+    const buildZillowQueries = (): string[] => {
+      if (isCityWide) {
+        if (isAnyBedroom) {
+          return [
+            `site:zillow.com condo "${city}" "${state}"`,
+            `site:zillow.com condominium "${city}" "${state}"`,
+            `site:zillow.com townhouse "${city}" "${state}"`,
+            `site:zillow.com "${city}, ${state}" condo`,
+          ];
+        }
+        return [
+          `site:zillow.com condo "${city}" "${state}" ${brTerm}`,
+          `site:zillow.com condominium "${city}" "${state}" ${brTerm}`,
+          `site:zillow.com "${city}, ${state}" ${brTerm} condo`,
+        ];
+      }
+      // Community-anchored — existing behavior.
+      if (isAnyBedroom) {
+        return [
+          `site:zillow.com "${communityName}" ${city} ${state}`,
+          `site:zillow.com "${communityName}" ${city}`,
+          `site:zillow.com "${communityName}"`,
+        ];
+      }
+      return [
+        `site:zillow.com "${communityName}" ${city} ${state} ${brTerm}`,
+        `site:zillow.com "${communityName}" ${brTerm}`,
+        `site:zillow.com "${communityName}" ${city} ${state}`,
+      ];
+    };
+    const buildRealtorQueries = (): string[] => {
+      if (isCityWide) {
+        if (isAnyBedroom) {
+          return [
+            `site:realtor.com condo "${city}" "${state}"`,
+            `site:realtor.com condominium "${city}" "${state}"`,
+            `site:realtor.com townhouse "${city}" "${state}"`,
+            `site:realtor.com "${city}, ${state}" condo`,
+          ];
+        }
+        return [
+          `site:realtor.com condo "${city}" "${state}" ${brTerm}`,
+          `site:realtor.com condominium "${city}" "${state}" ${brTerm}`,
+          `site:realtor.com "${city}, ${state}" ${brTerm} condo`,
+        ];
+      }
+      if (isAnyBedroom) {
+        return [
+          `site:realtor.com "${communityName}" ${city} ${state}`,
+          `site:realtor.com "${communityName}" ${city}`,
+          `site:realtor.com "${communityName}"`,
+        ];
+      }
+      return [
+        `site:realtor.com "${communityName}" ${city} ${state} ${brTerm}`,
+        `site:realtor.com "${communityName}" ${brTerm}`,
+        `site:realtor.com "${communityName}" ${city} ${state}`,
+      ];
+    };
+    const zillowQueries = buildZillowQueries().map((q) => q.replace(/\s+/g, " ").trim());
+    const realtorQueries = buildRealtorQueries().map((q) => q.replace(/\s+/g, " ").trim());
 
     const candidateUrls: string[] = [];
     const seen = new Set<string>();
@@ -16181,7 +16270,7 @@ Return ONLY compact JSON with this exact shape:
       harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
     ]);
     console.log(
-      `[find-clean-unit] discovery for "${communityName}" (${bedrooms}BR): ` +
+      `[find-clean-unit] discovery for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}): ` +
       `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} total=${candidateUrls.length}`,
     );
 
@@ -16194,7 +16283,9 @@ Return ONLY compact JSON with this exact shape:
     if (candidateUrls.length === 0) {
       finishWithResult({
         found: false,
-        reason: `No Zillow listings found for "${communityName}" (${bedrooms}BR) in ${city}, ${state}.`,
+        reason: isCityWide
+          ? `No condo listings found in ${city}, ${state} ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`}.`
+          : `No Zillow listings found for "${communityName}" ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`} in ${city}, ${state}.`,
         attempts: [],
       });
       return;
@@ -16224,7 +16315,13 @@ Return ONLY compact JSON with this exact shape:
     // FIND_CLEAN_UNIT_VERIFY_FIRST=0 on Railway to skip the OTA
     // index step and run the original discover-then-verify flow
     // unchanged. Default ON.
-    const verifyFirst = process.env.FIND_CLEAN_UNIT_VERIFY_FIRST !== "0";
+    // CODEX NOTE (2026-05-05, claude/city-wide-search): OTA
+    // address-index prefilter is anchored to a community name.
+    // City-wide search has no anchor, so a `site:airbnb.com {city}`
+    // would return thousands of unrelated listings — the prefilter
+    // would over-reject. Skip in city-wide mode; the per-candidate
+    // OTA qualifier still runs downstream and catches real matches.
+    const verifyFirst = process.env.FIND_CLEAN_UNIT_VERIFY_FIRST !== "0" && !isCityWide;
     const otaAddressTokens = new Set<string>();
     const otaIndexCounts = { airbnb: 0, vrbo: 0, booking: 0 };
     if (verifyFirst) {
@@ -16273,7 +16370,7 @@ Return ONLY compact JSON with this exact shape:
         addressTokens: otaAddressTokens.size,
       });
       console.log(
-        `[find-clean-unit] ota-index for "${communityName}" (${bedrooms}BR): airbnb=${otaIndexCounts.airbnb}, vrbo=${otaIndexCounts.vrbo}, booking=${otaIndexCounts.booking}, tokens=${otaAddressTokens.size}`,
+        `[find-clean-unit] ota-index for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}): airbnb=${otaIndexCounts.airbnb}, vrbo=${otaIndexCounts.vrbo}, booking=${otaIndexCounts.booking}, tokens=${otaAddressTokens.size}`,
       );
     }
 
@@ -16361,7 +16458,58 @@ Return ONLY compact JSON with this exact shape:
       return false;
     };
 
+    // CODEX NOTE (2026-05-05, claude/find-wall-budget): hard wall
+    // budget for the iteration loop. City-wide searches walk many
+    // candidates and could otherwise exceed Railway's edge timeout
+    // or burn excessive operator wait time. When we hit ~80% of
+    // the budget we emit a timeout-warning so the wizard can
+    // explain what's happening; at 100% we bail with whatever
+    // we've collected (text-only fallback or no-clean-unit reason).
+    //
+    // Budgets:
+    //   Community-anchored: 8 minutes (15 candidates × 32s avg)
+    //   City-wide:          12 minutes (more candidates expected)
+    const findStartedAt = Date.now();
+    const wallBudgetMs = isCityWide ? 12 * 60_000 : 8 * 60_000;
+    const warnThresholdMs = Math.floor(wallBudgetMs * 0.8);
+    let warnedAtSoftLimit = false;
+    let bailedOnWallBudget = false;
+    let clientDisconnected = false;
+    // Detect client disconnect — if the operator hit Cancel, the
+    // fetch's AbortController severs the connection. Express's
+    // `res.on("close")` fires; we set the flag and the loop breaks
+    // on the next iteration boundary.
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        clientDisconnected = true;
+        console.log(`[find-clean-unit] client disconnected mid-stream (likely operator cancelled)`);
+      }
+    });
+
     for (let candidateIdx = 0; candidateIdx < candidateCap; candidateIdx++) {
+      const elapsed = Date.now() - findStartedAt;
+      if (clientDisconnected) {
+        console.log(`[find-clean-unit] aborting after ${candidateIdx} candidates — client disconnected`);
+        return;
+      }
+      if (elapsed >= wallBudgetMs) {
+        bailedOnWallBudget = true;
+        console.log(`[find-clean-unit] hit wall budget ${wallBudgetMs}ms after ${candidateIdx} candidates`);
+        emit({
+          type: "wall-budget-exceeded",
+          elapsedMs: elapsed,
+          candidatesProcessed: candidateIdx,
+        });
+        break;
+      }
+      if (!warnedAtSoftLimit && elapsed >= warnThresholdMs) {
+        warnedAtSoftLimit = true;
+        emit({
+          type: "wall-budget-warning",
+          elapsedMs: elapsed,
+          budgetMs: wallBudgetMs,
+        });
+      }
       const url = candidateUrls[candidateIdx];
       // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
       // Emit candidate-start before the scrape so the wizard can
@@ -16545,8 +16693,10 @@ Return ONLY compact JSON with this exact shape:
 
       // Bedroom-count gate: skip when scrape returned a number that
       // doesn't match the operator's pick.
-      if (scrapedBR !== bedrooms) {
-        const reason = `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${bedrooms}BR.`;
+      // CODEX NOTE (2026-05-05, claude/any-bedroom): when operator
+      // picked "Any", skip this gate — every BR count is acceptable.
+      if (!isAnyBedroom && scrapedBR !== numericBedrooms) {
+        const reason = `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${numericBedrooms}BR.`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -16678,7 +16828,7 @@ Return ONLY compact JSON with this exact shape:
         bedrooms: scrapedBR,
         bathrooms: scrapedBA,
         address: addressGuess,
-        bedroomMatches: scrapedBR === bedrooms || scrapedBR === null,
+        bedroomMatches: isAnyBedroom || scrapedBR === numericBedrooms || scrapedBR === null,
         qualifies: qualifier.qualifies,
         qualifierReason: qualifier.reason,
         rejectedBecause: qualifier.qualifies
@@ -16708,7 +16858,11 @@ Return ONLY compact JSON with this exact shape:
           unit: {
             url,
             address: addressGuess,
-            bedrooms: scrapedBR ?? bedrooms,
+            // CODEX NOTE (2026-05-05, claude/any-bedroom): when
+            // bedrooms is "any", we don't have an operator-pick
+            // fallback. Use scrapedBR or 0 (caller should display
+            // "?" or pull from generated listing draft on Step 4).
+            bedrooms: scrapedBR ?? (numericBedrooms ?? 0),
             bathrooms: scrapedBA,
             photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
             qualifier,
@@ -16743,7 +16897,7 @@ Return ONLY compact JSON with this exact shape:
     // form on Step 3 is the final escape hatch.
     if (textOnlyFallback) {
       console.log(
-        `[find-clean-unit] returning text-only fallback for "${communityName}" (${bedrooms}BR) — ` +
+        `[find-clean-unit] returning text-only fallback for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}) — ` +
         `${textOnlyFallback.url} (photo scrape failed; OTA text-search clean)`,
       );
       finishWithResult({
@@ -16751,7 +16905,7 @@ Return ONLY compact JSON with this exact shape:
         unit: {
           url: textOnlyFallback.url,
           address: textOnlyFallback.addressGuess,
-          bedrooms: textOnlyFallback.scrapedBR ?? bedrooms,
+          bedrooms: textOnlyFallback.scrapedBR ?? (numericBedrooms ?? 0),
           bathrooms: textOnlyFallback.scrapedBA,
           photos: [],
           qualifier: textOnlyFallback.qualifier,
@@ -16789,7 +16943,10 @@ Return ONLY compact JSON with this exact shape:
     if (stubs > 0) reasonParts.push(`${stubs} stub listings (off-market with no data)`);
     if (wrongType > 0) reasonParts.push(`${wrongType} wrong property type`);
     if (wrongStatus > 0) reasonParts.push(`${wrongStatus} sold/auction status`);
-    const reason = `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
+    const scopeLabel = isCityWide
+      ? `in ${city}, ${state} (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`
+      : `for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`;
+    const reason = `Checked ${attempts.length} listing${attempts.length === 1 ? "" : "s"} ${scopeLabel} — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
     finishWithResult({
       found: false,
       reason,
