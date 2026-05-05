@@ -871,6 +871,36 @@ established it so you can read the rationale in the commit message.
     badly-formed Claude response can't pollute the wizard with
     `[0, 1.5, 99]` chaos.
 
+40. **`APIFY_ZILLOW_ACTOR` env var picks which Apify actor scrapes
+    Zillow listings.** Default is `maxcopell~zillow-detail-scraper`.
+    Per Grok's 2026-05-04 architectural review of the find-clean-
+    unit + photo-scraper system, `jaroslavhejlek~zillow-scraper` is
+    the recommended alternative — better photo extraction (handles
+    Zillow's carousel JSON more reliably, extracts up to 50+ photos
+    via `resoFacts.photos`), better resoFacts coverage (lower rate
+    of partial-payload responses where bedrooms is present but
+    bathrooms is null). Cost is roughly equivalent. **To switch:**
+    set `APIFY_ZILLOW_ACTOR=jaroslavhejlek~zillow-scraper` on
+    Railway (note tilde, not slash — the value is passed straight
+    into the Apify URL path). The runtime URL becomes
+    `https://api.apify.com/v2/acts/jaroslavhejlek~zillow-scraper/run-sync-get-dataset-items?...`.
+    No code changes required; `scrapeZillowViaApify` reads the env
+    var at call time.
+
+    The other big architectural recommendations from the same Grok
+    consult are NOT yet implemented and gated on operator decisions:
+    Bright Data Web Unblocker as primary scraper (~$0.50-1 per 1K
+    requests; would replace Apify+ScrapingBee for the highest
+    success rate on Zillow's anti-bot), wiring the residential-IP
+    Chrome sidecar for Zillow scraping (free but adds ~30-90s
+    latency), Redfin / Realtor / Trulia source diversification, and
+    the "verify-then-discover" architecture flip (start from OTA
+    listings index, inverse-filter to find unlisted, enrich photos
+    last). See `server/grok-single-listing-consult.ts` for the full
+    brief — hit `GET /api/operations/grok-single-listing-consult`
+    on Railway to re-run the consult. **Don't ship any of these
+    without operator approval** (cost / scope concerns).
+
 ### Inbox auto-reply
 
 24. **Auto-reply has a three-layer safety stack — input filter,
