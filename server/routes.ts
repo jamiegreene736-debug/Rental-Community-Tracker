@@ -715,6 +715,104 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
   }
 }
 
+// CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
+// scraper via direct fetch + JSON-LD parsing. Realtor.com's
+// anti-bot is much lighter than Zillow's — straight fetch with a
+// real browser User-Agent typically returns the full HTML. The
+// listing pages bake structured data into a `<script
+// type="application/ld+json">` block (schema.org Residence /
+// SingleFamilyResidence) that exposes:
+//   - numberOfBedrooms, numberOfBathroomsTotal
+//   - image: [hi-res photo URLs]
+//   - address: { streetAddress, addressLocality, ... }
+// Plus visible-HTML fallback (extractFactsFromText) for the rare
+// case JSON-LD is missing.
+//
+// Realtor.com's image CDN is `ar.rdcpix.com` / `i.realtor.com`.
+async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) {
+      console.warn(`[scrapeRealtor] HTTP ${resp.status} for ${url}`);
+      return { urls: [], facts: {} };
+    }
+    const html = await resp.text();
+    if (html.length < 1000 || /access denied|are you a robot|verify you/i.test(html.slice(0, 5000))) {
+      console.warn(`[scrapeRealtor] short / bot-walled response for ${url} (${html.length} bytes)`);
+      return { urls: [], facts: {} };
+    }
+
+    // Facts: JSON-LD primary, text-regex fallback. Both helpers
+    // are platform-agnostic — they don't care that this is
+    // Realtor instead of Zillow.
+    let facts = extractFactsFromJsonLd(html);
+    if (facts.bedrooms == null || facts.bathrooms == null) {
+      facts = mergeFacts(facts, extractFactsFromText(html));
+    }
+
+    // Photos: pull from JSON-LD `image` arrays first, then
+    // `<meta property="og:image">`, then `<img>` tags as fallback.
+    // Realtor.com hosts photos on ar.rdcpix.com / i.realtor.com
+    // — filter to those domains so we don't sweep in icons or
+    // tracking pixels.
+    const seen = new Set<string>();
+    const photos: string[] = [];
+    const pushPhoto = (raw: unknown) => {
+      if (typeof raw !== "string") return;
+      let u = raw.trim();
+      if (u.startsWith("//")) u = `https:${u}`;
+      if (!/^https?:\/\//i.test(u)) return;
+      if (!/(?:ar\.rdcpix\.com|i\.realtor\.com|rdcpix\.com)/i.test(u)) return;
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent/i.test(u)) return;
+      const key = u.replace(/[?#].*$/, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      photos.push(u);
+    };
+
+    // JSON-LD image arrays
+    const ldMatches = Array.from(html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi));
+    for (const m of ldMatches) {
+      try {
+        const parsed = JSON.parse(m[1]);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const obj of items) {
+          if (!obj || typeof obj !== "object") continue;
+          const imgs = obj.image;
+          if (Array.isArray(imgs)) for (const i of imgs) pushPhoto(i);
+          else pushPhoto(imgs);
+        }
+      } catch {}
+    }
+
+    // og:image meta tag
+    const ogMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    if (ogMatch) pushPhoto(ogMatch[1]);
+
+    // <img src="..."> fallback
+    if (photos.length === 0) {
+      const imgMatches = Array.from(html.matchAll(/<img[^>]+(?:src|data-src)=["']([^"']+)["']/gi));
+      for (const m of imgMatches) {
+        pushPhoto(m[1]);
+        if (photos.length >= 30) break;
+      }
+    }
+
+    console.log(`[scrapeRealtor] ${url} → ${photos.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls: photos, facts };
+  } catch (e: any) {
+    console.warn(`[scrapeRealtor] ${url}: ${e?.message ?? e}`);
+    return { urls: [], facts: {} };
+  }
+}
+
 // scrapeListingPhotos optionally populates the caller's `listingFacts` object
 // with the scraper-extracted bed/bath counts. Existing callers that don't
 // pass one are unaffected. New callers (notably the rescrape handler) use
@@ -761,6 +859,73 @@ async function scrapeListingPhotos(
   // so unioning inflated a 16-photo listing to 20+. With the walkers now
   // narrowed to the listing's own `responsivePhotos` array, a single
   // scraper returns exactly what Zillow shows — no need to union.
+  // CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
+  // branch — direct fetch + JSON-LD/text fallback. No Apify or
+  // sidecar tier yet; the direct fetch typically works because
+  // Realtor's anti-bot is much lighter than Zillow's. Add Apify
+  // (epctex/realtor-scraper) or sidecar later if direct fetch
+  // proves unreliable in production. ScrapingBee falls in as a
+  // backup when direct fetch returns no photos.
+  if (/realtor\.com\/realestateandhomes-detail/i.test(primaryUrl)) {
+    let result = await scrapeRealtorViaFetch(primaryUrl);
+    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+      console.log(`[scrapeRealtor] direct fetch returned 0, falling back to ScrapingBee`);
+      // ScrapingBee fetches the rendered HTML; we run the same
+      // JSON-LD/text helpers that scrapeRealtorViaFetch uses so
+      // facts + photos extraction is consistent.
+      try {
+        const sbResp = await fetch(
+          `https://app.scrapingbee.com/api/v1/?api_key=${encodeURIComponent(process.env.SCRAPINGBEE_API_KEY)}&url=${encodeURIComponent(primaryUrl)}&render_js=true`,
+          { signal: AbortSignal.timeout(60_000) },
+        );
+        if (sbResp.ok) {
+          const html = await sbResp.text();
+          let f = extractFactsFromJsonLd(html);
+          if (f.bedrooms == null || f.bathrooms == null) {
+            f = mergeFacts(f, extractFactsFromText(html));
+          }
+          // Photo extraction mirrors scrapeRealtorViaFetch's logic.
+          const seen = new Set<string>();
+          const photos: string[] = [];
+          const pushPhoto = (raw: unknown) => {
+            if (typeof raw !== "string") return;
+            let u = raw.trim();
+            if (u.startsWith("//")) u = `https:${u}`;
+            if (!/^https?:\/\//i.test(u)) return;
+            if (!/(?:ar\.rdcpix\.com|i\.realtor\.com|rdcpix\.com)/i.test(u)) return;
+            const key = u.replace(/[?#].*$/, "");
+            if (seen.has(key)) return;
+            seen.add(key);
+            photos.push(u);
+          };
+          for (const m of Array.from(html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi))) {
+            try {
+              const parsed = JSON.parse(m[1]);
+              const items = Array.isArray(parsed) ? parsed : [parsed];
+              for (const obj of items) {
+                if (!obj || typeof obj !== "object") continue;
+                const imgs = obj.image;
+                if (Array.isArray(imgs)) for (const i of imgs) pushPhoto(i);
+                else pushPhoto(imgs);
+              }
+            } catch {}
+          }
+          result = { urls: photos, facts: f };
+        }
+      } catch (e: any) {
+        console.warn(`[scrapeRealtor] ScrapingBee fallback errored: ${e?.message ?? e}`);
+      }
+    }
+    if (listingFacts) {
+      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
+      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+    }
+    if (result.urls.length > 0) {
+      return result.urls.map((u) => ({ url: u, title: "Realtor.com listing photo", source: "Realtor.com", sourceLink: primaryUrl }));
+    }
+    if (!fallbackUrl || /realtor\.com/i.test(fallbackUrl)) return [];
+  }
+
   if (/zillow\.com/i.test(primaryUrl)) {
     let result = await scrapeZillowViaApify(primaryUrl);
     if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
@@ -15666,7 +15831,16 @@ Return ONLY compact JSON with this exact shape:
   // unique /homedetails/ URLs across both. Returns the count plus
   // a sample list (first 5 URLs) so the operator can spot-check.
   // Cheap: 2 SearchAPI Google calls per click.
-  const communityInventoryCache = new Map<string, { count: number; sampleUrls: string[]; ts: number }>();
+  // CODEX NOTE (2026-05-05, claude/realtor-source): cache stores
+  // counts per source. Older shape kept the single `count` field
+  // for backward-compat — wizard reads byPlatform when present
+  // and falls back to `count` for older cached values.
+  const communityInventoryCache = new Map<string, {
+    count: number;
+    byPlatform: { zillow: number; realtor: number };
+    sampleUrls: string[];
+    ts: number;
+  }>();
   const COMMUNITY_INVENTORY_TTL = 10 * 60 * 1000;
   app.post("/api/single-listing/community-inventory", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -15683,25 +15857,23 @@ Return ONLY compact JSON with this exact shape:
     const cacheKey = `${communityName.toLowerCase()}|${city.toLowerCase()}|${state.toLowerCase()}`;
     const cached = communityInventoryCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < COMMUNITY_INVENTORY_TTL) {
-      return res.json({ count: cached.count, sampleUrls: cached.sampleUrls, cached: true });
+      return res.json({
+        count: cached.count,
+        byPlatform: cached.byPlatform,
+        sampleUrls: cached.sampleUrls,
+        cached: true,
+      });
     }
 
-    // CODEX NOTE (2026-05-05, claude/inventory-coverage): expanded
-    // query coverage. Operator pointed out a "100-unit resort"
-    // showing 20 listings was suspicious. Real reasons the count
-    // falls short of "total units":
-    //   - Most condo units NEVER list on Zillow (owner-occupied,
-    //     long-term rental, etc). Zillow homedetails are primarily
-    //     for-sale + recently-sold + selected off-market.
-    //   - Google site: search caps at ~10-20 results per page.
-    //   - Quoted "{community}" misses listings whose title doesn't
-    //     include the resort name (just "3920 Wyllie Rd APT 101").
+    // CODEX NOTE (2026-05-05, claude/realtor-source): inventory
+    // count combines Zillow + Realtor.com. Realtor often catches
+    // historical / off-market listings Zillow misses, especially
+    // in markets where the local MLS feeds Realtor preferentially.
     //
-    // Wider net here: 6 query variants, num=20 each, run in
-    // parallel. Catches more title variations + spelling
-    // variations + bedroom-anchored queries. Caps at 100 unique
-    // URLs (Google's hard ceiling on most queries).
-    const queries = [
+    // 6 Zillow queries + 4 Realtor queries (10 total) parallel.
+    // num=20 each. URL filter per platform recognizes the
+    // homedetails / realestateandhomes-detail URL shapes.
+    const zillowQueries = [
       `site:zillow.com "${communityName}" "${city}" "${state}"`,
       `site:zillow.com "${communityName}" ${city}`,
       `site:zillow.com "${communityName}"`,
@@ -15709,38 +15881,54 @@ Return ONLY compact JSON with this exact shape:
       `site:zillow.com "${communityName}" 2 bedroom`,
       `site:zillow.com "${communityName}" 3 bedroom`,
     ].map((q) => q.replace(/\s+/g, " ").trim());
-    const seen = new Set<string>();
-    const queryResults = await Promise.all(queries.map(async (q) => {
-      try {
-        const resp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=20&api_key=${apiKey}`,
-          { signal: AbortSignal.timeout(15_000) },
-        );
-        if (!resp.ok) return [] as string[];
-        const data = await resp.json() as any;
-        const organic = (data.organic_results || []) as Array<{ link?: string }>;
-        const urls: string[] = [];
-        for (const r of organic) {
-          const link = String(r.link ?? "");
-          if (!/zillow\.com\/homedetails\//i.test(link)) continue;
-          urls.push(link);
+    const realtorQueries = [
+      `site:realtor.com "${communityName}" "${city}" "${state}"`,
+      `site:realtor.com "${communityName}" ${city}`,
+      `site:realtor.com "${communityName}"`,
+      `site:realtor.com "${communityName}" condo`,
+    ].map((q) => q.replace(/\s+/g, " ").trim());
+
+    const runQueries = async (queries: string[], urlPattern: RegExp) => {
+      const results = await Promise.all(queries.map(async (q) => {
+        try {
+          const resp = await fetch(
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=20&api_key=${apiKey}`,
+            { signal: AbortSignal.timeout(15_000) },
+          );
+          if (!resp.ok) return [] as string[];
+          const data = await resp.json() as any;
+          const organic = (data.organic_results || []) as Array<{ link?: string }>;
+          const urls: string[] = [];
+          for (const r of organic) {
+            const link = String(r.link ?? "");
+            if (!urlPattern.test(link)) continue;
+            urls.push(link);
+          }
+          return urls;
+        } catch (e: any) {
+          console.warn(`[community-inventory] SearchAPI error for "${q}": ${e?.message ?? e}`);
+          return [] as string[];
         }
-        return urls;
-      } catch (e: any) {
-        console.warn(`[community-inventory] SearchAPI error for "${q}": ${e?.message ?? e}`);
-        return [] as string[];
-      }
-    }));
-    for (const urls of queryResults) {
-      for (const u of urls) seen.add(u.toLowerCase());
-    }
-    const sampleUrls = Array.from(seen).slice(0, 5);
+      }));
+      const set = new Set<string>();
+      for (const urls of results) for (const u of urls) set.add(u.toLowerCase());
+      return set;
+    };
+
+    const [zillowSet, realtorSet] = await Promise.all([
+      runQueries(zillowQueries, /zillow\.com\/homedetails\//i),
+      runQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i),
+    ]);
+    const seen = new Set<string>([...zillowSet, ...realtorSet]);
+    const sampleUrls = [...zillowSet, ...realtorSet].slice(0, 6);
+    const byPlatform = { zillow: zillowSet.size, realtor: realtorSet.size };
     const count = seen.size;
     console.log(
-      `[community-inventory] "${communityName}" / ${city}, ${state}: ${count} unique homedetails URLs across ${queries.length} queries`,
+      `[community-inventory] "${communityName}" / ${city}, ${state}: ` +
+      `zillow=${byPlatform.zillow} realtor=${byPlatform.realtor} total=${count}`,
     );
-    communityInventoryCache.set(cacheKey, { count, sampleUrls, ts: Date.now() });
-    res.json({ count, sampleUrls, cached: false });
+    communityInventoryCache.set(cacheKey, { count, byPlatform, sampleUrls, ts: Date.now() });
+    res.json({ count, byPlatform, sampleUrls, cached: false });
   });
 
   app.post("/api/single-listing/qualify", async (req, res) => {
@@ -15834,40 +16022,70 @@ Return ONLY compact JSON with this exact shape:
     const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
     emit({ type: "discovery-start", communityName, city, state, bedrooms });
 
-    // Stage-1: discover Zillow homedetails URLs for this community.
-    // Mirror the multi-query pattern from /api/community/fetch-unit-photos:
-    // most-specific first, then progressively-broader fallbacks.
-    const queries = [
-      `site:zillow.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`.replace(/\s+/g, " ").trim(),
-      `site:zillow.com "${communityName}" ${bedrooms} bedroom`.replace(/\s+/g, " ").trim(),
-      `site:zillow.com "${communityName}" ${city} ${state}`.replace(/\s+/g, " ").trim(),
-    ];
+    // CODEX NOTE (2026-05-05, claude/realtor-source): Stage-1
+    // discovery harvests candidates from BOTH Zillow and
+    // Realtor.com in parallel. Realtor often catches historical /
+    // off-market listings that Zillow's index drops, especially
+    // in markets where the local MLS feeds Realtor preferentially.
+    // Each platform has its own URL pattern; the iteration loop
+    // downstream branches scrape paths on the URL host.
+    const zillowQueries = [
+      `site:zillow.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`,
+      `site:zillow.com "${communityName}" ${bedrooms} bedroom`,
+      `site:zillow.com "${communityName}" ${city} ${state}`,
+    ].map((q) => q.replace(/\s+/g, " ").trim());
+    const realtorQueries = [
+      `site:realtor.com "${communityName}" ${city} ${state} ${bedrooms} bedroom`,
+      `site:realtor.com "${communityName}" ${bedrooms} bedroom`,
+      `site:realtor.com "${communityName}" ${city} ${state}`,
+    ].map((q) => q.replace(/\s+/g, " ").trim());
 
     const candidateUrls: string[] = [];
     const seen = new Set<string>();
-    for (const q of queries) {
-      try {
-        const resp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
-        );
-        if (!resp.ok) continue;
-        const data = await resp.json() as any;
-        const organic = (data.organic_results || []) as Array<{ link?: string }>;
-        for (const r of organic) {
-          const link = String(r.link ?? "");
-          if (!/zillow\.com\/homedetails\//i.test(link)) continue;
+    const platformCounts = { zillow: 0, realtor: 0 };
+    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: "zillow" | "realtor") => {
+      const results = await Promise.all(queries.map(async (q) => {
+        try {
+          const resp = await fetch(
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+            { signal: AbortSignal.timeout(15_000) },
+          );
+          if (!resp.ok) return [] as string[];
+          const data = await resp.json() as any;
+          const organic = (data.organic_results || []) as Array<{ link?: string }>;
+          return organic
+            .map((r) => String(r.link ?? ""))
+            .filter((l) => urlPattern.test(l));
+        } catch (e: any) {
+          console.warn(`[find-clean-unit] SearchAPI error for "${q}": ${e?.message ?? e}`);
+          return [] as string[];
+        }
+      }));
+      for (const urls of results) {
+        for (const link of urls) {
           const lower = link.toLowerCase();
           if (seen.has(lower)) continue;
           if (skipSet.has(lower)) continue;
           seen.add(lower);
           candidateUrls.push(link);
+          platformCounts[platform]++;
         }
-      } catch (e: any) {
-        console.warn(`[find-clean-unit] SearchAPI error for "${q}": ${e?.message ?? e}`);
       }
-    }
+    };
+    await Promise.all([
+      harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
+      harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+    ]);
+    console.log(
+      `[find-clean-unit] discovery for "${communityName}" (${bedrooms}BR): ` +
+      `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} total=${candidateUrls.length}`,
+    );
 
-    emit({ type: "discovery-done", totalCandidates: candidateUrls.length });
+    emit({
+      type: "discovery-done",
+      totalCandidates: candidateUrls.length,
+      byPlatform: platformCounts,
+    });
 
     if (candidateUrls.length === 0) {
       finishWithResult({
@@ -16003,11 +16221,28 @@ Return ONLY compact JSON with this exact shape:
     // need the address BEFORE the scrape so the prefilter can run
     // without paying for Apify on candidates the OTA index already
     // marks as listed.
+    //
+    // CODEX NOTE (2026-05-05, claude/realtor-source): handles both
+    // Zillow and Realtor URL slug formats:
+    //   - Zillow: /homedetails/4460-Nehe-Rd-Lihue-HI-96766/...
+    //     dash-separated all the way through
+    //   - Realtor: /realestateandhomes-detail/4460-Nehe-Rd_Lihue_HI_96766_M12345-67890
+    //     street uses dashes, then underscore-separated City_ST_Zip_PropertyID
+    // Returns just the street portion in both cases (no city/state/zip).
     const addressFromSlug = (url: string): string | null => {
-      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
-      if (!slugMatch) return null;
-      const raw = slugMatch[1].replace(/-/g, " ").trim();
-      return raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
+      const zillowMatch = url.match(/\/homedetails\/([^/]+)\//i);
+      if (zillowMatch) {
+        const raw = zillowMatch[1].replace(/-/g, " ").trim();
+        return raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
+      }
+      const realtorMatch = url.match(/\/realestateandhomes-detail\/([^/]+)/i);
+      if (realtorMatch) {
+        // First underscore-separated segment is the dashed street.
+        const segments = realtorMatch[1].split("_");
+        if (segments.length === 0) return null;
+        return segments[0].replace(/-/g, " ").trim();
+      }
+      return null;
     };
     const matchesOtaIndex = (zAddress: string | null): boolean => {
       if (!zAddress || otaAddressTokens.size === 0) return false;
@@ -16150,16 +16385,13 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
-      // Parse address from the Zillow URL slug
-      // (/homedetails/4460-Nehe-Rd-Lihue-HI-96766/...).
-      const slugMatch = url.match(/\/homedetails\/([^/]+)\//i);
-      let addressGuess: string | null = null;
-      if (slugMatch) {
-        const raw = slugMatch[1].replace(/-/g, " ").trim();
-        addressGuess = raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
-      }
+      // Parse address from the URL slug. addressFromSlug handles
+      // both Zillow (/homedetails/4460-Nehe-Rd-Lihue-HI-96766/)
+      // AND Realtor.com (/realestateandhomes-detail/4460-Nehe-Rd_Lihue_HI_96766_M12345)
+      // URL formats. Returns just the street portion.
+      const addressGuess = addressFromSlug(url);
       if (!addressGuess) {
-        const reason = "Could not parse address from Zillow URL slug.";
+        const reason = "Could not parse address from listing URL slug.";
         attempts.push({
           url,
           bedrooms: facts.bedrooms ?? null,
