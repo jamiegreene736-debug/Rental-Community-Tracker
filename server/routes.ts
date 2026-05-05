@@ -715,6 +715,101 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
   }
 }
 
+// CODEX NOTE (2026-05-05, claude/realtor-apify): Realtor.com
+// scraper via Apify (primary path). APIFY_REALTOR_ACTOR picks the
+// actor — defaults to epctex~realtor-scraper which accepts
+// startUrls and returns property JSON with `images` array +
+// numberOfBedrooms/numberOfBathroomsTotal. Operator can override
+// via env var if a different actor proves more reliable. Wired as
+// the FIRST Realtor scraper tier in scrapeListingPhotos; direct-
+// fetch + ScrapingBee remain as fallbacks below.
+async function scrapeRealtorViaApify(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) {
+    return { urls: [], facts: {} };
+  }
+  const actor = (process.env.APIFY_REALTOR_ACTOR || "epctex~realtor-scraper").replace("/", "~");
+  try {
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Most Realtor Apify actors accept either { startUrls: [{url}] }
+      // (the standard Apify pattern) or { urls: [...] } (epctex
+      // variant). Send both — actors ignore unknown fields.
+      body: JSON.stringify({ startUrls: [{ url }], urls: [url] }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[scrapeRealtor:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
+      return { urls: [], facts: {} };
+    }
+    const items: any[] = await r.json().catch(() => []);
+    if (!Array.isArray(items) || items.length === 0) {
+      console.warn(`[scrapeRealtor:Apify] empty dataset for ${url}`);
+      return { urls: [], facts: {} };
+    }
+
+    // Facts: extractListingFacts walks the JSON for bedrooms /
+    // bathrooms / homeType / etc — platform-agnostic, works on
+    // any actor's payload shape.
+    const facts = extractListingFacts(items);
+
+    // Photos: Realtor actors typically expose them in one of:
+    //   - item.images: string[] OR Array<{ href|url|src }>
+    //   - item.photos: same shape
+    //   - item.photoUrls
+    //   - item.image (singular, og:image style)
+    // Walk all known fields on the first item; fall back to a
+    // scoped walk for unknown shapes. Filter to Realtor-CDN hosts
+    // so we don't sweep in icons or tracking pixels.
+    const seen = new Set<string>();
+    const photos: string[] = [];
+    const pushPhoto = (raw: unknown) => {
+      let u = "";
+      if (typeof raw === "string") u = raw;
+      else if (raw && typeof raw === "object") {
+        const obj = raw as Record<string, unknown>;
+        u = String(obj.href ?? obj.url ?? obj.src ?? obj.original ?? obj.large ?? "");
+      }
+      u = u.trim();
+      if (u.startsWith("//")) u = `https:${u}`;
+      if (!/^https?:\/\//i.test(u)) return;
+      if (!/(?:ar\.rdcpix\.com|i\.realtor\.com|rdcpix\.com)/i.test(u)) return;
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent/i.test(u)) return;
+      const key = u.replace(/[?#].*$/, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      photos.push(u);
+    };
+    const item = items[0] as Record<string, unknown>;
+    for (const fieldName of ["images", "photos", "photoUrls", "media"]) {
+      const val = item?.[fieldName];
+      if (Array.isArray(val)) {
+        for (const v of val) pushPhoto(v);
+      }
+    }
+    if (photos.length === 0 && typeof item?.image === "string") {
+      pushPhoto(item.image);
+    }
+    // Last-resort scoped walk if nothing landed on the standard
+    // fields — actor schemas vary, this catches the unknown
+    // ones without sweeping the entire payload.
+    if (photos.length === 0) {
+      const scoped: string[] = [];
+      walkForPhotosScoped(item, scoped);
+      for (const u of scoped) pushPhoto(u);
+    }
+
+    console.log(`[scrapeRealtor:Apify] ${url} → ${photos.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls: photos, facts };
+  } catch (e: any) {
+    console.warn(`[scrapeRealtor:Apify] ${url}: ${e?.message ?? e}`);
+    return { urls: [], facts: {} };
+  }
+}
+
 // CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
 // scraper via direct fetch + JSON-LD parsing. Realtor.com's
 // anti-bot is much lighter than Zillow's — straight fetch with a
@@ -729,6 +824,8 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 // case JSON-LD is missing.
 //
 // Realtor.com's image CDN is `ar.rdcpix.com` / `i.realtor.com`.
+// Wired as the SECOND Realtor scraper tier in scrapeListingPhotos
+// (after Apify, before ScrapingBee).
 async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
   try {
     const resp = await fetch(url, {
@@ -859,15 +956,22 @@ async function scrapeListingPhotos(
   // so unioning inflated a 16-photo listing to 20+. With the walkers now
   // narrowed to the listing's own `responsivePhotos` array, a single
   // scraper returns exactly what Zillow shows — no need to union.
-  // CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
-  // branch — direct fetch + JSON-LD/text fallback. No Apify or
-  // sidecar tier yet; the direct fetch typically works because
-  // Realtor's anti-bot is much lighter than Zillow's. Add Apify
-  // (epctex/realtor-scraper) or sidecar later if direct fetch
-  // proves unreliable in production. ScrapingBee falls in as a
-  // backup when direct fetch returns no photos.
+  // CODEX NOTE (2026-05-05, claude/realtor-apify): Realtor.com
+  // branch with three scraper tiers, mirroring the Zillow chain:
+  //   1. Apify primary (epctex~realtor-scraper or operator-set
+  //      APIFY_REALTOR_ACTOR) — best fact + photo coverage.
+  //   2. Direct fetch — JSON-LD + text-regex parsing of the
+  //      live HTML. Realtor's anti-bot is light enough that
+  //      this typically works; cheaper than burning Apify
+  //      compute when Apify is rate-limited.
+  //   3. ScrapingBee — JS-rendered HTML, last resort.
+  // Photos preserve order from whichever tier returned them.
   if (/realtor\.com\/realestateandhomes-detail/i.test(primaryUrl)) {
-    let result = await scrapeRealtorViaFetch(primaryUrl);
+    let result = await scrapeRealtorViaApify(primaryUrl);
+    if (result.urls.length === 0) {
+      console.log(`[scrapeRealtor] Apify returned 0, falling back to direct fetch`);
+      result = await scrapeRealtorViaFetch(primaryUrl);
+    }
     if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeRealtor] direct fetch returned 0, falling back to ScrapingBee`);
       // ScrapingBee fetches the rendered HTML; we run the same
