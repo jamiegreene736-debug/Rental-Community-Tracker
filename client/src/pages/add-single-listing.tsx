@@ -325,7 +325,19 @@ export default function AddSingleListing() {
     }
   }, [toast]);
 
-  const pickCommunity = useCallback((c: CommunityResult) => {
+  // CODEX NOTE (2026-05-05, claude/community-inventory): inventory
+  // state populated when the operator picks a community. Shows the
+  // total Zillow listings for that resort so the operator has a
+  // sanity check before clicking Find. If a resort has 8 total
+  // listings and find-clean-unit rejects all 8, that's a real
+  // signal (saturated resort), not a scrape bug.
+  const [communityInventory, setCommunityInventory] = useState<{
+    count: number;
+    sampleUrls: string[];
+    loading: boolean;
+  } | null>(null);
+
+  const pickCommunity = useCallback(async (c: CommunityResult) => {
     setSelectedCommunity(c);
     setPropertyName(c.name);
     setManualMode(false);
@@ -334,7 +346,30 @@ export default function AddSingleListing() {
     setFindResult(null);
     setSkipUrls([]);
     setStreetAddress("");
-  }, []);
+    // Kick off the inventory count in the background. Picked-city
+    // is required (we need city + state for the search query); if
+    // it's somehow missing we just skip the count.
+    if (pickedCity) {
+      setCommunityInventory({ count: 0, sampleUrls: [], loading: true });
+      try {
+        const res = await apiRequest("POST", "/api/single-listing/community-inventory", {
+          communityName: c.name,
+          city: pickedCity.city,
+          state: pickedCity.state,
+        });
+        const data = await res.json();
+        setCommunityInventory({
+          count: typeof data.count === "number" ? data.count : 0,
+          sampleUrls: Array.isArray(data.sampleUrls) ? data.sampleUrls : [],
+          loading: false,
+        });
+      } catch {
+        setCommunityInventory(null);
+      }
+    } else {
+      setCommunityInventory(null);
+    }
+  }, [pickedCity]);
 
   // Escape hatch for unit-types that don't show up in the research
   // scan (or markets where the scan returns nothing).
@@ -1122,7 +1157,30 @@ export default function AddSingleListing() {
               const usedFallback = !selectedCommunity.availableBedrooms || selectedCommunity.availableBedrooms.length === 0;
               return (
                 <div className="space-y-4 border-t pt-5 mb-6">
-                  <h3 className="text-sm font-semibold">How many bedrooms?</h3>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <h3 className="text-sm font-semibold">How many bedrooms?</h3>
+                    {/* CODEX NOTE (2026-05-05, claude/community-inventory):
+                        Total Zillow listings count for the picked
+                        community. Surfaces "this resort has 23 total
+                        listings on Zillow" so the operator has a
+                        sanity check before clicking Find. If find-
+                        clean-unit later returns 0 clean units AND
+                        this count is also low, the resort is
+                        saturated (real signal). If the count is high
+                        but find-clean-unit returns 0, the OTA index
+                        is the culprit. */}
+                    {communityInventory?.loading && (
+                      <span className="text-[11px] text-muted-foreground inline-flex items-center gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        counting Zillow inventory…
+                      </span>
+                    )}
+                    {communityInventory && !communityInventory.loading && (
+                      <Badge variant={communityInventory.count > 0 ? "secondary" : "outline"} className="text-[11px]">
+                        {communityInventory.count} Zillow listing{communityInventory.count === 1 ? "" : "s"} at this resort
+                      </Badge>
+                    )}
+                  </div>
                   <p className="text-xs text-muted-foreground -mt-2">
                     We'll search Zillow for a {selectedBedrooms ?? "?"}BR unit at {selectedCommunity.name},
                     then auto-verify it isn't already listed on Airbnb, VRBO, or Booking.com.
@@ -1283,6 +1341,56 @@ export default function AddSingleListing() {
                 </div>
               </div>
             )}
+
+            {/* CODEX NOTE (2026-05-05, claude/no-unit-diagnostic):
+                Render the diagnostic breakdown when find-clean-unit
+                returned found:false. Shows the operator WHY no
+                candidate qualified (saturation vs scrape-failure
+                vs wrong-bedroom etc) so they can decide whether to
+                try a different bedroom count, a different resort,
+                or come back later when scrapers recover. The
+                per-candidate list is the same data as Step 2's
+                "Why we skipped" disclosure but surfaced in-line so
+                it's visible without expanding. */}
+            {selectedCommunity && !findLoading && findResult && !findResult.found && (
+              <div className="border border-red-300 bg-red-50/30 rounded-lg p-4 space-y-3">
+                <div className="flex items-center gap-2 font-semibold text-red-900">
+                  <ShieldX className="h-4 w-4" />
+                  No clean unit found
+                </div>
+                <p className="text-sm text-red-900">{findResult.reason}</p>
+                {findResult.attempts.length > 0 && (
+                  <details className="text-xs">
+                    <summary className="cursor-pointer text-red-800 hover:text-red-900">
+                      Show all {findResult.attempts.length} candidate{findResult.attempts.length === 1 ? "" : "s"} we checked
+                    </summary>
+                    <ul className="mt-2 space-y-1 pl-3">
+                      {findResult.attempts.map((a, i) => (
+                        <li key={`${a.url}-${i}`} className="text-muted-foreground">
+                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
+                            #{i + 1}
+                          </a>
+                          {a.address && <span className="text-foreground"> {a.address}</span>}
+                          : {a.rejectedBecause || "skipped"}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <Button size="sm" variant="outline" onClick={() => { setFindResult(null); findCleanUnit([]); }}>
+                    Try again
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => { setSelectedBedrooms(null); setFindResult(null); }}>
+                    Pick different bedroom count
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => { setSelectedCommunity(null); setFindResult(null); setSelectedBedrooms(null); setCommunityInventory(null); }}>
+                    Pick different community
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {manualMode && (
               <Button
                 onClick={() => setStep(2)}

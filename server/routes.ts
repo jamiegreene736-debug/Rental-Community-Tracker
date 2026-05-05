@@ -782,37 +782,61 @@ async function scrapeListingPhotos(
     // sidecar helpers — keeps the cold-start lean and the import
     // co-located with the conditional that uses it.
     //
+    // CODEX NOTE (2026-05-05, claude/sidecar-consistency): trigger
+    // changed from "Apify+ScrapingBee both empty" to "ANY missing
+    // signal" — fire the sidecar when (a) photos array is empty,
+    // OR (b) bedroom data wasn't extracted. Apify routinely
+    // returns photos without resoFacts (or vice versa), and the
+    // sidecar's Chrome-rendered DOM access fills both gaps. This
+    // makes sidecar usage CONSISTENT across resorts: any candidate
+    // missing photos OR facts gets a sidecar attempt, instead of
+    // only firing sidecar on the all-empty case (which depended
+    // on Apify's flaky behavior per-URL).
+    //
     // sidecar wallet defaults to 90s for one-shot callers; tight-
     // loop callers (find-clean-unit) override to 25s so a wedged
     // daemon doesn't compound to 22-minute stalls. 0 = disabled.
     const sidecarWalletMs = options?.sidecarWalletMs ?? 90_000;
-    if (result.urls.length === 0 && sidecarWalletMs > 0) {
+    const sidecarShouldFire =
+      sidecarWalletMs > 0 &&
+      (result.urls.length === 0 || result.facts.bedrooms == null);
+    if (sidecarShouldFire) {
       try {
         const { getHeartbeat, scrapeZillowPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
         const heartbeat = getHeartbeat();
         if (heartbeat.isOnline) {
-          console.log(`[scrapeZillow] Apify+ScrapingBee both empty; trying sidecar (Chrome on operator's IP, wallet=${sidecarWalletMs}ms)`);
+          const trigger = result.urls.length === 0 ? "no photos" : "missing facts";
+          console.log(`[scrapeZillow] sidecar trigger=${trigger} (apify-photos=${result.urls.length}, bedrooms=${result.facts.bedrooms ?? "?"}, wallet=${sidecarWalletMs}ms)`);
           const sidecar = await scrapeZillowPhotosViaSidecar({
             url: primaryUrl,
             walletBudgetMs: sidecarWalletMs,
           });
-          if (sidecar.photos.length > 0) {
+          // CODEX NOTE (2026-05-05, claude/sidecar-merge): MERGE
+          // sidecar results with prior Apify/ScrapingBee result
+          // instead of replacing. Apify often returns photos
+          // without facts (or vice versa); the sidecar fills in
+          // whichever piece is missing without clobbering
+          // whatever the earlier scraper got right.
+          //
+          // Photos: prefer Apify's (already in result.urls) when
+          // it returned anything, since Apify's photo-array
+          // ordering matches Zillow's carousel order more reliably
+          // than scraped <img> tags. Only swap to sidecar's photos
+          // when Apify came up empty.
+          if (sidecar.photos.length > 0 || sidecar.facts) {
+            const photosUsed = result.urls.length > 0 ? result.urls : sidecar.photos;
             console.log(
-              `[scrapeZillow] sidecar success: ${sidecar.photos.length} photos in ${sidecar.durationMs}ms`,
+              `[scrapeZillow] sidecar success: photos=${sidecar.photos.length} facts=${sidecar.facts ? "yes" : "no"} in ${sidecar.durationMs}ms (using ${result.urls.length > 0 ? "apify" : "sidecar"} photos, sidecar facts where missing)`,
             );
-            // Normalize the sidecar's facts into the result shape.
-            // Sidecar can return facts the other paths miss
-            // (homeType/propertySubType/photoCount via Chrome's
-            // rendered DOM access).
             result = {
-              urls: sidecar.photos,
+              urls: photosUsed,
               facts: {
-                bedrooms: sidecar.facts?.bedrooms,
-                bathrooms: sidecar.facts?.bathrooms,
-                homeType: sidecar.facts?.homeType,
-                homeStatus: sidecar.facts?.homeStatus,
-                propertySubType: sidecar.facts?.propertySubType,
-                photoCount: sidecar.facts?.photoCount,
+                bedrooms: result.facts.bedrooms ?? sidecar.facts?.bedrooms,
+                bathrooms: result.facts.bathrooms ?? sidecar.facts?.bathrooms,
+                homeType: result.facts.homeType ?? sidecar.facts?.homeType,
+                homeStatus: result.facts.homeStatus ?? sidecar.facts?.homeStatus,
+                propertySubType: result.facts.propertySubType ?? sidecar.facts?.propertySubType,
+                photoCount: result.facts.photoCount ?? sidecar.facts?.photoCount,
               },
             };
           } else {
@@ -15629,6 +15653,67 @@ Return ONLY compact JSON with this exact shape:
       photoChecksRun: photoSearch.checked,
     };
   }
+
+  // CODEX NOTE (2026-05-05, claude/community-inventory): operator-
+  // facing "how many units does this resort have on Zillow?"
+  // sanity check. Fires when the operator clicks a community on
+  // Step 1 so they can see the resort's Zillow inventory before
+  // picking a bedroom count and clicking Find. Helps explain "no
+  // clean unit found" results — if a resort has 8 listings and
+  // all 8 are on OTAs, that's a real signal, not a scrape bug.
+  //
+  // Two staged queries (most-specific then fallback). Harvest
+  // unique /homedetails/ URLs across both. Returns the count plus
+  // a sample list (first 5 URLs) so the operator can spot-check.
+  // Cheap: 2 SearchAPI Google calls per click.
+  const communityInventoryCache = new Map<string, { count: number; sampleUrls: string[]; ts: number }>();
+  const COMMUNITY_INVENTORY_TTL = 10 * 60 * 1000;
+  app.post("/api/single-listing/community-inventory", async (req, res) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { communityName, city, state } = req.body as {
+      communityName?: string;
+      city?: string;
+      state?: string;
+    };
+    if (!communityName || !city || !state) {
+      return res.status(400).json({ error: "communityName, city, state required" });
+    }
+    const cacheKey = `${communityName.toLowerCase()}|${city.toLowerCase()}|${state.toLowerCase()}`;
+    const cached = communityInventoryCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < COMMUNITY_INVENTORY_TTL) {
+      return res.json({ count: cached.count, sampleUrls: cached.sampleUrls, cached: true });
+    }
+
+    const queries = [
+      `site:zillow.com "${communityName}" ${city} ${state}`.replace(/\s+/g, " ").trim(),
+      `site:zillow.com "${communityName}"`,
+    ];
+    const seen = new Set<string>();
+    for (const q of queries) {
+      try {
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+          { signal: AbortSignal.timeout(15_000) },
+        );
+        if (!resp.ok) continue;
+        const data = await resp.json() as any;
+        const organic = (data.organic_results || []) as Array<{ link?: string }>;
+        for (const r of organic) {
+          const link = String(r.link ?? "");
+          if (!/zillow\.com\/homedetails\//i.test(link)) continue;
+          seen.add(link.toLowerCase());
+        }
+      } catch (e: any) {
+        console.warn(`[community-inventory] SearchAPI error for "${q}": ${e?.message ?? e}`);
+      }
+    }
+    const sampleUrls = Array.from(seen).slice(0, 5);
+    const count = seen.size;
+    communityInventoryCache.set(cacheKey, { count, sampleUrls, ts: Date.now() });
+    res.json({ count, sampleUrls, cached: false });
+  });
 
   app.post("/api/single-listing/qualify", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
