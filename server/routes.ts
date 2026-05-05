@@ -15652,23 +15652,58 @@ Return ONLY compact JSON with this exact shape:
   // SearchAPI qualifier calls + N Zillow scrape calls. Capped at
   // 8 candidates so worst case is ~32 SearchAPI calls.
   app.post("/api/single-listing/find-clean-unit", async (req, res) => {
+    // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
+    // Converted to NDJSON streaming. Emits progress events as the
+    // endpoint walks Zillow candidates so the wizard can render a
+    // real progress bar instead of staring at a single spinner for
+    // 30-180 seconds. Events:
+    //
+    //   { type: "discovery-done", totalCandidates }
+    //   { type: "candidate-start", url, index, total, address? }
+    //   { type: "candidate-scrape", url, photoCount, facts, scrapeError? }
+    //   { type: "candidate-rejected", url, reason }
+    //   { type: "candidate-qualifier", url, phase: "ota-check" }
+    //   { type: "candidate-qualifier-done", url, qualifies, platforms }
+    //   { type: "result", ...finalResult }
+    //
+    // The terminal `result` event has the same shape the prior JSON
+    // response had (found / unit / attempts / etc) so the wizard's
+    // FindResult type is unchanged. Only consumer is the wizard.
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (obj: Record<string, unknown>) => {
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        // Client disconnected mid-stream — Express will eat the EPIPE.
+      }
+    };
+    const finishWithResult = (obj: Record<string, unknown>) => {
+      emit({ type: "result", ...obj });
+      try { res.end(); } catch { /* already ended */ }
+    };
+
     const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    if (!apiKey) {
+      finishWithResult({ found: false, reason: "SEARCHAPI_API_KEY not configured", attempts: [] });
+      return;
+    }
 
     const { communityName, city, state, bedrooms, skipUrls } = req.body as {
       communityName?: string;
       city?: string;
       state?: string;
       bedrooms?: number;
-      // CODEX NOTE: when the operator clicks "Try another unit" in
-      // the wizard, we re-call this endpoint with the previously-
-      // returned URL appended to skipUrls so the next match wins.
       skipUrls?: string[];
     };
     if (!communityName || !city || !state || typeof bedrooms !== "number" || bedrooms < 1) {
-      return res.status(400).json({ error: "communityName, city, state, bedrooms required" });
+      finishWithResult({ found: false, reason: "communityName, city, state, bedrooms required", attempts: [] });
+      return;
     }
     const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
+    emit({ type: "discovery-start", communityName, city, state, bedrooms });
 
     // Stage-1: discover Zillow homedetails URLs for this community.
     // Mirror the multi-query pattern from /api/community/fetch-unit-photos:
@@ -15703,12 +15738,15 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    emit({ type: "discovery-done", totalCandidates: candidateUrls.length });
+
     if (candidateUrls.length === 0) {
-      return res.json({
+      finishWithResult({
         found: false,
         reason: `No Zillow listings found for "${communityName}" (${bedrooms}BR) in ${city}, ${state}.`,
         attempts: [],
       });
+      return;
     }
 
     // Stage-2: walk candidates in order; first match wins. We only
@@ -15752,8 +15790,20 @@ Return ONLY compact JSON with this exact shape:
       photoScrapeFailed: boolean;
     };
     let textOnlyFallback: FallbackMatch | null = null;
+    const candidateCap = Math.min(candidateUrls.length, 15);
 
-    for (const url of candidateUrls.slice(0, 15)) {
+    for (let candidateIdx = 0; candidateIdx < candidateCap; candidateIdx++) {
+      const url = candidateUrls[candidateIdx];
+      // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
+      // Emit candidate-start before the scrape so the wizard can
+      // bump its progress bar to "Candidate N/M" and show the URL
+      // even before the scrape completes.
+      emit({
+        type: "candidate-start",
+        url,
+        index: candidateIdx + 1,
+        total: candidateCap,
+      });
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
@@ -15762,6 +15812,17 @@ Return ONLY compact JSON with this exact shape:
       } catch (e: any) {
         scrapeError = e?.message ?? String(e);
       }
+      emit({
+        type: "candidate-scrape",
+        url,
+        photoCount: photos.length,
+        facts: {
+          bedrooms: facts.bedrooms ?? null,
+          bathrooms: facts.bathrooms ?? null,
+          homeType: facts.homeType ?? null,
+        },
+        scrapeError: scrapeError ?? undefined,
+      });
 
       // Surface scrape outcome to Railway logs so we can see why
       // photos aren't landing. Apify-token-exhausted /
@@ -15825,6 +15886,7 @@ Return ONLY compact JSON with this exact shape:
         addressGuess = raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
       }
       if (!addressGuess) {
+        const reason = "Could not parse address from Zillow URL slug.";
         attempts.push({
           url,
           bedrooms: facts.bedrooms ?? null,
@@ -15833,8 +15895,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: false,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: "Could not parse address from Zillow URL slug.",
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -15856,6 +15919,7 @@ Return ONLY compact JSON with this exact shape:
       // defaults on the listing draft, so skipping is the right
       // call.
       if (scrapedBR === null) {
+        const reason = `Stub listing — no bedroom data extracted (likely off-market, lot, or building-level page).`;
         attempts.push({
           url,
           bedrooms: null,
@@ -15864,14 +15928,16 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: false,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Stub listing — no bedroom data extracted (likely off-market, lot, or building-level page).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
       // Bedroom-count gate: skip when scrape returned a number that
       // doesn't match the operator's pick.
       if (scrapedBR !== bedrooms) {
+        const reason = `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${bedrooms}BR.`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15880,8 +15946,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: false,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Wrong bedroom count: Zillow says ${scrapedBR}BR, looking for ${bedrooms}BR.`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -15901,6 +15968,7 @@ Return ONLY compact JSON with this exact shape:
         "manufactured", "mobile",
       ];
       if (ht && DISQUALIFYING_HOME_TYPES.some((t) => ht.includes(t))) {
+        const reason = `Wrong property type: ${facts.homeType} (need condo / townhouse / apartment).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15909,8 +15977,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Wrong property type: ${facts.homeType} (need condo / townhouse / apartment).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -15922,6 +15991,7 @@ Return ONLY compact JSON with this exact shape:
       const pst = (facts.propertySubType || "").toLowerCase();
       const DISQUALIFYING_SUB_TYPES = ["lot", "land", "mobile", "co-op", "co op"];
       if (pst && DISQUALIFYING_SUB_TYPES.some((t) => pst.includes(t))) {
+        const reason = `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15930,8 +16000,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Wrong property sub-type: ${facts.propertySubType} (need condo / townhouse / apartment).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -15946,6 +16017,7 @@ Return ONLY compact JSON with this exact shape:
       // failure mode Jamie reported with Santa Maria Resort Condo
       // Hdr).
       if (typeof facts.photoCount === "number" && facts.photoCount < 3) {
+        const reason = `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15954,8 +16026,9 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Stub listing — only ${facts.photoCount} photo${facts.photoCount === 1 ? "" : "s"} (real units have 5+).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
 
@@ -15966,6 +16039,7 @@ Return ONLY compact JSON with this exact shape:
       const hs = (facts.homeStatus || "").toUpperCase();
       const DISQUALIFYING_STATUS = ["RECENTLY_SOLD", "SOLD", "FORE_AUCTION", "AUCTION", "PENDING"];
       if (hs && DISQUALIFYING_STATUS.includes(hs)) {
+        const reason = `Listing status is ${hs} (need an active or off-market unit, not sold/auctioned).`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
@@ -15974,10 +16048,15 @@ Return ONLY compact JSON with this exact shape:
           bedroomMatches: true,
           qualifies: null,
           qualifierReason: null,
-          rejectedBecause: `Listing status is ${hs} (need an active or off-market unit, not sold/auctioned).`,
+          rejectedBecause: reason,
         });
+        emit({ type: "candidate-rejected", url, reason });
         continue;
       }
+
+      // Emit qualifier-start so the wizard can show "Verifying OTAs"
+      // for the current candidate while the SearchAPI calls run.
+      emit({ type: "candidate-qualifier", url, phase: "ota-check", photoCount: photos.length });
 
       // Run the qualifier. When photos is empty the qualifier
       // automatically skips the photo-reverse-search step (text-
@@ -15998,9 +16077,24 @@ Return ONLY compact JSON with this exact shape:
           : `Listed on OTA: ${qualifier.reason}`,
       });
 
+      // Emit qualifier-done so the wizard can update the per-
+      // candidate row in the progress UI ("Listed on Airbnb",
+      // "Clean ✓", etc).
+      emit({
+        type: "candidate-qualifier-done",
+        url,
+        qualifies: qualifier.qualifies,
+        listed: {
+          airbnb: qualifier.platforms.airbnb.listed,
+          vrbo: qualifier.platforms.vrbo.listed,
+          booking: qualifier.platforms.booking.listed,
+        },
+        photoScrapeFailed,
+      });
+
       if (qualifier.qualifies && !photoScrapeFailed) {
         // BEST CASE: clean by text AND photo. Return immediately.
-        return res.json({
+        finishWithResult({
           found: true,
           unit: {
             url,
@@ -16015,6 +16109,7 @@ Return ONLY compact JSON with this exact shape:
           attemptCount: attempts.length,
           totalCandidates: candidateUrls.length,
         });
+        return;
       }
       if (qualifier.qualifies && photoScrapeFailed && !textOnlyFallback) {
         // FALLBACK: text-only verified. Keep walking in case a
@@ -16042,7 +16137,7 @@ Return ONLY compact JSON with this exact shape:
         `[find-clean-unit] returning text-only fallback for "${communityName}" (${bedrooms}BR) — ` +
         `${textOnlyFallback.url} (photo scrape failed; OTA text-search clean)`,
       );
-      return res.json({
+      finishWithResult({
         found: true,
         unit: {
           url: textOnlyFallback.url,
@@ -16057,6 +16152,7 @@ Return ONLY compact JSON with this exact shape:
         attemptCount: attempts.length,
         totalCandidates: candidateUrls.length,
       });
+      return;
     }
 
     // No clean candidate at all. Build a diagnostic reason so the
@@ -16076,7 +16172,7 @@ Return ONLY compact JSON with this exact shape:
     if (wrongType > 0) reasonParts.push(`${wrongType} wrong property type`);
     if (wrongStatus > 0) reasonParts.push(`${wrongStatus} sold/auction status`);
     const reason = `Checked ${attempts.length} Zillow candidate${attempts.length === 1 ? "" : "s"} for "${communityName}" (${bedrooms}BR) — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
-    res.json({
+    finishWithResult({
       found: false,
       reason,
       attempts,

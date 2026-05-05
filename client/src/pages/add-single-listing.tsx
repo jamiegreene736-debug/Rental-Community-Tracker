@@ -214,6 +214,36 @@ export default function AddSingleListing() {
   const [findResult, setFindResult] = useState<FindResult | null>(null);
   const [skipUrls, setSkipUrls] = useState<string[]>([]);
 
+  // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
+  // Live progress state populated by the NDJSON stream from
+  // /api/single-listing/find-clean-unit. Events received:
+  //   discovery-start / discovery-done / candidate-start /
+  //   candidate-scrape / candidate-rejected / candidate-qualifier /
+  //   candidate-qualifier-done / result.
+  // Drives the Step 1 progress bar so the operator can see the
+  // wizard walk Zillow candidates in real time instead of staring
+  // at a generic spinner for 30-180 seconds.
+  type CandidateProgress = {
+    url: string;
+    index: number;
+    total: number;
+    phase: "scraping" | "checking-ota" | "rejected" | "clean";
+    detail?: string;
+  };
+  const [findProgress, setFindProgress] = useState<{
+    phase: "discovering" | "candidates" | "done";
+    totalCandidates: number;
+    candidatesProcessed: number;
+    current: CandidateProgress | null;
+    rejected: number;
+  }>({
+    phase: "discovering",
+    totalCandidates: 0,
+    candidatesProcessed: 0,
+    current: null,
+    rejected: 0,
+  });
+
   // City autocomplete — nationwide endpoint scoped server-side to
   // Hawaii + Florida. Returns { city, state } pairs.
   useEffect(() => {
@@ -323,15 +353,136 @@ export default function AddSingleListing() {
     }
     setFindLoading(true);
     setFindResult(null);
+    setFindProgress({
+      phase: "discovering",
+      totalCandidates: 0,
+      candidatesProcessed: 0,
+      current: null,
+      rejected: 0,
+    });
     try {
-      const res = await apiRequest("POST", "/api/single-listing/find-clean-unit", {
-        communityName: selectedCommunity.name,
-        city: pickedCity.city,
-        state: pickedCity.state,
-        bedrooms: selectedBedrooms,
-        skipUrls: skipUrlsArg,
+      // CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
+      // Endpoint streams NDJSON progress events. We read the body
+      // line-by-line, dispatch on event type to update the progress
+      // bar state, and capture the terminal `result` event as the
+      // FindResult that drives the rest of the wizard. Falls back
+      // to whatever events arrived before disconnect if the stream
+      // ends without a `result` event (network blip, etc).
+      const resp = await fetch("/api/single-listing/find-clean-unit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          communityName: selectedCommunity.name,
+          city: pickedCity.city,
+          state: pickedCity.state,
+          bedrooms: selectedBedrooms,
+          skipUrls: skipUrlsArg,
+        }),
       });
-      const data: FindResult = await res.json();
+      if (!resp.ok || !resp.body) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let finalResult: FindResult | null = null;
+      // Track per-URL state across events so we can render a
+      // running list of candidates with their current phase.
+      const candidateState = new Map<string, CandidateProgress>();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt: any;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (evt.type === "discovery-start") {
+            setFindProgress((prev) => ({ ...prev, phase: "discovering" }));
+          } else if (evt.type === "discovery-done") {
+            setFindProgress((prev) => ({
+              ...prev,
+              phase: "candidates",
+              totalCandidates: evt.totalCandidates ?? 0,
+            }));
+          } else if (evt.type === "candidate-start") {
+            const cp: CandidateProgress = {
+              url: evt.url,
+              index: evt.index,
+              total: evt.total,
+              phase: "scraping",
+            };
+            candidateState.set(evt.url, cp);
+            setFindProgress((prev) => ({
+              ...prev,
+              current: cp,
+            }));
+          } else if (evt.type === "candidate-scrape") {
+            const existing = candidateState.get(evt.url);
+            if (existing) {
+              existing.detail = `Scraped ${evt.photoCount ?? 0} photo${evt.photoCount === 1 ? "" : "s"}`;
+              candidateState.set(evt.url, existing);
+              setFindProgress((prev) => prev.current?.url === evt.url ? { ...prev, current: { ...existing } } : prev);
+            }
+          } else if (evt.type === "candidate-rejected") {
+            const existing = candidateState.get(evt.url);
+            if (existing) {
+              existing.phase = "rejected";
+              existing.detail = String(evt.reason ?? "rejected");
+              candidateState.set(evt.url, existing);
+            }
+            setFindProgress((prev) => ({
+              ...prev,
+              candidatesProcessed: prev.candidatesProcessed + 1,
+              rejected: prev.rejected + 1,
+              current: existing ?? prev.current,
+            }));
+          } else if (evt.type === "candidate-qualifier") {
+            const existing = candidateState.get(evt.url);
+            if (existing) {
+              existing.phase = "checking-ota";
+              existing.detail = "Checking Airbnb / VRBO / Booking";
+              candidateState.set(evt.url, existing);
+              setFindProgress((prev) => prev.current?.url === evt.url ? { ...prev, current: { ...existing } } : prev);
+            }
+          } else if (evt.type === "candidate-qualifier-done") {
+            const existing = candidateState.get(evt.url);
+            const listed = evt.listed || {};
+            const listedNames = [
+              listed.airbnb && "Airbnb",
+              listed.vrbo && "VRBO",
+              listed.booking && "Booking.com",
+            ].filter(Boolean);
+            if (existing) {
+              existing.phase = evt.qualifies ? "clean" : "rejected";
+              existing.detail = evt.qualifies
+                ? "Clean of OTA listings"
+                : `Listed on ${listedNames.join(", ")}`;
+              candidateState.set(evt.url, existing);
+            }
+            setFindProgress((prev) => ({
+              ...prev,
+              candidatesProcessed: prev.candidatesProcessed + 1,
+              rejected: evt.qualifies ? prev.rejected : prev.rejected + 1,
+              current: existing ?? prev.current,
+            }));
+          } else if (evt.type === "result") {
+            finalResult = evt as FindResult;
+          }
+        }
+      }
+      setFindProgress((prev) => ({ ...prev, phase: "done" }));
+
+      if (!finalResult) {
+        throw new Error("Stream ended without a result event");
+      }
+      const data: FindResult = finalResult;
       setFindResult(data);
       if (data.found) {
         // Pre-populate the downstream fields so Step 2/3/4 work without
@@ -1001,16 +1152,81 @@ export default function AddSingleListing() {
             {/* Continue button:
                   - Auto-discovery path: picks community + BR → "Find a clean unit" calls the API
                   - Manual path: requires typed address → "Continue to OTA check" advances normally */}
-            {selectedCommunity && (
+            {selectedCommunity && !findLoading && (
               <Button
                 onClick={() => findCleanUnit([])}
-                disabled={!selectedBedrooms || findLoading}
+                disabled={!selectedBedrooms}
                 data-testid="button-find-clean-unit"
               >
-                {findLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
-                {findLoading ? `Searching Zillow + verifying OTAs…` : `Find a clean ${selectedBedrooms ?? "?"}BR unit`}
-                {!findLoading && <ArrowRight className="h-4 w-4 ml-2" />}
+                <Search className="h-4 w-4 mr-2" />
+                Find a clean {selectedBedrooms ?? "?"}BR unit
+                <ArrowRight className="h-4 w-4 ml-2" />
               </Button>
+            )}
+
+            {/* CODEX NOTE (2026-05-04, claude/find-clean-unit-streaming):
+                Progress bar — drives off `findProgress` state which is
+                populated by the NDJSON stream from
+                /api/single-listing/find-clean-unit. Shows phase label
+                ("Discovering candidates" → "Walking N/M") + a per-
+                candidate detail line ("Scraping…" / "Checking
+                Airbnb/VRBO/Booking" / "Listed on VRBO" / "Clean ✓"). */}
+            {selectedCommunity && findLoading && (
+              <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  {findProgress.phase === "discovering" && "Discovering Zillow candidates…"}
+                  {findProgress.phase === "candidates" && (
+                    <>
+                      Walking candidate{" "}
+                      <span className="font-mono">
+                        {findProgress.current?.index ?? 0}/{findProgress.totalCandidates}
+                      </span>
+                    </>
+                  )}
+                  {findProgress.phase === "done" && "Wrapping up…"}
+                </div>
+                {/* Progress bar */}
+                <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary transition-all duration-300"
+                    style={{
+                      width: findProgress.totalCandidates > 0
+                        ? `${Math.min(100, (findProgress.candidatesProcessed / findProgress.totalCandidates) * 100)}%`
+                        : findProgress.phase === "discovering" ? "10%" : "0%",
+                    }}
+                  />
+                </div>
+                {/* Per-candidate detail */}
+                {findProgress.current && (
+                  <div className="text-xs text-muted-foreground space-y-1">
+                    <div className="flex items-center gap-2">
+                      {findProgress.current.phase === "scraping" && (
+                        <Loader2 className="h-3 w-3 animate-spin text-blue-600" />
+                      )}
+                      {findProgress.current.phase === "checking-ota" && (
+                        <ShieldCheck className="h-3 w-3 text-amber-600" />
+                      )}
+                      {findProgress.current.phase === "rejected" && (
+                        <XCircle className="h-3 w-3 text-red-600" />
+                      )}
+                      {findProgress.current.phase === "clean" && (
+                        <CheckCircle2 className="h-3 w-3 text-green-700" />
+                      )}
+                      <span className="truncate flex-1">
+                        {findProgress.current.detail ?? "Starting…"}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[10px] text-muted-foreground/70 truncate">
+                      {findProgress.current.url.replace(/^https?:\/\/(www\.)?/, "")}
+                    </div>
+                  </div>
+                )}
+                <div className="text-[11px] text-muted-foreground">
+                  {findProgress.candidatesProcessed} processed
+                  {findProgress.rejected > 0 && ` · ${findProgress.rejected} rejected`}
+                </div>
+              </div>
             )}
             {manualMode && (
               <Button
