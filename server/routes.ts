@@ -16174,17 +16174,28 @@ Return ONLY compact JSON with this exact shape:
     const buildZillowQueries = (): string[] => {
       if (isCityWide) {
         if (isAnyBedroom) {
+          // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+          // Wider query set for city-wide + any BR. Adds "for sale",
+          // "apartment", "homedetails" path-anchored queries on top
+          // of the original 4. Each variation lets Google surface
+          // a different slice of its Zillow index for the city.
           return [
             `site:zillow.com condo "${city}" "${state}"`,
             `site:zillow.com condominium "${city}" "${state}"`,
             `site:zillow.com townhouse "${city}" "${state}"`,
             `site:zillow.com "${city}, ${state}" condo`,
+            `site:zillow.com/homedetails "${city}" "${state}" condo`,
+            `site:zillow.com apartment "${city}" "${state}"`,
+            `site:zillow.com condo for sale "${city}" "${state}"`,
+            `site:zillow.com "${city}" "${state}" condo townhouse`,
           ];
         }
         return [
           `site:zillow.com condo "${city}" "${state}" ${brTerm}`,
           `site:zillow.com condominium "${city}" "${state}" ${brTerm}`,
           `site:zillow.com "${city}, ${state}" ${brTerm} condo`,
+          `site:zillow.com/homedetails "${city}" "${state}" ${brTerm} condo`,
+          `site:zillow.com townhouse "${city}" "${state}" ${brTerm}`,
         ];
       }
       // Community-anchored — existing behavior.
@@ -16204,17 +16215,24 @@ Return ONLY compact JSON with this exact shape:
     const buildRealtorQueries = (): string[] => {
       if (isCityWide) {
         if (isAnyBedroom) {
+          // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+          // Mirror of the wider Zillow query set above.
           return [
             `site:realtor.com condo "${city}" "${state}"`,
             `site:realtor.com condominium "${city}" "${state}"`,
             `site:realtor.com townhouse "${city}" "${state}"`,
             `site:realtor.com "${city}, ${state}" condo`,
+            `site:realtor.com/realestateandhomes-detail "${city}" "${state}" condo`,
+            `site:realtor.com apartment "${city}" "${state}"`,
+            `site:realtor.com condo for sale "${city}" "${state}"`,
           ];
         }
         return [
           `site:realtor.com condo "${city}" "${state}" ${brTerm}`,
           `site:realtor.com condominium "${city}" "${state}" ${brTerm}`,
           `site:realtor.com "${city}, ${state}" ${brTerm} condo`,
+          `site:realtor.com/realestateandhomes-detail "${city}" "${state}" ${brTerm} condo`,
+          `site:realtor.com townhouse "${city}" "${state}" ${brTerm}`,
         ];
       }
       if (isAnyBedroom) {
@@ -16236,11 +16254,20 @@ Return ONLY compact JSON with this exact shape:
     const candidateUrls: string[] = [];
     const seen = new Set<string>();
     const platformCounts = { zillow: 0, realtor: 0 };
+    // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+    // num=20 in city-wide mode (vs num=10 default) so each query
+    // harvests up to 20 raw URLs. Combined with the wider candidate
+    // cap and 4 query variations per platform, city-wide
+    // discovery can now surface 60-100 unique URLs before dedup
+    // (vs ~30-40 before). Community-anchored stays at num=10 — the
+    // search space is small enough that more pagination just
+    // returns garbage from outside the resort.
+    const searchApiNum = isCityWide ? 20 : 10;
     const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: "zillow" | "realtor") => {
       const results = await Promise.all(queries.map(async (q) => {
         try {
           const resp = await fetch(
-            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=${searchApiNum}&api_key=${apiKey}`,
             { signal: AbortSignal.timeout(15_000) },
           );
           if (!resp.ok) return [] as string[];
@@ -16415,7 +16442,19 @@ Return ONLY compact JSON with this exact shape:
       photoScrapeFailed: boolean;
     };
     let textOnlyFallback: FallbackMatch | null = null;
-    const candidateCap = Math.min(candidateUrls.length, 15);
+    // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+    // Candidate cap is mode-aware. Community-anchored stays at 15
+    // because a single resort's Zillow inventory rarely tops that
+    // and we want to leave wall-budget headroom for the per-
+    // candidate Apify+OTA round-trip. City-wide mode caps at 60 so
+    // we can actually walk a meaningful slice of a city's condos
+    // (Fort Myers Beach saw "15 of the whole city checked" before
+    // this bump). The wall budget (12 min for city-wide) gates
+    // total runtime — at ~15-25s/candidate the loop typically
+    // bails on budget around candidate 30-40, but on fast scrape
+    // days we want to keep going up to 60.
+    const RAW_CAP = isCityWide ? 60 : 15;
+    const candidateCap = Math.min(candidateUrls.length, RAW_CAP);
 
     // CODEX NOTE (2026-05-04, claude/verify-then-discover): helper
     // that mirrors the same slug-parsing the loop does below. We
