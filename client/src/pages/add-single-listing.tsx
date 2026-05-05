@@ -1176,8 +1176,12 @@ export default function AddSingleListing() {
                       </span>
                     )}
                     {communityInventory && !communityInventory.loading && (
-                      <Badge variant={communityInventory.count > 0 ? "secondary" : "outline"} className="text-[11px]">
-                        {communityInventory.count} Zillow listing{communityInventory.count === 1 ? "" : "s"} at this resort
+                      <Badge
+                        variant={communityInventory.count > 0 ? "secondary" : "outline"}
+                        className="text-[11px]"
+                        title="This is the count of Zillow homedetails URLs we could find across multiple queries — NOT the total unit count at the resort. Most condo units never appear on Zillow (owner-occupied, long-term rentals). For-sale + recently-sold + indexed off-market listings make up the count."
+                      >
+                        ~{communityInventory.count} Zillow listing{communityInventory.count === 1 ? "" : "s"} indexed
                       </Badge>
                     )}
                   </div>
