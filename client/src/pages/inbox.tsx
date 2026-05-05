@@ -193,6 +193,8 @@ const MERGE_TAGS = [
   "{confirmation_code}", "{num_nights}",
 ];
 
+const GUESTY_VARIABLE_PATTERN = /\{\{[^}]+\}\}/;
+
 const TEMPLATE_CHANNEL_OPTIONS = [
   { value: "guesty", label: "Guesty / OTA / email" },
   { value: "sms", label: "Text message" },
@@ -290,7 +292,7 @@ VacationRentalExpertz`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: true,
-    body: `Hi {guest_name}, please complete the secure pre-arrival form for {property_name}: {{checkin_form}}
+    body: `Hi {guest_name}, I just sent the secure pre-arrival form for {property_name} in the booking thread/email. Please complete it there when you have a moment.
 
 This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, John`,
   },
@@ -300,7 +302,7 @@ This covers the rental agreement and arrival requirements. Please do not text ca
     trigger: "days_after_booking",
     daysOffset: 1,
     isActive: true,
-    body: `Hi {guest_name}, quick reminder to complete the secure pre-arrival form for {property_name}: {{checkin_form}}
+    body: `Hi {guest_name}, quick reminder to complete the secure pre-arrival form for {property_name}. I sent it in the booking thread/email.
 
 Once that is complete, you are all set for the next step. Thanks, John`,
   },
@@ -310,7 +312,7 @@ Once that is complete, you are all set for the next step. Thanks, John`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: false,
-    body: `Hi {guest_name}, please use this secure Guesty link to add your payment method or complete any remaining balance for {property_name}: {{guest_invoice}}
+    body: `Hi {guest_name}, I sent the secure Guesty payment request for {property_name} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.
 
 Please do not text card details. Thanks, John`,
   },
@@ -730,9 +732,7 @@ function buildAgreementRequestSmsBody(args: {
   propertyName: string;
 }): string {
   return [
-    `Hi ${args.guestFirstName || "there"}, please complete the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
-    `{{checkin_form}}`,
-    ``,
+    `Hi ${args.guestFirstName || "there"}, I just sent the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""} in the booking thread/email. Please complete it there when you have a moment.`,
     `This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
   ].join("\n");
 }
@@ -766,9 +766,7 @@ function buildGuestyInvoicePaymentSmsBody(args: {
   propertyName: string;
 }): string {
   return [
-    `Hi ${args.guestFirstName || "there"}, please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
-    `{{guest_invoice}}`,
-    ``,
+    `Hi ${args.guestFirstName || "there"}, I sent the secure Guesty payment request${args.propertyName ? ` for ${args.propertyName}` : ""} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.`,
     `Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
   ].join("\n");
 }
@@ -1546,9 +1544,12 @@ export default function InboxPage() {
   const threadPosts = [...posts, ...smsPosts];
   const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
   const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
+  const hasUnresolvedGuestyVariable = GUESTY_VARIABLE_PATTERN.test(replyText);
   const smsConfigured = smsStatus?.configured !== false;
   const smsDisabledReason = !smsConfigured
     ? (smsStatus?.message ?? "SMS is not configured yet in Railway")
+    : hasUnresolvedGuestyVariable
+      ? "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Use Send in Guesty or remove the placeholder before texting."
     : !effectiveGuestPhone
       ? "No guest phone number found on this thread"
       : undefined;
@@ -1767,6 +1768,9 @@ export default function InboxPage() {
       if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
       const to = effectiveGuestPhone;
       if (!to) throw new Error("No guest phone number found on this Guesty thread");
+      if (GUESTY_VARIABLE_PATTERN.test(replyText)) {
+        throw new Error("Guesty variables like {{checkin_form}} do not expand in Quo texts. Send this through Guesty or remove the placeholder before texting.");
+      }
       const r = await apiRequest("POST", `/api/inbox/sms/conversations/${selectedConvId}/send`, {
         to,
         body: replyText,

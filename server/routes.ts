@@ -20991,6 +20991,13 @@ CONSTRAINTS
         guestName?: string | null;
       };
       if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const smsBody = String(body ?? "");
+      if (/\{\{[^}]+\}\}/.test(smsBody)) {
+        return res.status(400).json({
+          error: "Unresolved Guesty variable",
+          message: "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Remove the placeholder before sending by text.",
+        });
+      }
       const config = getQuoSmsConfigStatus();
       if (!config.configured) {
         return res.status(503).json({
@@ -21004,7 +21011,7 @@ CONSTRAINTS
         reservationId: reservationId ?? null,
         guestName: guestName ?? null,
         to: normalizePhone(to),
-        body: String(body ?? ""),
+        body: smsBody,
       });
       return res.json({ ok: true, message });
     } catch (err: any) {
