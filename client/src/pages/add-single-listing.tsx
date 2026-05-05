@@ -142,6 +142,37 @@ type ListingDraft = {
   warning?: string;
 };
 
+function communityResearchStage(progress: number): { label: string; detail: string } {
+  if (progress < 25) {
+    return {
+      label: "Starting research",
+      detail: "Sending the city to the community research service.",
+    };
+  }
+  if (progress < 55) {
+    return {
+      label: "Finding communities",
+      detail: "Looking for condo and townhouse communities with vacation rental activity.",
+    };
+  }
+  if (progress < 78) {
+    return {
+      label: "Ranking results",
+      detail: "Sorting communities by size, relevance, and likely standalone listing fit.",
+    };
+  }
+  if (progress < 96) {
+    return {
+      label: "Finalizing shortlist",
+      detail: "Preparing the top communities for review.",
+    };
+  }
+  return {
+    label: "Done",
+    detail: "Loading the results.",
+  };
+}
+
 export default function AddSingleListing() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
@@ -161,6 +192,7 @@ export default function AddSingleListing() {
   // Top-20 community research for the picked city.
   const [communities, setCommunities] = useState<CommunityResult[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
+  const [researchProgress, setResearchProgress] = useState(0);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
 
   // CODEX NOTE (2026-05-04, claude/single-listing-find-unit):
@@ -284,6 +316,26 @@ export default function AddSingleListing() {
     rejectionsByReason: {},
   });
 
+  useEffect(() => {
+    if (!researchLoading) return;
+    const startedAt = Date.now();
+    setResearchProgress((prev) => Math.max(prev, 8));
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      // The community research endpoint returns one response rather
+      // than streamed progress, so this is an elapsed-time estimate
+      // that caps below 100 until the response arrives.
+      const target =
+        elapsed < 2_000 ? 12 + (elapsed / 2_000) * 13 :
+        elapsed < 6_000 ? 25 + ((elapsed - 2_000) / 4_000) * 30 :
+        elapsed < 12_000 ? 55 + ((elapsed - 6_000) / 6_000) * 23 :
+        elapsed < 22_000 ? 78 + ((elapsed - 12_000) / 10_000) * 14 :
+        92;
+      setResearchProgress((prev) => Math.max(prev, Math.min(92, Math.round(target))));
+    }, 450);
+    return () => window.clearInterval(id);
+  }, [researchLoading]);
+
   // City autocomplete — nationwide endpoint scoped server-side to
   // Hawaii + Florida. Returns { city, state } pairs.
   useEffect(() => {
@@ -333,6 +385,7 @@ export default function AddSingleListing() {
     setFindResult(null);
     setSkipUrls([]);
     setStreetAddress("");
+    setResearchProgress(8);
     setResearchLoading(true);
     try {
       const res = await apiRequest("POST", "/api/community/research", {
@@ -359,6 +412,7 @@ export default function AddSingleListing() {
             .slice(0, 10)
         : [];
       setCommunities(list);
+      setResearchProgress(100);
       if (list.length === 0) {
         toast({
           title: "No communities found",
@@ -1219,9 +1273,39 @@ export default function AddSingleListing() {
 
             {/* — Community research results — */}
             {researchLoading && (
-              <div className="text-center py-8 text-muted-foreground border rounded-lg mb-6">
-                <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
-                Finding top vacation rental communities in {pickedCity?.city}…
+              <div className="border rounded-lg mb-6 p-4 bg-muted/20">
+                {(() => {
+                  const stage = communityResearchStage(researchProgress);
+                  return (
+                    <div className="space-y-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <Loader2 className="h-4 w-4 animate-spin text-primary mt-0.5 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-foreground">
+                              {stage.label}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              Finding top vacation rental communities in {pickedCity?.city}…
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-xs font-mono tabular-nums text-muted-foreground">
+                          {researchProgress}%
+                        </div>
+                      </div>
+                      <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary transition-all duration-500"
+                          style={{ width: `${Math.min(100, Math.max(0, researchProgress))}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {stage.detail}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
