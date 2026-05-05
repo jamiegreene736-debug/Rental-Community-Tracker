@@ -756,9 +756,68 @@ async function scrapeListingPhotos(
       console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
       result = await scrapeZillowViaScrapingBee(primaryUrl);
     }
+    // CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape):
+    // Tertiary fallback — when Apify+ScrapingBee both came up
+    // empty (rate limit / Zillow anti-bot / token exhaustion),
+    // try the operator's local Chrome sidecar. The residential
+    // IP routinely beats both datacenter scrapers on bad days.
+    // Heartbeat-gated: only attempt when the sidecar daemon has
+    // pinged within the online window so we don't burn ~90s
+    // waiting for an offline daemon. Ignored when the sidecar
+    // isn't online — the existing Apify-then-ScrapingBee chain
+    // is the entire path for cold-deploy / no-daemon environments.
+    //
+    // Dynamic import follows the rest of the file's pattern for
+    // sidecar helpers — keeps the cold-start lean and the import
+    // co-located with the conditional that uses it.
+    if (result.urls.length === 0) {
+      try {
+        const { getHeartbeat, scrapeZillowPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+        const heartbeat = getHeartbeat();
+        if (heartbeat.isOnline) {
+          console.log(`[scrapeZillow] Apify+ScrapingBee both empty; trying sidecar (Chrome on operator's IP)`);
+          const sidecar = await scrapeZillowPhotosViaSidecar({
+            url: primaryUrl,
+            walletBudgetMs: 90_000,
+          });
+          if (sidecar.photos.length > 0) {
+            console.log(
+              `[scrapeZillow] sidecar success: ${sidecar.photos.length} photos in ${sidecar.durationMs}ms`,
+            );
+            // Normalize the sidecar's facts into the result shape.
+            // Sidecar can return facts the other paths miss
+            // (homeType/propertySubType/photoCount via Chrome's
+            // rendered DOM access).
+            result = {
+              urls: sidecar.photos,
+              facts: {
+                bedrooms: sidecar.facts?.bedrooms,
+                bathrooms: sidecar.facts?.bathrooms,
+                homeType: sidecar.facts?.homeType,
+                homeStatus: sidecar.facts?.homeStatus,
+                propertySubType: sidecar.facts?.propertySubType,
+                photoCount: sidecar.facts?.photoCount,
+              },
+            };
+          } else {
+            console.log(
+              `[scrapeZillow] sidecar returned 0 photos in ${sidecar.durationMs}ms (reason: ${sidecar.reason})`,
+            );
+          }
+        } else {
+          console.log(`[scrapeZillow] sidecar offline (heartbeat ageMs=${heartbeat.ageMs ?? "—"}); skipping`);
+        }
+      } catch (e: any) {
+        console.warn(`[scrapeZillow] sidecar fallback errored: ${e?.message ?? e}`);
+      }
+    }
     if (listingFacts) {
       if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
       if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+      if (result.facts.homeType != null) listingFacts.homeType = result.facts.homeType;
+      if (result.facts.homeStatus != null) listingFacts.homeStatus = result.facts.homeStatus;
+      if (result.facts.propertySubType != null) listingFacts.propertySubType = result.facts.propertySubType;
+      if (result.facts.photoCount != null) listingFacts.photoCount = result.facts.photoCount;
     }
     if (result.urls.length > 0) {
       return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));

@@ -45,6 +45,7 @@ export type SidecarOpType =
   | "airbnb_search"
   | "vrbo_search"
   | "vrbo_photo_scrape"
+  | "zillow_photo_scrape"
   | "booking_search"
   | "google_serp"
   | "pm_site_search"
@@ -73,6 +74,31 @@ export type SidecarVrboParams = {
 export type SidecarVrboPhotoScrapeParams = {
   url: string;
   maxPhotos?: number;
+};
+
+// CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape): Zillow
+// photo + facts scrape via the operator's local Chrome. Wired as
+// the tertiary fallback in scrapeListingPhotos when both Apify
+// and ScrapingBee return 0 photos — the residential IP bypasses
+// Zillow's datacenter anti-bot wall that hits Apify and
+// ScrapingBee on bad days. Result returns photos[] AND extracted
+// facts (bedrooms/bathrooms/homeType/...), so the find-clean-unit
+// HTML-fallback step is unnecessary when the sidecar succeeds.
+export type SidecarZillowPhotoScrapeParams = {
+  url: string;
+  maxPhotos?: number;
+};
+
+export type SidecarZillowPhotoScrapeResult = {
+  photos: string[];
+  facts?: {
+    bedrooms?: number;
+    bathrooms?: number;
+    homeType?: string;
+    homeStatus?: string;
+    propertySubType?: string;
+    photoCount?: number;
+  };
 };
 
 export type SidecarBookingParams = {
@@ -186,6 +212,7 @@ export type SidecarParamsByOp = {
   airbnb_search: SidecarAirbnbParams;
   vrbo_search: SidecarVrboParams;
   vrbo_photo_scrape: SidecarVrboPhotoScrapeParams;
+  zillow_photo_scrape: SidecarZillowPhotoScrapeParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
   pm_site_search: SidecarPmSiteSearchParams;
@@ -242,6 +269,7 @@ export type SidecarRequest = {
     | SidecarAirbnbParams
     | SidecarVrboParams
     | SidecarVrboPhotoScrapeParams
+    | SidecarZillowPhotoScrapeParams
     | SidecarBookingParams
     | SidecarGoogleSerpParams
     | SidecarPmSiteSearchParams
@@ -253,6 +281,7 @@ export type SidecarRequest = {
   results?:
     | SidecarPropertyCandidate[]
     | SidecarVrboPhotoScrapeResult
+    | SidecarZillowPhotoScrapeResult
     | SidecarSerpHit[]
     | SidecarPmUrlCheckResult
     | SidecarPmUrlCheckBatchResult
@@ -363,6 +392,10 @@ function makeRequestKey(
       const p = params as SidecarVrboPhotoScrapeParams;
       return `vrbo_photo_scrape|${p.url}|${p.maxPhotos ?? 40}`;
     }
+    case "zillow_photo_scrape": {
+      const p = params as SidecarZillowPhotoScrapeParams;
+      return `zillow_photo_scrape|${p.url}|${p.maxPhotos ?? 40}`;
+    }
     case "google_serp": {
       const p = params as SidecarGoogleSerpParams;
       return `google_serp|${p.query.toLowerCase().trim()}|${p.maxResults ?? 20}`;
@@ -421,6 +454,7 @@ export function enqueueOp(
     | { opType: "airbnb_search"; params: SidecarAirbnbParams }
     | { opType: "vrbo_search"; params: SidecarVrboParams }
     | { opType: "vrbo_photo_scrape"; params: SidecarVrboPhotoScrapeParams }
+    | { opType: "zillow_photo_scrape"; params: SidecarZillowPhotoScrapeParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
     | { opType: "pm_site_search"; params: SidecarPmSiteSearchParams }
@@ -574,6 +608,7 @@ export function getStatus(): {
     airbnb_search: 0,
     vrbo_search: 0,
     vrbo_photo_scrape: 0,
+    zillow_photo_scrape: 0,
     booking_search: 0,
     google_serp: 0,
     pm_site_search: 0,
@@ -620,6 +655,7 @@ export function getStatus(): {
         case "pm_url_check": return "PM rate check";
         case "google_serp": return "Google discovery";
         case "vrbo_photo_scrape": return "VRBO photo scrape";
+        case "zillow_photo_scrape": return "Zillow photo scrape";
         case "vrbo_upload_photos": return "VRBO photo upload";
         case "booking_upload_photos": return "Booking.com photo upload";
         case "guesty_disconnect_channel": return `Guesty ${p.channel ?? ""} disconnect`.trim();
@@ -774,6 +810,60 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   });
   return {
     photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape): Zillow
+// photo + facts scrape via the operator's home-IP Chrome. Wired
+// in as the tertiary fallback inside scrapeListingPhotos when
+// Apify+ScrapingBee both return 0 photos. The residential IP
+// bypasses Zillow's datacenter anti-bot wall that hits both
+// scrapers on bad days. Returns both photos AND extracted facts
+// (bedrooms/bathrooms/homeType/etc) so the find-clean-unit's
+// HTML-fallback step is short-circuited when the sidecar
+// succeeds.
+//
+// Default wallet 90s — Zillow detail pages are heavier than VRBO
+// search-result cards (more JS, more lazy-loaded photos), so the
+// daemon needs a bit more headroom. Caller can override.
+export async function scrapeZillowPhotosViaSidecar(opts: {
+  url: string;
+  maxPhotos?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+  signal?: AbortSignal;
+}): Promise<{
+  photos: string[];
+  facts: SidecarZillowPhotoScrapeResult["facts"];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.url || !/^https?:\/\/(www\.)?zillow\.com\//i.test(opts.url)) {
+    return {
+      photos: [],
+      facts: undefined,
+      workerOnline: false,
+      durationMs: 0,
+      reason: "valid zillow.com url required",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "zillow_photo_scrape",
+      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40 },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 90_000,
+    signal: opts.signal,
+  });
+  const result = r.results as SidecarZillowPhotoScrapeResult | undefined;
+  return {
+    photos: result?.photos ?? [],
+    facts: result?.facts,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
