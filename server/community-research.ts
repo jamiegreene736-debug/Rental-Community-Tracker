@@ -25,7 +25,7 @@ export type ResearchedCommunity = {
   // single-listing wizard can render only valid bedroom buttons
   // instead of a generic 1-5BR picker. Combo flow ignores this
   // field. Empty array means "Claude doesn't know" — wizard falls
-  // back to the generic picker in that case.
+  // back to common condo sizes plus the Any escape hatch.
   availableBedrooms?: number[];
   // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
   // Single-mode research returns Claude's rough estimate of the
@@ -34,6 +34,70 @@ export type ResearchedCommunity = {
   // 10 biggest. Combo flow ignores. 0 means Claude doesn't know.
   estimatedTotalUnits?: number;
 };
+
+type KnownSingleListingCommunityFact = {
+  city: RegExp;
+  state: RegExp;
+  aliases: RegExp[];
+  canonicalName: string;
+  availableBedrooms: number[];
+  estimatedTotalUnits: number;
+};
+
+// CODEX NOTE (2026-05-05, codex/single-listing-known-facts):
+// The single-listing wizard depends on Claude's resort research
+// for the card name, bedroom buttons, and rough resort unit count.
+// That works well most of the time, but a misspelled resort name
+// breaks the downstream community-anchored Zillow/Realtor search.
+// Keep tiny, operator-validated corrections here instead of trying
+// to repair names in the browser. Add only facts we are comfortable
+// treating as stable.
+const KNOWN_SINGLE_LISTING_COMMUNITY_FACTS: KnownSingleListingCommunityFact[] = [
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    aliases: [/^santia maria resort$/i, /^santa maria resort$/i],
+    canonicalName: "Santa Maria Resort",
+    availableBedrooms: [2, 3],
+    estimatedTotalUnits: 75,
+  },
+];
+
+function normalizeCommunityName(value: unknown): string {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeBedroomList(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return Array.from(new Set(
+    value
+      .map((n: unknown) => typeof n === "number" ? Math.round(n) : null)
+      .filter((n: number | null): n is number => n != null && n >= 1 && n <= 12),
+  )).sort((a, b) => a - b);
+}
+
+function applyKnownSingleListingFacts(
+  rawName: string,
+  city: string,
+  state: string,
+  availableBedrooms: number[] | undefined,
+  estimatedTotalUnits: number | undefined,
+): { name: string; availableBedrooms: number[] | undefined; estimatedTotalUnits: number | undefined } {
+  const rawKey = normalizeCommunityName(rawName);
+  const fact = KNOWN_SINGLE_LISTING_COMMUNITY_FACTS.find((f) =>
+    f.city.test(city.trim()) &&
+    f.state.test(state.trim()) &&
+    f.aliases.some((alias) => alias.test(rawKey)),
+  );
+  if (!fact) {
+    return { name: rawName, availableBedrooms, estimatedTotalUnits };
+  }
+  return {
+    name: fact.canonicalName,
+    availableBedrooms: fact.availableBedrooms,
+    estimatedTotalUnits: fact.estimatedTotalUnits,
+  };
+}
 
 // Pull a bedroom count out of a SearchAPI airbnb engine listing. The
 // engine returns `bedrooms` only as part of the title text — never as
@@ -626,9 +690,16 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               console.log(`[research] dropped "${s.communityName}" (${city}, ${state}): ${check.reason}`);
               continue;
             }
-            const rates = await spotCheckRate(s.communityName);
+            const normalizedBedrooms = normalizeBedroomList(s.availableBedrooms);
+            const normalizedUnits = typeof s.estimatedTotalUnits === "number" && s.estimatedTotalUnits >= 0 && s.estimatedTotalUnits <= 50000
+              ? Math.round(s.estimatedTotalUnits)
+              : undefined;
+            const normalized = mode === "single"
+              ? applyKnownSingleListingFacts(String(s.communityName ?? ""), city, state, normalizedBedrooms, normalizedUnits)
+              : { name: String(s.communityName ?? ""), availableBedrooms: undefined, estimatedTotalUnits: undefined };
+            const rates = await spotCheckRate(normalized.name);
             results.push({
-              name: s.communityName,
+              name: normalized.name,
               city,
               state,
               estimatedLowRate: rates.low,
@@ -647,21 +718,13 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               // CODEX NOTE: availableBedrooms only meaningful in
               // single mode. Filter to integers in [1,12] and
               // dedupe; combo mode leaves it undefined.
-              availableBedrooms: Array.isArray(s.availableBedrooms)
-                ? Array.from(new Set(
-                    s.availableBedrooms
-                      .map((n: any) => typeof n === "number" ? Math.round(n) : null)
-                      .filter((n: number | null): n is number => n != null && n >= 1 && n <= 12),
-                  )).sort((a, b) => a - b)
-                : undefined,
+              availableBedrooms: normalized.availableBedrooms,
               // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
               // estimatedTotalUnits comes back as a plain integer
               // from Claude. Clamp to [0, 50000] to prevent a
               // misformatted response from breaking the wizard's
               // sort. 0 = Claude doesn't know.
-              estimatedTotalUnits: typeof s.estimatedTotalUnits === "number" && s.estimatedTotalUnits >= 0 && s.estimatedTotalUnits <= 50000
-                ? Math.round(s.estimatedTotalUnits)
-                : undefined,
+              estimatedTotalUnits: normalized.estimatedTotalUnits,
             });
           }
         }
@@ -691,7 +754,15 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
     const sb = b.confidenceScore + (b.combinabilityScore ?? 50);
     return sb - sa;
   });
-  return results;
+  const deduped: ResearchedCommunity[] = [];
+  const seenCommunities = new Set<string>();
+  for (const result of results) {
+    const key = `${normalizeCommunityName(result.name)}|${result.city.toLowerCase()}|${result.state.toLowerCase()}`;
+    if (seenCommunities.has(key)) continue;
+    seenCommunities.add(key);
+    deduped.push(result);
+  }
+  return deduped;
 }
 
 // ─── TOP MARKETS ─────────────────────────────────────────────────────────────

@@ -327,6 +327,12 @@ export default function AddSingleListing() {
     setSelectedCommunity(null);
     setCommunities([]);
     setManualMode(false);
+    setCityWideMode(false);
+    setCommunityInventory(null);
+    setSelectedBedrooms(null);
+    setFindResult(null);
+    setSkipUrls([]);
+    setStreetAddress("");
     setResearchLoading(true);
     try {
       const res = await apiRequest("POST", "/api/community/research", {
@@ -387,6 +393,7 @@ export default function AddSingleListing() {
     setSelectedCommunity(c);
     setPropertyName(c.name);
     setManualMode(false);
+    setCityWideMode(false);
     // Reset auto-discovery state when switching communities.
     setSelectedBedrooms(null);
     setFindResult(null);
@@ -1245,6 +1252,10 @@ export default function AddSingleListing() {
                       setSelectedCommunity(null);
                       setCommunityInventory(null);
                       setManualMode(false);
+                      setSelectedBedrooms(null);
+                      setFindResult(null);
+                      setSkipUrls([]);
+                      setStreetAddress("");
                     }}
                     data-testid="button-city-wide"
                   >
@@ -1321,7 +1332,7 @@ export default function AddSingleListing() {
                                   estimatedTotalUnits is missing. */}
                               {typeof c.estimatedTotalUnits === "number" && c.estimatedTotalUnits > 0 && (
                                 <Badge variant="outline" className="text-[10px]">
-                                  ~{c.estimatedTotalUnits.toLocaleString()} units
+                                  ~{c.estimatedTotalUnits.toLocaleString()} resort units
                                 </Badge>
                               )}
                             </div>
@@ -1367,19 +1378,24 @@ export default function AddSingleListing() {
                   endpoint discovers the address + Zillow URL + photos
                   automatically, so the operator only picks the BR. — */}
             {(selectedCommunity || cityWideMode) && (() => {
-              // CODEX NOTE (2026-05-05, claude/any-bedroom): always
-              // show 1-5 BR + "Any" buttons. Highlight the BR
-              // counts the picked community is known to offer
-              // (from the research scan's availableBedrooms array)
-              // so the operator sees Claude's recommendation
-              // without being LIMITED to it. City-wide mode shows
-              // all five + Any with no highlight (no community
-              // anchor). "Any" tells the server to skip the
-              // BR-match gate.
-              const allBedrooms = [1, 2, 3, 4, 5];
-              const typicalBedrooms = !cityWideMode && selectedCommunity?.availableBedrooms && selectedCommunity.availableBedrooms.length > 0
-                ? new Set(selectedCommunity.availableBedrooms)
-                : null;
+              // CODEX NOTE (2026-05-05, codex/resort-bedroom-options):
+              // Resort mode should render ONLY the bedroom counts
+              // returned for that resort. Showing generic 1-5BR
+              // buttons caused operators to pick sizes a resort
+              // does not offer, which then made per-resort lookup
+              // look broken. City-wide mode remains broad because
+              // it is not anchored to one resort. "Any" still
+              // exists as the explicit escape hatch.
+              const confirmedBedrooms = !cityWideMode
+                ? Array.from(new Set(selectedCommunity?.availableBedrooms ?? []))
+                    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12)
+                    .sort((a, b) => a - b)
+                : [];
+              const bedroomOptions = cityWideMode
+                ? [1, 2, 3, 4, 5]
+                : confirmedBedrooms.length > 0
+                  ? confirmedBedrooms
+                  : [2, 3, 4];
               return (
                 <div className="space-y-4 border-t pt-5 mb-6">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -1453,25 +1469,24 @@ export default function AddSingleListing() {
                     )}
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {allBedrooms.map((br) => {
+                    {bedroomOptions.map((br) => {
                       const active = selectedBedrooms === br;
-                      const isTypical = typicalBedrooms?.has(br) ?? false;
                       return (
                         <button
                           key={br}
                           type="button"
                           onClick={() => setSelectedBedrooms(br)}
-                          title={isTypical ? `${selectedCommunity?.name} typically offers ${br}BR units` : undefined}
+                          title={!cityWideMode && confirmedBedrooms.length > 0 ? `${selectedCommunity?.name} offers ${br}BR units` : undefined}
                           className={`px-4 py-2 rounded-md border text-sm font-medium transition-colors ${
                             active
                               ? "bg-primary text-primary-foreground border-primary"
-                              : isTypical
+                              : !cityWideMode && confirmedBedrooms.length > 0
                                 ? "bg-card border-primary/40 ring-1 ring-primary/20 hover:border-primary"
                                 : "bg-card hover:border-primary/50"
                           }`}
                           data-testid={`button-bedrooms-${br}`}
                         >
-                          {br}BR{isTypical ? " ★" : ""}
+                          {br}BR
                         </button>
                       );
                     })}
@@ -1490,14 +1505,14 @@ export default function AddSingleListing() {
                       Any
                     </button>
                   </div>
-                  {typicalBedrooms && (
+                  {!cityWideMode && confirmedBedrooms.length > 0 && (
                     <p className="text-xs text-muted-foreground">
-                      ★ = sizes {selectedCommunity?.name} typically offers. Pick "Any" to search all sizes.
+                      Showing the confirmed bedroom sizes for {selectedCommunity?.name}. Pick "Any" to search all sizes.
                     </p>
                   )}
-                  {!typicalBedrooms && !cityWideMode && (
+                  {confirmedBedrooms.length === 0 && !cityWideMode && (
                     <p className="text-xs text-amber-700">
-                      We don't have a confirmed bedroom mix for this community — pick the size you want or use "Any".
+                      We don't have a confirmed bedroom mix for this community — use "Any" for the safest search, or pick a common condo size.
                     </p>
                   )}
                 </div>
