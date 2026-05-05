@@ -81,6 +81,12 @@ type CommunityResult = {
   // counts this community offers. Wizard uses this to render
   // valid bedroom buttons instead of a generic 1-5 picker.
   availableBedrooms?: number[];
+  // CODEX NOTE (2026-05-04, claude/single-listing-cap-10-biggest):
+  // Rough total condo/townhouse unit count for the resort.
+  // Wizard sorts by this descending and shows the top 10
+  // biggest communities per city. Optional — falls back to 0
+  // for sort key when missing.
+  estimatedTotalUnits?: number;
 };
 
 type QualifierPlatformResult = {
@@ -328,8 +334,17 @@ export default function AddSingleListing() {
         mode: "single",
       });
       const data = await res.json();
+      // CODEX NOTE (2026-05-04, claude/single-listing-cap-10-biggest):
+      // Sort by estimatedTotalUnits desc and slice to top 10 so the
+      // operator sees the biggest resorts first. Communities with no
+      // unit estimate fall to the bottom (treated as 0).
       const list: CommunityResult[] = Array.isArray(data?.communities)
-        ? data.communities.slice(0, 20)
+        ? [...data.communities]
+            .sort(
+              (a: CommunityResult, b: CommunityResult) =>
+                (b.estimatedTotalUnits ?? 0) - (a.estimatedTotalUnits ?? 0),
+            )
+            .slice(0, 10)
         : [];
       setCommunities(list);
       if (list.length === 0) {
@@ -1216,7 +1231,7 @@ export default function AddSingleListing() {
               <div className="mb-6">
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-semibold">
-                    Top {communities.length} {communities.length === 1 ? "community" : "communities"} in {pickedCity?.city}
+                    Top {communities.length} biggest {communities.length === 1 ? "community" : "communities"} in {pickedCity?.city}
                   </h3>
                   <button
                     type="button"
@@ -1250,6 +1265,15 @@ export default function AddSingleListing() {
                                 <Star className="h-2.5 w-2.5 mr-0.5" />
                                 {c.confidenceScore}
                               </Badge>
+                              {/* CODEX NOTE (2026-05-04, claude/single-listing-cap-10-biggest):
+                                  Rough total unit count from Claude's research prompt.
+                                  Helps the operator gauge resort size. Hidden when
+                                  estimatedTotalUnits is missing. */}
+                              {typeof c.estimatedTotalUnits === "number" && c.estimatedTotalUnits > 0 && (
+                                <Badge variant="outline" className="text-[10px]">
+                                  ~{c.estimatedTotalUnits.toLocaleString()} units
+                                </Badge>
+                              )}
                             </div>
                             {c.unitTypes && (
                               <p className="text-xs text-muted-foreground mt-1 italic">{c.unitTypes}</p>

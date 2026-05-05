@@ -27,6 +27,12 @@ export type ResearchedCommunity = {
   // field. Empty array means "Claude doesn't know" — wizard falls
   // back to the generic picker in that case.
   availableBedrooms?: number[];
+  // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
+  // Single-mode research returns Claude's rough estimate of the
+  // resort's total unit count (e.g. Reunion ~2000, Santa Maria
+  // ~75). Wizard sorts by this descending and slices to the top
+  // 10 biggest. Combo flow ignores. 0 means Claude doesn't know.
+  estimatedTotalUnits?: number;
 };
 
 // Pull a bedroom count out of a SearchAPI airbnb engine listing. The
@@ -504,11 +510,19 @@ Use (1) the search results below AND (2) your own world knowledge. **You MAY (an
 
 CRITICAL: For each resort, return availableBedrooms as an array of integers — the bedroom counts that resort actually offers (e.g. Santa Maria Resort: [2, 3]; Pili Mai: [2, 3, 4]; Caribe Cove: [2, 3, 4]; Reunion Resort: [2, 3, 4, 5, 6, 7, 8]). Only include bedroom counts you are confident the resort offers. If you don't know, return an empty array []. The wizard uses this to render bedroom buttons — wrong counts cause failed Zillow lookups, missing counts hide valid options. Default to including 2 and 3 if you're sure the resort exists but uncertain about exact mix. NEVER include studio/0 or 1 unless the resort is genuinely studio/1BR-dominated.
 
+ALSO CRITICAL: For each resort, return estimatedTotalUnits — your best estimate of the TOTAL number of condo/townhouse units in the resort (rough is fine). The wizard sorts by this descending and shows the biggest 10 first. Examples:
+  - Caribe Cove (Kissimmee): ~250 units
+  - Reunion Resort (Kissimmee): ~2000 units across the whole community
+  - Santa Maria Resort (Fort Myers Beach): ~75 units (single-tower condo)
+  - Pili Mai (Poipu Kai): ~140 townhomes
+  - Edgewater Beach Resort (Panama City Beach): ~520 units
+A rough order-of-magnitude estimate is much better than null. Use 0 only when you have NO idea about the resort's size.
+
 SEARCH RESULTS for "${city}, ${state}":
 ${unique.length > 0 ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n") : "(no organic results — rely on world knowledge)"}
 
 Output JSON array. Each element:
-{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
+{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
 
 Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
       : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
@@ -639,6 +653,14 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
                       .map((n: any) => typeof n === "number" ? Math.round(n) : null)
                       .filter((n: number | null): n is number => n != null && n >= 1 && n <= 12),
                   )).sort((a, b) => a - b)
+                : undefined,
+              // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
+              // estimatedTotalUnits comes back as a plain integer
+              // from Claude. Clamp to [0, 50000] to prevent a
+              // misformatted response from breaking the wizard's
+              // sort. 0 = Claude doesn't know.
+              estimatedTotalUnits: typeof s.estimatedTotalUnits === "number" && s.estimatedTotalUnits >= 0 && s.estimatedTotalUnits <= 50000
+                ? Math.round(s.estimatedTotalUnits)
                 : undefined,
             });
           }
