@@ -15686,31 +15686,59 @@ Return ONLY compact JSON with this exact shape:
       return res.json({ count: cached.count, sampleUrls: cached.sampleUrls, cached: true });
     }
 
+    // CODEX NOTE (2026-05-05, claude/inventory-coverage): expanded
+    // query coverage. Operator pointed out a "100-unit resort"
+    // showing 20 listings was suspicious. Real reasons the count
+    // falls short of "total units":
+    //   - Most condo units NEVER list on Zillow (owner-occupied,
+    //     long-term rental, etc). Zillow homedetails are primarily
+    //     for-sale + recently-sold + selected off-market.
+    //   - Google site: search caps at ~10-20 results per page.
+    //   - Quoted "{community}" misses listings whose title doesn't
+    //     include the resort name (just "3920 Wyllie Rd APT 101").
+    //
+    // Wider net here: 6 query variants, num=20 each, run in
+    // parallel. Catches more title variations + spelling
+    // variations + bedroom-anchored queries. Caps at 100 unique
+    // URLs (Google's hard ceiling on most queries).
     const queries = [
-      `site:zillow.com "${communityName}" ${city} ${state}`.replace(/\s+/g, " ").trim(),
+      `site:zillow.com "${communityName}" "${city}" "${state}"`,
+      `site:zillow.com "${communityName}" ${city}`,
       `site:zillow.com "${communityName}"`,
-    ];
+      `site:zillow.com "${communityName}" condo`,
+      `site:zillow.com "${communityName}" 2 bedroom`,
+      `site:zillow.com "${communityName}" 3 bedroom`,
+    ].map((q) => q.replace(/\s+/g, " ").trim());
     const seen = new Set<string>();
-    for (const q of queries) {
+    const queryResults = await Promise.all(queries.map(async (q) => {
       try {
         const resp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${apiKey}`,
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=20&api_key=${apiKey}`,
           { signal: AbortSignal.timeout(15_000) },
         );
-        if (!resp.ok) continue;
+        if (!resp.ok) return [] as string[];
         const data = await resp.json() as any;
         const organic = (data.organic_results || []) as Array<{ link?: string }>;
+        const urls: string[] = [];
         for (const r of organic) {
           const link = String(r.link ?? "");
           if (!/zillow\.com\/homedetails\//i.test(link)) continue;
-          seen.add(link.toLowerCase());
+          urls.push(link);
         }
+        return urls;
       } catch (e: any) {
         console.warn(`[community-inventory] SearchAPI error for "${q}": ${e?.message ?? e}`);
+        return [] as string[];
       }
+    }));
+    for (const urls of queryResults) {
+      for (const u of urls) seen.add(u.toLowerCase());
     }
     const sampleUrls = Array.from(seen).slice(0, 5);
     const count = seen.size;
+    console.log(
+      `[community-inventory] "${communityName}" / ${city}, ${state}: ${count} unique homedetails URLs across ${queries.length} queries`,
+    );
     communityInventoryCache.set(cacheKey, { count, sampleUrls, ts: Date.now() });
     res.json({ count, sampleUrls, cached: false });
   });
