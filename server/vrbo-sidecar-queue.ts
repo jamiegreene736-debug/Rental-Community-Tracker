@@ -325,6 +325,19 @@ const requestKeyIndex = new Map<string, string>(); // requestKey → id
 let lastWorkerPollAt: number | null = null;
 const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 
+// CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator-
+// controlled paused flag. When true, next() returns null even when
+// pending requests exist — the worker keeps polling (so the
+// heartbeat / "online" indicator stays green) but it doesn't pick
+// up any work. Combined with cancelActiveAndPendingRequests, this
+// gives the operator a hard "Stop" — currently-running ops are
+// cancelled AND new ones won't start. "Start" just clears the
+// flag. State is in-memory only — a server restart resets to
+// unpaused, which is the safer default.
+let queuePaused = false;
+let queuePausedAt: number | null = null;
+let queuePausedReason: string | null = null;
+
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
 const PENDING_TTL_MS = 5 * 60 * 1000;
@@ -511,6 +524,11 @@ export function enqueue(opts: SidecarVrboParams): {
 export function next(): SidecarRequest | null {
   cleanup();
   stampHeartbeat();
+  // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): paused
+  // queue returns null even when pending work exists. The worker
+  // keeps polling (heartbeat stays green so the operator sees
+  // it's still alive) but no work gets dispatched until resume.
+  if (queuePaused) return null;
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
@@ -520,6 +538,49 @@ export function next(): SidecarRequest | null {
   oldest.status = "in_progress";
   oldest.claimedAt = nowMs();
   return oldest;
+}
+
+// CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator
+// pause/resume controls. Pause does NOT cancel active or pending
+// work — the operator usually wants to also call
+// cancelActiveAndPendingRequests() to stop existing jobs in
+// flight. The two are kept separate so `pauseQueue()` is safe
+// to call without losing in-progress work, and the API endpoint
+// can compose both behaviors for the "Stop" button.
+export function pauseQueue(reason: string = "paused by operator"): {
+  alreadyPaused: boolean;
+} {
+  if (queuePaused) return { alreadyPaused: true };
+  queuePaused = true;
+  queuePausedAt = nowMs();
+  queuePausedReason = reason.slice(0, 200);
+  return { alreadyPaused: false };
+}
+
+export function resumeQueue(): { wasResumed: boolean } {
+  if (!queuePaused) return { wasResumed: false };
+  queuePaused = false;
+  queuePausedAt = null;
+  queuePausedReason = null;
+  return { wasResumed: true };
+}
+
+export function isQueuePaused(): {
+  paused: boolean;
+  pausedAt: string | null;
+  pausedAgeMs: number | null;
+  reason: string | null;
+} {
+  if (!queuePaused) {
+    return { paused: false, pausedAt: null, pausedAgeMs: null, reason: null };
+  }
+  const at = queuePausedAt ?? nowMs();
+  return {
+    paused: true,
+    pausedAt: new Date(at).toISOString(),
+    pausedAgeMs: nowMs() - at,
+    reason: queuePausedReason,
+  };
 }
 
 /**
@@ -715,13 +776,47 @@ export function getHeartbeat(): {
   lastWorkerPollAt: string | null;
   ageMs: number | null;
   onlineWindowMs: number;
+  // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): added paused
+  // + activeJob to the heartbeat so the status badge can render
+  // three states (online/offline/paused) and surface what op is
+  // currently running with how long it's been running.
+  paused: boolean;
+  pausedAt: string | null;
+  activeJob: {
+    id: string;
+    label: string;
+    opType: SidecarOpType;
+    stage?: string;
+    activeSec: number;
+  } | null;
 } {
+  const pausedState = isQueuePaused();
+  // Inline-find the in-progress request without paying for a full
+  // getStatus() walk — heartbeat is polled every 5-30s by the UI.
+  let activeJob: ReturnType<typeof getHeartbeat>["activeJob"] = null;
+  const now = nowMs();
+  for (const r of queue.values()) {
+    if (r.status !== "in_progress") continue;
+    const activeSec = r.claimedAt ? Math.max(0, Math.round((now - r.claimedAt) / 1000)) : 0;
+    if (!activeJob || activeSec > activeJob.activeSec) {
+      activeJob = {
+        id: r.id,
+        label: labelForOpType(r.opType),
+        opType: r.opType as SidecarOpType,
+        stage: r.stage,
+        activeSec,
+      };
+    }
+  }
   if (lastWorkerPollAt === null) {
     return {
       isOnline: false,
       lastWorkerPollAt: null,
       ageMs: null,
       onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+      paused: pausedState.paused,
+      pausedAt: pausedState.pausedAt,
+      activeJob,
     };
   }
   const ageMs = nowMs() - lastWorkerPollAt;
@@ -730,7 +825,30 @@ export function getHeartbeat(): {
     lastWorkerPollAt: new Date(lastWorkerPollAt).toISOString(),
     ageMs,
     onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+    paused: pausedState.paused,
+    pausedAt: pausedState.pausedAt,
+    activeJob,
   };
+}
+
+// Compact label for an op-type — mirrors the longer form in
+// getStatus().describeRequest but without per-request params.
+function labelForOpType(opType: string): string {
+  switch (opType) {
+    case "airbnb_search": return "Airbnb search";
+    case "vrbo_search": return "VRBO search";
+    case "booking_search": return "Booking.com search";
+    case "pm_site_search": return "PM website search";
+    case "pm_url_check_batch": return "PM rate checks";
+    case "pm_url_check": return "PM rate check";
+    case "google_serp": return "Google discovery";
+    case "vrbo_photo_scrape": return "VRBO photo scrape";
+    case "zillow_photo_scrape": return "Zillow photo scrape";
+    case "vrbo_upload_photos": return "VRBO photo upload";
+    case "booking_upload_photos": return "Booking.com photo upload";
+    case "guesty_disconnect_channel": return "Guesty disconnect";
+    default: return opType;
+  }
 }
 
 /**

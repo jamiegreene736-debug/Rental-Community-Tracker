@@ -25,8 +25,9 @@ import {
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
-  WalletCards, Landmark, Clock3,
+  WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause,
 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
@@ -3029,72 +3030,213 @@ function sourceBadgeClass(src: string) {
   }
 }
 
-// Local-Mac sidecar status indicator. The buy-in tool delegates Airbnb,
-// VRBO, Booking.com, and PM website searches to a daemon running on the
-// operator's Mac, which drives their real Chrome via CDP. When the
-// Mac is asleep / Claude Code closed without the daemon installed /
-// daemon crashed, the operator should know immediately. Polls /heartbeat
-// every 30s anywhere Operations is mounted.
+// Local-Mac sidecar status indicator + manual stop/start controls.
+// The buy-in tool delegates Airbnb, VRBO, Booking.com, and PM website
+// searches to a daemon running on the operator's Mac, which drives
+// their real Chrome via CDP. When the Mac is asleep / Claude Code
+// closed without the daemon installed / daemon crashed, the operator
+// should know immediately. Polls /heartbeat every 5s anywhere
+// Operations is mounted (was 30s; tighter cadence now that the popover
+// surfaces a live "active job for Ns" counter and the operator wants
+// to see it tick during a search).
+//
+// CODEX NOTE (2026-05-04, claude/sidecar-stop-start): the popover adds
+// Stop / Start buttons. Stop = cancel active+pending + pause queue
+// (worker keeps polling so heartbeat stays green, but next() returns
+// null until Start). Start = clear pause flag. Cancelled jobs do NOT
+// auto-resume — those are gone. Used when the sidecar "goes rogue"
+// (driving Chrome unexpectedly, hung on a bot wall, etc.).
+type SidecarHeartbeat = {
+  isOnline: boolean;
+  ageMs: number | null;
+  lastWorkerPollAt: string | null;
+  paused: boolean;
+  pausedAt: string | null;
+  activeJob: {
+    id: string;
+    label: string;
+    opType: string;
+    stage?: string;
+    activeSec: number;
+  } | null;
+};
+
 function SidecarStatusBadge() {
-  const [state, setState] = useState<{
-    isOnline: boolean | null;
-    ageMs: number | null;
-    everSeen: boolean;
-  }>({ isOnline: null, ageMs: null, everSeen: false });
+  const { toast } = useToast();
+  const [state, setState] = useState<{ data: SidecarHeartbeat | null; everSeen: boolean }>({
+    data: null,
+    everSeen: false,
+  });
+  const [acting, setActing] = useState<"stop" | "start" | null>(null);
+
+  const refresh = async (): Promise<SidecarHeartbeat | null> => {
+    try {
+      const r = await fetch("/api/vrbo-sidecar/heartbeat", { cache: "no-store" });
+      if (!r.ok) return null;
+      const data = (await r.json()) as SidecarHeartbeat;
+      setState({ data, everSeen: data.everSeen ?? !!data.lastWorkerPollAt });
+      return data;
+    } catch {
+      setState((p) => ({ ...p, data: p.data ? { ...p.data, isOnline: false } : null }));
+      return null;
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
-      try {
-        const r = await fetch("/api/vrbo-sidecar/heartbeat");
-        if (!r.ok) return;
-        const data = await r.json() as { isOnline: boolean; ageMs: number | null; lastWorkerPollAt: string | null };
-        if (cancelled) return;
-        setState({
-          isOnline: data.isOnline,
-          ageMs: data.ageMs,
-          everSeen: !!data.lastWorkerPollAt,
-        });
-      } catch {
-        if (!cancelled) setState((p) => ({ ...p, isOnline: false }));
-      }
+      if (cancelled) return;
+      await refresh();
     };
     tick();
-    const id = setInterval(tick, 30_000);
+    // 5s cadence so the active-job counter ticks visibly when a job
+    // is running. Heartbeat endpoint is cheap (in-memory state read).
+    const id = setInterval(tick, 5_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  if (state.isOnline === null) {
-    // First heartbeat poll hasn't returned yet — render nothing rather
-    // than flicker a "checking…" state.
+  const stopSidecar = async () => {
+    setActing("stop");
+    try {
+      const r = await apiRequest("POST", "/api/vrbo-sidecar/stop", {
+        reason: "Stop button (Operations UI)",
+      });
+      const j = await r.json();
+      toast({
+        title: "Sidecar stopped",
+        description: j.cancelled > 0
+          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Worker is paused — click Start to resume.`
+          : "Worker is paused — click Start to resume.",
+      });
+      await refresh();
+    } catch (e: any) {
+      toast({ title: "Stop failed", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const startSidecar = async () => {
+    setActing("start");
+    try {
+      await apiRequest("POST", "/api/vrbo-sidecar/start", {});
+      toast({ title: "Sidecar started", description: "Worker can pick up new jobs again." });
+      await refresh();
+    } catch (e: any) {
+      toast({ title: "Start failed", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const data = state.data;
+  if (!data) {
+    // First heartbeat poll hasn't returned yet — render nothing.
     return null;
   }
-  if (state.isOnline) {
-    return (
-      <Badge
-        className="gap-1 text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300 cursor-help"
-        title={
-          state.ageMs != null
-            ? `Local Mac sidecar polled ${Math.round(state.ageMs / 1000)}s ago. Airbnb, VRBO, Booking.com, and PM searches drive through your real Chrome.`
-            : "Local Mac sidecar online."
-        }
-      >
-        <CheckCircle2 className="h-3 w-3" /> Sidecar live
-      </Badge>
+
+  // Three visual states (priority order: paused > offline > online):
+  //   - Paused (by operator): yellow-orange "Paused" badge
+  //   - Offline (Mac asleep / daemon down): amber "Sidecar offline"
+  //   - Online idle: green "Sidecar live"
+  //   - Online with active job: green "Sidecar working {Ns}"
+  let badgeContent: React.ReactNode;
+  let badgeClass: string;
+  if (data.paused) {
+    badgeContent = <><Pause className="h-3 w-3" /> Sidecar paused</>;
+    badgeClass = "bg-orange-100 text-orange-900 dark:bg-orange-950/40 dark:text-orange-300 border-orange-400";
+  } else if (!data.isOnline) {
+    badgeContent = <><AlertCircle className="h-3 w-3" /> Sidecar offline</>;
+    badgeClass = "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400";
+  } else if (data.activeJob) {
+    badgeContent = (
+      <>
+        <Loader2 className="h-3 w-3 animate-spin" /> Sidecar working {data.activeJob.activeSec}s
+      </>
     );
+    badgeClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300";
+  } else {
+    badgeContent = <><CheckCircle2 className="h-3 w-3" /> Sidecar live</>;
+    badgeClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300";
   }
-  // Offline: distinguish "never seen" from "stale" so the operator
-  // knows whether to install the daemon or just wake their Mac.
-  const tooltip = state.everSeen
-    ? `Last poll ${state.ageMs != null ? Math.round(state.ageMs / 60_000) + "m" : "?"} ago — Mac may be asleep, daemon crashed, or Claude Code closed without launchd handoff. find-buy-in is using its server-side fallback paths instead.`
-    : "Local Mac daemon never connected. find-buy-in is using server-side fallbacks. Install instructions: ~/Downloads/vrbo-sidecar/README.md";
+
   return (
-    <Badge
-      className="gap-1 text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400 cursor-help"
-      title={tooltip}
-    >
-      <AlertCircle className="h-3 w-3" /> Sidecar offline
-    </Badge>
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex"
+          aria-label="Sidecar controls"
+          data-testid="button-sidecar-status"
+        >
+          <Badge className={`gap-1 text-[10px] cursor-pointer ${badgeClass}`}>
+            {badgeContent}
+          </Badge>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80 text-xs space-y-3" align="end">
+        <div>
+          <div className="font-semibold text-sm mb-1">Local Mac sidecar</div>
+          <div className="text-muted-foreground leading-snug">
+            {data.paused
+              ? "Paused by operator. Worker is polling but won't pick up jobs until you Start."
+              : !data.isOnline
+                ? state.everSeen
+                  ? `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. Mac asleep, daemon crashed, or launchd not running.`
+                  : "Daemon never connected. See ~/Downloads/vrbo-sidecar/README.md to install."
+                : data.activeJob
+                  ? `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Currently driving Chrome.`
+                  : `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Idle, ready for work.`}
+          </div>
+        </div>
+
+        {data.activeJob && (
+          <div className="border-l-2 border-emerald-400 pl-2 space-y-0.5">
+            <div className="font-medium text-foreground flex items-center gap-1.5">
+              <Loader2 className="h-3 w-3 animate-spin text-emerald-600" />
+              {data.activeJob.label}
+            </div>
+            {data.activeJob.stage && (
+              <div className="text-muted-foreground italic">{data.activeJob.stage}</div>
+            )}
+            <div className="font-mono text-[10px] text-muted-foreground">
+              running {data.activeJob.activeSec}s
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-8 text-xs"
+            disabled={acting !== null || data.paused}
+            onClick={stopSidecar}
+            data-testid="button-sidecar-stop"
+          >
+            <Square className="h-3 w-3 mr-1" />
+            {acting === "stop" ? "Stopping…" : "Stop"}
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            className="flex-1 h-8 text-xs"
+            disabled={acting !== null || !data.paused}
+            onClick={startSidecar}
+            data-testid="button-sidecar-start"
+          >
+            <Play className="h-3 w-3 mr-1" />
+            {acting === "start" ? "Starting…" : "Start"}
+          </Button>
+        </div>
+
+        <div className="text-[10px] text-muted-foreground leading-snug">
+          Stop cancels any running job AND blocks new jobs. Start unblocks new
+          jobs (cancelled jobs don't auto-restart). Worker keeps polling either
+          way — heartbeat tracks daemon liveness, not pause state.
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

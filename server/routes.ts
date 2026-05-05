@@ -10781,6 +10781,43 @@ Return ONLY compact JSON with this exact shape:
     return res.json({ ok: true, ...result });
   });
 
+  // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): manual
+  // stop/start controls for the operator's local Chrome sidecar.
+  // STOP composes two actions: cancelActiveAndPendingRequests +
+  // pauseQueue. Currently-running work is killed AND new work is
+  // blocked until START. The worker keeps polling (heartbeat
+  // stays green so the operator sees it's still alive) but
+  // next() returns null while paused. START just clears the
+  // paused flag — does NOT auto-restart any cancelled jobs;
+  // those are gone for good.
+  //
+  // Use case: Jamie sees the sidecar going rogue (driving Chrome
+  // when it shouldn't, hung on a bot wall, stuck on the wrong
+  // page). Click Stop in the portal, the daemon idles within
+  // ~2s, and Jamie can investigate / let the operator's Chrome
+  // recover before clicking Start.
+  app.post("/api/vrbo-sidecar/stop", async (req, res) => {
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 200)
+      : "stopped by operator from Operations UI";
+    const { cancelActiveAndPendingRequests, pauseQueue } = await import("./vrbo-sidecar-queue");
+    const cancelResult = cancelActiveAndPendingRequests(reason);
+    const pauseResult = pauseQueue(reason);
+    return res.json({
+      ok: true,
+      paused: true,
+      alreadyPaused: pauseResult.alreadyPaused,
+      ...cancelResult,
+    });
+  });
+
+  app.post("/api/vrbo-sidecar/start", async (_req, res) => {
+    const { resumeQueue } = await import("./vrbo-sidecar-queue");
+    const result = resumeQueue();
+    return res.json({ ok: true, paused: false, ...result });
+  });
+
   // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
   //
   // The Chrome extension at ~/Downloads/vrbo-sidecar-cookie-extension/
