@@ -680,15 +680,16 @@ export default function Home() {
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 mb-6">
           <Link href="/add-community">
             <Button
-              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg px-4 py-3 text-left bg-[linear-gradient(135deg,hsl(var(--brand-teal)),hsl(var(--brand-blue)))] shadow-sm"
+              variant="outline"
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg border-[hsl(var(--brand-blue)/0.26)] px-4 py-3 text-left hover:bg-[hsl(var(--brand-blue)/0.05)]"
               data-testid="button-add-community"
             >
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white/18">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--brand-blue)/0.10)] text-[hsl(var(--brand-blue))]">
                 <Layers className="h-5 w-5" />
               </span>
               <span className="min-w-0">
                 <span className="block text-sm font-semibold leading-tight">Add Combo Listing</span>
-                <span className="block text-[11px] font-normal text-white/80 leading-snug mt-1">Bundle nearby units into one listing</span>
+                <span className="block text-[11px] font-normal text-muted-foreground leading-snug mt-1">Bundle nearby units into one listing</span>
               </span>
             </Button>
           </Link>
@@ -699,15 +700,16 @@ export default function Home() {
               save flow as the combo wizard (community_drafts table). */}
           <Link href="/add-single-listing">
             <Button
-              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg px-4 py-3 text-left bg-[linear-gradient(135deg,hsl(var(--brand-orange)),hsl(var(--brand-teal)))] shadow-sm"
+              variant="outline"
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg border-[hsl(var(--brand-orange)/0.45)] px-4 py-3 text-left hover:bg-[hsl(var(--brand-orange)/0.08)]"
               data-testid="button-add-single-listing"
             >
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white/20">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--brand-orange)/0.14)] text-[hsl(var(--brand-orange))]">
                 <HomeIcon className="h-5 w-5" />
               </span>
               <span className="min-w-0">
                 <span className="block text-sm font-semibold leading-tight">Add Single Listing</span>
-                <span className="block text-[11px] font-normal text-white/85 leading-snug mt-1">Verify one standalone condo or townhouse</span>
+                <span className="block text-[11px] font-normal text-muted-foreground leading-snug mt-1">Verify one standalone condo or townhouse</span>
               </span>
             </Button>
           </Link>
