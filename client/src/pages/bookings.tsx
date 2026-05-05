@@ -3040,18 +3040,19 @@ function sourceBadgeClass(src: string) {
 // surfaces a live "active job for Ns" counter and the operator wants
 // to see it tick during a search).
 //
-// CODEX NOTE (2026-05-04, claude/sidecar-stop-start): the popover adds
-// Stop / Start buttons. Stop = cancel active+pending + pause queue
-// (worker keeps polling so heartbeat stays green, but next() returns
-// null until Start). Start = clear pause flag. Cancelled jobs do NOT
-// auto-resume — those are gone. Used when the sidecar "goes rogue"
-// (driving Chrome unexpectedly, hung on a bot wall, etc.).
+// CODEX NOTE (2026-05-05): these controls manage the Railway queue,
+// not the macOS LaunchAgent process. Stop cancels active+pending work
+// and pauses dispatch. Start clears the pause flag. If the badge is
+// offline, the local Mac daemon must be kickstarted outside the web app.
 type SidecarHeartbeat = {
   isOnline: boolean;
+  everSeen: boolean;
   ageMs: number | null;
   lastWorkerPollAt: string | null;
   paused: boolean;
   pausedAt: string | null;
+  pausedAgeMs: number | null;
+  pausedReason: string | null;
   activeJob: {
     id: string;
     label: string;
@@ -3103,10 +3104,10 @@ function SidecarStatusBadge() {
       });
       const j = await r.json();
       toast({
-        title: "Sidecar stopped",
+        title: "Sidecar queue stopped",
         description: j.cancelled > 0
-          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Worker is paused — click Start to resume.`
-          : "Worker is paused — click Start to resume.",
+          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Queue is paused; click Start Queue to resume dispatch.`
+          : "Queue is paused; click Start Queue to resume dispatch.",
       });
       await refresh();
     } catch (e: any) {
@@ -3116,35 +3117,23 @@ function SidecarStatusBadge() {
     }
   };
 
-  // CODEX NOTE (2026-05-04, claude/sidecar-stop-reset): "Stop &
-  // Reset" cancels in-progress + pending jobs WITHOUT pausing the
-  // queue. Use case: sidecar got stuck on the wrong page / hit a
-  // bot wall, operator just wants to clear it and immediately
-  // start a new search. Differs from plain Stop, which pauses
-  // the queue and forces the operator to click Start before
-  // anything new dispatches. Hits the existing /cancel endpoint
-  // (no pause) — also clears the paused flag if it was already
-  // set so the operator gets a fully clean slate in one click.
+  // CODEX NOTE (2026-05-05): "Stop & Reset" is a composed restart for
+  // the queue: cancel active+pending work, pause dispatch, then unpause
+  // so the next user action gets a clean queue. It cannot restart the
+  // local macOS LaunchAgent if that process is offline.
   const stopAndResetSidecar = async () => {
     setActing("reset");
     try {
-      const r = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
+      const r = await apiRequest("POST", "/api/vrbo-sidecar/stop", {
         reason: "Stop & Reset button (Operations UI)",
       });
       const j = await r.json();
-      // If the queue was paused (operator previously hit Stop), also
-      // unpause it so the reset truly restores a "ready" state in one
-      // click. apiRequest is fire-and-forget here — even if /start
-      // 404s in some unforeseen state, the cancel above already gave
-      // us a clean queue, which is the primary goal.
-      if (data?.paused) {
-        try { await apiRequest("POST", "/api/vrbo-sidecar/start", {}); } catch { /* ignore */ }
-      }
+      await apiRequest("POST", "/api/vrbo-sidecar/start", {});
       toast({
-        title: "Sidecar reset",
+        title: "Sidecar queue reset",
         description: j.cancelled > 0
-          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Ready for a new search.`
-          : "Queue cleared. Ready for a new search.",
+          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Queue is unpaused and ready for a new search.`
+          : "Queue cleared and unpaused. Ready for a new search.",
       });
       await refresh();
     } catch (e: any) {
@@ -3158,7 +3147,10 @@ function SidecarStatusBadge() {
     setActing("start");
     try {
       await apiRequest("POST", "/api/vrbo-sidecar/start", {});
-      toast({ title: "Sidecar started", description: "Worker can pick up new jobs again." });
+      toast({
+        title: "Sidecar queue started",
+        description: "Queue is unpaused. If the badge stays offline, kickstart the local Mac daemon.",
+      });
       await refresh();
     } catch (e: any) {
       toast({ title: "Start failed", description: e?.message ?? String(e), variant: "destructive" });
@@ -3217,16 +3209,28 @@ function SidecarStatusBadge() {
           <div className="font-semibold text-sm mb-1">Local Mac sidecar</div>
           <div className="text-muted-foreground leading-snug">
             {data.paused
-              ? "Paused by operator. Worker is polling but won't pick up jobs until you Start."
+              ? data.isOnline
+                ? "Queue paused by operator. The Mac daemon is still polling, but it will not pick up jobs until you start the queue."
+                : "Queue paused by operator. Start Queue will resume dispatch, but the Mac daemon also needs to be running."
               : !data.isOnline
                 ? state.everSeen
-                  ? `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. Mac asleep, daemon crashed, or launchd not running.`
+                  ? `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. Mac asleep, daemon crashed, or launchd is not running.`
                   : "Daemon never connected. See ~/Downloads/vrbo-sidecar/README.md to install."
                 : data.activeJob
                   ? `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Currently driving Chrome.`
                   : `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Idle, ready for work.`}
           </div>
         </div>
+
+        {!data.isOnline && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-2 py-2 text-[10px] leading-snug text-amber-900">
+            The web app can stop/start the queue, but a stopped local Mac sidecar has to be
+            kickstarted on this computer:
+            <code className="mt-1 block rounded bg-white/70 px-1.5 py-1 font-mono text-[9px] text-amber-950">
+              launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker
+            </code>
+          </div>
+        )}
 
         {data.activeJob && (
           <div className="border-l-2 border-emerald-400 pl-2 space-y-0.5">
@@ -3264,7 +3268,7 @@ function SidecarStatusBadge() {
             data-testid="button-sidecar-start"
           >
             <Play className="h-3 w-3 mr-1" />
-            {acting === "start" ? "Starting…" : "Start"}
+            {acting === "start" ? "Starting…" : "Start Queue"}
           </Button>
         </div>
 
@@ -3289,8 +3293,8 @@ function SidecarStatusBadge() {
 
         <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
           <div>
-            <strong>Stop</strong>: cancel running job + block new jobs.
-            Requires Start to resume.
+            <strong>Stop</strong>: cancel running job + block new queue work.
+            The Mac daemon idles if it is running.
           </div>
           <div>
             <strong>Stop &amp; Reset</strong>: cancel running job + stay
@@ -3298,7 +3302,8 @@ function SidecarStatusBadge() {
             immediately.
           </div>
           <div>
-            <strong>Start</strong>: unblock new jobs (only after Stop).
+            <strong>Start Queue</strong>: unblock new queue work. If the
+            sidecar is offline, kickstart the local Mac daemon too.
           </div>
         </div>
       </PopoverContent>

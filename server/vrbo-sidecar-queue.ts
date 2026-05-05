@@ -773,6 +773,7 @@ export function getStatus(): {
 
 export function getHeartbeat(): {
   isOnline: boolean;
+  everSeen: boolean;
   lastWorkerPollAt: string | null;
   ageMs: number | null;
   onlineWindowMs: number;
@@ -782,6 +783,8 @@ export function getHeartbeat(): {
   // currently running with how long it's been running.
   paused: boolean;
   pausedAt: string | null;
+  pausedAgeMs: number | null;
+  pausedReason: string | null;
   activeJob: {
     id: string;
     label: string;
@@ -811,22 +814,28 @@ export function getHeartbeat(): {
   if (lastWorkerPollAt === null) {
     return {
       isOnline: false,
+      everSeen: false,
       lastWorkerPollAt: null,
       ageMs: null,
       onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
       paused: pausedState.paused,
       pausedAt: pausedState.pausedAt,
+      pausedAgeMs: pausedState.pausedAgeMs,
+      pausedReason: pausedState.reason,
       activeJob,
     };
   }
   const ageMs = nowMs() - lastWorkerPollAt;
   return {
     isOnline: ageMs < HEARTBEAT_ONLINE_WINDOW_MS,
+    everSeen: true,
     lastWorkerPollAt: new Date(lastWorkerPollAt).toISOString(),
     ageMs,
     onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
     paused: pausedState.paused,
     pausedAt: pausedState.pausedAt,
+    pausedAgeMs: pausedState.pausedAgeMs,
+    pausedReason: pausedState.reason,
     activeJob,
   };
 }
