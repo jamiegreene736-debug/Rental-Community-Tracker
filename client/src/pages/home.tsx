@@ -43,6 +43,7 @@ import {
   Star,
   TrendingUp,
   MessageSquare,
+  Home as HomeIcon,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -665,7 +666,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-[1400px] mx-auto px-4 py-6">
-        <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
+        <div className="mb-5 flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
               VacationRentalExpertz Operations Portal
@@ -674,40 +675,75 @@ export default function Home() {
               Manage vacation-rental listings, guest messaging, buy-ins, and revenue workflows from one dashboard
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Link href="/add-community">
-              <Button data-testid="button-add-community">
-                <Plus className="h-4 w-4 mr-2" />
-                Add New Combo Listing
-              </Button>
-            </Link>
-            {/* CODEX NOTE (2026-05-04, claude/single-listing): standalone-
-                unit counterpart to "Add New Combo Listing". Routes to a
-                4-step wizard that requires the address to NOT already
-                be listed on Airbnb / VRBO / Booking.com. Same backend
-                save flow as the combo wizard (community_drafts table). */}
-            <Link href="/add-single-listing">
-              <Button variant="outline" data-testid="button-add-single-listing">
-                <Plus className="h-4 w-4 mr-2" />
-                Add a Single Listing
-              </Button>
-            </Link>
-            <Link href="/inbox">
-              <Button variant="outline" data-testid="button-inbox">
-                <MessageSquare className="h-4 w-4 mr-2" />
-                Guest Inbox
-              </Button>
-            </Link>
-            {/* Operations = consolidated Bookings + Buy-In Tracker + Availability Scanner.
-                The individual pages remain accessible by URL for power users, but the
-                everyday workflow (see booking → find buy-in → record it) lives here. */}
-            <Link href="/bookings">
-              <Button variant="outline" data-testid="button-operations">
-                <CalendarSearch className="h-4 w-4 mr-2" />
-                Operations
-              </Button>
-            </Link>
-          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 mb-6">
+          <Link href="/add-community">
+            <Button
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg px-4 py-3 text-left bg-[linear-gradient(135deg,hsl(var(--brand-teal)),hsl(var(--brand-blue)))] shadow-sm"
+              data-testid="button-add-community"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white/18">
+                <Layers className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold leading-tight">Add Combo Listing</span>
+                <span className="block text-[11px] font-normal text-white/80 leading-snug mt-1">Bundle nearby units into one listing</span>
+              </span>
+            </Button>
+          </Link>
+          {/* CODEX NOTE (2026-05-04, claude/single-listing): standalone-
+              unit counterpart to "Add New Combo Listing". Routes to a
+              4-step wizard that requires the address to NOT already
+              be listed on Airbnb / VRBO / Booking.com. Same backend
+              save flow as the combo wizard (community_drafts table). */}
+          <Link href="/add-single-listing">
+            <Button
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg px-4 py-3 text-left bg-[linear-gradient(135deg,hsl(var(--brand-orange)),hsl(var(--brand-teal)))] shadow-sm"
+              data-testid="button-add-single-listing"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white/20">
+                <HomeIcon className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold leading-tight">Add Single Listing</span>
+                <span className="block text-[11px] font-normal text-white/85 leading-snug mt-1">Verify one standalone condo or townhouse</span>
+              </span>
+            </Button>
+          </Link>
+          <Link href="/inbox">
+            <Button
+              variant="outline"
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg border-[hsl(var(--brand-teal)/0.35)] px-4 py-3 text-left hover:bg-[hsl(var(--brand-teal)/0.06)]"
+              data-testid="button-inbox"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--brand-teal)/0.10)] text-primary">
+                <MessageSquare className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold leading-tight">Guest Inbox</span>
+                <span className="block text-[11px] font-normal text-muted-foreground leading-snug mt-1">Messages, templates, and agreement follow-ups</span>
+              </span>
+            </Button>
+          </Link>
+          {/* Operations = consolidated Bookings + Buy-In Tracker + Availability Scanner.
+              The individual pages remain accessible by URL for power users, but the
+              everyday workflow (see booking → find buy-in → record it) lives here. */}
+          <Link href="/bookings">
+            <Button
+              variant="outline"
+              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg border-[hsl(var(--brand-orange)/0.45)] px-4 py-3 text-left hover:bg-[hsl(var(--brand-orange)/0.08)]"
+              data-testid="button-operations"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--brand-orange)/0.14)] text-[hsl(var(--brand-orange))]">
+                <CalendarSearch className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold leading-tight">Operations</span>
+                <span className="block text-[11px] font-normal text-muted-foreground leading-snug mt-1">Bookings, buy-ins, deposits, and availability</span>
+              </span>
+            </Button>
+          </Link>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
