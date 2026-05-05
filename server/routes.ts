@@ -1157,8 +1157,13 @@ async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: str
       if (u.startsWith("//")) u = `https:${u}`;
       if (!/^https?:\/\//i.test(u)) return;
       if (!/\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(u)) return;
-      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent|agent|broker|team|award|flag|main-bg|hero/i.test(u)) return;
-      if (!/(?:listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/|photos?|mls|media|cdn)/i.test(u)) return;
+      const lower = u.toLowerCase();
+      if (/(?:pinterest|facebook|twitter|instagram|youtube)\.com/i.test(lower)) return;
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent|agent|broker|team|award|flag|main-bg|hero|no-photo|nophoto|map-placeholder/i.test(lower)) return;
+      if (/fl_fgcmls_api|files\.usmre\.com\/[^?#]*_api\.jpe?g/i.test(lower)) return;
+      const isKnownBrokerGallery =
+        /(?:listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/|cloudfront\.net\/img\/)/i.test(lower);
+      if (!isKnownBrokerGallery && !/(?:photos?|mls|media|cdn)/i.test(lower)) return;
       const key = u.replace(/[?#].*$/, "");
       if (seen.has(key)) return;
       seen.add(key);
@@ -16926,6 +16931,22 @@ Return ONLY compact JSON with this exact shape:
       harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
       harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
     ]);
+    const brokerageDetailScore = (url: string): number => {
+      const path = (() => {
+        try {
+          return new URL(url).pathname.toLowerCase();
+        } catch {
+          return url.toLowerCase();
+        }
+      })();
+      if (/(?:\/property-search\/detail\/|\/idx\/listing\/|\/listing\/|\/homedetails\/|\/property\/|pid_|\/homes-for-sale\/)/i.test(path)) {
+        return 0;
+      }
+      if (/(?:\/area\/|\/neighborhood|\/neighborhoods\/|condos-for-sale|condo-condos|\/condos(?:\/|$)|\/listings(?:\/|$)|cdetail_list|subdivisions?)/i.test(path)) {
+        return 2;
+      }
+      return 1;
+    };
     const candidatePriority = (url: string): number => {
       const platform = candidateMeta.get(url.toLowerCase())?.platform
         ?? (/zillow\.com/i.test(url) ? "zillow" : /redfin\.com/i.test(url) ? "redfin" : /realtor\.com/i.test(url) ? "realtor" : "brokerage");
@@ -16935,7 +16956,17 @@ Return ONLY compact JSON with this exact shape:
       if (platform === "realtor") return 3;
       return 4;
     };
-    candidateUrls.sort((a, b) => candidatePriority(a) - candidatePriority(b));
+    candidateUrls.sort((a, b) => {
+      const primary = candidatePriority(a) - candidatePriority(b);
+      if (primary !== 0) return primary;
+      const aPlatform = candidateMeta.get(a.toLowerCase())?.platform;
+      const bPlatform = candidateMeta.get(b.toLowerCase())?.platform;
+      if (aPlatform === "brokerage" && bPlatform === "brokerage") {
+        const detail = brokerageDetailScore(a) - brokerageDetailScore(b);
+        if (detail !== 0) return detail;
+      }
+      return 0;
+    });
     console.log(
       `[find-clean-unit] discovery for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`}): ` +
       `zillow=${platformCounts.zillow} realtor=${platformCounts.realtor} redfin=${platformCounts.redfin} brokerage=${platformCounts.brokerage} total=${candidateUrls.length}`,
@@ -17062,8 +17093,10 @@ Return ONLY compact JSON with this exact shape:
     // not enough to qualify a unit. This mirrors the combo preflight
     // methodology the operator validated.
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
-    // Candidate cap is mode-aware. Community-anchored stays at 15
-    // because a single resort's Zillow inventory rarely tops that.
+    // Candidate cap is mode-aware. Community-anchored is high enough
+    // to walk local brokerage detail pages after OTA-listed Zillow
+    // inventory; older resorts like Santa Maria can have 15+ real
+    // but OTA-contaminated candidates before the first clean source.
     // City-wide bumped to 80 now that Apify search actors surface
     // 200-500+ URLs; the active-listings filter strips stubs
     // upstream so each remaining candidate has a much higher
@@ -17071,7 +17104,7 @@ Return ONLY compact JSON with this exact shape:
     // budget (12 min) still gates total runtime — at ~15-25s
     // each, the loop bails around candidate 30-50 on slow scrape
     // days but walks the full 80 on fast days.
-    const RAW_CAP = isCityWide ? 80 : 15;
+    const RAW_CAP = isCityWide ? 80 : 30;
     const candidateCap = Math.min(candidateUrls.length, RAW_CAP);
 
     // CODEX NOTE (2026-05-04, claude/verify-then-discover): helper
@@ -17413,6 +17446,21 @@ Return ONLY compact JSON with this exact shape:
         const reason = scrapeError
           ? `Photo scrape failed: ${scrapeError}`
           : `Photo scrape returned 0 photos; cannot run reverse-image OTA check.`;
+        attempts.push({
+          url,
+          bedrooms: scrapedBR,
+          bathrooms: scrapedBA,
+          address: addressGuess,
+          bedroomMatches: true,
+          qualifies: null,
+          qualifierReason: qualifier.reason,
+          rejectedBecause: reason,
+        });
+        emit({ type: "candidate-rejected", url, reason });
+        continue;
+      }
+      if (photos.length < 3) {
+        const reason = `Too few usable listing photos: scraped ${photos.length}; need at least 3 unit photos for sample-photo setup and reverse-image confidence.`;
         attempts.push({
           url,
           bedrooms: scrapedBR,
