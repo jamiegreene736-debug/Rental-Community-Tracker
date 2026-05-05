@@ -3302,30 +3302,86 @@ export async function registerRoutes(
     if (!city || !state) {
       return res.status(400).json({ error: "city and state required" });
     }
-    const startedAt = Date.now();
-    const [zillowResult, realtorResult] = await Promise.allSettled([
-      harvestZillowUrlsViaApifySearch(city, state, 500),
-      harvestRealtorUrlsViaApifySearch(city, state, 500),
-    ]);
-    const elapsedMs = Date.now() - startedAt;
-    const summarize = (r: PromiseSettledResult<string[]>) => {
-      if (r.status === "rejected") return { ok: false, error: String((r as any).reason?.message ?? r.reason) };
-      const urls = r.value;
-      return {
-        ok: true,
-        count: urls.length,
-        sample: urls.slice(0, 5),
-      };
+    const token = process.env.APIFY_API_TOKEN;
+    if (!token) {
+      return res.json({ error: "APIFY_API_TOKEN not set on Railway" });
+    }
+
+    // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
+    // Direct Apify calls so we surface the actual HTTP status + body
+    // instead of swallowing them like the production helpers do.
+    const probeActor = async (
+      actor: string,
+      input: Record<string, unknown>,
+    ): Promise<{ httpStatus: number; ok: boolean; bodySnippet: string; itemCount: number; sampleUrls: string[]; elapsedMs: number }> => {
+      const start = Date.now();
+      try {
+        const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actor.replace("/", "~"))}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(60_000),
+        });
+        const elapsedMs = Date.now() - start;
+        const text = await r.text().catch(() => "");
+        let parsedItems: any[] = [];
+        if (r.ok) {
+          try { parsedItems = JSON.parse(text); } catch { /* not JSON */ }
+        }
+        const sampleUrls: string[] = [];
+        if (Array.isArray(parsedItems)) {
+          const visit = (val: any, depth: number) => {
+            if (depth > 4 || sampleUrls.length >= 5) return;
+            if (typeof val === "string" && /^https?:\/\//.test(val)) sampleUrls.push(val);
+            else if (Array.isArray(val)) val.forEach((v) => visit(v, depth + 1));
+            else if (val && typeof val === "object") Object.values(val).forEach((v) => visit(v, depth + 1));
+          };
+          parsedItems.slice(0, 3).forEach((item) => visit(item, 0));
+        }
+        return {
+          httpStatus: r.status,
+          ok: r.ok,
+          bodySnippet: text.slice(0, 600),
+          itemCount: Array.isArray(parsedItems) ? parsedItems.length : 0,
+          sampleUrls,
+          elapsedMs,
+        };
+      } catch (e: any) {
+        return {
+          httpStatus: 0,
+          ok: false,
+          bodySnippet: `EXCEPTION: ${e?.message ?? e}`,
+          itemCount: 0,
+          sampleUrls: [],
+          elapsedMs: Date.now() - start,
+        };
+      }
     };
+
+    const zillowActor = process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper";
+    const realtorActor = process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper";
+    const zillowSearchUrl = `https://www.zillow.com/${citySlugForZillow(city, state)}/condos/`;
+    const realtorSearchUrl = `https://www.realtor.com/realestateandhomes-search/${citySlugForRealtor(city, state)}/type-condo-townhome-row-home-co-op`;
+
+    const [zillowResult, realtorResult] = await Promise.all([
+      probeActor(zillowActor, {
+        startUrls: [{ url: zillowSearchUrl }],
+        maxItems: 50,
+        proxy: { useApifyProxy: true, groups: ["RESIDENTIAL"] },
+      }),
+      probeActor(realtorActor, {
+        startUrls: [{ url: realtorSearchUrl }],
+        maxItems: 50,
+      }),
+    ]);
+
     return res.json({
       city,
       state,
-      elapsedMs,
-      hasApifyToken: !!process.env.APIFY_API_TOKEN,
-      configuredZillowActor: process.env.APIFY_ZILLOW_SEARCH_ACTOR || "epctex~zillow-scraper",
-      configuredRealtorActor: process.env.APIFY_REALTOR_SEARCH_ACTOR || "epctex~realtor-scraper",
-      zillow: summarize(zillowResult),
-      realtor: summarize(realtorResult),
+      hasApifyToken: true,
+      zillow: { actor: zillowActor, searchUrl: zillowSearchUrl, ...zillowResult },
+      realtor: { actor: realtorActor, searchUrl: realtorSearchUrl, ...realtorResult },
     });
   });
 
