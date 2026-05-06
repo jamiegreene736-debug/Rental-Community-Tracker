@@ -101,7 +101,7 @@ function normalizeHttpsUrl(value: unknown): string | null {
 }
 
 function agreementBaseUrl(req: any): string {
-  const configured = process.env.PUBLIC_APP_URL || process.env.APP_URL || process.env.RAILWAY_PUBLIC_DOMAIN;
+  const configured = process.env.PUBLIC_APP_URL || process.env.APP_URL || "https://admin.vacationrentalexpertz.com";
   if (configured) {
     const withProtocol = /^https?:\/\//i.test(configured) ? configured : `https://${configured}`;
     return withProtocol.replace(/\/+$/, "");
@@ -114,6 +114,24 @@ function agreementBaseUrl(req: any): string {
 function isAgreementChannel(channel: string): boolean {
   const raw = channel.toLowerCase();
   return raw.includes("vrbo") || raw.includes("homeaway") || raw.includes("booking");
+}
+
+function displayAgreementChannel(channel: string): string {
+  const raw = channel.toLowerCase();
+  if (raw.includes("homeaway") || raw.includes("vrbo")) return "Homeaway";
+  if (raw.includes("booking")) return "Booking.com";
+  return channel || "Direct booking";
+}
+
+function cancellationPolicyForAgreementChannel(channel: string): string {
+  const display = displayAgreementChannel(channel);
+  if (display === "Booking.com") {
+    return "Cancellation policy: This Booking.com reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown on Booking.com at the time of booking. Any approved refund, cancellation, or modification must be processed according to the Booking.com reservation terms and applicable platform rules.";
+  }
+  if (display === "Homeaway") {
+    return "Cancellation policy: This Homeaway/VRBO reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown on Homeaway/VRBO at the time of booking. Any approved refund, cancellation, or modification must be processed according to the Homeaway/VRBO reservation terms and applicable platform rules.";
+  }
+  return "Cancellation policy: This reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown at the time of booking.";
 }
 
 function buildRentalAgreementText(input: {
@@ -133,16 +151,19 @@ function buildRentalAgreementText(input: {
   const dates = input.checkIn && input.checkOut
     ? `${input.checkIn} through ${input.checkOut}${input.nights ? ` (${input.nights} nights)` : ""}`
     : "the reserved stay dates";
+  const displayChannel = displayAgreementChannel(input.channel);
   return [
     "Rental Agreement and Guest Acknowledgment",
     "",
     `Primary guest: ${input.guestName}`,
     `Property/listing: ${input.propertyName}`,
-    `Booking channel: ${input.channel}`,
+    `Booking channel: ${displayChannel}`,
     `Stay dates: ${dates}`,
     `Booking total: ${money}`,
     input.confirmationCode ? `Confirmation code: ${input.confirmationCode}` : "",
     input.unitSummary ? `Assigned/buy-in unit summary: ${input.unitSummary}` : "",
+    "",
+    cancellationPolicyForAgreementChannel(input.channel),
     "",
     "By signing below, I acknowledge and agree to the following:",
     "",
@@ -2958,7 +2979,15 @@ export async function registerRoutes(
         .where(eq(rentalAgreements.token, token))
         .limit(1);
       if (!agreement) return res.status(404).json({ error: "Agreement not found" });
-      res.json({ agreement });
+      const viewerIp = String(req.headers["x-forwarded-for"] ?? req.socket.remoteAddress ?? "").split(",")[0].trim();
+      res.json({
+        agreement: {
+          ...agreement,
+          channel: displayAgreementChannel(agreement.channel),
+          cancellationPolicy: cancellationPolicyForAgreementChannel(agreement.channel),
+        },
+        viewerIp,
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch rental agreement", message: err.message });
     }
