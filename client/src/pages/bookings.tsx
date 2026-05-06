@@ -773,7 +773,22 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     .filter((row) => row.status === "done" && row.matches.length > 0)
     .filter((row) => nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline)
     .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
-  const selectedDirect = directMatches[0] ?? null;
+  const directMatchByUrl = new Map(directMatches.map((row) => [listingUrlKey(row.candidate.url), row] as const));
+  const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
+    candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url));
+  const bestOptimizedCombo = options
+    .map((option) => {
+      const picks = (option.pools ?? []).map((pool) =>
+        pool.candidates
+          .filter((candidate) => candidate.totalPrice > 0 && candidateQualifies(candidate))
+          .sort((a, b) => a.totalPrice - b.totalPrice)[0] ?? null,
+      );
+      if (picks.length === 0 || picks.some((pick) => !pick)) return null;
+      const totalCost = picks.reduce((sum, pick) => sum + (pick?.totalPrice ?? 0), 0);
+      return { option, picks: picks.filter((pick): pick is NonNullable<typeof pick> => !!pick), totalCost };
+    })
+    .filter((combo): combo is NonNullable<typeof combo> => combo !== null)
+    .sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
   const directProgress = directCandidates.length > 0
     ? Math.min(100, Math.round((directDone / directCandidates.length) * 100))
     : 0;
@@ -866,43 +881,52 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
             </div>
           )}
           {!directRunning && directMatches.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">No Airbnb candidate with a direct PM site beat the non-Airbnb baseline.</p>
+            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO/Booking.com/PM rows plus Airbnb rows with a direct booking site.</p>
           ) : (
             <div className="space-y-1">
-              {directMatches.map((row) => (
-                <div
-                  key={row.candidate.url}
-                  className={`rounded border px-2 py-1.5 ${
-                    selectedDirect?.candidate.url === row.candidate.url
-                      ? "border-emerald-400 bg-emerald-50"
-                      : "bg-white"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-medium">
-                      {selectedDirect?.candidate.url === row.candidate.url && (
-                        <Badge className="mr-1 bg-emerald-600 text-white text-[9px]">Auto-selected</Badge>
-                      )}
-                      {row.candidate.title}
+              {bestOptimizedCombo && (
+                <div className="rounded border border-emerald-400 bg-emerald-50 px-2 py-1.5">
+                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-emerald-950">
+                      <Badge className="mr-1 bg-emerald-600 text-white text-[9px]">Auto-selected</Badge>
+                      {bestOptimizedCombo.option.label}
                     </span>
-                    <span className="font-semibold">{fmtMoney(row.candidate.totalPrice)}</span>
+                    <span className="font-semibold">{fmtMoney(bestOptimizedCombo.totalCost)}</span>
                   </div>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {row.matches.slice(0, 3).map((match) => (
-                      <a
-                        key={`${row.candidate.url}-${match.url}`}
-                        href={match.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
-                      >
-                        {match.domain}
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
+                  <div className="space-y-1">
+                    {bestOptimizedCombo.picks.map((candidate, index) => (
+                      <div key={`${candidate.url}-${index}`} className="rounded border bg-white/80 px-2 py-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="min-w-0 truncate">
+                            <Badge className={`mr-1 text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
+                            {candidate.title}
+                          </span>
+                          <span className="font-semibold">{fmtMoney(candidate.totalPrice)}</span>
+                        </div>
+                        {candidate.source === "airbnb" && directMatchByUrl.has(listingUrlKey(candidate.url)) && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {directMatchByUrl.get(listingUrlKey(candidate.url))!.matches.slice(0, 3).map((match) => (
+                              <a
+                                key={`${candidate.url}-${match.url}`}
+                                href={match.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                              >
+                                {match.domain}
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     ))}
                   </div>
                 </div>
-              ))}
+              )}
+              {!bestOptimizedCombo && !directRunning && (
+                <p className="text-[11px] text-muted-foreground">Direct sites were found, but not enough qualifying rows existed to build a full unit combination.</p>
+              )}
             </div>
           )}
         </div>
