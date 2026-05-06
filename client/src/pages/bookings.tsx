@@ -722,6 +722,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     message?: string;
   }>>([]);
   const [directRunning, setDirectRunning] = useState(false);
+  const [directDone, setDirectDone] = useState(0);
   if (options.length === 0) return null;
   const selected = options.find((option) => option.selected);
   const directCandidates = Array.from(new Map(
@@ -740,6 +741,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   const runDirectScan = async () => {
     if (directRunning || directCandidates.length === 0) return;
     setDirectRunning(true);
+    setDirectDone(0);
     setDirectRows(directCandidates.map((candidate) => ({ candidate, status: "loading", matches: [] })));
     try {
       for (const candidate of directCandidates) {
@@ -759,6 +761,8 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
           setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
             ? { candidate, status: "error", matches: [], message: e?.message ?? "Direct booking scan failed" }
             : row));
+        } finally {
+          setDirectDone((n) => n + 1);
         }
       }
     } finally {
@@ -769,6 +773,10 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     .filter((row) => row.status === "done" && row.matches.length > 0)
     .filter((row) => nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline)
     .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
+  const selectedDirect = directMatches[0] ?? null;
+  const directProgress = directCandidates.length > 0
+    ? Math.min(100, Math.round((directDone / directCandidates.length) * 100))
+    : 0;
   return (
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -852,16 +860,31 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
             </Badge>
           </div>
           {directRunning && (
-            <p className="mb-1 text-[11px] text-sky-900/75">Checking Airbnb candidates for direct PM listing pages...</p>
+            <div className="mb-2 space-y-1">
+              <p className="text-[11px] text-sky-900/75">Checking Airbnb candidates for direct PM listing pages...</p>
+              <Progress value={directProgress} className="h-1.5" />
+            </div>
           )}
           {!directRunning && directMatches.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">No Airbnb candidate with a direct PM site beat the non-Airbnb baseline.</p>
           ) : (
             <div className="space-y-1">
               {directMatches.map((row) => (
-                <div key={row.candidate.url} className="rounded border bg-white px-2 py-1.5">
+                <div
+                  key={row.candidate.url}
+                  className={`rounded border px-2 py-1.5 ${
+                    selectedDirect?.candidate.url === row.candidate.url
+                      ? "border-emerald-400 bg-emerald-50"
+                      : "bg-white"
+                  }`}
+                >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-medium">{row.candidate.title}</span>
+                    <span className="min-w-0 truncate font-medium">
+                      {selectedDirect?.candidate.url === row.candidate.url && (
+                        <Badge className="mr-1 bg-emerald-600 text-white text-[9px]">Auto-selected</Badge>
+                      )}
+                      {row.candidate.title}
+                    </span>
                     <span className="font-semibold">{fmtMoney(row.candidate.totalPrice)}</span>
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1">
@@ -891,6 +914,10 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
 function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] }) {
   if (audits.length === 0) return null;
   const totalRows = audits.reduce((sum, audit) => sum + audit.candidates.length, 0);
+  const cheapestUrl = audits
+    .flatMap((audit) => audit.candidates)
+    .filter((candidate) => candidate.totalPrice > 0)
+    .sort((a, b) => a.totalPrice - b.totalPrice)[0]?.url;
   return (
     <details className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs" open>
       <summary className="cursor-pointer font-medium text-slate-900">
@@ -930,18 +957,25 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                           {source === "pm" ? "PM/direct" : source === "booking" ? "Booking.com" : source.toUpperCase()} ({rows.length})
                         </p>
                         <div className="space-y-1">
-                          {rows.slice(0, 30).map((candidate, index) => (
+                          {rows.slice(0, 30).map((candidate, index) => {
+                            const isCheapest = cheapestUrl && listingUrlKey(candidate.url) === listingUrlKey(cheapestUrl);
+                            return (
                             <a
                               key={`${candidate.url}-${index}`}
                               href={candidate.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded border bg-background px-2 py-1.5 hover:bg-muted/50"
+                              className={`grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded border px-2 py-1.5 hover:bg-muted/50 ${
+                                isCheapest ? "border-emerald-400 bg-emerald-50" : "bg-background"
+                              }`}
                             >
                               <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>
                                 {candidate.sourceLabel}
                               </Badge>
                               <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
+                                {isCheapest && (
+                                  <Badge className="mr-1 bg-emerald-600 text-white text-[9px]">Cheapest</Badge>
+                                )}
                                 {candidate.title}
                                 {candidate.verified && (
                                   <span className="ml-1 text-muted-foreground">· {candidate.verified}</span>
@@ -951,7 +985,8 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                                 {candidate.totalPrice > 0 ? fmtMoney(candidate.totalPrice) : "No price"}
                               </span>
                             </a>
-                          ))}
+                          );
+                          })}
                         </div>
                       </div>
                     );
