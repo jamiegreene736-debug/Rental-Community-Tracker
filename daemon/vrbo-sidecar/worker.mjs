@@ -583,6 +583,14 @@ async function pollNext() {
 
 let lastHeartbeatSentAt = 0;
 
+class SidecarCancelledError extends Error {
+  constructor(id) {
+    super(`server cancelled request ${id}`);
+    this.name = "SidecarCancelledError";
+    this.id = id;
+  }
+}
+
 async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
   const now = Date.now();
   if (!force && now - lastHeartbeatSentAt < 15_000) return false;
@@ -598,10 +606,11 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
     if (id && data?.cancelled) {
       log(`${label}: server cancelled request ${id}; closing active Chrome task`);
       await teardownBrowser(`server cancelled ${id}`);
-      return false;
+      throw new SidecarCancelledError(id);
     }
     return true;
   } catch (e) {
+    if (e instanceof SidecarCancelledError) throw e;
     if (!/404|fetch failed|AbortError/i.test(e?.message ?? "")) {
       log(`${label} failed: ${e?.message ?? e}`);
     }
@@ -610,9 +619,13 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
 }
 
 function startBusyHeartbeat(label, id = null) {
-  void sendHeartbeat(`start ${label}`, true, id);
+  void sendHeartbeat(`start ${label}`, true, id).catch((e) => {
+    if (!(e instanceof SidecarCancelledError)) log(`start ${label} heartbeat failed: ${e?.message ?? e}`);
+  });
   const interval = setInterval(() => {
-    void sendHeartbeat(`busy ${label}`, true, id);
+    void sendHeartbeat(`busy ${label}`, true, id).catch((e) => {
+      if (!(e instanceof SidecarCancelledError)) log(`busy ${label} heartbeat failed: ${e?.message ?? e}`);
+    });
   }, Math.min(HEARTBEAT_BUSY_MS, 5_000));
   interval.unref?.();
   return () => clearInterval(interval);
@@ -4020,7 +4033,11 @@ async function tick() {
     log(`done ${req.id} in ${Date.now() - startedAt}ms`);
     return true;
   } catch (e) {
-    log(`process error for ${req.id}: ${e.message}`);
+    if (e instanceof SidecarCancelledError) {
+      log(`cancelled ${req.id} in ${Date.now() - startedAt}ms`);
+    } else {
+      log(`process error for ${req.id}: ${e.message}`);
+    }
     try { await postResult(req.id, undefined, e.message ?? String(e)); } catch {}
     if (/closed|disconnected|protocol|target/i.test(e.message ?? "")) {
       await teardownBrowser("error suggests CDP died");
@@ -4028,7 +4045,11 @@ async function tick() {
     return true; // we DID process (even if it errored) — keep busy-looping
   } finally {
     stopBusyHeartbeat();
-    await sendHeartbeat(`finish ${req.opType ?? "request"}`, true, req.id);
+    try {
+      await sendHeartbeat(`finish ${req.opType ?? "request"}`, true, req.id);
+    } catch (e) {
+      if (!(e instanceof SidecarCancelledError)) throw e;
+    }
   }
 }
 

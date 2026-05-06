@@ -504,15 +504,15 @@ function SidecarQueueProgress({
   const stopSidecar = async () => {
     setIsStopping(true);
     try {
-      const response = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
-        reason: "cancelled by operator from Operations UI",
+      const response = await apiRequest("POST", "/api/vrbo-sidecar/stop", {
+        reason: "stopped by operator from Operations progress bar",
       });
       const result = await response.json();
       toast({
-        title: "Sidecar stop requested",
+        title: "Sidecar stopped",
         description: result.cancelled > 0
-          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"}. The active Chrome task should close within a few seconds.`
-          : "No active sidecar jobs were running.",
+          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"} and paused the queue. Click Start Queue when you're ready.`
+          : "Queue is paused. Click Start Queue when you're ready.",
       });
     } catch (e) {
       toast({
@@ -595,15 +595,15 @@ function AutoFillProgress({
   const stopSidecar = async () => {
     setIsStopping(true);
     try {
-      const response = await apiRequest("POST", "/api/vrbo-sidecar/cancel", {
-        reason: "cancelled by operator from Operations UI",
+      const response = await apiRequest("POST", "/api/vrbo-sidecar/stop", {
+        reason: "stopped by operator from Operations auto-fill progress",
       });
       const result = await response.json();
       toast({
-        title: "Sidecar stop requested",
+        title: "Sidecar stopped",
         description: result.cancelled > 0
-          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"}. The active Chrome task should close within a few seconds.`
-          : "No active sidecar jobs were running.",
+          ? `Cancelled ${result.cancelled} job${result.cancelled === 1 ? "" : "s"} and paused the queue. Click Start Queue when you're ready.`
+          : "Queue is paused. Click Start Queue when you're ready.",
       });
     } catch (e) {
       toast({
