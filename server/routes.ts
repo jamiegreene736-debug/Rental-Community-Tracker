@@ -18742,7 +18742,11 @@ Return ONLY compact JSON with this exact shape:
       const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
-      if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
+      // Use the same intent as the Operations direct-booking optimizer:
+      // basis should reflect a buy-in we can actually use without relying
+      // on ordinary Airbnb-only inventory. Prefer PM/direct, VRBO, and
+      // Booking.com; fall back to Airbnb only when those channels returned
+      // nothing usable for this BR/season.
       if (sidecarRan) {
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
@@ -18750,7 +18754,8 @@ Return ONLY compact JSON with this exact shape:
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
-      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
+      if (channelRates.length > 0) basis = channelRates[0];
+      else if (typeof channels.airbnb === "number" && channels.airbnb > 0) basis = channels.airbnb;
       else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
       return { basis, channelRates, samples: samples.length, channels };
     };
@@ -18780,7 +18785,7 @@ Return ONLY compact JSON with this exact shape:
         !!lowResult.channels.booking ||
         !!lowResult.channels.pm;
       const basisSource = hasNonAirbnbChannel
-        ? "live-multichannel-median"
+        ? "optimized-buy-in"
         : "airbnb";
       await storage.upsertPropertyMarketRate({
         propertyId: -id,
@@ -18926,8 +18931,10 @@ Return ONLY compact JSON with this exact shape:
     };
     // Helper: compute the per-season basis for a BR from a season's
     // scan result. Every season can include Airbnb, VRBO, Booking, and
-    // PM channel signals; falls back to Airbnb sample median when no
-    // verified sidecar/direct channel signal lands.
+    // PM channel signals. For the Pricing tab, mirror the Operations
+    // direct-booking optimizer: prefer channels we can actually use for
+    // buy-in without ordinary Airbnb-only inventory (PM/direct, VRBO,
+    // Booking.com), then fall back to Airbnb only when nothing else lands.
     const basisForSeason = (
       scan: typeof seasonScan.perSeason["LOW"],
       br: number,
@@ -18937,7 +18944,6 @@ Return ONLY compact JSON with this exact shape:
       const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
-      if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
       if (sidecarRan) {
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
@@ -18945,7 +18951,8 @@ Return ONLY compact JSON with this exact shape:
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
-      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
+      if (channelRates.length > 0) basis = channelRates[0];
+      else if (typeof channels.airbnb === "number" && channels.airbnb > 0) basis = channels.airbnb;
       else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
       return { basis, channelRates, airbnbSamples: samples.length, channels };
     };
@@ -19015,7 +19022,7 @@ Return ONLY compact JSON with this exact shape:
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.airbnbSamples,
-        source: basisSource === "live-multichannel-median" ? "live-multichannel-median" : "airbnb",
+        source: basisSource === "live-multichannel-median" ? "optimized-buy-in" : "airbnb",
       });
       persisted.push({
         bedrooms: br,
