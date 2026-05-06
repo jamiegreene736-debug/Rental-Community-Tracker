@@ -771,7 +771,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   const bestDirectCandidate = directMatches[0] ?? null;
   const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
     candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url));
-  const bestOptimizedCombo = options
+  const optimizedCombos = options
     .map((option) => {
       const picks = (option.pools ?? []).map((pool) =>
         pool.candidates
@@ -782,8 +782,9 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
       const totalCost = picks.reduce((sum, pick) => sum + (pick?.totalPrice ?? 0), 0);
       return { option, picks: picks.filter((pick): pick is NonNullable<typeof pick> => !!pick), totalCost };
     })
-    .filter((combo): combo is NonNullable<typeof combo> => combo !== null)
-    .sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
+    .filter((combo): combo is NonNullable<typeof combo> => combo !== null);
+  const optimizedComboByLabel = new Map(optimizedCombos.map((combo) => [combo.option.label, combo] as const));
+  const bestOptimizedCombo = [...optimizedCombos].sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
   const optimizedOptionLabel = bestOptimizedCombo?.option.label ?? null;
   const directProgress = directCandidates.length > 0
     ? Math.min(100, Math.round((directDone / directCandidates.length) * 100))
@@ -819,15 +820,19 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
       </div>
       <div className="mt-2 space-y-1">
         {options.map((option) => {
-          const isOptimizedOption = optimizedOptionLabel === option.label;
-          const displayedPicks = isOptimizedOption && bestOptimizedCombo ? bestOptimizedCombo.picks : option.picks;
-          const displayedTotal = isOptimizedOption && bestOptimizedCombo ? bestOptimizedCombo.totalCost : option.totalCost;
+          const optimizedCombo = optimizedComboByLabel.get(option.label) ?? null;
+          const isOptimizedWinner = optimizedOptionLabel === option.label;
+          const isOptimizedOption = !!optimizedCombo;
+          const displayedPicks = optimizedCombo ? optimizedCombo.picks : option.picks;
+          const displayedTotal = optimizedCombo ? optimizedCombo.totalCost : option.totalCost;
           return (
           <details
             key={option.label}
             className={`rounded border px-2 py-1.5 ${
-              isOptimizedOption
+              isOptimizedWinner
                 ? "border-sky-400 bg-sky-50"
+                : isOptimizedOption
+                ? "border-sky-200 bg-sky-50/50"
                 : option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
             }`}
           >
@@ -835,7 +840,8 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
               <div className="min-w-0">
                 <p className="font-medium text-foreground">
                   {option.label}
-                  {isOptimizedOption && <span className="ml-1 text-sky-700">direct optimized</span>}
+                  {isOptimizedWinner && <span className="ml-1 text-sky-700">best direct optimized</span>}
+                  {!isOptimizedWinner && isOptimizedOption && <span className="ml-1 text-sky-700">direct optimized</span>}
                   {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">selected</span>}
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
@@ -858,7 +864,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                     ) : pool.candidates.map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
-                      const isOptimizedPick = !!bestOptimizedCombo?.picks.some((pick) => listingUrlKey(pick.url) === listingUrlKey(candidate.url));
+                      const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => listingUrlKey(pick.url) === listingUrlKey(candidate.url));
                       return (
                       <a
                         key={`${candidate.url}-${index}`}
