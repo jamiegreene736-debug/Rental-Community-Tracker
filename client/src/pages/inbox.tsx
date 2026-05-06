@@ -3499,12 +3499,12 @@ export default function InboxPage() {
                             return (
                               <div className="space-y-1.5">
                                 {timeline.map((item) => (
-                                  <div key={item.title} className="border rounded-lg p-2 text-xs bg-muted/20">
-                                    <div className="flex items-center justify-between gap-2">
+                                  <div key={item.title} className="border rounded-lg p-2.5 text-xs bg-muted/20">
+                                    <div className="flex flex-col gap-2">
                                       <div className="min-w-0">
-                                        <p className="font-medium flex items-center gap-1">
+                                        <p className="font-medium flex items-start gap-1.5 leading-snug">
                                           {item.sent ? <CheckCircle className="h-3 w-3 text-green-600 shrink-0" /> : <Clock className="h-3 w-3 text-amber-600 shrink-0" />}
-                                          <span className="truncate">{item.title}</span>
+                                          <span className="break-words">{item.title}</span>
                                         </p>
                                         <p className="text-[11px] text-muted-foreground">
                                           Due {formatShortDate(item.due, item.dueLabel)}
@@ -3512,11 +3512,11 @@ export default function InboxPage() {
                                           {item.sent ? "Completed" : item.detail}
                                         </p>
                                       </div>
-                                      <div className="flex items-center gap-1 shrink-0">
+                                      <div className="flex items-center gap-1.5">
                                         <Button
                                           size="sm"
                                           variant="outline"
-                                          className="h-7 px-2 text-[11px]"
+                                          className="h-7 flex-1 px-2 text-[11px]"
                                           disabled={Boolean(item.disabled)}
                                           onClick={item.onClick}
                                           data-testid={item.testId}
@@ -3528,7 +3528,7 @@ export default function InboxPage() {
                                           <Button
                                             size="sm"
                                             variant="outline"
-                                            className="h-7 px-2 text-[11px]"
+                                            className="h-7 flex-1 px-2 text-[11px]"
                                             disabled={Boolean(item.disabled) || Boolean(smsDisabledReason)}
                                             onClick={item.smsOnClick}
                                             title={smsDisabledReason ?? `Draft text for ${effectiveGuestPhone}`}
