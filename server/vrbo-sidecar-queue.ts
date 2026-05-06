@@ -478,6 +478,10 @@ export function enqueueOp(
     | { opType: "guesty_disconnect_channel"; params: SidecarGuestyDisconnectParams },
 ): { id: string; deduped: boolean } {
   cleanup();
+  if (queuePaused) {
+    const reason = queuePausedReason ? `: ${queuePausedReason}` : "";
+    throw new Error(`Sidecar queue is stopped${reason}`);
+  }
   const requestKey = makeRequestKey(req.opType, req.params);
   const existingId = requestKeyIndex.get(requestKey);
   if (existingId) {
@@ -486,7 +490,7 @@ export function enqueueOp(
       const isFresh =
         existing.status === "pending" ||
         existing.status === "in_progress" ||
-        (existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
+        (existing.status === "completed" && existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
       if (isFresh) return { id: existingId, deduped: true };
     }
   }
@@ -1368,6 +1372,15 @@ async function awaitOpResult(opts: {
       workerOnline: false,
       durationMs: nowMs() - startedAt,
       reason: abortReason(),
+    };
+  }
+  const pausedState = isQueuePaused();
+  if (pausedState.paused) {
+    return {
+      results: null,
+      workerOnline: false,
+      durationMs: nowMs() - startedAt,
+      reason: pausedState.reason ? `sidecar queue stopped: ${pausedState.reason}` : "sidecar queue stopped by operator",
     };
   }
   const { id } = enqueueOp(opts.enqueueArgs);

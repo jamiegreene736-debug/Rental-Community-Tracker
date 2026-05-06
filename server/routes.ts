@@ -11427,7 +11427,15 @@ Return ONLY compact JSON with this exact shape:
   // Both round-trip through the same queue + dedup machinery.
   app.post("/api/vrbo-sidecar/enqueue", async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const { enqueueOp } = await import("./vrbo-sidecar-queue");
+    const { enqueueOp, isQueuePaused } = await import("./vrbo-sidecar-queue");
+    const pausedState = isQueuePaused();
+    if (pausedState.paused) {
+      return res.status(409).json({
+        error: "Sidecar queue is stopped",
+        message: pausedState.reason ?? "Start Queue before enqueueing new sidecar work.",
+        paused: true,
+      });
+    }
 
     // Generic op-type shape — discriminate on body.opType.
     if (typeof body.opType === "string") {
@@ -11538,7 +11546,8 @@ Return ONLY compact JSON with this exact shape:
         }
         return res.json(result);
       } catch (e: any) {
-        return res.status(500).json({ error: e?.message ?? String(e) });
+        const message = e?.message ?? String(e);
+        return res.status(/queue is stopped/i.test(message) ? 409 : 500).json({ error: message });
       }
     }
 

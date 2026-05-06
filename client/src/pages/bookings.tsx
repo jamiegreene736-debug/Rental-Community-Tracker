@@ -3335,10 +3335,13 @@ function SidecarStatusBadge() {
     }
   };
 
-  // CODEX NOTE (2026-05-05): "Stop & Reset" is a composed restart for
-  // the queue: cancel active+pending work, pause dispatch, then unpause
-  // so the next user action gets a clean queue. It cannot restart the
-  // local macOS LaunchAgent if that process is offline.
+  // CODEX NOTE (2026-05-06): Stop & Reset is now a hard stop, not a
+  // composed restart. The old flow called /stop and then /start, which
+  // meant any server-side search still running could enqueue more work
+  // during the pause window and the immediate /start would let the
+  // sidecar pick it up again. That made the sidecar appear to "randomly"
+  // restart after Jamie clicked reset. Keep the queue paused until the
+  // operator explicitly clicks Start Queue.
   const stopAndResetSidecar = async () => {
     setActing("reset");
     try {
@@ -3346,12 +3349,11 @@ function SidecarStatusBadge() {
         reason: "Stop & Reset button (Operations UI)",
       });
       const j = await r.json();
-      await apiRequest("POST", "/api/vrbo-sidecar/start", {});
       toast({
-        title: "Sidecar queue reset",
+        title: "Sidecar stopped and reset",
         description: j.cancelled > 0
-          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Queue is unpaused and ready for a new search.`
-          : "Queue cleared and unpaused. Ready for a new search.",
+          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Queue stays stopped until you click Start Queue.`
+          : "Queue stays stopped until you click Start Queue.",
       });
       await refresh();
     } catch (e: any) {
@@ -3503,10 +3505,9 @@ function SidecarStatusBadge() {
         {/* CODEX NOTE (2026-05-04, claude/sidecar-stop-reset):
             Full-width Stop & Reset on its own row — it's the
             most-used recovery action when the sidecar gets stuck.
-            Different from Stop (which pauses) — this clears the
-            queue AND leaves it ready for a new search in one
-            click. Disabled while another action is in flight, but
-            usable from any state (running, idle, or paused). */}
+            It cancels active/pending work and leaves the queue
+            paused. The operator must explicitly click Start Queue
+            before new sidecar work can be dispatched. */}
         <Button
           size="sm"
           variant="secondary"
@@ -3525,9 +3526,9 @@ function SidecarStatusBadge() {
             The Mac daemon idles if it is running.
           </div>
           <div>
-            <strong>Stop &amp; Reset</strong>: cancel running job + stay
-            ready. Use when the sidecar is stuck and you want to retry
-            immediately.
+            <strong>Stop &amp; Reset</strong>: cancel running job + keep
+            the queue stopped. Use when the sidecar is stuck or opening
+            Chrome unexpectedly.
           </div>
           <div>
             <strong>Start Queue</strong>: unblock new queue work. If the
