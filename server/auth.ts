@@ -125,6 +125,15 @@ function isPublicPath(path: string): boolean {
   return false;
 }
 
+function isPublicAgreementPagePath(path: string): boolean {
+  return (
+    path === "/agreement" ||
+    path.startsWith("/agreement/") ||
+    path === "/admin/agreement" ||
+    path.startsWith("/admin/agreement/")
+  );
+}
+
 function isAuthorizedBuyInEmailWebhook(req: Request): boolean {
   if (req.path !== "/api/buy-in-emails/inbound") return false;
   const secret = process.env.BUY_IN_EMAIL_WEBHOOK_SECRET ?? "";
@@ -226,6 +235,15 @@ function buildSetCookie(value: string, maxAgeSeconds: number): string {
 
 export function loginPageHandler(req: Request, res: Response) {
   const nextPath = typeof req.query.next === "string" ? req.query.next : "/";
+  // If a guest previously hit the agreement route before the public
+  // allowlist deployed, Safari may have cached/copied the redirected
+  // /login?next=/agreement/... URL. Do not show the operator password
+  // form for those tokenized guest links; send them back to the public
+  // agreement route. This still leaves every other /login?next=/admin...
+  // path protected.
+  if (nextPath.startsWith("/") && !nextPath.startsWith("//") && isPublicAgreementPagePath(nextPath)) {
+    return res.redirect(nextPath);
+  }
   // Gate is open when ADMIN_SECRET is unset — bounce home immediately
   // so the operator doesn't see a confusing login form on a deploy
   // that doesn't actually require auth.
