@@ -792,7 +792,9 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-medium text-emerald-900">
-          Cheapest combination{selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}
+          {bestOptimizedCombo
+            ? `Direct-optimized combination: ${bestOptimizedCombo.option.label} · ${fmtMoney(bestOptimizedCombo.totalCost)}`
+            : `Cheapest combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {directCandidates.length > 0 && (
@@ -808,12 +810,18 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
               Optimize direct booking sites
             </Button>
           )}
-          {selected && <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>}
+          {bestOptimizedCombo ? (
+            <Badge className="bg-sky-700 text-white text-[10px]">Direct optimized</Badge>
+          ) : selected && (
+            <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>
+          )}
         </div>
       </div>
       <div className="mt-2 space-y-1">
         {options.map((option) => {
           const isOptimizedOption = optimizedOptionLabel === option.label;
+          const displayedPicks = isOptimizedOption && bestOptimizedCombo ? bestOptimizedCombo.picks : option.picks;
+          const displayedTotal = isOptimizedOption && bestOptimizedCombo ? bestOptimizedCombo.totalCost : option.totalCost;
           return (
           <details
             key={option.label}
@@ -831,13 +839,13 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                   {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">selected</span>}
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
-                  {option.totalCost == null
+                  {displayedTotal == null
                     ? option.unavailableReason ?? "Not enough verified options"
-                    : option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
+                    : displayedPicks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
                 </p>
               </div>
               <div className="text-right font-semibold tabular-nums">
-                {option.totalCost == null ? "—" : fmtMoney(option.totalCost)}
+                {displayedTotal == null ? "—" : fmtMoney(displayedTotal)}
               </div>
             </summary>
             <div className="mt-2 space-y-2 border-t border-emerald-100 pt-2">
