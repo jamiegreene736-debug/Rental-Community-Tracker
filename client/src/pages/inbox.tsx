@@ -545,6 +545,51 @@ function channelBadge(raw: string) {
   return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-400 text-white">{src}</span>;
 }
 
+function readableCancellationPolicy(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value
+    .replace(/^Cancellation policy:\s*/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  const labels: Record<string, string> = {
+    firm: "Firm cancellation policy",
+    strict: "Strict cancellation policy",
+    flexible: "Flexible cancellation policy",
+    moderate: "Moderate cancellation policy",
+    relaxed: "Relaxed cancellation policy",
+    "non refundable": "Non-refundable cancellation policy",
+    nonrefundable: "Non-refundable cancellation policy",
+  };
+  return labels[cleaned.toLowerCase()] ?? cleaned;
+}
+
+function findCancellationPolicyValue(value: unknown, depth = 0): string | null {
+  if (!value || depth > 5 || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCancellationPolicyValue(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of ["cancellationPolicyText", "cancellationPolicyDescription", "cancellationPolicyName", "cancellationPolicy", "cancelationPolicy", "cancellation_policy", "policy"]) {
+    const direct = readableCancellationPolicy(obj[key]);
+    if (direct) return direct;
+  }
+  for (const [key, nested] of Object.entries(obj)) {
+    if (/cancell?ation|cancel|ratePlan|terms|policy/i.test(key)) {
+      const direct = readableCancellationPolicy(nested);
+      if (direct) return direct;
+      const found = findCancellationPolicyValue(nested, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // ─── Inbound message cleanup ───────────────────────────────────────────────────
 // Some Guesty channel integrations forward inbound emails as a full HTML
 // document (`<!DOCTYPE html><html>...</html>`). The inbox renders message
@@ -2042,6 +2087,7 @@ export default function InboxPage() {
     confirmationCode?: string;
     numNights?: number | null;
     bookingTotal?: number;
+    cancellationPolicy?: string | null;
   }): Promise<string> => {
     if (!reservationId) throw new Error("No reservation found for this agreement");
     const channel = String(args.channelRaw ?? "");
@@ -2061,6 +2107,7 @@ export default function InboxPage() {
       confirmationCode: args.confirmationCode,
       nights: args.numNights,
       bookingTotal: args.bookingTotal,
+      cancellationPolicy: args.cancellationPolicy,
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
@@ -2080,6 +2127,7 @@ export default function InboxPage() {
     numNights,
     bookingTotal,
     totalPaid,
+    cancellationPolicy,
     channelRaw,
     guestName,
     guestEmail,
@@ -2096,6 +2144,7 @@ export default function InboxPage() {
     numNights?: number | null;
     bookingTotal?: number;
     totalPaid?: number;
+    cancellationPolicy?: string | null;
     channelRaw?: string;
     guestName?: string;
     guestEmail?: string | null;
@@ -2115,6 +2164,7 @@ export default function InboxPage() {
           confirmationCode,
           numNights,
           bookingTotal,
+          cancellationPolicy,
         })
         : "";
       const body = channel === "sms" && kind === "agreement-request"
@@ -3583,6 +3633,7 @@ export default function InboxPage() {
                               numNights: nights ?? res?.nightsCount ?? null,
                               bookingTotal: totalPriceFromMoney,
                               totalPaid: totalPaidFromMoney,
+                              cancellationPolicy: findCancellationPolicyValue(res),
                             };
                             const timeline = [
                               {

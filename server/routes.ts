@@ -123,15 +123,78 @@ function displayAgreementChannel(channel: string): string {
   return channel || "Direct booking";
 }
 
-function cancellationPolicyForAgreementChannel(channel: string): string {
+function readableCancellationPolicy(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/^Cancellation policy:\s*/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const lower = cleaned.toLowerCase();
+  const labels: Record<string, string> = {
+    firm: "Firm cancellation policy",
+    strict: "Strict cancellation policy",
+    flexible: "Flexible cancellation policy",
+    moderate: "Moderate cancellation policy",
+    relaxed: "Relaxed cancellation policy",
+    "non refundable": "Non-refundable cancellation policy",
+    nonrefundable: "Non-refundable cancellation policy",
+    "no refund": "Non-refundable cancellation policy",
+  };
+  return labels[lower] ?? cleaned;
+}
+
+function findCancellationPolicyValue(value: unknown, depth = 0): string | null {
+  if (!value || depth > 5) return null;
+  if (typeof value === "string") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCancellationPolicyValue(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  const preferredKeys = [
+    "cancellationPolicyText",
+    "cancellationPolicyDescription",
+    "cancellationPolicyName",
+    "cancellationPolicy",
+    "cancelationPolicy",
+    "cancellation_policy",
+    "policy",
+  ];
+  for (const key of preferredKeys) {
+    const readable = readableCancellationPolicy(obj[key]);
+    if (readable) return readable;
+  }
+  for (const [key, nested] of Object.entries(obj)) {
+    if (/cancell?ation|cancel|ratePlan|terms|policy/i.test(key)) {
+      const direct = readableCancellationPolicy(nested);
+      if (direct) return direct;
+      const found = findCancellationPolicyValue(nested, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function cancellationPolicyForAgreementChannel(channel: string, specificPolicy?: string | null): string {
   const display = displayAgreementChannel(channel);
+  const policy = readableCancellationPolicy(specificPolicy);
+  if (policy) {
+    return `Cancellation policy: This ${display} reservation was booked under the ${policy}. The cancellation, refund, no-show, payment, and date-change terms are the terms shown to the guest on ${display} at the time of booking and in the channel reservation confirmation.`;
+  }
   if (display === "Booking.com") {
-    return "Cancellation policy: This Booking.com reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown on Booking.com at the time of booking. Any approved refund, cancellation, or modification must be processed according to the Booking.com reservation terms and applicable platform rules.";
+    return "Cancellation policy: This Booking.com reservation follows the cancellation, refund, no-show, payment, and date-change terms shown to the guest on Booking.com at the time of booking and in the Booking.com reservation confirmation.";
   }
   if (display === "Homeaway") {
-    return "Cancellation policy: This Homeaway/VRBO reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown on Homeaway/VRBO at the time of booking. Any approved refund, cancellation, or modification must be processed according to the Homeaway/VRBO reservation terms and applicable platform rules.";
+    return "Cancellation policy: This Homeaway/VRBO reservation follows the cancellation, refund, no-show, payment, and date-change terms shown to the guest on Homeaway/VRBO at the time of booking and in the Homeaway/VRBO reservation confirmation.";
   }
-  return "Cancellation policy: This reservation is subject to the cancellation policy, payment schedule, no-show terms, and date-change rules shown at the time of booking.";
+  return "Cancellation policy: This reservation follows the cancellation, refund, no-show, payment, and date-change terms shown to the guest at the time of booking and in the reservation confirmation.";
 }
 
 function buildRentalAgreementText(input: {
@@ -144,6 +207,7 @@ function buildRentalAgreementText(input: {
   bookingTotal?: string | number | null;
   confirmationCode?: string | null;
   unitSummary?: string | null;
+  cancellationPolicy?: string | null;
 }): string {
   const money = input.bookingTotal != null && input.bookingTotal !== ""
     ? `$${Number(input.bookingTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -163,14 +227,14 @@ function buildRentalAgreementText(input: {
     input.confirmationCode ? `Confirmation code: ${input.confirmationCode}` : "",
     input.unitSummary ? `Assigned/buy-in unit summary: ${input.unitSummary}` : "",
     "",
-    cancellationPolicyForAgreementChannel(input.channel),
+    cancellationPolicyForAgreementChannel(input.channel, input.cancellationPolicy),
     "",
     "By signing below, I acknowledge and agree to the following:",
     "",
     "1. I am the primary guest or am authorized by the primary guest to complete this agreement for the reservation.",
     "2. I understand this reservation may be fulfilled using two separate nearby units rather than one single connected unit. The units may be in the same resort/community or nearby within the same area, but they may have separate entrances, addresses, parking spaces, access instructions, interiors, furnishings, views, and layouts.",
     "3. I understand listing photos and descriptions may be representative of the resort/community and unit standard. Exact assigned units can vary, but the stay will be fulfilled according to the booked bedroom count, guest capacity, dates, and overall property standard.",
-    `4. I authorize and accept the total reservation cost of ${money}, plus any channel-disclosed taxes, fees, deposits, damage charges, or other agreed charges connected with the stay.`,
+    `4. I understand and agree that the total reservation cost for this booking is ${money}.`,
     "5. I agree to follow house rules, occupancy limits, quiet hours, parking rules, resort/community rules, and all arrival/access instructions sent before check-in.",
     "6. I accept responsibility for damage, missing items, excessive cleaning, rule violations, fines, chargebacks, payment disputes, and other costs caused by me or my party, subject to the booking terms and applicable law.",
     "7. I understand arrival details are normally sent before check-in after the agreement and any required payment or authorization steps are complete.",
@@ -2901,6 +2965,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: "reservationId, guestName, and propertyName are required" });
       }
 
+      let reservationCancellationPolicy = readableCancellationPolicy(req.body?.cancellationPolicy);
+      if (!reservationCancellationPolicy) {
+        try {
+          const reservation = await guestyRequest("GET", `/reservations/${encodeURIComponent(reservationId)}`) as any;
+          reservationCancellationPolicy = findCancellationPolicyValue(reservation?.data ?? reservation);
+        } catch (policyErr: any) {
+          console.warn("[rental-agreement] could not fetch reservation cancellation policy", reservationId, policyErr?.message ?? policyErr);
+        }
+      }
+
       const existing = await db
         .select()
         .from(rentalAgreements)
@@ -2908,6 +2982,35 @@ export async function registerRoutes(
         .orderBy(desc(rentalAgreements.createdAt))
         .limit(1);
       if (existing[0]) {
+        if (existing[0].status !== "signed") {
+          const refreshedText = buildRentalAgreementText({
+            guestName: existing[0].guestName || guestName,
+            propertyName: existing[0].propertyName || propertyName,
+            channel: existing[0].channel || channel,
+            checkIn: existing[0].checkIn ?? (String(req.body?.checkIn ?? "").slice(0, 10) || null),
+            checkOut: existing[0].checkOut ?? (String(req.body?.checkOut ?? "").slice(0, 10) || null),
+            nights: existing[0].nights ?? null,
+            bookingTotal: existing[0].bookingTotal ?? req.body?.bookingTotal ?? null,
+            confirmationCode: existing[0].confirmationCode ?? (String(req.body?.confirmationCode ?? "").trim() || null),
+            unitSummary: existing[0].unitSummary ?? null,
+            cancellationPolicy: reservationCancellationPolicy ?? existing[0].cancellationPolicy ?? null,
+          });
+          const [updated] = await db
+            .update(rentalAgreements)
+            .set({
+              cancellationPolicy: reservationCancellationPolicy ?? existing[0].cancellationPolicy ?? null,
+              agreementText: refreshedText,
+              updatedAt: new Date(),
+            })
+            .where(eq(rentalAgreements.id, existing[0].id))
+            .returning();
+          return res.json({
+            agreement: updated,
+            signingUrl: `${agreementBaseUrl(req)}/agreement/${updated.token}`,
+            created: false,
+            refreshed: true,
+          });
+        }
         return res.json({
           agreement: existing[0],
           signingUrl: `${agreementBaseUrl(req)}/agreement/${existing[0].token}`,
@@ -2937,6 +3040,7 @@ export async function registerRoutes(
         bookingTotal: Number.isFinite(bookingTotal) && bookingTotal > 0 ? bookingTotal.toFixed(2) : null,
         confirmationCode: String(req.body?.confirmationCode ?? "").trim() || null,
         unitSummary,
+        cancellationPolicy: reservationCancellationPolicy,
       });
       const token = randomBytes(24).toString("base64url");
       const [agreement] = await db
@@ -2956,6 +3060,7 @@ export async function registerRoutes(
           bookingTotal: Number.isFinite(bookingTotal) && bookingTotal > 0 ? bookingTotal.toFixed(2) : null,
           confirmationCode: String(req.body?.confirmationCode ?? "").trim() || null,
           unitSummary,
+          cancellationPolicy: reservationCancellationPolicy,
           agreementText,
           rawPayload: JSON.stringify(req.body ?? {}),
         })
@@ -2984,7 +3089,7 @@ export async function registerRoutes(
         agreement: {
           ...agreement,
           channel: displayAgreementChannel(agreement.channel),
-          cancellationPolicy: cancellationPolicyForAgreementChannel(agreement.channel),
+          cancellationPolicy: cancellationPolicyForAgreementChannel(agreement.channel, agreement.cancellationPolicy),
         },
         viewerIp,
       });

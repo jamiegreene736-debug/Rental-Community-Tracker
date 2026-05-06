@@ -139,6 +139,7 @@ export const rentalAgreements = pgTable("rental_agreements", {
   bookingTotal: numeric("booking_total", { precision: 10, scale: 2 }),
   confirmationCode: text("confirmation_code"),
   unitSummary: text("unit_summary"),
+  cancellationPolicy: text("cancellation_policy"),
   agreementText: text("agreement_text").notNull(),
   status: text("status").notNull().default("pending"),
   signedName: text("signed_name"),

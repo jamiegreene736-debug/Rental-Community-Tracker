@@ -97,6 +97,7 @@ export async function ensureRuntimeSchema(): Promise<void> {
       booking_total numeric(10,2),
       confirmation_code text,
       unit_summary text,
+      cancellation_policy text,
       agreement_text text NOT NULL,
       status text NOT NULL DEFAULT 'pending',
       signed_name text,
@@ -109,6 +110,10 @@ export async function ensureRuntimeSchema(): Promise<void> {
       created_at timestamp NOT NULL DEFAULT now(),
       updated_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  await db.execute(sql`
+    ALTER TABLE rental_agreements
+      ADD COLUMN IF NOT EXISTS cancellation_policy text
   `);
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS rental_agreements_reservation_idx
