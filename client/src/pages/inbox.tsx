@@ -48,6 +48,8 @@ type InboxBuyInRecord = ArrivalUnitDetail & {
   propertyName?: string;
   checkIn?: string;
   checkOut?: string;
+  managementCompany?: string;
+  managementContact?: string;
 };
 
 type InboxVendorContactRecord = {
@@ -62,6 +64,17 @@ type InboxBuyInCommunications = {
   alias: { aliasEmail: string; mailboxEmail: string } | null;
   buyIns: InboxBuyInRecord[];
   contacts: InboxVendorContactRecord[];
+  emails: Array<{
+    id: number;
+    buyInId: number;
+    direction: "outbound" | "inbound" | string;
+    fromEmail: string;
+    toEmail: string;
+    subject: string;
+    body: string;
+    status?: string | null;
+    sentAt?: string | null;
+  }>;
 };
 
 type InboxRentalAgreement = {
@@ -490,6 +503,26 @@ function triggerLabel(trigger: string, daysOffset: number): string {
 function formatDate(d?: string) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function extractEmailForInput(value: string): string {
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0] ?? "";
+}
+
+function buildDefaultVendorEmailDraft(unit: InboxBuyInRecord, guestName?: string) {
+  return {
+    subject: `Arrival details request for ${unit.unitLabel || unit.propertyName || "unit"}`,
+    body: [
+      "Aloha,",
+      "",
+      `We booked ${unit.propertyName || "this property"}${unit.unitLabel ? ` - ${unit.unitLabel}` : ""} for ${guestName || "our guest"} from ${formatDate(unit.checkIn)} to ${formatDate(unit.checkOut)}.`,
+      "Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?",
+      "",
+      "Mahalo,",
+      "John Carpenter",
+    ].join("\n"),
+  };
 }
 
 function platformBadge(res: GuestyReservation) {
@@ -1399,11 +1432,21 @@ function TemplateEditor({
   );
 }
 
-function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?: InboxBuyInCommunications }) {
+function InboxBuyInPanel({
+  reservationId,
+  guestName,
+  data,
+}: {
+  reservationId: string;
+  guestName?: string;
+  data?: InboxBuyInCommunications;
+}) {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [composeId, setComposeId] = useState<number | null>(null);
+  const [emailDrafts, setEmailDrafts] = useState<Record<number, { subject: string; body: string }>>({});
 
   const saveDetails = useMutation({
     mutationFn: ({ id, values }: { id: number; values: Record<string, string> }) =>
@@ -1417,6 +1460,27 @@ function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?
     onError: (err: any) => toast({ title: "Save failed", description: err?.message ?? "Could not save buy-in details", variant: "destructive" }),
   });
 
+  const sendVendorEmail = useMutation({
+    mutationFn: ({ unit, contact }: { unit: InboxBuyInRecord; contact?: InboxVendorContactRecord }) => {
+      const draft = emailDrafts[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName);
+      const vendorEmail = contact?.vendorEmail ?? extractEmailForInput(unit.managementContact ?? "");
+      return apiRequest("POST", `/api/buy-ins/${unit.id}/vendor-email`, {
+        reservationId,
+        guestName: guestName ?? "",
+        vendorName: contact?.vendorName ?? unit.managementCompany ?? "",
+        vendorEmail,
+        subject: draft.subject,
+        body: draft.body,
+      }).then((r) => r.json());
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      setComposeId(null);
+      toast({ title: "PM email sent", description: "The message is saved in this guest's buy-in email history." });
+    },
+    onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send PM email", variant: "destructive" }),
+  });
+
   const units = data?.buyIns ?? [];
   if (units.length === 0 && !data?.alias) return null;
 
@@ -1427,11 +1491,29 @@ function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?
       managementContact: unit.managementContact ?? "",
       unitAddress: unit.unitAddress ?? "",
       accessCode: unit.accessCode ?? "",
+      wifiName: unit.wifiName ?? "",
+      wifiPassword: unit.wifiPassword ?? "",
       parkingInfo: unit.parkingInfo ?? "",
       arrivalNotes: unit.arrivalNotes ?? "",
     });
   };
   const set = (key: string, value: string) => setForm((prev) => ({ ...prev, [key]: value }));
+  const updateEmailDraft = (unit: InboxBuyInRecord, key: "subject" | "body", value: string) => {
+    setEmailDrafts((prev) => ({
+      ...prev,
+      [unit.id]: {
+        ...(prev[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName)),
+        [key]: value,
+      },
+    }));
+  };
+  const startCompose = (unit: InboxBuyInRecord) => {
+    setComposeId(unit.id);
+    setEmailDrafts((prev) => ({
+      ...prev,
+      [unit.id]: prev[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName),
+    }));
+  };
 
   return (
     <div>
@@ -1450,7 +1532,11 @@ function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?
         )}
         {units.map((unit) => {
           const contact = data?.contacts?.find((row) => row.buyInId === unit.id);
+          const emails = (data?.emails ?? []).filter((row) => row.buyInId === unit.id);
           const editing = editingId === unit.id;
+          const composing = composeId === unit.id;
+          const draft = emailDrafts[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName);
+          const vendorEmail = contact?.vendorEmail ?? extractEmailForInput(unit.managementContact ?? "");
           return (
             <div key={unit.id} className="px-2.5 py-2 space-y-2">
               <div className="flex items-start justify-between gap-2">
@@ -1476,12 +1562,96 @@ function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?
                     <Input className="h-8 text-xs" value={form.accessCode ?? ""} onChange={(e) => set("accessCode", e.target.value)} placeholder="Access code" />
                     <Input className="h-8 text-xs" value={form.parkingInfo ?? ""} onChange={(e) => set("parkingInfo", e.target.value)} placeholder="Parking" />
                   </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Input className="h-8 text-xs" value={form.wifiName ?? ""} onChange={(e) => set("wifiName", e.target.value)} placeholder="Wi-Fi name" />
+                    <Input className="h-8 text-xs" value={form.wifiPassword ?? ""} onChange={(e) => set("wifiPassword", e.target.value)} placeholder="Wi-Fi password" />
+                  </div>
                   <Textarea rows={3} className="text-xs" value={form.arrivalNotes ?? ""} onChange={(e) => set("arrivalNotes", e.target.value)} placeholder="Arrival notes" />
                   <Button size="sm" className="w-full" disabled={saveDetails.isPending} onClick={() => saveDetails.mutate({ id: unit.id, values: form })}>
                     {saveDetails.isPending ? "Saving..." : "Save buy-in details"}
                   </Button>
                 </div>
               )}
+              <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                <div>
+                  <span className="text-muted-foreground">Address:</span> {unit.unitAddress || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Access:</span> {unit.accessCode || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Wi-Fi:</span> {unit.wifiName || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Parking:</span> {unit.parkingInfo || "Not saved"}
+                </div>
+              </div>
+              <details className="rounded-md border bg-background/60 p-2" open={emails.length > 0}>
+                <summary className="cursor-pointer text-[11px] font-medium">
+                  Alias email history ({emails.length})
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {emails.length === 0 && (
+                    <div className="text-[11px] text-muted-foreground">
+                      No PM/vendor emails saved for this unit yet.
+                    </div>
+                  )}
+                  {emails.map((email) => (
+                    <div key={email.id} className="rounded border bg-muted/20 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium truncate">{email.subject}</span>
+                        <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                          {email.direction}
+                        </Badge>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground truncate">
+                        {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                      </div>
+                      <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">
+                        {email.body}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+              <div className="space-y-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 w-full justify-start text-[11px]"
+                  onClick={() => composing ? setComposeId(null) : startCompose(unit)}
+                  disabled={!vendorEmail}
+                  title={vendorEmail ? `Send via alias to ${vendorEmail}` : "Save a PM/vendor email first"}
+                >
+                  <Mail className="h-3 w-3 mr-1.5" />
+                  {composing ? "Close PM email composer" : "Write PM/vendor email"}
+                </Button>
+                {composing && (
+                  <div className="space-y-1.5 rounded-md border bg-background/60 p-2">
+                    <Input
+                      className="h-8 text-xs"
+                      value={draft.subject}
+                      onChange={(e) => updateEmailDraft(unit, "subject", e.target.value)}
+                      placeholder="Subject"
+                    />
+                    <Textarea
+                      rows={5}
+                      className="text-xs"
+                      value={draft.body}
+                      onChange={(e) => updateEmailDraft(unit, "body", e.target.value)}
+                      placeholder="Message to PM/vendor"
+                    />
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      disabled={sendVendorEmail.isPending || !vendorEmail || !draft.subject.trim() || !draft.body.trim()}
+                      onClick={() => sendVendorEmail.mutate({ unit, contact })}
+                    >
+                      {sendVendorEmail.isPending ? "Sending..." : `Send to ${vendorEmail}`}
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
           );
         })}
@@ -3327,7 +3497,11 @@ export default function InboxPage() {
                       )}
 
                       {reservationId && (phase === "booked" || phase === "request") && (
-                        <InboxBuyInPanel reservationId={reservationId} data={buyInComms} />
+                        <InboxBuyInPanel
+                          reservationId={reservationId}
+                          guestName={guest.fullName ?? selectedConv.displayGuestName ?? ""}
+                          data={buyInComms}
+                        />
                       )}
 
                       {/* Templates — manual on-demand outbound message

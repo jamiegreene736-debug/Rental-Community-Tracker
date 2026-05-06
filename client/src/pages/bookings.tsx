@@ -122,6 +122,7 @@ type BuyInEmailRecord = {
   fromEmail: string;
   toEmail: string;
   subject: string;
+  body: string;
   sentAt?: string;
   status?: string;
 };
@@ -2714,15 +2715,30 @@ function BuyInVendorEmailPanel({
           </div>
         </div>
       </details>
-      {emails.length > 0 && (
-        <div className="space-y-1">
+      <details className="rounded-md border bg-background/70 p-2" open={emails.length > 0}>
+        <summary className="cursor-pointer text-xs font-medium">Alias email history ({emails.length})</summary>
+        <div className="mt-2 space-y-2">
+          {emails.length === 0 && (
+            <div className="text-[11px] text-muted-foreground">No PM/vendor emails saved for this unit yet.</div>
+          )}
           {emails.map((email) => (
-            <div key={email.id} className="text-[11px] text-muted-foreground">
-              <span className="uppercase">{email.direction}</span> · {email.subject} · {email.status ?? "sent"}
+            <div key={email.id} className="rounded border bg-muted/20 p-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium truncate">{email.subject}</span>
+                <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                  {email.direction}
+                </Badge>
+              </div>
+              <div className="text-[10px] text-muted-foreground truncate">
+                {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+              </div>
+              <div className="mt-1 whitespace-pre-wrap leading-relaxed text-foreground">
+                {email.body}
+              </div>
             </div>
           ))}
         </div>
-      )}
+      </details>
     </div>
   );
 }

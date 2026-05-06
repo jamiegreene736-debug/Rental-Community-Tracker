@@ -3248,6 +3248,16 @@ export async function registerRoutes(
 
   app.post("/api/buy-in-emails/inbound", async (req, res) => {
     try {
+      const webhookSecret = process.env.BUY_IN_EMAIL_WEBHOOK_SECRET ?? "";
+      if (webhookSecret) {
+        const provided = String(
+          req.headers["x-webhook-secret"]
+          ?? req.headers["x-buy-in-email-webhook-secret"]
+          ?? req.body?.secret
+          ?? "",
+        );
+        if (provided !== webhookSecret) return res.status(401).json({ error: "Unauthorized" });
+      }
       const fromEmail = extractEmailAddress(String(req.body?.from ?? req.body?.fromEmail ?? "")).toLowerCase();
       const toEmail = extractEmailAddress(String(req.body?.to ?? req.body?.toEmail ?? "")).toLowerCase();
       const subject = String(req.body?.subject ?? "").trim() || "(no subject)";
@@ -3256,7 +3266,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "from, to, and body are required" });
       }
 
-      const [contact] = await db
+      let [contact] = await db
         .select()
         .from(buyInVendorContacts)
         .where(and(
@@ -3264,6 +3274,24 @@ export async function registerRoutes(
           sql`lower(${buyInVendorContacts.reverseAliasEmail}) = ${toEmail}`,
         ))
         .limit(1);
+      if (!contact) {
+        const candidates = await db
+          .select()
+          .from(buyInVendorContacts)
+          .where(sql`lower(${buyInVendorContacts.vendorEmail}) = ${fromEmail}`)
+          .limit(25);
+        for (const candidate of candidates) {
+          const [alias] = await db
+            .select()
+            .from(reservationAliases)
+            .where(eq(reservationAliases.reservationId, candidate.reservationId))
+            .limit(1);
+          if (alias?.aliasEmail?.toLowerCase() === toEmail) {
+            contact = candidate;
+            break;
+          }
+        }
+      }
       if (!contact) return res.status(404).json({ error: "No matching buy-in vendor contact" });
 
       const parsed = parseArrivalDetailsFromText(body);

@@ -36,6 +36,10 @@
 //     signature links. Guests receive these by SMS/email and cannot use
 //     the operator password. Admin creation routes stay protected under
 //     /api/bookings/*/rental-agreement.
+//   - /api/buy-in-emails/inbound — server-to-server email webhook only
+//     when BUY_IN_EMAIL_WEBHOOK_SECRET matches. This records PM/vendor
+//     replies from alias email threads without giving guests/vendors the
+//     operator password.
 //   - 127.0.0.1 loopback — availability-scheduler.ts does an HTTP
 //     self-call to /api/admin/refresh-all-market-rates once per
 //     scheduled tick. The bypass uses req.socket.remoteAddress, NOT
@@ -116,6 +120,14 @@ function isPublicPath(path: string): boolean {
   return false;
 }
 
+function isAuthorizedBuyInEmailWebhook(req: Request): boolean {
+  if (req.path !== "/api/buy-in-emails/inbound") return false;
+  const secret = process.env.BUY_IN_EMAIL_WEBHOOK_SECRET ?? "";
+  if (!secret) return false;
+  const header = req.headers["x-webhook-secret"] ?? req.headers["x-buy-in-email-webhook-secret"];
+  return typeof header === "string" && constantTimeEqual(header, secret);
+}
+
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   try {
@@ -142,6 +154,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const secret = process.env.ADMIN_SECRET ?? "";
   if (!secret) return next();
   if (isLoopback(req)) return next();
+  if (isAuthorizedBuyInEmailWebhook(req)) return next();
   if (isPublicPath(req.path)) return next();
   if (isAuthenticated(req, secret)) return next();
 
