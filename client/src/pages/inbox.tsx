@@ -64,6 +64,17 @@ type InboxBuyInCommunications = {
   contacts: InboxVendorContactRecord[];
 };
 
+type InboxRentalAgreement = {
+  agreement: {
+    id: number;
+    token: string;
+    status: string;
+    signingUrl?: string;
+    signedName?: string | null;
+    signedAt?: string | null;
+  } | null;
+};
+
 // ─── AI draft property-context builder ────────────────────────────────────────
 // Given a Guesty listingId, look up the matching NexStay property via the
 // backing map and build a rich text block the AI can use to answer
@@ -301,19 +312,19 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
-    name: "Guesty Agreement & Card Authorization Request",
+    name: "Internal Rental Agreement Request",
     deliveryChannel: "guesty",
     trigger: "days_after_booking",
     daysOffset: 0,
-    isActive: true,
+    isActive: false,
     body: `Hi {guest_name},
 
-Please have the primary guest complete our secure Guesty Guest App pre-arrival form for the stay at {property_name}.
+Please have the primary guest review and sign our secure rental agreement for the stay at {property_name}.
 
 Please complete it here:
-{{checkin_form}}
+[agreement link]
 
-This lets us confirm the booking details, house rules, authorized guest, signed rental agreement, and any required secure payment/card authorization details before arrival. Please do not send credit card details in this message thread.
+This confirms the booking details, house rules, authorized guest, signed rental agreement, and two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.
 
 Once completed, you are all set. We will send final arrival/access details 14 days before check-in.
 
@@ -340,22 +351,22 @@ John Carpenter
 VacationRentalExpertz`,
   },
   {
-    name: "SMS: Secure Pre-Arrival Form",
+    name: "SMS: Rental Agreement",
     deliveryChannel: "sms",
     trigger: "days_after_booking",
     daysOffset: 0,
-    isActive: true,
-    body: `Hi {guest_name}, I just sent the secure pre-arrival form for {property_name} in the booking thread/email. Please complete it there when you have a moment.
+    isActive: false,
+    body: `Hi {guest_name}, please review and sign the secure rental agreement for {property_name}: [agreement link]
 
-This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, John`,
+This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. Thanks, John`,
   },
   {
-    name: "SMS: Reminder to Complete Pre-Arrival Form",
+    name: "SMS: Reminder to Sign Rental Agreement",
     deliveryChannel: "sms",
     trigger: "days_after_booking",
     daysOffset: 1,
-    isActive: true,
-    body: `Hi {guest_name}, quick reminder to complete the secure pre-arrival form for {property_name}. I sent it in the booking thread/email.
+    isActive: false,
+    body: `Hi {guest_name}, quick reminder to sign the secure rental agreement for {property_name}: [agreement link]
 
 Once that is complete, you are all set for the next step. Thanks, John`,
   },
@@ -569,7 +580,7 @@ function isSignedHostTemplateBody(body: string): boolean {
 }
 
 function normalizeGuestyManualMessageBody(body: string): string {
-  return body.replace(/\{\{guest_app::\[app_name\]\}\}/g, "{{checkin_form}}");
+  return body;
 }
 
 // ─── Outbound message templates ────────────────────────────────────────────────
@@ -756,21 +767,22 @@ function buildRepresentativeUnitsFollowUpBody(args: {
 function buildAgreementRequestBody(args: {
   guestFirstName: string;
   propertyName: string;
+  agreementUrl: string;
   checkInIso?: string;
   confirmationCode?: string;
 }): string {
   const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
-    `Please have the primary guest complete our secure Guesty Guest App pre-arrival form${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
+    `Please have the primary guest review and sign our secure rental agreement${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
   lines.push(``);
   lines.push(`Please complete it here:`);
-  lines.push(`{{checkin_form}}`);
+  lines.push(args.agreementUrl);
   lines.push(``);
-  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and any required secure payment/card authorization details before arrival. Please do not send credit card details in this message thread.`);
+  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and the two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.`);
   lines.push(``);
   lines.push(`Once completed, you are all set. We will send final arrival/access details 14 days before check-in.`);
   lines.push(``);
@@ -783,14 +795,13 @@ function buildAgreementRequestBody(args: {
 function buildAgreementRequestSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
-  preArrivalFormUrl?: string;
+  agreementUrl: string;
 }): string {
-  const link = args.preArrivalFormUrl?.trim() || "[PASTE SECURE GUESTY FORM LINK]";
   return [
-    `Hi ${args.guestFirstName || "there"}, please complete the secure pre-arrival form${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
-    link,
+    `Hi ${args.guestFirstName || "there"}, please review and sign the secure rental agreement${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    args.agreementUrl,
     ``,
-    `This covers the rental agreement and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
+    `This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
   ].join("\n");
 }
 
@@ -1710,7 +1721,7 @@ export default function InboxPage() {
   const smsDisabledReason = !smsConfigured
     ? (smsStatus?.message ?? "SMS is not configured yet in Railway")
     : hasUnresolvedGuestyVariable
-      ? "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Use Send in Guesty or remove the placeholder before texting."
+      ? "Guesty variables like {{guest_invoice}} only expand when sent through Guesty. Use Send in Guesty or remove the placeholder before texting."
     : hasSmsPlaceholder
       ? "Paste the real secure Guesty link before texting this draft."
     : !effectiveGuestPhone
@@ -1766,6 +1777,17 @@ export default function InboxPage() {
       return r.json();
     },
     staleTime: 60_000,
+  });
+
+  const { data: rentalAgreement, refetch: refetchRentalAgreement } = useQuery<InboxRentalAgreement>({
+    queryKey: ["/api/bookings", reservationId, "rental-agreement"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/rental-agreement`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 30_000,
   });
 
   // ── Inquiry-time buy-in estimate ──
@@ -1841,7 +1863,44 @@ export default function InboxPage() {
     previewTemplateBody(title, body, channel);
   };
 
-  const draftStayTemplate = ({
+  const ensureRentalAgreementLink = async (args: {
+    channelRaw: string;
+    guestName: string;
+    guestEmail?: string | null;
+    guestPhone?: string | null;
+    propertyName: string;
+    checkInIso?: string;
+    checkOutIso?: string;
+    confirmationCode?: string;
+    numNights?: number | null;
+    bookingTotal?: number;
+  }): Promise<string> => {
+    if (!reservationId) throw new Error("No reservation found for this agreement");
+    const channel = String(args.channelRaw ?? "");
+    if (!/vrbo|homeaway|booking/i.test(channel)) {
+      throw new Error("Internal rental agreements are only for VRBO/HomeAway and Booking.com bookings.");
+    }
+    if (rentalAgreement?.agreement?.signingUrl) return rentalAgreement.agreement.signingUrl;
+    const response = await apiRequest("POST", `/api/bookings/${reservationId}/rental-agreement`, {
+      conversationId: selectedConvId,
+      channel,
+      guestName: args.guestName,
+      guestEmail: args.guestEmail,
+      guestPhone: args.guestPhone,
+      propertyName: args.propertyName,
+      checkIn: args.checkInIso?.slice(0, 10),
+      checkOut: args.checkOutIso?.slice(0, 10),
+      confirmationCode: args.confirmationCode,
+      nights: args.numNights,
+      bookingTotal: args.bookingTotal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
+    await refetchRentalAgreement();
+    return payload.signingUrl || payload.agreement?.signingUrl || `/agreement/${payload.agreement?.token}`;
+  };
+
+  const draftStayTemplate = async ({
     title = "Template preview",
     channel = "guesty",
     kind,
@@ -1853,6 +1912,10 @@ export default function InboxPage() {
     numNights,
     bookingTotal,
     totalPaid,
+    channelRaw,
+    guestName,
+    guestEmail,
+    guestPhone,
   }: {
     title?: string;
     channel?: "guesty" | "sms";
@@ -1865,34 +1928,56 @@ export default function InboxPage() {
     numNights?: number | null;
     bookingTotal?: number;
     totalPaid?: number;
+    channelRaw?: string;
+    guestName?: string;
+    guestEmail?: string | null;
+    guestPhone?: string | null;
   }) => {
-    const units = arrivalDetails?.units ?? [];
-    const body = channel === "sms" && kind === "agreement-request"
-      ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, preArrivalFormUrl: effectivePreArrivalFormUrl })
-      : channel === "sms" && kind === "guesty-invoice-payment"
-        ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
-      : channel === "sms" && kind === "representative-follow-up"
-        ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
-      : channel === "sms" && kind === "local-tips"
-        ? buildLocalTipsSmsBody({ guestFirstName, propertyName })
-      : channel === "sms" && kind === "day-before"
-        ? buildDayBeforeSmsBody({ guestFirstName, propertyName })
-      : channel === "sms" && kind === "post-stay"
-        ? buildPostStaySmsBody({ guestFirstName, propertyName })
-      : kind === "booking"
-      ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
-      : kind === "agreement-request"
-        ? buildAgreementRequestBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
-      : kind === "guesty-invoice-payment"
-        ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
-      : kind === "representative-follow-up"
-        ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
-        : kind === "local-tips"
-          ? buildLocalTipsBody({ guestFirstName, propertyName, units })
-          : kind === "day-before"
-            ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
-            : buildPostStayBody({ guestFirstName, propertyName });
-    previewTemplateBody(title, body, channel);
+    try {
+      const units = arrivalDetails?.units ?? [];
+      const agreementUrl = kind === "agreement-request"
+        ? await ensureRentalAgreementLink({
+          channelRaw: channelRaw ?? "",
+          guestName: guestName || guestFirstName,
+          guestEmail,
+          guestPhone,
+          propertyName,
+          checkInIso,
+          checkOutIso,
+          confirmationCode,
+          numNights,
+          bookingTotal,
+        })
+        : "";
+      const body = channel === "sms" && kind === "agreement-request"
+        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, agreementUrl })
+        : channel === "sms" && kind === "guesty-invoice-payment"
+          ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
+        : channel === "sms" && kind === "representative-follow-up"
+          ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "local-tips"
+          ? buildLocalTipsSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "day-before"
+          ? buildDayBeforeSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "post-stay"
+          ? buildPostStaySmsBody({ guestFirstName, propertyName })
+        : kind === "booking"
+        ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
+        : kind === "agreement-request"
+          ? buildAgreementRequestBody({ guestFirstName, propertyName, agreementUrl, checkInIso, confirmationCode })
+        : kind === "guesty-invoice-payment"
+          ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
+        : kind === "representative-follow-up"
+          ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
+          : kind === "local-tips"
+            ? buildLocalTipsBody({ guestFirstName, propertyName, units })
+            : kind === "day-before"
+              ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
+              : buildPostStayBody({ guestFirstName, propertyName });
+      previewTemplateBody(title, body, channel);
+    } catch (err: any) {
+      toast({ title: "Could not create agreement", description: err?.message ?? "Please try again.", variant: "destructive" });
+    }
   };
 
   const sendMessage = useMutation({
@@ -1948,10 +2033,10 @@ export default function InboxPage() {
       const to = effectiveGuestPhone;
       if (!to) throw new Error("No guest phone number found on this Guesty thread");
       if (GUESTY_VARIABLE_PATTERN.test(replyText)) {
-        throw new Error("Guesty variables like {{checkin_form}} do not expand in Quo texts. Send this through Guesty or remove the placeholder before texting.");
+        throw new Error("Guesty variables like {{guest_invoice}} do not expand in Quo texts. Send this through Guesty or remove the placeholder before texting.");
       }
       if (SMS_PLACEHOLDER_PATTERN.test(replyText)) {
-        throw new Error("Paste the real secure Guesty link before sending this text.");
+        throw new Error("Paste the real secure link before sending this text.");
       }
       const r = await apiRequest("POST", `/api/inbox/sms/conversations/${selectedConvId}/send`, {
         to,
@@ -3336,7 +3421,7 @@ export default function InboxPage() {
                             const checkInDate = parseStayDate(checkInIso);
                             const checkOutDate = parseStayDate(checkOutIso);
                             const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
-                            const needsAgreement = true;
+                            const needsAgreement = /vrbo|homeaway|booking/i.test(channelRaw);
                             const postBodies = threadPosts
                               .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""))
                               .filter((body: string) => body.trim().length > 0);
@@ -3384,7 +3469,11 @@ export default function InboxPage() {
                                 .finally(() => setReceiptPaymentsLoading(false));
                             };
                             const draftCommon = {
+                              guestName: fullName,
                               guestFirstName: firstName,
+                              guestEmail: guest.email ?? res?.guest?.email ?? null,
+                              guestPhone: effectiveGuestPhone || null,
+                              channelRaw,
                               propertyName,
                               checkInIso,
                               checkOutIso,
@@ -3407,12 +3496,12 @@ export default function InboxPage() {
                                 title: "Agreement + card authorization",
                                 due: bookingDate,
                                 dueLabel: "After booking",
-                                sent: wasSent(/guest app|pre-arrival form|rental agreement|signed terms|complete it here|check-in form|card authorization/i),
-                                detail: "Guesty Guest App · agreement/check-in form",
+                                sent: rentalAgreement?.agreement?.status === "signed" || wasSent(/\/agreement\/|rental agreement|signed terms|complete it here|two-separate-units|two separate units acknowledgment|card authorization/i),
+                                detail: rentalAgreement?.agreement?.status === "signed" ? "Signed internal agreement" : "Internal agreement · two-unit acknowledgment",
                                 testId: "button-draft-agreement-request",
                                 onClick: () => draftStayTemplate({ title: "Agreement + card authorization", kind: "agreement-request", ...draftCommon }),
                                 smsTestId: "button-draft-sms-agreement-request",
-                                smsOnClick: () => draftStayTemplate({ title: "SMS: secure pre-arrival form", channel: "sms", kind: "agreement-request", ...draftCommon }),
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: rental agreement", channel: "sms", kind: "agreement-request", ...draftCommon }),
                               },
                               {
                                 title: "Guesty invoice / payment method",

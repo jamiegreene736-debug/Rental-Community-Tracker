@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import {
   buyInEmails,
@@ -8,6 +9,7 @@ import {
   insertCommunityDraftSchema,
   insertUnitSwapSchema,
   reservationAliases,
+  rentalAgreements,
 } from "@shared/schema";
 import { db } from "./db";
 import { and, desc, eq, sql } from "drizzle-orm";
@@ -96,6 +98,63 @@ function normalizeHttpsUrl(value: unknown): string | null {
   } catch {
     throw new Error("Enter a valid secure URL starting with https://");
   }
+}
+
+function agreementBaseUrl(req: any): string {
+  const configured = process.env.PUBLIC_APP_URL || process.env.APP_URL || process.env.RAILWAY_PUBLIC_DOMAIN;
+  if (configured) {
+    const withProtocol = /^https?:\/\//i.test(configured) ? configured : `https://${configured}`;
+    return withProtocol.replace(/\/+$/, "");
+  }
+  const proto = String(req.headers["x-forwarded-proto"] ?? req.protocol ?? "https").split(",")[0];
+  const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0];
+  return `${proto || "https"}://${host}`.replace(/\/+$/, "");
+}
+
+function isAgreementChannel(channel: string): boolean {
+  const raw = channel.toLowerCase();
+  return raw.includes("vrbo") || raw.includes("homeaway") || raw.includes("booking");
+}
+
+function buildRentalAgreementText(input: {
+  guestName: string;
+  propertyName: string;
+  channel: string;
+  checkIn?: string | null;
+  checkOut?: string | null;
+  nights?: number | null;
+  bookingTotal?: string | number | null;
+  confirmationCode?: string | null;
+  unitSummary?: string | null;
+}): string {
+  const money = input.bookingTotal != null && input.bookingTotal !== ""
+    ? `$${Number(input.bookingTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : "the booking total shown in the reservation";
+  const dates = input.checkIn && input.checkOut
+    ? `${input.checkIn} through ${input.checkOut}${input.nights ? ` (${input.nights} nights)` : ""}`
+    : "the reserved stay dates";
+  return [
+    "Rental Agreement and Guest Acknowledgment",
+    "",
+    `Primary guest: ${input.guestName}`,
+    `Property/listing: ${input.propertyName}`,
+    `Booking channel: ${input.channel}`,
+    `Stay dates: ${dates}`,
+    `Booking total: ${money}`,
+    input.confirmationCode ? `Confirmation code: ${input.confirmationCode}` : "",
+    input.unitSummary ? `Assigned/buy-in unit summary: ${input.unitSummary}` : "",
+    "",
+    "By signing below, I acknowledge and agree to the following:",
+    "",
+    "1. I am the primary guest or am authorized by the primary guest to complete this agreement for the reservation.",
+    "2. I understand this reservation may be fulfilled using two separate nearby units rather than one single connected unit. The units may be in the same resort/community or nearby within the same area, but they may have separate entrances, addresses, parking spaces, access instructions, interiors, furnishings, views, and layouts.",
+    "3. I understand listing photos and descriptions may be representative of the resort/community and unit standard. Exact assigned units can vary, but the stay will be fulfilled according to the booked bedroom count, guest capacity, dates, and overall property standard.",
+    `4. I authorize and accept the total reservation cost of ${money}, plus any channel-disclosed taxes, fees, deposits, damage charges, or other agreed charges connected with the stay.`,
+    "5. I agree to follow house rules, occupancy limits, quiet hours, parking rules, resort/community rules, and all arrival/access instructions sent before check-in.",
+    "6. I accept responsibility for damage, missing items, excessive cleaning, rule violations, fines, chargebacks, payment disputes, and other costs caused by me or my party, subject to the booking terms and applicable law.",
+    "7. I understand arrival details are normally sent before check-in after the agreement and any required payment or authorization steps are complete.",
+    "8. I agree that my typed signature, submitted electronically, has the same effect as a handwritten signature for this agreement.",
+  ].filter(Boolean).join("\n");
 }
 
 // Fetch the latest Guesty login verification code from the operator's Gmail
@@ -2786,6 +2845,158 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
+    }
+  });
+
+  app.get("/api/bookings/:reservationId/rental-agreement", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const [agreement] = await db
+        .select()
+        .from(rentalAgreements)
+        .where(eq(rentalAgreements.reservationId, reservationId))
+        .orderBy(desc(rentalAgreements.createdAt))
+        .limit(1);
+      res.json({
+        agreement: agreement
+          ? { ...agreement, signingUrl: `${agreementBaseUrl(req)}/agreement/${agreement.token}` }
+          : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch rental agreement", message: err.message });
+    }
+  });
+
+  app.post("/api/bookings/:reservationId/rental-agreement", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const channel = String(req.body?.channel ?? "").trim();
+      if (!isAgreementChannel(channel)) {
+        return res.status(400).json({ error: "Internal rental agreements are only for VRBO/HomeAway and Booking.com bookings" });
+      }
+      const guestName = String(req.body?.guestName ?? "").trim();
+      const propertyName = String(req.body?.propertyName ?? "").trim();
+      if (!reservationId || !guestName || !propertyName) {
+        return res.status(400).json({ error: "reservationId, guestName, and propertyName are required" });
+      }
+
+      const existing = await db
+        .select()
+        .from(rentalAgreements)
+        .where(eq(rentalAgreements.reservationId, reservationId))
+        .orderBy(desc(rentalAgreements.createdAt))
+        .limit(1);
+      if (existing[0]) {
+        return res.json({
+          agreement: existing[0],
+          signingUrl: `${agreementBaseUrl(req)}/agreement/${existing[0].token}`,
+          created: false,
+        });
+      }
+
+      const buyIns = await storage.getBuyInsByReservation(reservationId);
+      const unitSummary = buyIns.length > 0
+        ? buyIns
+          .slice()
+          .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+          .map((b) => `${b.unitLabel || b.propertyName}${b.unitAddress ? ` (${b.unitAddress})` : ""}`)
+          .join("; ")
+        : String(req.body?.unitSummary ?? "").trim() || "Two separate nearby units assigned for this reservation";
+      const checkIn = String(req.body?.checkIn ?? "").slice(0, 10) || null;
+      const checkOut = String(req.body?.checkOut ?? "").slice(0, 10) || null;
+      const nights = Number(req.body?.nights);
+      const bookingTotal = Number(req.body?.bookingTotal);
+      const agreementText = buildRentalAgreementText({
+        guestName,
+        propertyName,
+        channel,
+        checkIn,
+        checkOut,
+        nights: Number.isFinite(nights) && nights > 0 ? nights : null,
+        bookingTotal: Number.isFinite(bookingTotal) && bookingTotal > 0 ? bookingTotal.toFixed(2) : null,
+        confirmationCode: String(req.body?.confirmationCode ?? "").trim() || null,
+        unitSummary,
+      });
+      const token = randomBytes(24).toString("base64url");
+      const [agreement] = await db
+        .insert(rentalAgreements)
+        .values({
+          token,
+          reservationId,
+          conversationId: String(req.body?.conversationId ?? "").trim() || null,
+          channel,
+          guestName,
+          guestEmail: String(req.body?.guestEmail ?? "").trim() || null,
+          guestPhone: String(req.body?.guestPhone ?? "").trim() || null,
+          propertyName,
+          checkIn,
+          checkOut,
+          nights: Number.isFinite(nights) && nights > 0 ? nights : null,
+          bookingTotal: Number.isFinite(bookingTotal) && bookingTotal > 0 ? bookingTotal.toFixed(2) : null,
+          confirmationCode: String(req.body?.confirmationCode ?? "").trim() || null,
+          unitSummary,
+          agreementText,
+          rawPayload: JSON.stringify(req.body ?? {}),
+        })
+        .returning();
+      res.status(201).json({
+        agreement,
+        signingUrl: `${agreementBaseUrl(req)}/agreement/${agreement.token}`,
+        created: true,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to create rental agreement", message: err.message });
+    }
+  });
+
+  app.get("/api/rental-agreements/:token", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").trim();
+      const [agreement] = await db
+        .select()
+        .from(rentalAgreements)
+        .where(eq(rentalAgreements.token, token))
+        .limit(1);
+      if (!agreement) return res.status(404).json({ error: "Agreement not found" });
+      res.json({ agreement });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch rental agreement", message: err.message });
+    }
+  });
+
+  app.post("/api/rental-agreements/:token/sign", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").trim();
+      const signedName = String(req.body?.signedName ?? "").trim();
+      if (!signedName) return res.status(400).json({ error: "Typed signature is required" });
+      const signerEmail = String(req.body?.signerEmail ?? "").trim() || null;
+      const signerPhone = String(req.body?.signerPhone ?? "").trim() || null;
+      const [existing] = await db
+        .select()
+        .from(rentalAgreements)
+        .where(eq(rentalAgreements.token, token))
+        .limit(1);
+      if (!existing) return res.status(404).json({ error: "Agreement not found" });
+      if (existing.status === "signed") return res.json({ agreement: existing, alreadySigned: true });
+
+      const [agreement] = await db
+        .update(rentalAgreements)
+        .set({
+          status: "signed",
+          signedName,
+          signerEmail,
+          signerPhone,
+          signerIp: String(req.headers["x-forwarded-for"] ?? req.socket.remoteAddress ?? "").split(",")[0],
+          signerUserAgent: String(req.headers["user-agent"] ?? ""),
+          signedAt: new Date(),
+          updatedAt: new Date(),
+          rawPayload: JSON.stringify({ previousRawPayload: existing.rawPayload, signaturePayload: req.body ?? {} }),
+        })
+        .where(eq(rentalAgreements.id, existing.id))
+        .returning();
+      res.json({ agreement });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to sign rental agreement", message: err.message });
     }
   });
 
@@ -21495,13 +21706,13 @@ CONSTRAINTS
       if (/\{\{[^}]+\}\}/.test(smsBody)) {
         return res.status(400).json({
           error: "Unresolved Guesty variable",
-          message: "Guesty variables like {{checkin_form}} only expand when sent through Guesty. Remove the placeholder before sending by text.",
+          message: "Guesty variables like {{guest_invoice}} only expand when sent through Guesty. Remove the placeholder before sending by text.",
         });
       }
       if (/\[(?:PASTE|ADD) [^\]]+\]/i.test(smsBody)) {
         return res.status(400).json({
           error: "Missing SMS link",
-          message: "Paste the real secure Guesty link before sending this text.",
+          message: "Paste the real secure link before sending this text.",
         });
       }
       const config = getQuoSmsConfigStatus();

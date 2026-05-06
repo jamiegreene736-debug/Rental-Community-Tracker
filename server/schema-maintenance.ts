@@ -81,6 +81,46 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured SimpleLogin buy-in email tables");
 
   await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS rental_agreements (
+      id serial PRIMARY KEY,
+      token text NOT NULL UNIQUE,
+      reservation_id text NOT NULL,
+      conversation_id text,
+      channel text NOT NULL,
+      guest_name text NOT NULL,
+      guest_email text,
+      guest_phone text,
+      property_name text NOT NULL,
+      check_in date,
+      check_out date,
+      nights integer,
+      booking_total numeric(10,2),
+      confirmation_code text,
+      unit_summary text,
+      agreement_text text NOT NULL,
+      status text NOT NULL DEFAULT 'pending',
+      signed_name text,
+      signer_email text,
+      signer_phone text,
+      signer_ip text,
+      signer_user_agent text,
+      signed_at timestamp,
+      raw_payload text,
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS rental_agreements_reservation_idx
+      ON rental_agreements (reservation_id, created_at DESC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS rental_agreements_status_idx
+      ON rental_agreements (status)
+  `);
+  console.log("[schema] ensured rental_agreements table");
+
+  await db.execute(sql`
     ALTER TABLE message_templates
       ADD COLUMN IF NOT EXISTS delivery_channel text NOT NULL DEFAULT 'guesty'
   `);

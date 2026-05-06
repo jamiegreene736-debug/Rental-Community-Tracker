@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -22,9 +22,22 @@ import Builder from "@/pages/builder";
 import BuilderPreflight from "@/pages/builder-preflight";
 import Inbox from "@/pages/inbox";
 import Bookings from "@/pages/bookings";
+import Agreement from "@/pages/agreement";
 import { setLivePropertyMarketRates, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
 
 function Router() {
+  const [location] = useLocation();
+  if (location.startsWith("/agreement/")) {
+    return (
+      <ErrorBoundary>
+        <Switch>
+          <Route path="/agreement/:token" component={Agreement} />
+          <Route component={NotFound} />
+        </Switch>
+      </ErrorBoundary>
+    );
+  }
+
   return (
     <>
       <AppHeader />
@@ -42,6 +55,7 @@ function Router() {
           <Route path="/community-photo-finder" component={CommunityPhotoFinder} />
           <Route path="/inbox" component={Inbox} />
           <Route path="/bookings" component={Bookings} />
+          <Route path="/agreement/:token" component={Agreement} />
           <Route component={NotFound} />
         </Switch>
       </ErrorBoundary>

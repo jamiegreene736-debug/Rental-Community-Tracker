@@ -123,6 +123,44 @@ export const insertBuyInEmailSchema = createInsertSchema(buyInEmails).omit({
 export type InsertBuyInEmail = z.infer<typeof insertBuyInEmailSchema>;
 export type BuyInEmail = typeof buyInEmails.$inferSelect;
 
+export const rentalAgreements = pgTable("rental_agreements", {
+  id: serial("id").primaryKey(),
+  token: text("token").notNull().unique(),
+  reservationId: text("reservation_id").notNull(),
+  conversationId: text("conversation_id"),
+  channel: text("channel").notNull(),
+  guestName: text("guest_name").notNull(),
+  guestEmail: text("guest_email"),
+  guestPhone: text("guest_phone"),
+  propertyName: text("property_name").notNull(),
+  checkIn: date("check_in"),
+  checkOut: date("check_out"),
+  nights: integer("nights"),
+  bookingTotal: numeric("booking_total", { precision: 10, scale: 2 }),
+  confirmationCode: text("confirmation_code"),
+  unitSummary: text("unit_summary"),
+  agreementText: text("agreement_text").notNull(),
+  status: text("status").notNull().default("pending"),
+  signedName: text("signed_name"),
+  signerEmail: text("signer_email"),
+  signerPhone: text("signer_phone"),
+  signerIp: text("signer_ip"),
+  signerUserAgent: text("signer_user_agent"),
+  signedAt: timestamp("signed_at"),
+  rawPayload: text("raw_payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertRentalAgreementSchema = createInsertSchema(rentalAgreements).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertRentalAgreement = z.infer<typeof insertRentalAgreementSchema>;
+export type RentalAgreement = typeof rentalAgreements.$inferSelect;
+
 export const lodgifyBookings = pgTable("lodgify_bookings", {
   id: serial("id").primaryKey(),
   lodgifyBookingId: integer("lodgify_booking_id").notNull().unique(),
