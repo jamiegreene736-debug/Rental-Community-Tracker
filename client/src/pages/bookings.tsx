@@ -2931,6 +2931,14 @@ type BuyInListingSitesResponse = {
   fromCache?: boolean;
 };
 
+type DirectBookingScanRow = {
+  candidate: LiveCandidate;
+  status: "loading" | "done" | "error";
+  matches: ReverseImageListingMatch[];
+  message?: string;
+  fromCache?: boolean;
+};
+
 type FindBuyInResponse = {
   community: string;
   resortName?: string | null;
@@ -3336,6 +3344,8 @@ function LiveSearchSection({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
   const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
+  const [directScanRows, setDirectScanRows] = useState<DirectBookingScanRow[]>([]);
+  const [directScanRunning, setDirectScanRunning] = useState(false);
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -3571,6 +3581,12 @@ function LiveSearchSection({
     if (isAttachedElsewhere(u.primaryUrl)) return false;
     return !u.listings.some((l) => isAttachedElsewhere(l.url));
   });
+  const directScanCandidates = availableAirbnb
+    .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
+    .sort((a, b) => a.totalPrice - b.totalPrice);
+  const nonAirbnbBaseline = [...availableVrbo, ...availableBooking, ...availablePm]
+    .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
+    .reduce<number | null>((best, c) => best === null ? c.totalPrice : Math.min(best, c.totalPrice), null);
   const focusedCheapestUnits = availableCheapestUnits.slice(0, 1);
   const additionalCheapestUnits = availableCheapestUnits.slice(1);
   const focusedCheapest = availableCheapest.slice(0, 1);
@@ -3614,6 +3630,72 @@ function LiveSearchSection({
     };
   };
 
+  const directMatchToCandidate = (airbnbCandidate: LiveCandidate, match: ReverseImageListingMatch): LiveCandidate => ({
+    source: "pm",
+    sourceLabel: `Direct PM (${match.domain})`,
+    title: match.title || airbnbCandidate.title,
+    url: match.url,
+    nightlyPrice: airbnbCandidate.nightlyPrice,
+    totalPrice: airbnbCandidate.totalPrice,
+    bedrooms: airbnbCandidate.bedrooms,
+    image: airbnbCandidate.image,
+    snippet: "Direct booking site found from this Airbnb listing's photos. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.",
+    alternateUrls: [airbnbCandidate.url, match.url],
+    identityKeys: airbnbCandidate.identityKeys,
+    airbnbAnchorUrl: airbnbCandidate.url,
+    airbnbAnchorPrice: airbnbCandidate.totalPrice,
+    verified: "yes",
+    verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
+    verifiedReason: "Direct PM listing found by the listing-site scan. Airbnb supplied the date-specific availability/rate proxy, so confirm the PM site before purchase.",
+  });
+
+  const runDirectBookingScan = async () => {
+    if (directScanRunning || directScanCandidates.length === 0) return;
+    setDirectScanRunning(true);
+    const initialRows = directScanCandidates.map((candidate) => ({
+      candidate,
+      status: "loading" as const,
+      matches: [],
+    }));
+    setDirectScanRows(initialRows);
+    try {
+      for (const candidate of directScanCandidates) {
+        try {
+          const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
+            sourceUrl: candidate.url,
+            title: candidate.title,
+            resortName: data?.resortName ?? data?.community ?? "",
+            community: data?.community ?? "",
+          });
+          const body = await response.json();
+          const matches = Array.isArray(body?.matches)
+            ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
+            : [];
+          setDirectScanRows((prev) => prev.map((row) => row.candidate.url === candidate.url
+            ? {
+              candidate,
+              status: "done",
+              matches,
+              message: body?.message,
+              fromCache: body?.fromCache === true,
+            }
+            : row));
+        } catch (e: any) {
+          setDirectScanRows((prev) => prev.map((row) => row.candidate.url === candidate.url
+            ? {
+              candidate,
+              status: "error",
+              matches: [],
+              message: e?.message ?? "Direct booking scan failed",
+            }
+            : row));
+        }
+      }
+    } finally {
+      setDirectScanRunning(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -3636,6 +3718,23 @@ function LiveSearchSection({
         </div>
         <div className="flex items-center gap-2">
           <SidecarStatusBadge />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={runDirectBookingScan}
+            disabled={directScanRunning || directScanCandidates.length === 0 || isFetching}
+            title={directScanCandidates.length > 0
+              ? `Scan ${directScanCandidates.length} Airbnb priced candidate${directScanCandidates.length === 1 ? "" : "s"} for direct PM listings`
+              : "No priced Airbnb candidates available to scan"}
+            data-testid="button-direct-booking-airbnb-scan"
+          >
+            {directScanRunning ? (
+              <RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <Globe className="h-3.5 w-3.5 mr-1" />
+            )}
+            Direct-booking Airbnb picks
+          </Button>
           <Button size="sm" variant="ghost" onClick={refreshLiveSearch}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
           </Button>
@@ -3679,6 +3778,14 @@ function LiveSearchSection({
         <div className="border border-amber-300 bg-amber-50/70 text-amber-800 rounded-md px-3 py-2 text-[11px]">
           Hidden {hiddenAlreadyAttachedCount} option{hiddenAlreadyAttachedCount === 1 ? "" : "s"} already attached to another unit in this reservation.
         </div>
+      )}
+      {directScanRows.length > 0 && (
+        <DirectBookingRecommendations
+          rows={directScanRows}
+          running={directScanRunning}
+          nonAirbnbBaseline={nonAirbnbBaseline}
+          onRecord={(candidate, match) => setRecordTarget(directMatchToCandidate(candidate, match))}
+        />
       )}
       {/* Raw hit counts + drop counts per source — lets us see why a source
           returned few results (upstream empty vs resort/bedroom filtered).
@@ -3916,6 +4023,129 @@ function LiveSearchSection({
           slot={slot}
           onClose={() => setRecordTarget(null)}
         />
+      )}
+    </div>
+  );
+}
+
+function DirectBookingRecommendations({
+  rows,
+  running,
+  nonAirbnbBaseline,
+  onRecord,
+}: {
+  rows: DirectBookingScanRow[];
+  running: boolean;
+  nonAirbnbBaseline: number | null;
+  onRecord: (candidate: LiveCandidate, match: ReverseImageListingMatch) => void;
+}) {
+  const completed = rows.filter((row) => row.status !== "loading").length;
+  const eligible = rows
+    .filter((row) => row.status === "done" && row.matches.length > 0)
+    .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
+  const cheaperEligible = eligible.filter((row) =>
+    nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline,
+  );
+  const displayRows = cheaperEligible.length > 0 ? cheaperEligible : eligible;
+  const errorCount = rows.filter((row) => row.status === "error").length;
+
+  return (
+    <div className="rounded-lg border border-sky-300 bg-sky-50/70 p-3 dark:bg-sky-950/20">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-sky-900 dark:text-sky-200 flex items-center gap-1.5">
+            <Globe className="h-3.5 w-3.5" />
+            Airbnb listings with direct PM sites
+          </p>
+          <p className="text-[11px] text-sky-900/75 dark:text-sky-200/75 mt-0.5">
+            Scans priced Airbnb listings with the same Find sites photo process, then keeps direct/PM matches only.
+            {nonAirbnbBaseline !== null ? ` Non-Airbnb baseline: ${fmtMoney(nonAirbnbBaseline)} total.` : " No priced non-Airbnb baseline found."}
+          </p>
+        </div>
+        <Badge className="bg-sky-700 text-white text-[10px] shrink-0">
+          {running ? `${completed}/${rows.length}` : `${eligible.length} found`}
+        </Badge>
+      </div>
+
+      {running && (
+        <div className="mb-2 text-[11px] text-sky-900/80 inline-flex items-center gap-1.5">
+          <RefreshCw className="h-3 w-3 animate-spin" />
+          Checking Airbnb candidates for direct PM listing pages…
+        </div>
+      )}
+
+      {!running && displayRows.length === 0 && (
+        <p className="rounded-md border border-sky-200 bg-white/70 px-2 py-2 text-[11px] text-muted-foreground">
+          No direct PM listing found from this scan.
+          {errorCount > 0 ? ` ${errorCount} candidate${errorCount === 1 ? "" : "s"} failed during lookup.` : ""}
+        </p>
+      )}
+
+      {displayRows.length > 0 && (
+        <div className="space-y-2">
+          {displayRows.map((row) => {
+            const primaryMatch = row.matches[0];
+            const beatsBaseline = nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline;
+            return (
+              <div
+                key={row.candidate.url}
+                className="rounded-md border bg-background p-2.5 flex items-start gap-2.5"
+              >
+                {row.candidate.image && (
+                  <img src={row.candidate.image} alt="" className="h-12 w-12 rounded object-cover shrink-0" />
+                )}
+                <div className="min-w-0 grow">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Badge className="text-[9px] bg-[#FF5A5F] text-white">Airbnb priced</Badge>
+                    <Badge className={`text-[9px] ${beatsBaseline ? "bg-emerald-600 text-white" : "bg-amber-500 text-white"}`}>
+                      {beatsBaseline ? "Cheaper than non-Airbnb" : "Direct site found"}
+                    </Badge>
+                    {row.fromCache && <Badge variant="outline" className="text-[9px]">cached</Badge>}
+                    <p className="text-sm font-medium truncate">{row.candidate.title}</p>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Airbnb rate proxy: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
+                    {row.candidate.nightlyPrice > 0 ? ` · ${fmtMoney(row.candidate.nightlyPrice)}/night` : ""}
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {row.matches.slice(0, 3).map((match) => (
+                      <a
+                        key={`${row.candidate.url}-${match.domain}-${match.url}`}
+                        href={match.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                        title={match.title}
+                      >
+                        {match.domain}
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+                <div className="shrink-0 flex flex-col gap-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => window.open(primaryMatch.url, "_blank", "noopener,noreferrer")}
+                  >
+                    <ExternalLink className="h-3 w-3 mr-1" /> PM site
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => onRecord(row.candidate, primaryMatch)}
+                    disabled={!beatsBaseline}
+                    title={beatsBaseline ? "Record this direct PM match as the buy-in" : "Direct site found, but it is not cheaper than the non-Airbnb baseline"}
+                  >
+                    <ShoppingCart className="h-3 w-3 mr-1" /> Record
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -5237,6 +5467,13 @@ function RecordBuyInDialog({
 
   const createAndAttach = useMutation({
     mutationFn: async () => {
+      const defaultNotes = candidate.airbnbAnchorUrl
+        ? [
+          `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
+          `Direct PM listing found from Airbnb photos. Airbnb rate proxy: ${candidate.airbnbAnchorPrice ? fmtMoney(candidate.airbnbAnchorPrice) : "unknown"}.`,
+          `Airbnb anchor: ${candidate.airbnbAnchorUrl}`,
+        ].join(" · ")
+        : `Bought via ${candidate.sourceLabel} — ${candidate.title}`;
       const body = {
         propertyId,
         unitId: slot.unitId,
@@ -5247,7 +5484,7 @@ function RecordBuyInDialog({
         costPaid: Number(costPaid).toFixed(2),
         airbnbConfirmation: confirmation || null,
         airbnbListingUrl: listingUrl || null,
-        notes: notes || `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
+        notes: notes || defaultNotes,
         status: "active",
       };
       const created = await apiRequest("POST", "/api/buy-ins", body).then((r) => r.json());

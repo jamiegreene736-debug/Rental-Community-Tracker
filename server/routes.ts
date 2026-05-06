@@ -6575,6 +6575,169 @@ export async function registerRoutes(
     return res.json({ ...value, matches: matches.slice(0, maxResults), fromCache: false });
   });
 
+  // POST /api/operations/direct-booking-sites
+  // Run the same source-listing photo scan as the attached-row "Find sites"
+  // action, but against a live Airbnb candidate before it is recorded as a
+  // buy-in. This intentionally returns ONLY PM/direct booking matches; OTA or
+  // generic "same photo" sites are useful audit evidence, but they are not
+  // enough to qualify an Airbnb candidate for direct-booking buy-in.
+  app.post("/api/operations/direct-booking-sites", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const sourceUrl = String(req.body?.sourceUrl ?? "").trim();
+    const sourceTitle = String(req.body?.title ?? "Airbnb listing").trim() || "Airbnb listing";
+    const resortName = String(req.body?.resortName ?? "").trim();
+    const community = String(req.body?.community ?? resortName ?? "").trim();
+    if (!sourceUrl) return res.status(400).json({ error: "sourceUrl required" });
+    if (!/airbnb\.[^/]+\/rooms\//i.test(sourceUrl)) {
+      return res.status(400).json({ error: "direct booking scan only supports Airbnb room listings" });
+    }
+    try {
+      const parsed = new URL(sourceUrl);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error("unsupported protocol");
+    } catch {
+      return res.status(400).json({ error: "sourceUrl is invalid" });
+    }
+
+    try {
+      const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
+      const sourceKey = normalizeListingSurfaceKey(sourceUrl);
+      const cacheKey = `buy-in-sites:${sourceKey}`;
+      evictExpiredBuyInListingSites();
+      const cached = buyInListingSitesCache.get(cacheKey);
+      if (useCache && cached && cached.expiresAt > Date.now()) {
+        const directMatches = cached.value.matches.filter((match) => match.platformKey === "pm");
+        return res.json({
+          ...cached.value,
+          buyInId: 0,
+          sourceUrl,
+          sourceLabel: "Airbnb",
+          matches: directMatches,
+          directMatchCount: directMatches.length,
+          fromCache: true,
+        });
+      }
+
+      let scrapeError: string | null = null;
+      let scraped = await scrapeAirbnbPropertyImagesFallback(sourceUrl);
+      if (scraped.length === 0) {
+        try {
+          scraped = await scrapeListingPhotos(sourceUrl);
+        } catch (err: any) {
+          scrapeError = err?.message ?? String(err);
+          console.warn(`[direct-booking-sites] browser scrape failed for ${sourceUrl}: ${scrapeError}`);
+        }
+      }
+
+      const auditedPhotos = await auditBuyInListingPhotos(scraped);
+      const candidatePhotos = auditedPhotos
+        .filter((photo): photo is BuyInListingPhotoAudit & { role: NonNullable<BuyInListingPhotoAudit["role"]> } =>
+          !!photo.role && !photo.skippedReason,
+        )
+        .sort((a, b) => {
+          const rank = (role: NonNullable<BuyInListingPhotoAudit["role"]>): number =>
+            role === "main" ? 0 : role === "living-room" ? 1 : 2;
+          return rank(a.role) - rank(b.role);
+        });
+      for (const photo of candidatePhotos) {
+        photo.searched = false;
+      }
+
+      const sourceDomain = domainFromUrl(sourceUrl);
+      const matches: BuyInListingSiteMatch[] = [];
+      const seen = new Set<string>();
+      let rawCount = 0;
+      const port = process.env.PORT || "5000";
+      const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
+
+      for (const photo of candidatePhotos) {
+        photo.searched = true;
+        const photoMatches: BuyInListingSiteMatch[] = [];
+        try {
+          const response = await fetch(lookupEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageUrl: photo.url,
+              sourceUrl,
+              title: sourceTitle,
+              resortName,
+              community,
+              maxResults: 25,
+            }),
+            signal: AbortSignal.timeout(75_000),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            photo.skippedReason = body?.error ? `Reverse search failed: ${body.error}` : `Reverse search failed (${response.status})`;
+            photo.searched = false;
+            continue;
+          }
+          rawCount += Number(body?.rawCount ?? 0) || 0;
+          for (const match of Array.isArray(body?.matches) ? body.matches as ReverseImageListingMatch[] : []) {
+            if (match.source === "known-source") continue;
+            if (match.platformKey !== "pm") continue;
+            if (normalizeListingSurfaceKey(match.url) === sourceKey) continue;
+            if (domainFromUrl(match.url) === sourceDomain) continue;
+            const key = `${match.platformKey}|${match.domain}|${normalizeListingSurfaceKey(match.url)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const decoratedMatch = {
+              ...match,
+              matchedPhotoUrl: photo.url,
+              matchedPhotoRole: photo.role,
+              matchedPhotoLabel: photo.label,
+              matchedPhotoCategory: photo.category,
+            };
+            photoMatches.push(decoratedMatch);
+            matches.push(decoratedMatch);
+          }
+        } catch (e: any) {
+          photo.skippedReason = e?.name === "AbortError"
+            ? "Reverse search timed out for this photo"
+            : `Reverse search failed: ${e?.message ?? String(e)}`;
+          photo.searched = false;
+        }
+        if (photoMatches.length > 0) break;
+      }
+
+      matches.sort((a, b) => {
+        const roleRank = (role: NonNullable<BuyInListingPhotoAudit["role"]>): number =>
+          role === "main" ? 0 : role === "living-room" ? 1 : 2;
+        return roleRank(a.matchedPhotoRole) - roleRank(b.matchedPhotoRole)
+          || a.position - b.position
+          || a.domain.localeCompare(b.domain);
+      });
+
+      const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;
+      const value = {
+        buyInId: 0,
+        sourceUrl,
+        sourceLabel: "Airbnb",
+        photos: auditedPhotos,
+        matches: matches.slice(0, 25),
+        rawCount,
+        generatedAt: new Date().toISOString(),
+        ...(scraped.length === 0
+          ? { message: scrapeError
+            ? "No listing photos could be extracted without browser support for this source page."
+            : "No listing photos could be extracted from the source page." }
+          : searchedCount === 0
+          ? { message: "Listing photos were found, but all were classified as shared/exterior/amenity-style photos and skipped." }
+          : {}),
+      };
+      buyInListingSitesCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + REVERSE_IMAGE_LISTING_TTL_MS,
+      });
+      return res.json({ ...value, directMatchCount: value.matches.length, fromCache: false });
+    } catch (err: any) {
+      console.error("[direct-booking-sites] error:", err);
+      return res.status(500).json({ error: err?.message ?? "Failed to scan direct booking sites" });
+    }
+  });
+
   // POST /api/buy-ins/:id/listing-sites
   // Attached buy-in row action: scrape the source listing's own gallery,
   // skip shared community/exterior/amenity photos, then run Lens on the
