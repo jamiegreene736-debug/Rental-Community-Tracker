@@ -2671,27 +2671,27 @@ export default function InboxPage() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <div className="border-b bg-card px-6 py-4 flex items-center gap-4">
+      <div className="border-b bg-card px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center gap-3 sm:gap-4">
         <Link href="/">
           <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
             <ArrowLeft className="h-4 w-4" /> Dashboard
           </Button>
         </Link>
-        <div className="h-5 w-px bg-border" />
-        <div>
+        <div className="hidden sm:block h-5 w-px bg-border" />
+        <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>
           <p className="text-xs text-muted-foreground">Messages · Reservations · Auto-Messages</p>
         </div>
         {pendingRes.length > 0 && (
-          <Badge className="ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
+          <Badge className="sm:ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
             {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
           </Badge>
         )}
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 py-6">
+      <div className="max-w-7xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         <Tabs defaultValue="messages">
-          <TabsList className="mb-6" data-testid="tabs-inbox">
+          <TabsList className="mb-4 sm:mb-6 flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-inbox">
             <TabsTrigger value="messages" data-testid="tab-messages">
               <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
             </TabsTrigger>
@@ -2718,9 +2718,9 @@ export default function InboxPage() {
 
           {/* ── MESSAGES TAB ── */}
           <TabsContent value="messages">
-            <div className="grid grid-cols-[280px_1fr_300px] gap-4 h-[calc(100vh-220px)] min-h-[600px]">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px] lg:h-[calc(100vh-220px)] lg:min-h-[600px]">
               {/* Conversation List */}
-              <div className="border rounded-lg bg-card overflow-y-auto">
+              <div className="border rounded-lg bg-card max-h-[42vh] overflow-y-auto lg:max-h-none">
                 <div className="px-4 py-3 border-b flex items-center justify-between gap-2">
                   <span className="text-sm font-medium shrink-0">Conversations</span>
                   {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
@@ -2850,7 +2850,7 @@ export default function InboxPage() {
               </div>
 
               {/* Thread + Reply */}
-              <div className="border rounded-lg bg-card flex flex-col">
+              <div className="border rounded-lg bg-card flex min-h-[560px] flex-col lg:min-h-0">
                 {!selectedConvId ? (
                   <div className="flex-1 flex items-center justify-center text-muted-foreground">
                     <div className="text-center">
@@ -2861,7 +2861,7 @@ export default function InboxPage() {
                 ) : (
                   <>
                     {/* Thread header */}
-                    <div className="px-5 py-3 border-b flex items-center justify-between gap-3">
+                    <div className="px-4 py-3 sm:px-5 border-b flex flex-wrap items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="font-medium truncate">{selectedConv?.displayGuestName ?? "Guest"}</p>
                         <p className="text-xs text-muted-foreground truncate">{selectedConv?.displayListingName ?? "—"}</p>
@@ -2885,7 +2885,7 @@ export default function InboxPage() {
                     </div>
 
                     {/* Messages — sorted oldest → newest, each with channel badge + full timestamp */}
-                    <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+                    <div ref={threadRef} className="flex-1 overflow-y-auto px-3 py-4 sm:px-5 space-y-3">
                       {(threadLoading || postsLoading || smsLoading) && threadPosts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
@@ -2940,7 +2940,7 @@ export default function InboxPage() {
                           return (
                             <div key={p._id} className={`flex flex-col ${isHost ? "items-end" : "items-start"}`}>
                               <div
-                                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
+                                className={`max-w-[92%] [overflow-wrap:anywhere] rounded-2xl px-3 py-2.5 text-sm whitespace-pre-wrap sm:max-w-[78%] sm:px-4 ${
                                   isHost
                                     ? "bg-primary text-primary-foreground rounded-br-sm"
                                     : "bg-muted text-foreground rounded-bl-sm"
@@ -2995,7 +2995,7 @@ export default function InboxPage() {
                         drag taller for long custom messages without
                         letting them drag horizontally (which would break
                         the column layout). */}
-                    <div className="border-t px-4 py-3 space-y-2">
+                    <div className="border-t px-3 py-3 sm:px-4 space-y-2">
                       <Textarea
                         data-testid="textarea-reply"
                         placeholder="Write a reply…"
@@ -3009,10 +3009,11 @@ export default function InboxPage() {
                           }
                         }}
                       />
-                      <div className="flex items-center gap-2 justify-end">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
                         <Button
                           variant="outline"
                           size="sm"
+                          className="w-full sm:w-auto"
                           onClick={generateDraft}
                           disabled={draftLoading}
                           data-testid="button-ai-draft"
@@ -3023,6 +3024,7 @@ export default function InboxPage() {
                         <Button
                           variant="outline"
                           size="sm"
+                          className="w-full sm:w-auto"
                           onClick={() => sendTextMessage.mutate()}
                           disabled={!replyText.trim() || sendTextMessage.isPending || Boolean(smsDisabledReason)}
                           title={smsDisabledReason ?? `Send SMS to ${effectiveGuestPhone}`}
@@ -3033,6 +3035,7 @@ export default function InboxPage() {
                         </Button>
                         <Button
                           size="sm"
+                          className="w-full sm:w-auto"
                           onClick={() => sendMessage.mutate()}
                           disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
@@ -3047,7 +3050,7 @@ export default function InboxPage() {
               </div>
 
               {/* Reservation detail panel (right column) */}
-              <div className="border rounded-lg bg-card overflow-y-auto">
+              <div className="border rounded-lg bg-card max-h-none overflow-y-auto lg:max-h-none">
                 {!selectedConv ? (
                   <div className="p-6 text-center text-sm text-muted-foreground">
                     <Calendar className="h-8 w-8 mx-auto mb-2 opacity-30" />

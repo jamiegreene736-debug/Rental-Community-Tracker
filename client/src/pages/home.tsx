@@ -665,13 +665,13 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-[1400px] mx-auto px-4 py-6">
+      <div className="max-w-[1400px] mx-auto px-3 py-4 sm:px-4 sm:py-6">
         <div className="mb-5 flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
+            <h1 className="text-xl font-bold tracking-tight sm:text-2xl" data-testid="text-page-title">
               VacationRentalExpertz Operations Portal
             </h1>
-            <p className="text-muted-foreground mt-1">
+            <p className="text-sm text-muted-foreground mt-1 sm:text-base">
               Manage vacation-rental listings, guest messaging, buy-ins, and revenue workflows from one dashboard
             </p>
           </div>
@@ -748,7 +748,7 @@ export default function Home() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
               <Building2 className="h-4 w-4 text-muted-foreground" />
@@ -781,8 +781,8 @@ export default function Home() {
             See client/src/components/PhotoSyncStatusPanel.tsx. */}
 
         <Card className="p-4 mb-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="relative flex-1 min-w-[200px]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="relative flex-1 min-w-0 sm:min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 data-testid="input-search"
@@ -795,7 +795,7 @@ export default function Home() {
               />
             </div>
             <Select value={communityFilter} onValueChange={setCommunityFilter}>
-              <SelectTrigger className="w-[200px]" data-testid="select-community" id="select-community-filter" aria-label="Filter by community">
+              <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-community" id="select-community-filter" aria-label="Filter by community">
                 <SelectValue placeholder="All Communities" />
               </SelectTrigger>
               <SelectContent>
@@ -808,7 +808,7 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={islandFilter} onValueChange={setIslandFilter}>
-              <SelectTrigger className="w-[160px]" data-testid="select-island" id="select-island-filter" aria-label="Filter by island">
+              <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-island" id="select-island-filter" aria-label="Filter by island">
                 <SelectValue placeholder="All Islands" />
               </SelectTrigger>
               <SelectContent>
@@ -821,7 +821,7 @@ export default function Home() {
               </SelectContent>
             </Select>
             <Select value={multiUnitFilter} onValueChange={setMultiUnitFilter}>
-              <SelectTrigger className="w-[160px]" data-testid="select-multi-unit" id="select-type-filter" aria-label="Filter by property type">
+              <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-multi-unit" id="select-type-filter" aria-label="Filter by property type">
                 <SelectValue placeholder="All Types" />
               </SelectTrigger>
               <SelectContent>

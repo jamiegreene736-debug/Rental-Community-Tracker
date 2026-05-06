@@ -1851,20 +1851,20 @@ export default function Bookings() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <div className="border-b bg-card px-6 py-4 flex items-center gap-4">
+      <div className="border-b bg-card px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center gap-3 sm:gap-4">
         <Link href="/">
           <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
             <ArrowLeft className="h-4 w-4" /> Dashboard
           </Button>
         </Link>
-        <div className="h-5 w-px bg-border" />
-        <div>
+        <div className="hidden sm:block h-5 w-px bg-border" />
+        <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
             Bookings · Buy-in tracking · Live sidecar search across Airbnb, VRBO, Booking.com, and PM rental sites
           </p>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="w-full sm:ml-auto sm:w-auto flex flex-wrap items-center gap-2">
           <SidecarStatusBadge />
           <Button
             variant="outline"
@@ -1878,12 +1878,12 @@ export default function Bookings() {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-6 space-y-5">
+      <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-6 space-y-5">
         {/* Selectors */}
         <Card>
           <CardContent className="py-4">
-            <div className="flex flex-wrap items-end gap-4">
-              <div className="grow min-w-[260px]">
+            <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:flex-wrap sm:items-end">
+              <div className="grow min-w-0 sm:min-w-[260px]">
                 <Label className="text-xs mb-1.5 block">Property</Label>
                 <Select
                   value={selectedPropertyId?.toString() ?? ""}
@@ -1964,7 +1964,7 @@ export default function Bookings() {
         )}
 
         {selectedPropertyId && stats && (
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <Card>
               <CardContent className="py-4">
                 <p className="text-xs text-muted-foreground">Bookings</p>
@@ -2000,7 +2000,7 @@ export default function Bookings() {
 
         {selectedPropertyId && !bookingsError && (
           <Tabs defaultValue="bookings" className="space-y-4">
-            <TabsList data-testid="tabs-operations">
+            <TabsList className="flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-operations">
               <TabsTrigger value="bookings" data-testid="tab-operations-bookings">
                 <Calendar className="h-3.5 w-3.5 mr-1.5" /> Bookings
               </TabsTrigger>
@@ -2030,7 +2030,7 @@ export default function Bookings() {
               {/* Sortable column headers — mirrors the data row exactly so
                   every column lines up: chevron-spacer + 6-col grid. */}
               {reservations.length > 0 && (
-                <div className="px-4 py-2 border-b flex items-center gap-3">
+                <div className="hidden px-4 py-2 border-b md:flex items-center gap-3">
                   <span className="w-4 h-4 shrink-0" /> {/* matches chevron icon in row */}
                   <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
                     <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
@@ -2062,21 +2062,22 @@ export default function Bookings() {
                     {/* Summary row */}
                     <button
                       onClick={() => toggleExpanded(r._id)}
-                      className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-muted/40 transition-colors rounded-lg"
+                      className="w-full text-left px-3 py-3 sm:px-4 flex items-start md:items-center gap-3 hover:bg-muted/40 transition-colors rounded-lg"
                     >
                       {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                      <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
+                      <div className="grow min-w-0 grid grid-cols-2 gap-3 md:grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] md:items-center">
                         <div className="min-w-0">
                           <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
                           {r.confirmationCode && (
                             <p className="text-[10px] text-muted-foreground font-mono">{r.confirmationCode}</p>
                           )}
                         </div>
-                        <div className="text-sm">
+                        <div className="text-sm col-span-2 md:col-span-1">
                           <p>{fmtDate(checkInOf(r))} → {fmtDate(checkOutOf(r))}</p>
                           <p className="text-xs text-muted-foreground">{nights} nights · <Badge variant="outline" className="text-[10px] capitalize ml-1">{channel}</Badge></p>
                         </div>
-                        <div className="text-sm text-right">
+                        <div className="text-sm md:text-right">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Payout</p>
                           <p className="font-medium">{fmtMoney(payout)}</p>
                           {(() => {
                             // Payment status from Guesty's money object (same
@@ -2087,7 +2088,7 @@ export default function Bookings() {
                             const fullyPaid = r.money?.isFullyPaid === true || (balanceDue <= 0 && totalPaid > 0);
                             if (fullyPaid) {
                               return (
-                                <p className="text-[10px] font-medium text-green-700 flex items-center justify-end gap-0.5">
+                                <p className="text-[10px] font-medium text-green-700 flex items-center md:justify-end gap-0.5">
                                   <CheckCircle2 className="h-2.5 w-2.5" /> Paid in full
                                 </p>
                               );
@@ -2109,11 +2110,13 @@ export default function Bookings() {
                             return <p className="text-[10px] text-muted-foreground">guest payout</p>;
                           })()}
                         </div>
-                        <div className="text-sm text-right">
+                        <div className="text-sm md:text-right">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Buy-in</p>
                           <p className="font-medium">{fmtMoney(totalBuyInCost)}</p>
                           <p className="text-[10px] text-muted-foreground">buy-in cost</p>
                         </div>
-                        <div className="text-sm text-right">
+                        <div className="text-sm md:text-right">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Profit</p>
                           {r.fullyLinked ? (
                             <span className={`font-medium ${payout - totalBuyInCost >= 0 ? "text-green-600" : "text-red-600"}`}>
                               {fmtMoney(payout - totalBuyInCost)}
@@ -2123,7 +2126,7 @@ export default function Bookings() {
                           )}
                           <p className="text-[10px] text-muted-foreground">profit</p>
                         </div>
-                        <div className="shrink-0">
+                        <div className="col-span-2 shrink-0 md:col-span-1">
                           {rowAutoFillRunning ? (
                             <Badge className="bg-blue-600 text-white text-[10px]">
                               <RefreshCw className="h-2.5 w-2.5 mr-1 animate-spin" />
@@ -2153,7 +2156,7 @@ export default function Bookings() {
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (
                           <div className="bg-primary/5 border border-primary/20 rounded px-3 py-2">
-                            <div className="flex items-center justify-between gap-3">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                               <div className="text-xs text-muted-foreground">
                                 {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
                               </div>
@@ -2198,9 +2201,9 @@ export default function Bookings() {
                             data-testid={`slot-${r._id}-${slot.unitId}`}
                           >
                           <div
-                            className="flex items-center gap-3 px-3 py-2.5"
+                            className="flex flex-col gap-3 px-3 py-2.5 md:flex-row md:items-center"
                           >
-                            <div className="shrink-0 w-24">
+                            <div className="shrink-0 md:w-24">
                               <p className="text-sm font-medium">{slot.unitLabel}</p>
                               <p className="text-[10px] text-muted-foreground">{slot.bedrooms} BR</p>
                             </div>
@@ -2248,7 +2251,7 @@ export default function Bookings() {
                                 <p className="text-xs text-muted-foreground italic">No buy-in attached for this unit</p>
                               )}
                             </div>
-                            <div className="shrink-0 flex items-center gap-1">
+                            <div className="shrink-0 flex w-full flex-wrap items-center gap-1 md:w-auto md:justify-end">
                               {slot.buyIn ? (
                                 <>
                                   {/* Verify rate — on-demand vision check
@@ -2353,7 +2356,7 @@ export default function Bookings() {
 
             <TabsContent value="deposits" className="space-y-4">
               {depositStats && (
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   <Card>
                     <CardContent className="py-4">
                       <p className="text-xs text-muted-foreground">Expected Deposits</p>

@@ -9,14 +9,14 @@ export default function AppHeader() {
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-[hsl(var(--brand-blue)/0.12)] bg-[linear-gradient(180deg,hsl(var(--brand-teal)/0.06),hsl(var(--background)))] shadow-sm backdrop-blur">
-      <div className="max-w-[1400px] mx-auto px-4 py-2">
-        <div className="flex min-h-12 items-center justify-between gap-3">
+      <div className="max-w-[1400px] mx-auto px-3 py-2 sm:px-4">
+        <div className="flex min-h-12 items-center justify-between gap-2 sm:gap-3">
           <Link
             href="/"
-            className="group inline-flex min-w-0 items-center gap-3 rounded-lg border border-[hsl(var(--brand-teal)/0.18)] bg-background/92 px-3 py-2 shadow-sm transition-colors hover:border-[hsl(var(--brand-teal)/0.35)] hover:bg-background"
+            className="group inline-flex min-w-0 items-center gap-3 rounded-lg border border-[hsl(var(--brand-teal)/0.18)] bg-background/92 px-2 py-2 shadow-sm transition-colors hover:border-[hsl(var(--brand-teal)/0.35)] hover:bg-background sm:px-3"
             data-testid="link-brand-home"
           >
-            <span className="flex h-9 w-[180px] max-w-[52vw] items-center">
+            <span className="flex h-9 w-[132px] max-w-[42vw] items-center sm:w-[180px] sm:max-w-[52vw]">
               <img
                 src="/brand/vacation-rental-expertz-horizontal-transparent.png"
                 alt="VacationRentalExpertz"
@@ -26,10 +26,10 @@ export default function AppHeader() {
             </span>
           </Link>
 
-          <nav className="flex shrink-0 items-center gap-2" aria-label="Primary navigation">
+          <nav className="flex shrink-0 items-center gap-1 sm:gap-2" aria-label="Primary navigation">
             <Link
               href="/"
-              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors
+              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
                 ${isHome
                   ? "border-[hsl(var(--brand-blue)/0.25)] bg-[hsl(var(--brand-blue)/0.07)] text-foreground cursor-default pointer-events-none"
                   : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-blue)/0.18)] hover:bg-background"
@@ -41,7 +41,7 @@ export default function AppHeader() {
             </Link>
             <Link
               href="/inbox"
-              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors
+              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
                 ${isInbox
                   ? "border-[hsl(var(--brand-teal)/0.30)] bg-[hsl(var(--brand-teal)/0.08)] text-foreground cursor-default pointer-events-none"
                   : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-teal)/0.22)] hover:bg-background"
@@ -53,7 +53,7 @@ export default function AppHeader() {
             </Link>
             <Link
               href="/bookings"
-              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors
+              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
                 ${isOperations
                   ? "border-[hsl(var(--brand-orange)/0.40)] bg-[hsl(var(--brand-orange)/0.10)] text-foreground cursor-default pointer-events-none"
                   : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-orange)/0.25)] hover:bg-background"
