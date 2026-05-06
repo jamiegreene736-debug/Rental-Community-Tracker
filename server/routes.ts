@@ -1,7 +1,16 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertBuyInSchema, insertCommunityDraftSchema, insertUnitSwapSchema } from "@shared/schema";
+import {
+  buyInEmails,
+  buyInVendorContacts,
+  insertBuyInSchema,
+  insertCommunityDraftSchema,
+  insertUnitSwapSchema,
+  reservationAliases,
+} from "@shared/schema";
+import { db } from "./db";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
@@ -63,6 +72,19 @@ import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { unitBuilderData, getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
+import {
+  aliasPrefixForGuest,
+  createSimpleLoginAlias,
+  createSimpleLoginContact,
+  extractSimpleLoginAliasEmail,
+  extractSimpleLoginAliasId,
+  extractSimpleLoginContactId,
+  extractSimpleLoginReverseAlias,
+  extractEmailAddress,
+  getSimpleLoginStatus,
+  SIMPLELOGIN_MAILBOX_EMAIL,
+} from "./simplelogin";
+import { parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
 
 function normalizeHttpsUrl(value: unknown): string | null {
   const raw = String(value ?? "").trim();
@@ -2764,6 +2786,273 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
+    }
+  });
+
+  async function getOrCreateReservationAlias(input: {
+    reservationId: string;
+    guestName?: string | null;
+  }) {
+    const existing = await db
+      .select()
+      .from(reservationAliases)
+      .where(eq(reservationAliases.reservationId, input.reservationId))
+      .limit(1);
+    if (existing[0]) return { alias: existing[0], created: false };
+
+    const payload = await createSimpleLoginAlias({
+      prefix: aliasPrefixForGuest(input.guestName, input.reservationId),
+      guestName: input.guestName,
+      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}`,
+    });
+    const aliasEmail = extractSimpleLoginAliasEmail(payload);
+    const simpleloginAliasId = extractSimpleLoginAliasId(payload);
+    if (!aliasEmail) throw new Error("SimpleLogin did not return an alias email");
+
+    const [alias] = await db
+      .insert(reservationAliases)
+      .values({
+        reservationId: input.reservationId,
+        guestName: input.guestName ?? null,
+        aliasEmail,
+        simpleloginAliasId,
+        mailboxEmail: SIMPLELOGIN_MAILBOX_EMAIL,
+        rawPayload: JSON.stringify(payload),
+      })
+      .returning();
+    return { alias, created: true };
+  }
+
+  async function getOrCreateVendorContact(input: {
+    buyInId: number;
+    reservationId: string;
+    guestName?: string | null;
+    vendorEmail: string;
+    vendorName?: string | null;
+  }) {
+    const vendorEmail = extractEmailAddress(input.vendorEmail).toLowerCase();
+    if (!input.reservationId) throw new Error("reservationId is required");
+    if (!vendorEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(vendorEmail)) {
+      throw new Error("A valid vendor email is required");
+    }
+    const buyIn = await storage.getBuyIn(input.buyInId);
+    if (!buyIn) throw new Error("Buy-in not found");
+    if (buyIn.guestyReservationId && buyIn.guestyReservationId !== input.reservationId) {
+      throw new Error("Buy-in is attached to a different reservation");
+    }
+
+    const { alias } = await getOrCreateReservationAlias({
+      reservationId: input.reservationId,
+      guestName: input.guestName,
+    });
+    if (!alias.simpleloginAliasId) throw new Error("Saved SimpleLogin alias is missing its alias id");
+
+    const existing = await db
+      .select()
+      .from(buyInVendorContacts)
+      .where(and(
+        eq(buyInVendorContacts.buyInId, input.buyInId),
+        sql`lower(${buyInVendorContacts.vendorEmail}) = ${vendorEmail}`,
+      ))
+      .limit(1);
+    if (existing[0]?.reverseAliasEmail) return { alias, contact: existing[0], created: false };
+
+    const payload = await createSimpleLoginContact(alias.simpleloginAliasId, vendorEmail, input.vendorName);
+    const reverseAliasEmail = extractSimpleLoginReverseAlias(payload);
+    const simpleloginContactId = extractSimpleLoginContactId(payload);
+    if (!reverseAliasEmail) throw new Error("SimpleLogin did not return a reverse alias for this vendor contact");
+
+    if (existing[0]) {
+      const [contact] = await db
+        .update(buyInVendorContacts)
+        .set({
+          vendorName: input.vendorName ?? existing[0].vendorName,
+          simpleloginContactId,
+          reverseAliasEmail,
+          reverseAlias: reverseAliasEmail,
+          rawPayload: JSON.stringify(payload),
+          updatedAt: new Date(),
+        })
+        .where(eq(buyInVendorContacts.id, existing[0].id))
+        .returning();
+      return { alias, contact, created: false };
+    }
+
+    const [contact] = await db
+      .insert(buyInVendorContacts)
+      .values({
+        buyInId: input.buyInId,
+        reservationId: input.reservationId,
+        vendorName: input.vendorName ?? null,
+        vendorEmail,
+        simpleloginContactId,
+        reverseAliasEmail,
+        reverseAlias: reverseAliasEmail,
+        rawPayload: JSON.stringify(payload),
+      })
+      .returning();
+    return { alias, contact, created: true };
+  }
+
+  app.get("/api/simplelogin/status", async (_req, res) => {
+    try {
+      const simplelogin = await getSimpleLoginStatus();
+      res.json({
+        ...simplelogin,
+        smtpConfigured: !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to check SimpleLogin status", message: err.message });
+    }
+  });
+
+  app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const buyIns = await storage.getBuyInsByReservation(reservationId);
+      const [alias] = await db
+        .select()
+        .from(reservationAliases)
+        .where(eq(reservationAliases.reservationId, reservationId))
+        .limit(1);
+      const contacts = await db
+        .select()
+        .from(buyInVendorContacts)
+        .where(eq(buyInVendorContacts.reservationId, reservationId));
+      const emails = await db
+        .select()
+        .from(buyInEmails)
+        .where(eq(buyInEmails.reservationId, reservationId))
+        .orderBy(desc(buyInEmails.sentAt))
+        .limit(100);
+      res.json({ reservationId, alias: alias ?? null, buyIns, contacts, emails });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
+    }
+  });
+
+  app.post("/api/bookings/:reservationId/simplelogin/alias", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const guestName = String(req.body?.guestName ?? "").trim() || null;
+      const result = await getOrCreateReservationAlias({ reservationId, guestName });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to create SimpleLogin alias", message: err.message });
+    }
+  });
+
+  app.post("/api/buy-ins/:id/vendor-contact", async (req, res) => {
+    try {
+      const buyInId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const result = await getOrCreateVendorContact({
+        buyInId,
+        reservationId: String(req.body?.reservationId ?? "").trim(),
+        guestName: String(req.body?.guestName ?? "").trim() || null,
+        vendorEmail: String(req.body?.vendorEmail ?? "").trim(),
+        vendorName: String(req.body?.vendorName ?? "").trim() || null,
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to create vendor contact", message: err.message });
+    }
+  });
+
+  app.post("/api/buy-ins/:id/vendor-email", async (req, res) => {
+    try {
+      const buyInId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const reservationId = String(req.body?.reservationId ?? "").trim();
+      const vendorEmail = String(req.body?.vendorEmail ?? "").trim();
+      const vendorName = String(req.body?.vendorName ?? "").trim() || null;
+      const subject = String(req.body?.subject ?? "").trim();
+      const body = String(req.body?.body ?? "").trim();
+      if (!reservationId || !vendorEmail || !subject || !body) {
+        return res.status(400).json({ error: "reservationId, vendorEmail, subject, and body are required" });
+      }
+
+      const { alias, contact } = await getOrCreateVendorContact({
+        buyInId,
+        reservationId,
+        guestName: String(req.body?.guestName ?? "").trim() || null,
+        vendorEmail,
+        vendorName,
+      });
+      if (!contact.reverseAliasEmail) {
+        return res.status(500).json({ error: "Vendor contact is missing a reverse alias email" });
+      }
+      const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
+      const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body });
+      const [email] = await db
+        .insert(buyInEmails)
+        .values({
+          buyInId,
+          reservationId,
+          vendorContactId: contact.id,
+          direction: "outbound",
+          fromEmail: from,
+          toEmail: contact.reverseAliasEmail,
+          subject,
+          body,
+          providerMessageId: sent.messageId ?? null,
+          rawPayload: JSON.stringify(sent),
+          status: "sent",
+        })
+        .returning();
+      res.json({ alias, contact, email });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to send buy-in vendor email", message: err.message });
+    }
+  });
+
+  app.post("/api/buy-in-emails/inbound", async (req, res) => {
+    try {
+      const fromEmail = extractEmailAddress(String(req.body?.from ?? req.body?.fromEmail ?? "")).toLowerCase();
+      const toEmail = extractEmailAddress(String(req.body?.to ?? req.body?.toEmail ?? "")).toLowerCase();
+      const subject = String(req.body?.subject ?? "").trim() || "(no subject)";
+      const body = String(req.body?.text ?? req.body?.body ?? req.body?.html ?? "").trim();
+      if (!fromEmail || !toEmail || !body) {
+        return res.status(400).json({ error: "from, to, and body are required" });
+      }
+
+      const [contact] = await db
+        .select()
+        .from(buyInVendorContacts)
+        .where(and(
+          sql`lower(${buyInVendorContacts.vendorEmail}) = ${fromEmail}`,
+          sql`lower(${buyInVendorContacts.reverseAliasEmail}) = ${toEmail}`,
+        ))
+        .limit(1);
+      if (!contact) return res.status(404).json({ error: "No matching buy-in vendor contact" });
+
+      const parsed = parseArrivalDetailsFromText(body);
+      const arrivalUpdates = Object.fromEntries(
+        Object.entries(parsed).filter(([, value]) => String(value ?? "").trim().length > 0),
+      );
+      if (Object.keys(arrivalUpdates).length > 0) {
+        await storage.updateBuyIn(contact.buyInId, arrivalUpdates);
+      }
+      const [email] = await db
+        .insert(buyInEmails)
+        .values({
+          buyInId: contact.buyInId,
+          reservationId: contact.reservationId,
+          vendorContactId: contact.id,
+          direction: "inbound",
+          fromEmail,
+          toEmail,
+          subject,
+          body,
+          providerMessageId: String(req.body?.messageId ?? req.body?.message_id ?? "") || null,
+          rawPayload: JSON.stringify(req.body ?? {}),
+          parsedArrivalDetails: JSON.stringify(arrivalUpdates),
+          status: Object.keys(arrivalUpdates).length > 0 ? "parsed" : "received",
+        })
+        .returning();
+      res.json({ email, parsedArrivalDetails: arrivalUpdates });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to record inbound buy-in email", message: err.message });
     }
   });
 

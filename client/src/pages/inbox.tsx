@@ -21,7 +21,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText,
+  FileText, Mail,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -42,6 +42,26 @@ type ArrivalUnitDetail = {
   managementCompany?: string;
   managementContact?: string;
   arrivalNotes?: string;
+};
+
+type InboxBuyInRecord = ArrivalUnitDetail & {
+  propertyName?: string;
+  checkIn?: string;
+  checkOut?: string;
+};
+
+type InboxVendorContactRecord = {
+  id: number;
+  buyInId: number;
+  vendorName?: string | null;
+  vendorEmail: string;
+  reverseAliasEmail?: string | null;
+};
+
+type InboxBuyInCommunications = {
+  alias: { aliasEmail: string; mailboxEmail: string } | null;
+  buyIns: InboxBuyInRecord[];
+  contacts: InboxVendorContactRecord[];
 };
 
 // ─── AI draft property-context builder ────────────────────────────────────────
@@ -1363,6 +1383,97 @@ function TemplateEditor({
   );
 }
 
+function InboxBuyInPanel({ reservationId, data }: { reservationId: string; data?: InboxBuyInCommunications }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [form, setForm] = useState<Record<string, string>>({});
+
+  const saveDetails = useMutation({
+    mutationFn: ({ id, values }: { id: number; values: Record<string, string> }) =>
+      apiRequest("PATCH", `/api/buy-ins/${id}`, values).then((r) => r.json()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "arrival-details"] });
+      setEditingId(null);
+      toast({ title: "Buy-in details saved" });
+    },
+    onError: (err: any) => toast({ title: "Save failed", description: err?.message ?? "Could not save buy-in details", variant: "destructive" }),
+  });
+
+  const units = data?.buyIns ?? [];
+  if (units.length === 0 && !data?.alias) return null;
+
+  const startEdit = (unit: InboxBuyInRecord) => {
+    setEditingId(unit.id);
+    setForm({
+      managementCompany: unit.managementCompany ?? "",
+      managementContact: unit.managementContact ?? "",
+      unitAddress: unit.unitAddress ?? "",
+      accessCode: unit.accessCode ?? "",
+      parkingInfo: unit.parkingInfo ?? "",
+      arrivalNotes: unit.arrivalNotes ?? "",
+    });
+  };
+  const set = (key: string, value: string) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+        Buy-in
+      </div>
+      <div className="border rounded-lg divide-y text-xs">
+        {data?.alias && (
+          <div className="px-2.5 py-2">
+            <div className="flex items-center gap-1.5 font-medium">
+              <Mail className="h-3.5 w-3.5" />
+              <span className="truncate">{data.alias.aliasEmail}</span>
+            </div>
+            <div className="text-[11px] text-muted-foreground">Forwards to {data.alias.mailboxEmail}</div>
+          </div>
+        )}
+        {units.map((unit) => {
+          const contact = data?.contacts?.find((row) => row.buyInId === unit.id);
+          const editing = editingId === unit.id;
+          return (
+            <div key={unit.id} className="px-2.5 py-2 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{unit.unitLabel || unit.propertyName}</div>
+                  <div className="text-[11px] text-muted-foreground truncate">
+                    {unit.managementCompany || "PM not saved"} · {contact?.vendorEmail || unit.managementContact || "No vendor email"}
+                  </div>
+                  {contact?.reverseAliasEmail && (
+                    <div className="text-[10px] text-muted-foreground font-mono truncate">{contact.reverseAliasEmail}</div>
+                  )}
+                </div>
+                <Button size="sm" variant="outline" className="h-7" onClick={() => editing ? setEditingId(null) : startEdit(unit)}>
+                  {editing ? "Close" : "Edit"}
+                </Button>
+              </div>
+              {editing && (
+                <div className="space-y-1.5">
+                  <Input className="h-8 text-xs" value={form.managementCompany ?? ""} onChange={(e) => set("managementCompany", e.target.value)} placeholder="Management company" />
+                  <Input className="h-8 text-xs" value={form.managementContact ?? ""} onChange={(e) => set("managementContact", e.target.value)} placeholder="PM email / phone" />
+                  <Input className="h-8 text-xs" value={form.unitAddress ?? ""} onChange={(e) => set("unitAddress", e.target.value)} placeholder="Unit address" />
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Input className="h-8 text-xs" value={form.accessCode ?? ""} onChange={(e) => set("accessCode", e.target.value)} placeholder="Access code" />
+                    <Input className="h-8 text-xs" value={form.parkingInfo ?? ""} onChange={(e) => set("parkingInfo", e.target.value)} placeholder="Parking" />
+                  </div>
+                  <Textarea rows={3} className="text-xs" value={form.arrivalNotes ?? ""} onChange={(e) => set("arrivalNotes", e.target.value)} placeholder="Arrival notes" />
+                  <Button size="sm" className="w-full" disabled={saveDetails.isPending} onClick={() => saveDetails.mutate({ id: unit.id, values: form })}>
+                    {saveDetails.isPending ? "Saving..." : "Save buy-in details"}
+                  </Button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function InboxPage() {
@@ -1640,6 +1751,17 @@ export default function InboxPage() {
     enabled: !!reservationId,
     queryFn: async () => {
       const r = await apiRequest("GET", `/api/bookings/${reservationId}/arrival-details`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const { data: buyInComms } = useQuery<InboxBuyInCommunications>({
+    queryKey: ["/api/bookings", reservationId, "buy-in-communications"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/buy-in-communications`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     },
@@ -3192,6 +3314,10 @@ export default function InboxPage() {
                             <div className="text-xs text-muted-foreground italic">Loading money details…</div>
                           )}
                         </div>
+                      )}
+
+                      {reservationId && (phase === "booked" || phase === "request") && (
+                        <InboxBuyInPanel reservationId={reservationId} data={buyInComms} />
                       )}
 
                       {/* Templates — manual on-demand outbound message

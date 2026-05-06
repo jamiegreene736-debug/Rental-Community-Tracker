@@ -51,6 +51,78 @@ export const insertBuyInSchema = createInsertSchema(buyIns).omit({
 export type InsertBuyIn = z.infer<typeof insertBuyInSchema>;
 export type BuyIn = typeof buyIns.$inferSelect;
 
+export const reservationAliases = pgTable("reservation_aliases", {
+  id: serial("id").primaryKey(),
+  reservationId: text("reservation_id").notNull().unique(),
+  guestName: text("guest_name"),
+  aliasEmail: text("alias_email").notNull(),
+  simpleloginAliasId: integer("simplelogin_alias_id"),
+  mailboxEmail: text("mailbox_email").notNull(),
+  status: text("status").notNull().default("active"),
+  rawPayload: text("raw_payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReservationAliasSchema = createInsertSchema(reservationAliases).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReservationAlias = z.infer<typeof insertReservationAliasSchema>;
+export type ReservationAlias = typeof reservationAliases.$inferSelect;
+
+export const buyInVendorContacts = pgTable("buy_in_vendor_contacts", {
+  id: serial("id").primaryKey(),
+  buyInId: integer("buy_in_id").notNull(),
+  reservationId: text("reservation_id").notNull(),
+  vendorName: text("vendor_name"),
+  vendorEmail: text("vendor_email").notNull(),
+  simpleloginContactId: integer("simplelogin_contact_id"),
+  reverseAliasEmail: text("reverse_alias_email"),
+  reverseAlias: text("reverse_alias"),
+  status: text("status").notNull().default("active"),
+  rawPayload: text("raw_payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertBuyInVendorContactSchema = createInsertSchema(buyInVendorContacts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertBuyInVendorContact = z.infer<typeof insertBuyInVendorContactSchema>;
+export type BuyInVendorContact = typeof buyInVendorContacts.$inferSelect;
+
+export const buyInEmails = pgTable("buy_in_emails", {
+  id: serial("id").primaryKey(),
+  buyInId: integer("buy_in_id").notNull(),
+  reservationId: text("reservation_id").notNull(),
+  vendorContactId: integer("vendor_contact_id"),
+  direction: text("direction").notNull(), // outbound | inbound
+  fromEmail: text("from_email").notNull(),
+  toEmail: text("to_email").notNull(),
+  subject: text("subject").notNull(),
+  body: text("body").notNull(),
+  providerMessageId: text("provider_message_id"),
+  rawPayload: text("raw_payload"),
+  parsedArrivalDetails: text("parsed_arrival_details"),
+  status: text("status").notNull().default("sent"),
+  sentAt: timestamp("sent_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertBuyInEmailSchema = createInsertSchema(buyInEmails).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertBuyInEmail = z.infer<typeof insertBuyInEmailSchema>;
+export type BuyInEmail = typeof buyInEmails.$inferSelect;
+
 export const lodgifyBookings = pgTable("lodgify_bookings", {
   id: serial("id").primaryKey(),
   lodgifyBookingId: integer("lodgify_booking_id").notNull().unique(),

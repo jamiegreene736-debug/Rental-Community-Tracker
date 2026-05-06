@@ -25,7 +25,7 @@ import {
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
-  WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause,
+  WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
@@ -97,6 +97,42 @@ interface GuestyPayment {
   kind?: string;
   [key: string]: unknown;
 }
+
+type ReservationAliasRecord = {
+  id: number;
+  reservationId: string;
+  aliasEmail: string;
+  simpleloginAliasId?: number | null;
+  mailboxEmail: string;
+};
+
+type BuyInVendorContactRecord = {
+  id: number;
+  buyInId: number;
+  reservationId: string;
+  vendorName?: string | null;
+  vendorEmail: string;
+  reverseAliasEmail?: string | null;
+};
+
+type BuyInEmailRecord = {
+  id: number;
+  buyInId: number;
+  direction: "outbound" | "inbound" | string;
+  fromEmail: string;
+  toEmail: string;
+  subject: string;
+  sentAt?: string;
+  status?: string;
+};
+
+type BuyInCommunicationsResponse = {
+  reservationId: string;
+  alias: ReservationAliasRecord | null;
+  buyIns: BuyIn[];
+  contacts: BuyInVendorContactRecord[];
+  emails: BuyInEmailRecord[];
+};
 
 type AutoFillSearchSummary = {
   bedrooms: number;
@@ -2290,6 +2326,9 @@ export default function Bookings() {
                               </Button>
                             </div>
                           </div>
+                          {slot.buyIn && (
+                            <BuyInVendorEmailPanel reservation={r} buyIn={slot.buyIn} />
+                          )}
                           {slotIsExpanded && selectedPropertyId && (
                             <div className="border-t bg-muted/20 px-3 py-3">
                               <LiveSearchSection
@@ -2539,6 +2578,158 @@ export default function Bookings() {
       )}
     </div>
   );
+}
+
+function BuyInVendorEmailPanel({
+  reservation,
+  buyIn,
+}: {
+  reservation: GuestyReservation;
+  buyIn: BuyIn;
+}) {
+  const { toast } = useToast();
+  const guestName = reservation.guest?.fullName ?? "";
+  const [vendorName, setVendorName] = useState(buyIn.managementCompany ?? "");
+  const [vendorEmail, setVendorEmail] = useState(() => extractEmailForInput(buyIn.managementContact ?? ""));
+  const [subject, setSubject] = useState(() => `Arrival details request for ${buyIn.unitLabel || buyIn.propertyName}`);
+  const [body, setBody] = useState(() => [
+    `Aloha,`,
+    ``,
+    `We booked ${buyIn.propertyName}${buyIn.unitLabel ? ` - ${buyIn.unitLabel}` : ""} for ${guestName || "our guest"} from ${fmtDate(buyIn.checkIn)} to ${fmtDate(buyIn.checkOut)}.`,
+    `Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?`,
+    ``,
+    `Mahalo,`,
+    `John Carpenter`,
+  ].join("\n"));
+
+  const queryKey = ["/api/bookings", reservation._id, "buy-in-communications"];
+  const { data, isLoading } = useQuery<BuyInCommunicationsResponse>({
+    queryKey,
+    enabled: !!reservation._id && !!buyIn.id,
+    queryFn: () => apiRequest("GET", `/api/bookings/${reservation._id}/buy-in-communications`).then((r) => r.json()),
+  });
+  const contact = data?.contacts?.find((row) => row.buyInId === buyIn.id) ?? null;
+  const emails = (data?.emails ?? []).filter((row) => row.buyInId === buyIn.id).slice(0, 3);
+
+  const createAlias = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/bookings/${reservation._id}/simplelogin/alias`, { guestName }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+      toast({ title: "Alias ready", description: "SimpleLogin alias saved for this booking." });
+    },
+    onError: (err: any) => toast({ title: "Alias failed", description: err?.message ?? "Could not create alias", variant: "destructive" }),
+  });
+
+  const saveContact = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/buy-ins/${buyIn.id}/vendor-contact`, {
+      reservationId: reservation._id,
+      guestName,
+      vendorName,
+      vendorEmail,
+    }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+      toast({ title: "Vendor contact saved", description: "Reverse alias created for this PM/vendor." });
+    },
+    onError: (err: any) => toast({ title: "Contact failed", description: err?.message ?? "Could not save vendor contact", variant: "destructive" }),
+  });
+
+  const sendEmail = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/buy-ins/${buyIn.id}/vendor-email`, {
+      reservationId: reservation._id,
+      guestName,
+      vendorName,
+      vendorEmail,
+      subject,
+      body,
+    }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+      toast({ title: "Email sent", description: "The PM/vendor reply will come back through the alias." });
+    },
+    onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send vendor email", variant: "destructive" }),
+  });
+
+  return (
+    <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Mail className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="font-medium">PM email alias</span>
+        {data?.alias ? (
+          <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={() => createAlias.mutate()}
+            disabled={createAlias.isPending || isLoading}
+          >
+            {createAlias.isPending ? "Creating..." : "Create guest alias"}
+          </Button>
+        )}
+        {contact?.reverseAliasEmail && (
+          <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>
+        )}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-2">
+        <Input
+          value={vendorName}
+          onChange={(e) => setVendorName(e.target.value)}
+          placeholder="PM / buy-in company"
+          className="h-8 text-xs"
+        />
+        <Input
+          value={vendorEmail}
+          onChange={(e) => setVendorEmail(e.target.value)}
+          placeholder="pm@example.com"
+          className="h-8 text-xs"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8"
+          onClick={() => saveContact.mutate()}
+          disabled={saveContact.isPending || !vendorEmail.trim()}
+        >
+          Save PM contact
+        </Button>
+      </div>
+      <details className="group">
+        <summary className="cursor-pointer text-xs text-primary font-medium">Compose arrival-details request</summary>
+        <div className="mt-2 space-y-2">
+          <Input value={subject} onChange={(e) => setSubject(e.target.value)} className="h-8 text-xs" />
+          <Textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} className="text-xs" />
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] text-muted-foreground">
+              Sends from reservations mailbox to the SimpleLogin reverse alias so the vendor sees the guest alias.
+            </div>
+            <Button
+              size="sm"
+              onClick={() => sendEmail.mutate()}
+              disabled={sendEmail.isPending || !vendorEmail.trim() || !subject.trim() || !body.trim()}
+            >
+              {sendEmail.isPending ? "Sending..." : "Send PM email"}
+            </Button>
+          </div>
+        </div>
+      </details>
+      {emails.length > 0 && (
+        <div className="space-y-1">
+          {emails.map((email) => (
+            <div key={email.id} className="text-[11px] text-muted-foreground">
+              <span className="uppercase">{email.direction}</span> · {email.subject} · {email.status ?? "sent"}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function extractEmailForInput(value: string): string {
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0] ?? "";
 }
 
 function ArrivalDetailsDialog({
