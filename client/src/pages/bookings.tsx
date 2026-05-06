@@ -3170,24 +3170,30 @@ function SidecarStatusBadge() {
   //   - Offline (Mac asleep / daemon down): amber "Sidecar offline"
   //   - Online idle: green "Sidecar live"
   //   - Online with active job: green "Sidecar working {Ns}"
-  let badgeContent: React.ReactNode;
-  let badgeClass: string;
+  let statusIcon: React.ReactNode;
+  let statusLabel: string;
+  let statusDetail: string;
+  let triggerClass: string;
   if (data.paused) {
-    badgeContent = <><Pause className="h-3 w-3" /> Sidecar paused</>;
-    badgeClass = "bg-orange-100 text-orange-900 dark:bg-orange-950/40 dark:text-orange-300 border-orange-400";
+    statusIcon = <Pause className="h-4 w-4" />;
+    statusLabel = "Sidecar paused";
+    statusDetail = "Queue stopped";
+    triggerClass = "border-[hsl(var(--brand-orange)/0.40)] bg-[hsl(var(--brand-orange)/0.08)] text-orange-900 hover:bg-[hsl(var(--brand-orange)/0.12)]";
   } else if (!data.isOnline) {
-    badgeContent = <><AlertCircle className="h-3 w-3" /> Sidecar offline</>;
-    badgeClass = "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-400";
+    statusIcon = <AlertCircle className="h-4 w-4" />;
+    statusLabel = "Sidecar offline";
+    statusDetail = state.everSeen ? "Reconnect Mac" : "Not connected";
+    triggerClass = "border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100";
   } else if (data.activeJob) {
-    badgeContent = (
-      <>
-        <Loader2 className="h-3 w-3 animate-spin" /> Sidecar working {data.activeJob.activeSec}s
-      </>
-    );
-    badgeClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300";
+    statusIcon = <Loader2 className="h-4 w-4 animate-spin" />;
+    statusLabel = "Sidecar working";
+    statusDetail = `${data.activeJob.activeSec}s`;
+    triggerClass = "border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100";
   } else {
-    badgeContent = <><CheckCircle2 className="h-3 w-3" /> Sidecar live</>;
-    badgeClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-300";
+    statusIcon = <CheckCircle2 className="h-4 w-4" />;
+    statusLabel = "Sidecar live";
+    statusDetail = "Ready";
+    triggerClass = "border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100";
   }
 
   return (
@@ -3195,13 +3201,17 @@ function SidecarStatusBadge() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex"
+          className={`inline-flex h-11 min-w-[176px] items-center gap-2.5 rounded-lg border px-3 text-left shadow-sm transition-colors ${triggerClass}`}
           aria-label="Sidecar controls"
           data-testid="button-sidecar-status"
         >
-          <Badge className={`gap-1 text-[10px] cursor-pointer ${badgeClass}`}>
-            {badgeContent}
-          </Badge>
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/75">
+            {statusIcon}
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold leading-tight">{statusLabel}</span>
+            <span className="block text-[11px] font-medium leading-tight opacity-75">{statusDetail}</span>
+          </span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80 text-xs space-y-3" align="end">
