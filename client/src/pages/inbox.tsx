@@ -784,14 +784,30 @@ function buildAgreementRequestBody(args: {
 function buildAgreementRequestSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  checkInIso?: string;
+  checkOutIso?: string;
   agreementUrl: string;
 }): string {
+  const propertyLabel = smsAgreementPropertyLabel(args.propertyName);
   return [
-    `Hi ${args.guestFirstName || "there"}, please review and sign the secure rental agreement${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    `Hi ${args.guestFirstName || "there"}, please review and sign the secure rental agreement for: ${propertyLabel}`,
+    args.checkInIso ? `Arriving: ${formatLongDate(args.checkInIso.slice(0, 10))}` : "",
+    args.checkOutIso ? `Departing: ${formatLongDate(args.checkOutIso.slice(0, 10))}` : "",
     args.agreementUrl,
     ``,
-    `This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
-  ].join("\n");
+    `This confirms your reservation details, the two-unit acknowledgment, and arrival requirements. Thanks, ${OUTBOUND_SENDER_NAME}`,
+  ].filter(Boolean).join("\n");
+}
+
+function smsAgreementPropertyLabel(propertyName: string): string {
+  const raw = String(propertyName || "your stay").trim();
+  return raw
+    .replace(/\s*-\s*Sleeps\s+\d+\s*$/i, "")
+    .replace(/\b(\d+)\s*BR\b/gi, "$1 Bedroom")
+    .replace(/\bTownhomes\b/gi, "Townhouse")
+    .replace(/\s*-\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildGuestyInvoicePaymentBody(args: {
@@ -1932,7 +1948,7 @@ export default function InboxPage() {
         })
         : "";
       const body = channel === "sms" && kind === "agreement-request"
-        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, agreementUrl })
+        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, checkInIso, checkOutIso, agreementUrl })
         : channel === "sms" && kind === "guesty-invoice-payment"
           ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
         : channel === "sms" && kind === "representative-follow-up"
