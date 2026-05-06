@@ -169,6 +169,25 @@ type AutoFillComboOption = {
   }>;
 };
 
+type AutoFillAuditCandidate = {
+  source: "airbnb" | "vrbo" | "booking" | "pm";
+  sourceLabel: string;
+  title: string;
+  url: string;
+  totalPrice: number;
+  nightlyPrice: number;
+  image?: string;
+  verified?: "yes" | "no" | "unclear" | "skipped";
+  verifiedReason?: string;
+};
+
+type AutoFillSearchAudit = {
+  bedrooms: number;
+  generatedAt: string;
+  counts: AutoFillSearchSummary;
+  candidates: AutoFillAuditCandidate[];
+};
+
 interface Candidate {
   buyIn: BuyIn;
   buyInNights: number;
@@ -869,6 +888,84 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   );
 }
 
+function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] }) {
+  if (audits.length === 0) return null;
+  const totalRows = audits.reduce((sum, audit) => sum + audit.candidates.length, 0);
+  return (
+    <details className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs" open>
+      <summary className="cursor-pointer font-medium text-slate-900">
+        Search results reviewed ({totalRows} curated option{totalRows === 1 ? "" : "s"})
+      </summary>
+      <div className="mt-2 space-y-3">
+        {audits.map((audit) => {
+          const grouped = {
+            airbnb: audit.candidates.filter((c) => c.source === "airbnb"),
+            vrbo: audit.candidates.filter((c) => c.source === "vrbo"),
+            booking: audit.candidates.filter((c) => c.source === "booking"),
+            pm: audit.candidates.filter((c) => c.source === "pm"),
+          };
+          return (
+            <div key={audit.bedrooms} className="rounded border bg-muted/10">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b px-2 py-1.5">
+                <div>
+                  <p className="font-semibold">{audit.bedrooms}BR search</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {audit.counts.scanned} scanned · {audit.counts.priced} priced · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
+                  </p>
+                </div>
+                <span className="text-[10px] text-muted-foreground">
+                  {new Date(audit.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
+                </span>
+              </div>
+              <div className="max-h-72 overflow-y-auto divide-y">
+                {audit.candidates.length === 0 ? (
+                  <p className="px-2 py-2 text-[11px] text-muted-foreground">No curated options were kept for this search.</p>
+                ) : (
+                  (["airbnb", "vrbo", "booking", "pm"] as const).map((source) => {
+                    const rows = grouped[source];
+                    if (rows.length === 0) return null;
+                    return (
+                      <div key={`${audit.bedrooms}-${source}`} className="p-2">
+                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {source === "pm" ? "PM/direct" : source === "booking" ? "Booking.com" : source.toUpperCase()} ({rows.length})
+                        </p>
+                        <div className="space-y-1">
+                          {rows.slice(0, 30).map((candidate, index) => (
+                            <a
+                              key={`${candidate.url}-${index}`}
+                              href={candidate.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded border bg-background px-2 py-1.5 hover:bg-muted/50"
+                            >
+                              <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>
+                                {candidate.sourceLabel}
+                              </Badge>
+                              <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
+                                {candidate.title}
+                                {candidate.verified && (
+                                  <span className="ml-1 text-muted-foreground">· {candidate.verified}</span>
+                                )}
+                              </span>
+                              <span className="text-[11px] font-semibold tabular-nums">
+                                {candidate.totalPrice > 0 ? fmtMoney(candidate.totalPrice) : "No price"}
+                              </span>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 function nightsBetween(a: string | undefined | null, b: string | undefined | null): number {
   if (!a || !b) return 1;
   const da = new Date(a);
@@ -1248,6 +1345,7 @@ export default function Bookings() {
     });
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
+  const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
 
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
@@ -1500,6 +1598,52 @@ export default function Bookings() {
           sourceCounts,
         };
       };
+      const auditCandidateFrom = (candidate: LiveCandidate): AutoFillAuditCandidate => ({
+        source: candidate.source,
+        sourceLabel: candidate.sourceLabel,
+        title: candidate.title,
+        url: candidate.url,
+        totalPrice: candidate.totalPrice,
+        nightlyPrice: candidate.nightlyPrice,
+        image: candidate.image,
+        verified: candidate.verified,
+        verifiedReason: candidate.verifiedReason,
+      });
+      const auditCandidatesFor = (data: FindBuyInResponse): AutoFillAuditCandidate[] => {
+        const flatCandidates = [
+          ...(data.sources?.airbnb ?? []),
+          ...(data.sources?.vrbo ?? []),
+          ...(data.sources?.booking ?? []),
+          ...(data.sources?.pm ?? []),
+        ];
+        const groupedCandidates = (data.cheapestUnits ?? []).flatMap((unit) =>
+          (unit.listings ?? []).map((listing): AutoFillAuditCandidate => ({
+            source: listing.channel,
+            sourceLabel: listing.channelLabel,
+            title: unit.unitTitle,
+            url: listing.url,
+            totalPrice: listing.totalPrice,
+            nightlyPrice: listing.nightlyPrice,
+            image: unit.image,
+            verified: listing.verified,
+            verifiedReason: listing.verifiedReason,
+          })),
+        );
+        const rows = groupedCandidates.length > 0 ? groupedCandidates : flatCandidates.map(auditCandidateFrom);
+        return Array.from(
+          new Map(
+            rows
+              .filter((row) => row.url)
+              .sort((a, b) => {
+                const ap = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
+                const bp = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
+                return ap - bp;
+              })
+              .map((row) => [listingUrlKey(row.url), row] as const),
+          ).values(),
+        );
+      };
+      const searchAudits = new Map<number, AutoFillSearchAudit>();
 
       const bedroomFromCandidateText = (c: LiveCandidate): number | null => {
         const text = `${c.title} ${c.snippet ?? ""} ${c.url}`.toLowerCase();
@@ -1539,6 +1683,12 @@ export default function Bookings() {
           throw new Error(`Auto-fill stopped before attaching buy-ins: ${detail} Open the slot's live search to review the audit results manually.`);
         }
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
+        searchAudits.set(searchedBedrooms, {
+          bedrooms: searchedBedrooms,
+          generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
+          counts: searchSummary,
+          candidates: auditCandidatesFor(data),
+        });
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
           .map((unit): LiveCandidate | null => {
             const listing = [...(unit.listings ?? [])]
@@ -1793,7 +1943,12 @@ export default function Bookings() {
           );
           results.push(result);
         }
-        return { reservation, results, comboOptions: comboEvaluation.options };
+        return {
+          reservation,
+          results,
+          comboOptions: comboEvaluation.options,
+          searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+        };
       }
 
       const plannedPicks: Array<{
@@ -1821,9 +1976,14 @@ export default function Bookings() {
             };
         results.push(slotResult);
       }
-      return { reservation, results, comboOptions: comboEvaluation.options };
+      return {
+        reservation,
+        results,
+        comboOptions: comboEvaluation.options,
+        searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+      };
     },
-    onSuccess: ({ reservation, results, comboOptions }) => {
+    onSuccess: ({ reservation, results, comboOptions, searchAudits }) => {
       autoFillRunRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
@@ -1831,6 +1991,9 @@ export default function Bookings() {
       setAutoFillStartedAtMs(null);
       if (comboOptions.length > 0) {
         setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
+      }
+      if (searchAudits.length > 0) {
+        setLastAutoFillAudits((prev) => ({ ...prev, [reservation._id]: searchAudits }));
       }
       const filled = results.filter((r) => r.picked);
       const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
@@ -2219,6 +2382,7 @@ export default function Bookings() {
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
                 const comboOptions = lastAutoFillCombos[r._id] ?? [];
+                const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
@@ -2353,6 +2517,7 @@ export default function Bookings() {
                             )}
                           </div>
                         )}
+                        {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
                         {comboOptions.length > 0 && <ComboComparisonPanel options={comboOptions} />}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
