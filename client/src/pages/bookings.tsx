@@ -1576,8 +1576,20 @@ export default function Bookings() {
   });
 
   const detachMutation = useMutation({
-    mutationFn: (buyInId: number) =>
+    mutationFn: ({ buyInId }: { buyInId: number; reservationId: string }) =>
       apiRequest("POST", `/api/bookings/detach-buy-in/${buyInId}`).then((r) => r.json()),
+    onMutate: ({ reservationId }) => {
+      setLastAutoFillCombos((prev) => {
+        const next = { ...prev };
+        delete next[reservationId];
+        return next;
+      });
+      setLastAutoFillAudits((prev) => {
+        const next = { ...prev };
+        delete next[reservationId];
+        return next;
+      });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
@@ -2481,8 +2493,9 @@ export default function Bookings() {
                 const rowSidecarOnly = autoFilling === r._id
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
-                const comboOptions = lastAutoFillCombos[r._id] ?? [];
-                const searchAudits = lastAutoFillAudits[r._id] ?? [];
+                const hasAttachedBuyIns = r.slots.some((slot) => !!slot.buyIn);
+                const comboOptions = hasAttachedBuyIns ? lastAutoFillCombos[r._id] ?? [] : [];
+                const searchAudits = hasAttachedBuyIns ? lastAutoFillAudits[r._id] ?? [] : [];
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
@@ -2724,7 +2737,7 @@ export default function Bookings() {
                                   <Button
                                     size="sm"
                                     variant="ghost"
-                                    onClick={() => slot.buyIn && detachMutation.mutate(slot.buyIn.id)}
+                                    onClick={() => slot.buyIn && detachMutation.mutate({ buyInId: slot.buyIn.id, reservationId: r._id })}
                                     disabled={detachMutation.isPending}
                                     data-testid={`button-detach-${r._id}-${slot.unitId}`}
                                   >
