@@ -240,17 +240,6 @@ function templateChannelBadgeVariant(channel?: string): "default" | "secondary" 
   return channel === "sms" ? "secondary" : "outline";
 }
 
-function normalizeHttpsUrl(value: string): string {
-  const raw = value.trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    return url.protocol === "https:" ? url.toString() : raw;
-  } catch {
-    return raw;
-  }
-}
-
 function extractUrlsFromText(value: string): string[] {
   return Array.from(value.matchAll(/https?:\/\/[^\s<>"')]+/gi)).map((match) =>
     match[0].replace(/[.,;:!?]+$/, ""),
@@ -1497,8 +1486,6 @@ export default function InboxPage() {
   const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
   const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
   const [guestPhoneInput, setGuestPhoneInput] = useState("");
-  const [guestPreArrivalFormUrlInput, setGuestPreArrivalFormUrlInput] = useState("");
-  const [guestPaymentUrlInput, setGuestPaymentUrlInput] = useState("");
   // Property filter for the conversation list — narrows the visible
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
@@ -1731,11 +1718,6 @@ export default function InboxPage() {
   useEffect(() => {
     setGuestPhoneInput(effectiveGuestPhone);
   }, [selectedConvId, effectiveGuestPhone]);
-
-  useEffect(() => {
-    setGuestPreArrivalFormUrlInput(effectivePreArrivalFormUrl);
-    setGuestPaymentUrlInput(effectivePaymentUrl);
-  }, [selectedConvId, effectivePreArrivalFormUrl, effectivePaymentUrl]);
 
   useEffect(() => {
     if (threadRef.current) {
@@ -2072,8 +2054,8 @@ export default function InboxPage() {
         reservationId: selectedConv.reservationId ?? null,
         guestName: selectedConv.displayGuestName ?? null,
         sourcePhone: selectedConv.displayGuestPhone ?? null,
-        preArrivalFormUrl: guestPreArrivalFormUrlInput.trim() || null,
-        paymentUrl: guestPaymentUrlInput.trim() || null,
+        preArrivalFormUrl: effectivePreArrivalFormUrl || null,
+        paymentUrl: effectivePaymentUrl || null,
       });
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
@@ -2088,34 +2070,6 @@ export default function InboxPage() {
       toast({ title: "Guest phone saved", description: phone });
     },
     onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
-  });
-
-  const saveGuestSmsLinks = useMutation({
-    mutationFn: async () => {
-      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
-      const normalized = normalizePhone(guestPhoneInput || effectiveGuestPhone);
-      if (!normalized) throw new Error("Save a valid guest SMS phone number before saving SMS links");
-      const r = await apiRequest("PUT", `/api/inbox/sms/conversations/${selectedConvId}/links`, {
-        phone: normalized,
-        reservationId: selectedConv.reservationId ?? null,
-        guestName: selectedConv.displayGuestName ?? null,
-        sourcePhone: selectedConv.displayGuestPhone ?? null,
-        preArrivalFormUrl: guestPreArrivalFormUrlInput.trim() || null,
-        paymentUrl: guestPaymentUrlInput.trim() || null,
-      });
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
-      }
-      return r.json();
-    },
-    onSuccess: (data) => {
-      setGuestPreArrivalFormUrlInput(String(data?.override?.preArrivalFormUrl ?? ""));
-      setGuestPaymentUrlInput(String(data?.override?.paymentUrl ?? ""));
-      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"] });
-      toast({ title: "SMS links saved" });
-    },
-    onError: (e: any) => toast({ title: "Links not saved", description: e.message, variant: "destructive" }),
   });
 
   // Regenerate the receipt body whenever any input changes — but only
@@ -3140,51 +3094,6 @@ export default function InboxPage() {
                               : selectedConv.displayGuestPhone
                                 ? "Pulled from Guesty"
                                 : "Enter a number with area code before texting"}
-                          </div>
-                          <div className="pt-1 space-y-1.5">
-                            <Label htmlFor="guest-prearrival-link" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                              Agreement link
-                            </Label>
-                            <Input
-                              id="guest-prearrival-link"
-                              value={guestPreArrivalFormUrlInput}
-                              onChange={(e) => setGuestPreArrivalFormUrlInput(e.target.value)}
-                              onBlur={() => setGuestPreArrivalFormUrlInput((value) => normalizeHttpsUrl(value))}
-                              placeholder="https://guest-app.guesty.com/..."
-                              className="h-8 text-xs"
-                              data-testid="input-guest-prearrival-link"
-                            />
-                            <Label htmlFor="guest-payment-link" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                              Payment link
-                            </Label>
-                            <Input
-                              id="guest-payment-link"
-                              value={guestPaymentUrlInput}
-                              onChange={(e) => setGuestPaymentUrlInput(e.target.value)}
-                              onBlur={() => setGuestPaymentUrlInput((value) => normalizeHttpsUrl(value))}
-                              placeholder="https://..."
-                              className="h-8 text-xs"
-                              data-testid="input-guest-payment-link"
-                            />
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-[10px] text-muted-foreground">
-                                {savedPreArrivalFormUrl || savedPaymentUrl
-                                  ? "Saved for SMS templates"
-                                  : detectedPreArrivalFormUrl || detectedPaymentUrl
-                                    ? "Detected from the thread; save to pin it"
-                                    : "Paste Guesty links here before texting them"}
-                              </div>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-2 text-[11px]"
-                                onClick={() => saveGuestSmsLinks.mutate()}
-                                disabled={saveGuestSmsLinks.isPending || !effectiveGuestPhone}
-                                data-testid="button-save-guest-sms-links"
-                              >
-                                Save links
-                              </Button>
-                            </div>
                           </div>
                         </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
