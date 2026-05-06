@@ -32,6 +32,10 @@
 //   - /api/quo/webhooks/* — Quo/OpenPhone sends inbound SMS webhooks
 //     server-to-server and cannot carry the browser auth cookie. The
 //     endpoint is protected separately with QUO_WEBHOOK_SECRET when set.
+//   - /agreement/* + /api/rental-agreements/* — tokenized guest
+//     signature links. Guests receive these by SMS/email and cannot use
+//     the operator password. Admin creation routes stay protected under
+//     /api/bookings/*/rental-agreement.
 //   - 127.0.0.1 loopback — availability-scheduler.ts does an HTTP
 //     self-call to /api/admin/refresh-all-market-rates once per
 //     scheduled tick. The bypass uses req.socket.remoteAddress, NOT
@@ -59,6 +63,8 @@ const PUBLIC_PATH_PREFIXES = [
   "/brand/",
   "/api/admin/vrbo-sidecar/",
   "/api/quo/webhooks/",
+  "/agreement/",
+  "/api/rental-agreements/",
 ];
 
 const PUBLIC_PATH_EXACT = new Set<string>([
