@@ -155,6 +155,18 @@ type AutoFillComboOption = {
     totalPrice: number;
     url: string;
   }>;
+  pools?: Array<{
+    bedrooms: number;
+    candidates: Array<{
+      source: "airbnb" | "vrbo" | "booking" | "pm";
+      sourceLabel: string;
+      title: string;
+      totalPrice: number;
+      nightlyPrice: number;
+      url: string;
+      image?: string;
+    }>;
+  }>;
 };
 
 interface Candidate {
@@ -684,41 +696,175 @@ function AutoFillProgress({
 }
 
 function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
+  const [directRows, setDirectRows] = useState<Array<{
+    candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number];
+    status: "loading" | "done" | "error";
+    matches: ReverseImageListingMatch[];
+    message?: string;
+  }>>([]);
+  const [directRunning, setDirectRunning] = useState(false);
   if (options.length === 0) return null;
   const selected = options.find((option) => option.selected);
+  const directCandidates = Array.from(new Map(
+    options
+      .flatMap((option) => option.pools ?? [])
+      .flatMap((pool) => pool.candidates)
+      .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0)
+      .sort((a, b) => a.totalPrice - b.totalPrice)
+      .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
+  ).values());
+  const nonAirbnbBaseline = options
+    .flatMap((option) => option.pools ?? [])
+    .flatMap((pool) => pool.candidates)
+    .filter((candidate) => candidate.source !== "airbnb" && candidate.totalPrice > 0)
+    .reduce<number | null>((best, candidate) => best === null ? candidate.totalPrice : Math.min(best, candidate.totalPrice), null);
+  const runDirectScan = async () => {
+    if (directRunning || directCandidates.length === 0) return;
+    setDirectRunning(true);
+    setDirectRows(directCandidates.map((candidate) => ({ candidate, status: "loading", matches: [] })));
+    try {
+      for (const candidate of directCandidates) {
+        try {
+          const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
+            sourceUrl: candidate.url,
+            title: candidate.title,
+          });
+          const body = await response.json();
+          const matches = Array.isArray(body?.matches)
+            ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
+            : [];
+          setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
+            ? { candidate, status: "done", matches, message: body?.message }
+            : row));
+        } catch (e: any) {
+          setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
+            ? { candidate, status: "error", matches: [], message: e?.message ?? "Direct booking scan failed" }
+            : row));
+        }
+      }
+    } finally {
+      setDirectRunning(false);
+    }
+  };
+  const directMatches = directRows
+    .filter((row) => row.status === "done" && row.matches.length > 0)
+    .filter((row) => nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline)
+    .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
   return (
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-medium text-emerald-900">
           Cheapest combination{selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}
         </p>
-        {selected && <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>}
+        <div className="flex flex-wrap items-center gap-2">
+          {directCandidates.length > 0 && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 border-emerald-300 bg-white/80 px-2 text-[11px]"
+              onClick={runDirectScan}
+              disabled={directRunning}
+            >
+              {directRunning ? <RefreshCw className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Globe className="mr-1 h-3.5 w-3.5" />}
+              Optimize direct booking sites
+            </Button>
+          )}
+          {selected && <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>}
+        </div>
       </div>
       <div className="mt-2 space-y-1">
         {options.map((option) => (
-          <div
+          <details
             key={option.label}
-            className={`grid grid-cols-[1fr_auto] gap-3 rounded border px-2 py-1.5 ${
+            className={`rounded border px-2 py-1.5 ${
               option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
             }`}
           >
-            <div className="min-w-0">
-              <p className="font-medium text-foreground">
-                {option.label}
-                {option.selected && <span className="ml-1 text-emerald-700">selected</span>}
-              </p>
-              <p className="truncate text-[11px] text-muted-foreground">
-                {option.totalCost == null
-                  ? option.unavailableReason ?? "Not enough verified options"
-                  : option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
-              </p>
+            <summary className="grid cursor-pointer grid-cols-[1fr_auto] gap-3">
+              <div className="min-w-0">
+                <p className="font-medium text-foreground">
+                  {option.label}
+                  {option.selected && <span className="ml-1 text-emerald-700">selected</span>}
+                </p>
+                <p className="truncate text-[11px] text-muted-foreground">
+                  {option.totalCost == null
+                    ? option.unavailableReason ?? "Not enough verified options"
+                    : option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
+                </p>
+              </div>
+              <div className="text-right font-semibold tabular-nums">
+                {option.totalCost == null ? "—" : fmtMoney(option.totalCost)}
+              </div>
+            </summary>
+            <div className="mt-2 space-y-2 border-t border-emerald-100 pt-2">
+              {(option.pools ?? []).map((pool) => (
+                <div key={`${option.label}-${pool.bedrooms}`}>
+                  <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
+                  <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
+                    {pool.candidates.length === 0 ? (
+                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No verified options in this pool.</p>
+                    ) : pool.candidates.map((candidate, index) => (
+                      <a
+                        key={`${candidate.url}-${index}`}
+                        href={candidate.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 hover:bg-emerald-50/70"
+                      >
+                        <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
+                        <span className="truncate text-[11px]" title={candidate.title}>{candidate.title}</span>
+                        <span className="text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="text-right font-semibold tabular-nums">
-              {option.totalCost == null ? "—" : fmtMoney(option.totalCost)}
-            </div>
-          </div>
+          </details>
         ))}
       </div>
+      {directRows.length > 0 && (
+        <div className="mt-2 rounded-md border border-sky-200 bg-sky-50/80 p-2">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold text-sky-900">Direct-booking site scan</p>
+            <Badge className="bg-sky-700 text-white text-[9px]">
+              {directRunning ? `${directRows.filter((row) => row.status !== "loading").length}/${directRows.length}` : `${directMatches.length} qualified`}
+            </Badge>
+          </div>
+          {directRunning && (
+            <p className="mb-1 text-[11px] text-sky-900/75">Checking Airbnb candidates for direct PM listing pages...</p>
+          )}
+          {!directRunning && directMatches.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">No Airbnb candidate with a direct PM site beat the non-Airbnb baseline.</p>
+          ) : (
+            <div className="space-y-1">
+              {directMatches.map((row) => (
+                <div key={row.candidate.url} className="rounded border bg-white px-2 py-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="min-w-0 truncate font-medium">{row.candidate.title}</span>
+                    <span className="font-semibold">{fmtMoney(row.candidate.totalPrice)}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {row.matches.slice(0, 3).map((match) => (
+                      <a
+                        key={`${row.candidate.url}-${match.url}`}
+                        href={match.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                      >
+                        {match.domain}
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1542,6 +1688,7 @@ export default function Bookings() {
       type EvaluatedCombo = {
         combo: TwoUnitBedroomCombo;
         picks: LiveCandidate[];
+        pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }>;
         summaries: AutoFillSearchSummary[];
         totalCost: number | null;
         unavailableReason?: string;
@@ -1558,6 +1705,18 @@ export default function Bookings() {
           title: pick.title,
           totalPrice: pick.totalPrice,
           url: pick.url,
+        })),
+        pools: evaluated.pools.map((pool) => ({
+          bedrooms: pool.bedrooms,
+          candidates: pool.candidates.slice(0, 20).map((candidate) => ({
+            source: candidate.source,
+            sourceLabel: candidate.sourceLabel,
+            title: candidate.title,
+            totalPrice: candidate.totalPrice,
+            nightlyPrice: candidate.nightlyPrice,
+            url: candidate.url,
+            image: candidate.image,
+          })),
         })),
       });
       const evaluateTwoUnitCombos = async (): Promise<{
@@ -1581,10 +1740,12 @@ export default function Bookings() {
         for (const combo of combos) {
           const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
+          const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
           const summaries: AutoFillSearchSummary[] = [];
           let unavailableReason = "";
           for (const bedroomCount of combo.bedrooms) {
             const pool = await poolFor(bedroomCount);
+            pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c));
             if (!pick) {
@@ -1600,6 +1761,7 @@ export default function Bookings() {
           const evaluated: EvaluatedCombo = {
             combo,
             picks,
+            pools,
             summaries,
             totalCost,
             unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
@@ -2663,28 +2825,28 @@ function BuyInVendorEmailPanel({
 
   return (
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Mail className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="font-medium">{showAliasControls ? "Booking email alias" : "Uses booking alias"}</span>
-        {data?.alias ? (
-          <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
-        ) : showAliasControls ? (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7"
-            onClick={() => createAlias.mutate()}
-            disabled={createAlias.isPending || isLoading}
-          >
-            {createAlias.isPending ? "Creating..." : "Create booking alias"}
-          </Button>
-        ) : (
-          <span className="text-[11px] text-muted-foreground">Create it once from the first buy-in on this booking.</span>
-        )}
-        {contact?.reverseAliasEmail && (
-          <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>
-        )}
-      </div>
+      {showAliasControls && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Mail className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="font-medium">Booking email alias</span>
+          {data?.alias ? (
+            <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7"
+              onClick={() => createAlias.mutate()}
+              disabled={createAlias.isPending || isLoading}
+            >
+              {createAlias.isPending ? "Creating..." : "Create booking alias"}
+            </Button>
+          )}
+          {contact?.reverseAliasEmail && (
+            <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>
+          )}
+        </div>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-2">
         <Input
           value={vendorName}
