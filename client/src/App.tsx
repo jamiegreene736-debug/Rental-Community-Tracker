@@ -27,11 +27,12 @@ import { setLivePropertyMarketRates, type LivePropertyMarketRateInput } from "@s
 
 function Router() {
   const [location] = useLocation();
-  if (location.startsWith("/agreement/")) {
+  if (location.startsWith("/agreement/") || location.startsWith("/admin/agreement/")) {
     return (
       <ErrorBoundary>
         <Switch>
           <Route path="/agreement/:token" component={Agreement} />
+          <Route path="/admin/agreement/:token" component={Agreement} />
           <Route component={NotFound} />
         </Switch>
       </ErrorBoundary>
@@ -56,6 +57,7 @@ function Router() {
           <Route path="/inbox" component={Inbox} />
           <Route path="/bookings" component={Bookings} />
           <Route path="/agreement/:token" component={Agreement} />
+          <Route path="/admin/agreement/:token" component={Agreement} />
           <Route component={NotFound} />
         </Switch>
       </ErrorBoundary>

@@ -32,10 +32,12 @@
 //   - /api/quo/webhooks/* — Quo/OpenPhone sends inbound SMS webhooks
 //     server-to-server and cannot carry the browser auth cookie. The
 //     endpoint is protected separately with QUO_WEBHOOK_SECRET when set.
-//   - /agreement/* + /api/rental-agreements/* — tokenized guest
-//     signature links. Guests receive these by SMS/email and cannot use
-//     the operator password. Admin creation routes stay protected under
-//     /api/bookings/*/rental-agreement.
+//   - /agreement/* + /admin/agreement/* + /api/rental-agreements/* —
+//     tokenized guest signature links. Guests receive these by SMS/email
+//     and cannot use the operator password. The /admin/agreement/*
+//     alias exists only for older/shared guest links that included
+//     "admin" in the path; it does not unlock the admin portal. Admin
+//     creation routes stay protected under /api/bookings/*/rental-agreement.
 //   - /api/buy-in-emails/inbound — server-to-server email webhook only
 //     when BUY_IN_EMAIL_WEBHOOK_SECRET matches. This records PM/vendor
 //     replies from alias email threads without giving guests/vendors the
@@ -68,12 +70,15 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/admin/vrbo-sidecar/",
   "/api/quo/webhooks/",
   "/agreement/",
+  "/admin/agreement/",
   "/api/rental-agreements/",
 ];
 
 const PUBLIC_PATH_EXACT = new Set<string>([
   "/login",
   "/logout",
+  "/agreement",
+  "/admin/agreement",
   "/favicon.ico",
   "/favicon.png",
   "/favicon-16x16.png",
