@@ -84,11 +84,14 @@ function MarketRatesHydrator() {
 }
 
 function App() {
+  const [location] = useLocation();
+  const isAgreementRoute = location.startsWith("/agreement/") || location.startsWith("/admin/agreement/");
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
-        <MarketRatesHydrator />
+        {!isAgreementRoute && <MarketRatesHydrator />}
         <Router />
       </TooltipProvider>
     </QueryClientProvider>
