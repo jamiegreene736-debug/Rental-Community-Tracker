@@ -2194,6 +2194,7 @@ export default function Bookings() {
                         {comboOptions.length > 0 && <ComboComparisonPanel options={comboOptions} />}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
+                          const firstBuyInId = r.slots.find((s) => s.buyIn)?.buyIn?.id ?? null;
                           return (
                           <div
                             key={slot.unitId}
@@ -2331,7 +2332,11 @@ export default function Bookings() {
                             </div>
                           </div>
                           {slot.buyIn && (
-                            <BuyInVendorEmailPanel reservation={r} buyIn={slot.buyIn} />
+                            <BuyInVendorEmailPanel
+                              reservation={r}
+                              buyIn={slot.buyIn}
+                              showAliasControls={slot.buyIn.id === firstBuyInId}
+                            />
                           )}
                           {slotIsExpanded && selectedPropertyId && (
                             <div className="border-t bg-muted/20 px-3 py-3">
@@ -2587,9 +2592,11 @@ export default function Bookings() {
 function BuyInVendorEmailPanel({
   reservation,
   buyIn,
+  showAliasControls,
 }: {
   reservation: GuestyReservation;
   buyIn: BuyIn;
+  showAliasControls: boolean;
 }) {
   const { toast } = useToast();
   const guestName = reservation.guest?.fullName ?? "";
@@ -2658,10 +2665,10 @@ function BuyInVendorEmailPanel({
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <Mail className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="font-medium">PM email alias</span>
+        <span className="font-medium">{showAliasControls ? "Booking email alias" : "Uses booking alias"}</span>
         {data?.alias ? (
           <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
-        ) : (
+        ) : showAliasControls ? (
           <Button
             size="sm"
             variant="outline"
@@ -2669,8 +2676,10 @@ function BuyInVendorEmailPanel({
             onClick={() => createAlias.mutate()}
             disabled={createAlias.isPending || isLoading}
           >
-            {createAlias.isPending ? "Creating..." : "Create guest alias"}
+            {createAlias.isPending ? "Creating..." : "Create booking alias"}
           </Button>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">Create it once from the first buy-in on this booking.</span>
         )}
         {contact?.reverseAliasEmail && (
           <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>

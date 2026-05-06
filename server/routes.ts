@@ -3192,33 +3192,76 @@ export async function registerRoutes(
     });
     if (!alias.simpleloginAliasId) throw new Error("Saved SimpleLogin alias is missing its alias id");
 
-    const existing = await db
+    const exactExisting = await db
       .select()
       .from(buyInVendorContacts)
       .where(and(
         eq(buyInVendorContacts.buyInId, input.buyInId),
         sql`lower(${buyInVendorContacts.vendorEmail}) = ${vendorEmail}`,
       ))
+      .orderBy(desc(buyInVendorContacts.updatedAt))
       .limit(1);
-    if (existing[0]?.reverseAliasEmail) return { alias, contact: existing[0], created: false };
+    if (exactExisting[0]?.reverseAliasEmail) return { alias, contact: exactExisting[0], created: false };
+
+    const existing = await db
+      .select()
+      .from(buyInVendorContacts)
+      .where(and(
+        eq(buyInVendorContacts.reservationId, input.reservationId),
+        sql`lower(${buyInVendorContacts.vendorEmail}) = ${vendorEmail}`,
+      ))
+      .orderBy(desc(buyInVendorContacts.updatedAt))
+      .limit(1);
+    if (existing[0]?.reverseAliasEmail) {
+      if (exactExisting[0]) {
+        const [contact] = await db
+          .update(buyInVendorContacts)
+          .set({
+            vendorName: input.vendorName ?? exactExisting[0].vendorName,
+            simpleloginContactId: existing[0].simpleloginContactId,
+            reverseAliasEmail: existing[0].reverseAliasEmail,
+            reverseAlias: existing[0].reverseAlias,
+            rawPayload: existing[0].rawPayload,
+            updatedAt: new Date(),
+          })
+          .where(eq(buyInVendorContacts.id, exactExisting[0].id))
+          .returning();
+        return { alias, contact, created: false };
+      }
+      const [contact] = await db
+        .insert(buyInVendorContacts)
+        .values({
+          buyInId: input.buyInId,
+          reservationId: input.reservationId,
+          vendorName: input.vendorName ?? existing[0].vendorName,
+          vendorEmail,
+          simpleloginContactId: existing[0].simpleloginContactId,
+          reverseAliasEmail: existing[0].reverseAliasEmail,
+          reverseAlias: existing[0].reverseAlias,
+          rawPayload: existing[0].rawPayload,
+        })
+        .returning();
+      return { alias, contact, created: false };
+    }
 
     const payload = await createSimpleLoginContact(alias.simpleloginAliasId, vendorEmail, input.vendorName);
     const reverseAliasEmail = extractSimpleLoginReverseAlias(payload);
     const simpleloginContactId = extractSimpleLoginContactId(payload);
     if (!reverseAliasEmail) throw new Error("SimpleLogin did not return a reverse alias for this vendor contact");
 
-    if (existing[0]) {
+    if (exactExisting[0] || existing[0]) {
+      const contactToUpdate = exactExisting[0] ?? existing[0];
       const [contact] = await db
         .update(buyInVendorContacts)
         .set({
-          vendorName: input.vendorName ?? existing[0].vendorName,
+          vendorName: input.vendorName ?? contactToUpdate.vendorName,
           simpleloginContactId,
           reverseAliasEmail,
           reverseAlias: reverseAliasEmail,
           rawPayload: JSON.stringify(payload),
           updatedAt: new Date(),
         })
-        .where(eq(buyInVendorContacts.id, existing[0].id))
+        .where(eq(buyInVendorContacts.id, contactToUpdate.id))
         .returning();
       return { alias, contact, created: false };
     }
@@ -3378,12 +3421,14 @@ export async function registerRoutes(
           sql`lower(${buyInVendorContacts.vendorEmail}) = ${fromEmail}`,
           sql`lower(${buyInVendorContacts.reverseAliasEmail}) = ${toEmail}`,
         ))
+        .orderBy(desc(buyInVendorContacts.updatedAt))
         .limit(1);
       if (!contact) {
         const candidates = await db
           .select()
           .from(buyInVendorContacts)
           .where(sql`lower(${buyInVendorContacts.vendorEmail}) = ${fromEmail}`)
+          .orderBy(desc(buyInVendorContacts.updatedAt))
           .limit(25);
         for (const candidate of candidates) {
           const [alias] = await db
