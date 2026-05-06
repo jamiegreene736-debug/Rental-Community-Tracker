@@ -18962,7 +18962,7 @@ Return ONLY compact JSON with this exact shape:
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "live-multichannel-median" | "airbnb" | "none";
+      basisSource: "optimized-buy-in" | "airbnb" | "none";
       channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
       channelCount: number;
     };
@@ -18982,7 +18982,7 @@ Return ONLY compact JSON with this exact shape:
         lowResult.basis == null
           ? "none"
           : hasNonAirbnbChannel
-            ? "live-multichannel-median"
+            ? "optimized-buy-in"
             : "airbnb";
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
@@ -19022,7 +19022,7 @@ Return ONLY compact JSON with this exact shape:
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.airbnbSamples,
-        source: basisSource === "live-multichannel-median" ? "optimized-buy-in" : "airbnb",
+        source: basisSource,
       });
       persisted.push({
         bedrooms: br,
