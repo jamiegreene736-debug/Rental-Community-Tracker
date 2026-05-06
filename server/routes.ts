@@ -7134,6 +7134,8 @@ export async function registerRoutes(
       const d = domain.toLowerCase();
       return /(?:^|\.)(?:google|gstatic|googleusercontent|searchapi|bing|yahoo|duckduckgo|facebook|instagram|pinterest|youtube|youtu|tiktok|twitter|x|threads|linkedin|reddit|wikimedia|wikipedia|imgur|flickr|staticflickr)\./.test(d)
         || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d)
+        || /(?:^|\.)(?:amazon|walmart|potterybarn|wayfair|target|ebay|etsy|craigslist|ikea|homedepot|lowes|costco|samsclub|kohls|macys|overstock|bedbathandbeyond)\./.test(d)
+        || /(?:^|\.)(?:almosafer|charleston\.craigslist)\./.test(d)
         || /(?:^|\.)(?:zillow|realtor|redfin|coldwellbanker|century21|compass|sothebysrealty|sothebys|hawaiilife|homes|trulia|movoto|mls|realtytrac|loopnet|apartments|hotpads|ramaui|emauirealestate)\./.test(d);
     };
 

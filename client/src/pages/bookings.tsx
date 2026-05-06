@@ -733,11 +733,6 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
       .sort((a, b) => a.totalPrice - b.totalPrice)
       .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
   ).values());
-  const nonAirbnbBaseline = options
-    .flatMap((option) => option.pools ?? [])
-    .flatMap((pool) => pool.candidates)
-    .filter((candidate) => candidate.source !== "airbnb" && candidate.totalPrice > 0)
-    .reduce<number | null>((best, candidate) => best === null ? candidate.totalPrice : Math.min(best, candidate.totalPrice), null);
   const runDirectScan = async () => {
     if (directRunning || directCandidates.length === 0) return;
     setDirectRunning(true);
@@ -771,9 +766,9 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   };
   const directMatches = directRows
     .filter((row) => row.status === "done" && row.matches.length > 0)
-    .filter((row) => nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline)
     .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
   const directMatchByUrl = new Map(directMatches.map((row) => [listingUrlKey(row.candidate.url), row] as const));
+  const bestDirectCandidate = directMatches[0] ?? null;
   const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
     candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url));
   const bestOptimizedCombo = options
@@ -789,6 +784,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     })
     .filter((combo): combo is NonNullable<typeof combo> => combo !== null)
     .sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
+  const optimizedOptionLabel = bestOptimizedCombo?.option.label ?? null;
   const directProgress = directCandidates.length > 0
     ? Math.min(100, Math.round((directDone / directCandidates.length) * 100))
     : 0;
@@ -816,18 +812,23 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
         </div>
       </div>
       <div className="mt-2 space-y-1">
-        {options.map((option) => (
+        {options.map((option) => {
+          const isOptimizedOption = optimizedOptionLabel === option.label;
+          return (
           <details
             key={option.label}
             className={`rounded border px-2 py-1.5 ${
-              option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
+              isOptimizedOption
+                ? "border-sky-400 bg-sky-50"
+                : option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
             }`}
           >
             <summary className="grid cursor-pointer grid-cols-[1fr_auto] gap-3">
               <div className="min-w-0">
                 <p className="font-medium text-foreground">
                   {option.label}
-                  {option.selected && <span className="ml-1 text-emerald-700">selected</span>}
+                  {isOptimizedOption && <span className="ml-1 text-sky-700">direct optimized</span>}
+                  {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">selected</span>}
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
                   {option.totalCost == null
@@ -846,25 +847,37 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                   <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
                     {pool.candidates.length === 0 ? (
                       <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No verified options in this pool.</p>
-                    ) : pool.candidates.map((candidate, index) => (
+                    ) : pool.candidates.map((candidate, index) => {
+                      const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
+                      const isDirectPick = !!directRow;
+                      const isOptimizedPick = !!bestOptimizedCombo?.picks.some((pick) => listingUrlKey(pick.url) === listingUrlKey(candidate.url));
+                      return (
                       <a
                         key={`${candidate.url}-${index}`}
                         href={candidate.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 hover:bg-emerald-50/70"
+                        className={`grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 ${
+                          isOptimizedPick
+                            ? "bg-sky-100 hover:bg-sky-100"
+                            : isDirectPick ? "bg-emerald-50 hover:bg-emerald-100" : "hover:bg-emerald-50/70"
+                        }`}
                       >
                         <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
-                        <span className="truncate text-[11px]" title={candidate.title}>{candidate.title}</span>
-                        <span className="text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
+                        <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
+                          {candidate.title}
+                          {isOptimizedPick && <Badge className="ml-1 bg-sky-700 text-white text-[9px]">optimized pick</Badge>}
+                          {!isOptimizedPick && isDirectPick && <Badge className="ml-1 bg-emerald-600 text-white text-[9px]">direct site</Badge>}
+                        </span>
+                        <span className="text-right text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
                       </a>
-                    ))}
+                    )})}
                   </div>
                 </div>
               ))}
             </div>
           </details>
-        ))}
+        )})}
       </div>
       {directRows.length > 0 && (
         <div className="mt-2 rounded-md border border-sky-200 bg-sky-50/80 p-2">
@@ -920,6 +933,34 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                           </div>
                         )}
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!bestOptimizedCombo && bestDirectCandidate && !directRunning && (
+                <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5">
+                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-amber-950">
+                      <Badge className="mr-1 bg-amber-600 text-white text-[9px]">Best direct unit found</Badge>
+                      {bestDirectCandidate.candidate.title}
+                    </span>
+                    <span className="font-semibold">{fmtMoney(bestDirectCandidate.candidate.totalPrice)}</span>
+                  </div>
+                  <p className="text-[11px] text-amber-900/80">
+                    This Airbnb has a direct-booking site match, but the scan did not find enough qualifying rows to build a complete optimized unit combination.
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {bestDirectCandidate.matches.slice(0, 3).map((match) => (
+                      <a
+                        key={`${bestDirectCandidate.candidate.url}-${match.url}`}
+                        href={match.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded border bg-white px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                      >
+                        {match.domain}
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </a>
                     ))}
                   </div>
                 </div>
