@@ -44,6 +44,17 @@ type KnownSingleListingCommunityFact = {
   estimatedTotalUnits: number;
 };
 
+type KnownSingleListingCommunitySeed = {
+  city: RegExp;
+  state: RegExp;
+  name: string;
+  availableBedrooms: number[];
+  estimatedTotalUnits: number;
+  unitTypes: string;
+  researchSummary: string;
+  sourceUrl?: string;
+};
+
 // CODEX NOTE (2026-05-05, codex/single-listing-known-facts):
 // The single-listing wizard depends on Claude's resort research
 // for the card name, bedroom buttons, and rough resort unit count.
@@ -62,6 +73,125 @@ const KNOWN_SINGLE_LISTING_COMMUNITY_FACTS: KnownSingleListingCommunityFact[] = 
     estimatedTotalUnits: 75,
   },
 ];
+
+// Deterministic market seeds for single-listing city research. These do
+// not replace SearchAPI/Claude; they make sure operator-known resort
+// markets still produce useful choices when an upstream model call,
+// organic search, or rate spot-check comes back empty. Keep this list
+// intentionally small and market-specific so it stays trustworthy.
+const KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS: KnownSingleListingCommunitySeed[] = [
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Estero Beach & Tennis Club",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 280,
+    unitTypes: "Individually owned beachfront condominium resort",
+    researchSummary: "Large Fort Myers Beach condo community with individually owned units and active vacation-rental inventory.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Pointe Estero Resort",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 100,
+    unitTypes: "Individually owned beachfront condominium resort",
+    researchSummary: "Recognizable Gulf-front condo resort with standalone vacation-rental units.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Diamond Head Beach Resort",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 120,
+    unitTypes: "Condominium resort with individually owned units",
+    researchSummary: "Known Fort Myers Beach condo resort; included as a single-listing candidate for unit-level onboarding.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Santa Maria Resort",
+    availableBedrooms: [2, 3],
+    estimatedTotalUnits: 75,
+    unitTypes: "Individually owned condominium resort",
+    researchSummary: "Operator-validated Fort Myers Beach condo resort with 2BR and 3BR vacation-rental units.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Sandcastle Beach Club",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 50,
+    unitTypes: "Beachfront condominium resort",
+    researchSummary: "Fort Myers Beach beachfront condo community suitable for standalone unit research.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Casa Playa Beach Resort",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 35,
+    unitTypes: "Beachfront condominium resort",
+    researchSummary: "Smaller Fort Myers Beach condo resort with individually rented units.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Sea Castle Condominiums",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 35,
+    unitTypes: "Condominium community",
+    researchSummary: "Fort Myers Beach condo community included as a fallback candidate for single-listing onboarding.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Mariner's Boathouse & Beach Resort",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 40,
+    unitTypes: "Condominium resort",
+    researchSummary: "Fort Myers Beach resort-style condo property with vacation-rental relevance.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Surf & Sun Beach Resort",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 30,
+    unitTypes: "Beachfront condominium resort",
+    researchSummary: "Fort Myers Beach beachfront condo resort candidate for standalone listing research.",
+  },
+  {
+    city: /^fort myers beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "The Sunset Beach Club",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 25,
+    unitTypes: "Condominium resort",
+    researchSummary: "Known Fort Myers Beach condo resort candidate for the single-listing flow.",
+  },
+];
+
+function knownSingleListingSeedsForCity(city: string, state: string): ResearchedCommunity[] {
+  return KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS
+    .filter((seed) => seed.city.test(city.trim()) && seed.state.test(state.trim()))
+    .map((seed) => ({
+      name: seed.name,
+      city,
+      state,
+      estimatedLowRate: null,
+      estimatedHighRate: null,
+      unitTypes: seed.unitTypes,
+      confidenceScore: 88,
+      researchSummary: seed.researchSummary,
+      sourceUrl: seed.sourceUrl ?? "",
+      bedroomMix: seed.availableBedrooms.length > 0 ? `${seed.availableBedrooms.join("/")}BR` : undefined,
+      combinabilityScore: undefined,
+      fromWorldKnowledge: true,
+      availableBedrooms: seed.availableBedrooms,
+      estimatedTotalUnits: seed.estimatedTotalUnits,
+    }));
+}
 
 function normalizeCommunityName(value: unknown): string {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
@@ -746,6 +876,29 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         researchSummary: r.snippet,
         sourceUrl: r.link,
       });
+    }
+  }
+
+  if (mode === "single") {
+    const knownSeeds = knownSingleListingSeedsForCity(city, state);
+    for (const seed of knownSeeds) {
+      const existing = results.find((r) =>
+        normalizeCommunityName(r.name) === normalizeCommunityName(seed.name) &&
+        r.city.toLowerCase() === seed.city.toLowerCase() &&
+        r.state.toLowerCase() === seed.state.toLowerCase(),
+      );
+      if (existing) {
+        existing.availableBedrooms = existing.availableBedrooms?.length ? existing.availableBedrooms : seed.availableBedrooms;
+        existing.estimatedTotalUnits = existing.estimatedTotalUnits && existing.estimatedTotalUnits > 0
+          ? existing.estimatedTotalUnits
+          : seed.estimatedTotalUnits;
+        existing.unitTypes = existing.unitTypes || seed.unitTypes;
+        existing.researchSummary = existing.researchSummary || seed.researchSummary;
+        existing.fromWorldKnowledge = existing.fromWorldKnowledge || seed.fromWorldKnowledge;
+        existing.confidenceScore = Math.max(existing.confidenceScore ?? 0, seed.confidenceScore);
+      } else {
+        results.push(seed);
+      }
     }
   }
 
