@@ -19397,6 +19397,7 @@ Return ONLY compact JSON with this exact shape:
         label: string;
         current?: number;
         currentLabel?: string;
+        currentStartedAt?: number;
       }) => {
         const current = getRefreshProgress(propertyId);
         const done = Math.max(0, Math.min(totalWindows, args.completed));
@@ -19411,10 +19412,39 @@ Return ONLY compact JSON with this exact shape:
           progressTotal: totalWindows,
           progressCurrent: typeof args.current === "number" ? Math.max(1, Math.min(totalWindows, args.current)) : undefined,
           progressWindowLabel: args.currentLabel,
+          progressWindowStartedAt: args.currentStartedAt ?? current?.progressWindowStartedAt,
           daemonOnline: current?.daemonOnline,
           daemonLastPollAgeMs: current?.daemonLastPollAgeMs,
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
         });
+      };
+      const MONTHLY_WINDOW_BUDGET_MS = 12 * 60_000;
+      const runMonthlyWindowScan = async (
+        label: string,
+        dateOverride: { checkIn: string; checkOut: string },
+      ) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => {
+          controller.abort(new Error(`${label} exceeded the ${Math.round(MONTHLY_WINDOW_BUDGET_MS / 60_000)} minute per-window budget`));
+        }, MONTHLY_WINDOW_BUDGET_MS);
+        try {
+          return await fetchMultiChannelBuyInByBR({
+            community: loc.searchName,
+            city: loc.city,
+            state: loc.state,
+            streetAddress: loc.streetAddress,
+            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+            searchName: loc.searchName,
+            bedroomCounts: wantBedrooms,
+            propertyId,
+            dateOverride,
+            sidecarQueueBudgetMs: 15 * 60_000,
+            sidecarStopGeneration,
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
       };
       const heartbeat = setInterval(() => {
         const current = getRefreshProgress(propertyId);
@@ -19454,25 +19484,15 @@ Return ONLY compact JSON with this exact shape:
         for (const win of monthlyWindows) {
           assertSidecarRunCurrent();
           const currentLabel = `${win.yearMonth} ${win.season} rates`;
+          const currentStartedAt = Date.now();
           setMonthlyProgress({
             completed,
             current: completed + 1,
             currentLabel,
+            currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
-          const scan = await fetchMultiChannelBuyInByBR({
-            community: loc.searchName,
-            city: loc.city,
-            state: loc.state,
-            streetAddress: loc.streetAddress,
-            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-            searchName: loc.searchName,
-            bedroomCounts: wantBedrooms,
-            propertyId,
-            dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
-            sidecarQueueBudgetMs: 15 * 60_000,
-            sidecarStopGeneration,
-          });
+          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
           assertSidecarRunCurrent();
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
@@ -19501,25 +19521,15 @@ Return ONLY compact JSON with this exact shape:
         for (const win of holidayWindows) {
           assertSidecarRunCurrent();
           const currentLabel = `${win.label} holiday rates`;
+          const currentStartedAt = Date.now();
           setMonthlyProgress({
             completed,
             current: completed + 1,
             currentLabel,
+            currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
-          const scan = await fetchMultiChannelBuyInByBR({
-            community: loc.searchName,
-            city: loc.city,
-            state: loc.state,
-            streetAddress: loc.streetAddress,
-            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-            searchName: loc.searchName,
-            bedroomCounts: wantBedrooms,
-            propertyId,
-            dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
-            sidecarQueueBudgetMs: 15 * 60_000,
-            sidecarStopGeneration,
-          });
+          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
           assertSidecarRunCurrent();
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {

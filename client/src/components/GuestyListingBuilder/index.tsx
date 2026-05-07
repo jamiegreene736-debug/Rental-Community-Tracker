@@ -1865,6 +1865,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     progressTotal?: number;
     progressCurrent?: number;
     progressWindowLabel?: string;
+    progressWindowStartedAt?: number;
     lastTickAt?: number;
     daemonOnline?: boolean;
     daemonLastPollAgeMs?: number | null;
@@ -1998,6 +1999,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       progressTotal: previous?.progressTotal,
       progressCurrent: previous?.progressCurrent,
       progressWindowLabel: previous?.progressWindowLabel,
+      progressWindowStartedAt: previous?.progressWindowStartedAt,
       lastTickAt: previous?.lastTickAt,
       daemonOnline: previous?.daemonOnline,
       daemonLastPollAgeMs: previous?.daemonLastPollAgeMs,
@@ -2047,6 +2049,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       progressTotal: typeof p.progressTotal === "number" ? p.progressTotal : undefined,
       progressCurrent: typeof p.progressCurrent === "number" ? p.progressCurrent : undefined,
       progressWindowLabel: typeof p.progressWindowLabel === "string" ? p.progressWindowLabel : undefined,
+      progressWindowStartedAt: typeof p.progressWindowStartedAt === "number" ? p.progressWindowStartedAt : undefined,
       lastTickAt: typeof p.lastTickAt === "number" ? p.lastTickAt : undefined,
       daemonOnline: typeof p.daemonOnline === "boolean" ? p.daemonOnline : undefined,
       daemonLastPollAgeMs: typeof p.daemonLastPollAgeMs === "number" ? p.daemonLastPollAgeMs : null,
@@ -3926,6 +3929,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const activeWindowPercent = hasWindowProgress && currentWindow != null
                                 ? Math.round((currentWindow / totalWindows) * 100)
                                 : completedPercent;
+                              const currentWindowElapsedMs = refreshProgress.progressWindowStartedAt
+                                ? Math.max(0, now - refreshProgress.progressWindowStartedAt)
+                                : 0;
+                              const currentWindowElapsedMin = Math.floor(currentWindowElapsedMs / 60000);
+                              const currentWindowElapsedSec = Math.floor((currentWindowElapsedMs % 60000) / 1000);
+                              const currentWindowElapsedStr = `${currentWindowElapsedMin}:${String(currentWindowElapsedSec).padStart(2, "0")}`;
                               const progressText = hasWindowProgress
                                 ? `${completedWindows}/${totalWindows} windows · ${completedPercent}%`
                                 : `${Math.max(0, Math.min(100, refreshProgress.percent))}%`;
@@ -3982,6 +3991,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {hasWindowProgress && refreshProgress.progressWindowLabel && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
                                       Current window {currentWindow}/{totalWindows}: {refreshProgress.progressWindowLabel}
+                                      {refreshProgress.progressWindowStartedAt && ` · ${currentWindowElapsedStr} on this window`}
+                                    </div>
+                                  )}
+                                  {hasWindowProgress && currentWindow != null && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      The percent advances after each 7-night window finishes; one slow channel can hold this number until the current window completes or times out.
                                     </div>
                                   )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}

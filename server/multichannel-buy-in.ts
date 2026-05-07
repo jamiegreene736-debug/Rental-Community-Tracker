@@ -52,7 +52,7 @@ export function classifyScanReason(reason: string | undefined | null): ScanWarni
   if (s.includes("cloudflare") || s.includes("just a moment") || s.includes("ddos protection")) return "blocked";
   if (s.includes("403") || s.includes("bot detection") || s.includes("access denied")) return "blocked";
   if (s.includes("429") || s.includes("rate limit") || s.includes("too many requests")) return "rate-limit";
-  if (s.includes("timeout") || s.includes("timed out") || s.includes("navigation timeout") || s.includes("walletbudget")) return "timeout";
+  if (s.includes("timeout") || s.includes("timed out") || s.includes("navigation timeout") || s.includes("walletbudget") || s.includes("budget")) return "timeout";
   if (s.includes("econnreset") || s.includes("enotfound") || s.includes("network error") || s.includes("net::")) return "network";
   // "worker likely offline" / "request expired" cover the daemon-down case;
   // those surface separately via daemonOnline so don't double-warn.
@@ -241,6 +241,7 @@ async function fetchPmMarketRatesForBedroom(args: {
   checkOut: string;
   region: RegionKey;
   sidecarStopGeneration?: number;
+  signal?: AbortSignal;
 }): Promise<{
   br: number;
   medianNightly: number | null;
@@ -250,6 +251,11 @@ async function fetchPmMarketRatesForBedroom(args: {
 }> {
   const br = args.bedrooms;
   const assertSidecarRunCurrent = () => {
+    if (args.signal?.aborted) {
+      const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "monthly PM scan cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
     if (hasSidecarStopGenerationChanged(args.sidecarStopGeneration)) {
       throw sidecarRunCancelledError();
     }
@@ -329,6 +335,7 @@ async function fetchPmMarketRatesForBedroom(args: {
         perSiteLimit: 3,
         walletBudgetMs: 105_000,
         queueBudgetMs: 285_000,
+        signal: args.signal,
         stopGeneration: args.sidecarStopGeneration,
       });
       workerOnline = r.workerOnline;
@@ -462,10 +469,16 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // captured at scan start so a later operator Stop cancels the whole
   // scan, even if Start Queue is clicked again.
   sidecarStopGeneration?: number;
+  signal?: AbortSignal;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
   const sidecarStopGeneration = args.sidecarStopGeneration ?? getSidecarStopGeneration();
   const assertSidecarRunCurrent = () => {
+    if (args.signal?.aborted) {
+      const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "monthly window scan cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
     if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
       throw sidecarRunCancelledError();
     }
@@ -551,6 +564,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             bedrooms: br,
             walletBudgetMs: 120_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            signal: args.signal,
             stopGeneration: sidecarStopGeneration,
           });
           let cheapest = Infinity;
@@ -602,6 +616,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            signal: args.signal,
             stopGeneration: sidecarStopGeneration,
           });
           if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
@@ -659,6 +674,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            signal: args.signal,
             stopGeneration: sidecarStopGeneration,
           });
           // Booking sidecar publishes `totalPrice` and leaves
@@ -698,6 +714,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
       checkOut,
       region: inferRegion(args.city, args.state),
       sidecarStopGeneration,
+      signal: args.signal,
     }));
   }
 
@@ -1033,6 +1050,7 @@ export type RefreshProgressState = {
   progressTotal?: number;
   progressCurrent?: number;
   progressWindowLabel?: string;
+  progressWindowStartedAt?: number;
   // Freeze-detection fields (PR #311). lastTickAt is updated by a
   // 15-second heartbeat AND every setPhase call — so the client can
   // tell the scan is still alive even when no phase boundary has
