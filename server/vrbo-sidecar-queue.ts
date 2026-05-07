@@ -337,6 +337,7 @@ const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 let queuePaused = false;
 let queuePausedAt: number | null = null;
 let queuePausedReason: string | null = null;
+let queueStopGeneration = 0;
 
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
@@ -346,6 +347,26 @@ const TERMINAL_TTL_MS = 5 * 60 * 1000;
 
 function nowMs(): number {
   return Date.now();
+}
+
+function sidecarRunCancelledError(reason = "sidecar run cancelled by operator stop"): Error {
+  const err = new Error(reason);
+  err.name = "SidecarRunCancelledError";
+  return err;
+}
+
+export function getSidecarStopGeneration(): number {
+  return queueStopGeneration;
+}
+
+export function hasSidecarStopGenerationChanged(generation: number | null | undefined): boolean {
+  return generation != null && generation !== queueStopGeneration;
+}
+
+export function assertSidecarStopGenerationCurrent(generation: number | null | undefined): void {
+  if (hasSidecarStopGenerationChanged(generation)) {
+    throw sidecarRunCancelledError();
+  }
 }
 
 export function stampHeartbeat(id?: string, stage?: string): void {
@@ -554,7 +575,16 @@ export function next(): SidecarRequest | null {
 export function pauseQueue(reason: string = "paused by operator"): {
   alreadyPaused: boolean;
 } {
-  if (queuePaused) return { alreadyPaused: true };
+  // Stop is also a producer-level cancellation boundary. A long
+  // background market/availability scan that began before this stop
+  // must not resume enqueueing browser work after the operator clicks
+  // Start Queue again.
+  queueStopGeneration++;
+  if (queuePaused) {
+    queuePausedReason = reason.slice(0, 200);
+    if (!queuePausedAt) queuePausedAt = nowMs();
+    return { alreadyPaused: true };
+  }
   queuePaused = true;
   queuePausedAt = nowMs();
   queuePausedReason = reason.slice(0, 200);
@@ -880,6 +910,7 @@ export async function searchVrboViaSidecar(opts: {
   walletBudgetMs?: number;
   queueBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -901,6 +932,7 @@ export async function searchVrboViaSidecar(opts: {
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -916,6 +948,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   photos: string[];
   workerOnline: boolean;
@@ -938,6 +971,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 90_000,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
@@ -966,6 +1000,7 @@ export async function scrapeZillowPhotosViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   photos: string[];
   facts: SidecarZillowPhotoScrapeResult["facts"];
@@ -1011,6 +1046,7 @@ export async function searchBookingViaSidecar(opts: {
   walletBudgetMs?: number;
   queueBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -1032,6 +1068,7 @@ export async function searchBookingViaSidecar(opts: {
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -1051,6 +1088,7 @@ export async function searchAirbnbViaSidecar(opts: {
   walletBudgetMs?: number;
   queueBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -1072,6 +1110,7 @@ export async function searchAirbnbViaSidecar(opts: {
     walletBudgetMs: opts.walletBudgetMs,
     queueBudgetMs: opts.queueBudgetMs,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -1087,6 +1126,7 @@ export async function googleSerpViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   hits: SidecarSerpHit[];
   workerOnline: boolean;
@@ -1101,6 +1141,7 @@ export async function googleSerpViaSidecar(opts: {
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     hits: (r.results ?? []) as SidecarSerpHit[],
@@ -1121,6 +1162,7 @@ export async function searchPmSitesViaSidecar(opts: {
   walletBudgetMs?: number;
   queueBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -1154,6 +1196,7 @@ export async function searchPmSitesViaSidecar(opts: {
     walletBudgetMs: opts.walletBudgetMs ?? 120_000,
     queueBudgetMs: opts.queueBudgetMs,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
@@ -1171,6 +1214,7 @@ export async function checkPmUrlViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   result: SidecarPmUrlCheckResult | null;
   workerOnline: boolean;
@@ -1212,6 +1256,7 @@ export async function checkPmUrlsBatchViaSidecar(opts: {
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   results: SidecarPmUrlCheckBatchResult;
   workerOnline: boolean;
@@ -1240,6 +1285,7 @@ export async function checkPmUrlsBatchViaSidecar(opts: {
     // Default 60s — daemon does up to 5 in parallel ≈ 20-30s typical.
     walletBudgetMs: opts.walletBudgetMs ?? 60_000,
     signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
   });
   return {
     results: (r.results as SidecarPmUrlCheckBatchResult | undefined) ?? [],
@@ -1350,6 +1396,7 @@ async function awaitOpResult(opts: {
   walletBudgetMs?: number;
   queueBudgetMs?: number;
   signal?: AbortSignal;
+  stopGeneration?: number;
 }): Promise<{
   results: SidecarRequest["results"];
   workerOnline: boolean;
@@ -1374,6 +1421,7 @@ async function awaitOpResult(opts: {
       reason: abortReason(),
     };
   }
+  assertSidecarStopGenerationCurrent(opts.stopGeneration);
   const pausedState = isQueuePaused();
   if (pausedState.paused) {
     return {
@@ -1403,6 +1451,11 @@ async function awaitOpResult(opts: {
           durationMs: nowMs() - startedAt,
           reason: abortReason(),
         };
+      }
+      if (hasSidecarStopGenerationChanged(opts.stopGeneration)) {
+        const reason = "sidecar run cancelled by operator stop";
+        cancelRequest(id, reason);
+        throw sidecarRunCancelledError(reason);
       }
       const r = getResult(id);
       if (!r) {

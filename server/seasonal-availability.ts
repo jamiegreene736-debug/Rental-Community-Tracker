@@ -7,6 +7,7 @@ import {
   type RegionKey,
   type SeasonKey,
 } from "./multichannel-buy-in";
+import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
 
 export type AvailabilityChannelCounts = {
   airbnb: number;
@@ -442,6 +443,14 @@ async function runSeasonalAvailabilityCapacity(args: {
   const thresholds = computeAvailabilityThresholds(args.config.units, args.manualMinSets ?? 1);
   const bedroomCounts = Object.keys(thresholds.requiredByBR).map(Number).sort((a, b) => a - b);
   const weeks = Math.min(Math.max(args.weeks ?? 104, 1), 104);
+  const sidecarStopGeneration = getSidecarStopGeneration();
+  const assertSidecarRunCurrent = () => {
+    if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
+      const err = new Error("sidecar run cancelled by operator stop");
+      err.name = "SidecarRunCancelledError";
+      throw err;
+    }
+  };
   const windows = SEASONS.map((season) => ({
     season,
     window: pickAvailabilitySeasonWindow({ propertyId: args.propertyId, region, season }),
@@ -450,6 +459,7 @@ async function runSeasonalAvailabilityCapacity(args: {
   const sampleResults: SeasonalAvailabilityWindow[] = [];
   for (const { season, window } of windows) {
     throwIfAborted(args.signal);
+    assertSidecarRunCurrent();
     args.onPhase?.(`Scanning ${season} sample (${window.checkIn} to ${window.checkOut})`);
     const seasonStartedAt = Date.now();
     const heartbeat = setInterval(() => {
@@ -465,7 +475,9 @@ async function runSeasonalAvailabilityCapacity(args: {
         searchName: loc.searchName,
         bedroomCounts,
         dateOverride: { checkIn: window.checkIn, checkOut: window.checkOut },
+        sidecarStopGeneration,
       });
+      assertSidecarRunCurrent();
       const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds });
       sampleResults.push(result);
     } catch (error) {

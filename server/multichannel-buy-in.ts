@@ -22,6 +22,7 @@
 import { fetchAmortizedNightlyByBR } from "./community-research";
 import { STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { VRP_SITES } from "./pm-scraper-vrp";
+import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
 import type { SidecarPmSearchSite } from "./vrbo-sidecar-queue";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking" | "pm";
@@ -68,6 +69,16 @@ function describeWarning(kind: ScanWarning["kind"], channel: ScanWarning["channe
     case "network":    return `${ch} network error during the ${season} scan — check daemon Mac connectivity.`;
     case "unknown":    return `${ch} reported an issue during the ${season} scan.`;
   }
+}
+
+function sidecarRunCancelledError(): Error {
+  const err = new Error("sidecar run cancelled by operator stop");
+  err.name = "SidecarRunCancelledError";
+  return err;
+}
+
+function rethrowIfSidecarRunCancelled(error: unknown): void {
+  if ((error as any)?.name === "SidecarRunCancelledError") throw error;
 }
 
 // Tax/fee normalization to bring sidecar VRBO + Booking + PM rates onto
@@ -229,6 +240,7 @@ async function fetchPmMarketRatesForBedroom(args: {
   checkIn: string;
   checkOut: string;
   region: RegionKey;
+  sidecarStopGeneration?: number;
 }): Promise<{
   br: number;
   medianNightly: number | null;
@@ -237,6 +249,11 @@ async function fetchPmMarketRatesForBedroom(args: {
   reason?: string;
 }> {
   const br = args.bedrooms;
+  const assertSidecarRunCurrent = () => {
+    if (hasSidecarStopGenerationChanged(args.sidecarStopGeneration)) {
+      throw sidecarRunCancelledError();
+    }
+  };
   const target = args.searchName ?? args.community;
   const nights = nightsBetween(args.checkIn, args.checkOut);
   const samples: PmRateSample[] = [];
@@ -276,6 +293,7 @@ async function fetchPmMarketRatesForBedroom(args: {
 
   let discoveredSites: SidecarPmSearchSite[] = [];
   if (apiKey) {
+    assertSidecarRunCurrent();
     discoveredSites = await discoverPmSitesViaSearchApi({
       target,
       locality: `${args.city} ${args.state}`,
@@ -300,6 +318,7 @@ async function fetchPmMarketRatesForBedroom(args: {
 
   if (sites.length > 0) {
     try {
+      assertSidecarRunCurrent();
       const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
       const r = await searchPmSitesViaSidecar({
         sites,
@@ -310,6 +329,7 @@ async function fetchPmMarketRatesForBedroom(args: {
         perSiteLimit: 3,
         walletBudgetMs: 105_000,
         queueBudgetMs: 285_000,
+        stopGeneration: args.sidecarStopGeneration,
       });
       workerOnline = r.workerOnline;
       sidecarReason = r.reason;
@@ -332,6 +352,7 @@ async function fetchPmMarketRatesForBedroom(args: {
         });
       }
     } catch (e: any) {
+      rethrowIfSidecarRunCancelled(e);
       sidecarReason = e?.message ?? String(e);
     }
   }
@@ -425,6 +446,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // doesn't pin a `searchName` (drafts).
   searchName?: string;
   bedroomCounts: number[];
+  propertyId?: number;
   // PR #282: optional explicit dates. When supplied, all sidecar
   // website searches hit this window. When omitted, defaults to
   // the legacy 7-night, 30-day-out window.
@@ -436,8 +458,18 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // Manual market-rate refreshes run in the background now, so they can
   // tolerate a deeper local Chrome queue than request/response flows.
   sidecarQueueBudgetMs?: number;
+  // Producer-level stop boundary. Long background scans pass the value
+  // captured at scan start so a later operator Stop cancels the whole
+  // scan, even if Start Queue is clicked again.
+  sidecarStopGeneration?: number;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
+  const sidecarStopGeneration = args.sidecarStopGeneration ?? getSidecarStopGeneration();
+  const assertSidecarRunCurrent = () => {
+    if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
+      throw sidecarRunCancelledError();
+    }
+  };
 
   const ymd = (d: Date) => d.toISOString().slice(0, 10);
   let checkIn: string;
@@ -459,6 +491,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const targetDest = args.searchName ?? args.community;
   const nights = nightsBetween(checkIn, checkOut);
   const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
+  if (!args.skipSidecar) assertSidecarRunCurrent();
 
   // Fan out every website search concurrently. The sidecar daemon still
   // serializes Chrome work, but enqueuing together prevents a slow PM
@@ -508,6 +541,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp> => {
         try {
+          assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchAirbnbViaSidecar({
             destination: targetDest,
@@ -517,6 +551,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             bedrooms: br,
             walletBudgetMs: 120_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            stopGeneration: sidecarStopGeneration,
           });
           let cheapest = Infinity;
           let availableCount = 0;
@@ -544,6 +579,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             reason: r.reason,
           };
         } catch (e: any) {
+          rethrowIfSidecarRunCancelled(e);
           return { br, channel: "airbnb", cheapestNightly: null, availableCount: 0, rates: [], workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
@@ -551,6 +587,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp> => {
         try {
+          assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchVrboViaSidecar({
             destination: targetDest,
@@ -565,6 +602,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            stopGeneration: sidecarStopGeneration,
           });
           if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
           // Filter to listings that actually quote a per-night and
@@ -598,6 +636,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             reason: r.reason,
           };
         } catch (e: any) {
+          rethrowIfSidecarRunCancelled(e);
           return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
@@ -605,6 +644,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp> => {
         try {
+          assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchBookingViaSidecar({
             destination: targetDest,
@@ -619,6 +659,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
             queueBudgetMs: sidecarQueueBudgetMs,
+            stopGeneration: sidecarStopGeneration,
           });
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the
@@ -642,6 +683,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             reason: r.reason,
           };
         } catch (e: any) {
+          rethrowIfSidecarRunCancelled(e);
           return { br, channel: "booking", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
         }
       })(),
@@ -655,6 +697,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
       checkIn,
       checkOut,
       region: inferRegion(args.city, args.state),
+      sidecarStopGeneration,
     }));
   }
 
@@ -1058,9 +1101,16 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   propertyId: number; // for progress tracking
   sidecarQueueBudgetMs?: number;
   seasonDeadlineMs?: number;
+  sidecarStopGeneration?: number;
 }): Promise<MultiSeasonBuyInResult> {
   const startedAt = Date.now();
   const region: RegionKey = args.state.toLowerCase().match(/^(florida|fl)$/) ? "florida" : "hawaii";
+  const sidecarStopGeneration = args.sidecarStopGeneration ?? getSidecarStopGeneration();
+  const assertSidecarRunCurrent = () => {
+    if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
+      throw sidecarRunCancelledError();
+    }
+  };
 
   const setPhase = (phase: RefreshProgressState["phase"], percent: number, label: string) =>
     setRefreshProgress({ propertyId: args.propertyId, startedAt, phase, percent, label });
@@ -1157,14 +1207,17 @@ export async function fetchMultiChannelBuyInBySeason(args: {
       return;
     }
     setPhaseAtLeast(startPhase, startPercent, `${season} season multichannel scan (${window.checkIn} to ${window.checkOut})`);
+    assertSidecarRunCurrent();
     const result = await waitWithDeadline(
       fetchMultiChannelBuyInByBR({
         ...args,
         dateOverride: window,
         sidecarQueueBudgetMs: args.sidecarQueueBudgetMs,
+        sidecarStopGeneration,
       }),
       season,
     );
+    assertSidecarRunCurrent();
     perSeason[season] = result;
     ingestSeasonWarnings(season, result);
     setPhaseAtLeast(
@@ -1176,9 +1229,23 @@ export async function fetchMultiChannelBuyInBySeason(args: {
     );
   };
 
-  await scanSeason("LOW", "airbnb-low", "sidecar-low", 3, 35);
-  await scanSeason("HIGH", "airbnb-high", "sidecar-high", 38, 65);
-  await scanSeason("HOLIDAY", "airbnb-holiday", "sidecar-holiday", 68, 90);
+  try {
+    await scanSeason("LOW", "airbnb-low", "sidecar-low", 3, 35);
+    await scanSeason("HIGH", "airbnb-high", "sidecar-high", 38, 65);
+    await scanSeason("HOLIDAY", "airbnb-holiday", "sidecar-holiday", 68, 90);
+  } catch (error: any) {
+    if (error?.name === "SidecarRunCancelledError") {
+      setRefreshProgress({
+        propertyId: args.propertyId,
+        startedAt,
+        phase: "error",
+        percent: 100,
+        label: "Market-rate scan cancelled",
+        error: "Cancelled by Sidecar Stop",
+      });
+    }
+    throw error;
+  }
 
   setPhaseAtLeast("persisting", 95, "Persisting medians");
 

@@ -4717,6 +4717,8 @@ export async function registerRoutes(
     console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
 
     const scanStartedAt = Date.now();
+    const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
+    const sidecarStopGeneration = getSidecarStopGeneration();
     const routeRemainingMs = () => Math.max(0, FIND_BUY_IN_ROUTE_BUDGET_MS - (Date.now() - scanStartedAt));
     const sourceErrors: Array<{ source: string; message: string }> = [];
     const sourceTimeouts: Array<{ source: string; ms: number }> = [];
@@ -5139,6 +5141,7 @@ export async function registerRoutes(
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
           signal: airbnbSidecarAbort.signal,
+          stopGeneration: sidecarStopGeneration,
         });
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
@@ -5210,6 +5213,7 @@ export async function registerRoutes(
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
           signal: bookingSidecarAbort.signal,
+          stopGeneration: sidecarStopGeneration,
         });
         bookingRawCount = r.candidates.length;
         bookingSidecarCount = r.candidates.length;
@@ -5283,6 +5287,7 @@ export async function registerRoutes(
           walletBudgetMs: 120_000,
           queueBudgetMs: 285_000,
           signal: vrboSidecarAbort.signal,
+          stopGeneration: sidecarStopGeneration,
         });
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
@@ -5956,11 +5961,12 @@ export async function registerRoutes(
           checkIn,
 	          checkOut,
 	          bedrooms,
-	          perSiteLimit: 3,
-	          walletBudgetMs: 105_000,
-	          queueBudgetMs: 285_000,
-	          signal: pmWebsiteSidecarAbort.signal,
-	        });
+          perSiteLimit: 3,
+          walletBudgetMs: 105_000,
+          queueBudgetMs: 285_000,
+          signal: pmWebsiteSidecarAbort.signal,
+          stopGeneration: sidecarStopGeneration,
+        });
         pmWebsiteSidecarCount = r.candidates.length;
         pmWebsiteSidecarOnline = r.workerOnline;
         pmWebsiteSidecarMs = r.durationMs;
@@ -6465,6 +6471,7 @@ export async function registerRoutes(
             checkOut,
             bedrooms,
             walletBudgetMs: Math.min(60_000, remainingBeforeBatch),
+            stopGeneration: sidecarStopGeneration,
           });
           sidecarVerifyMs += batchRes.durationMs;
           if (batchRes.workerOnline && batchRes.results.length > 0) {
@@ -18713,6 +18720,7 @@ Return ONLY compact JSON with this exact shape:
       ? "monthly"
       : "seasonal";
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const { getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
@@ -18754,21 +18762,50 @@ Return ONLY compact JSON with this exact shape:
       return res.status(202).json({ ok: true, accepted: true, propertyId: propertyKey });
     }
     const startedAt = Date.now();
+    const sidecarStopGeneration = getSidecarStopGeneration();
+    const assertSidecarRunCurrent = () => {
+      if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
+        const err = new Error("sidecar run cancelled by operator stop");
+        err.name = "SidecarRunCancelledError";
+        throw err;
+      }
+    };
     setRefreshProgress({ propertyId: -id, startedAt, phase: "starting", percent: 0, label: "Initializing draft scan" });
-    const seasonScan = await fetchMultiChannelBuyInBySeason({
-      community: draft.name,        // PM discovery/location context
-      city: draft.city,
-      state: draft.state,
-      streetAddress: draft.streetAddress ?? undefined,
-      // No bboxCenterOverride for drafts yet. Drafts don't have
-      // operator-validated lat/lng, so the sidecar searches by the
-      // entered resort/community name.
-      searchName: draft.name,        // sidecar destination — same resort name
-      bedroomCounts,
-      propertyId: -id,               // negative id convention for drafts
-      sidecarQueueBudgetMs: 15 * 60_000,
-      seasonDeadlineMs: 25 * 60_000,
-    });
+    let seasonScan: Awaited<ReturnType<typeof fetchMultiChannelBuyInBySeason>>;
+    try {
+      assertSidecarRunCurrent();
+      seasonScan = await fetchMultiChannelBuyInBySeason({
+        community: draft.name,        // PM discovery/location context
+        city: draft.city,
+        state: draft.state,
+        streetAddress: draft.streetAddress ?? undefined,
+        // No bboxCenterOverride for drafts yet. Drafts don't have
+        // operator-validated lat/lng, so the sidecar searches by the
+        // entered resort/community name.
+        searchName: draft.name,        // sidecar destination — same resort name
+        bedroomCounts,
+        propertyId: -id,               // negative id convention for drafts
+        sidecarQueueBudgetMs: 15 * 60_000,
+        seasonDeadlineMs: 25 * 60_000,
+        sidecarStopGeneration,
+      });
+      assertSidecarRunCurrent();
+    } catch (e: any) {
+      const cancelled = e?.name === "SidecarRunCancelledError";
+      setRefreshProgress({
+        propertyId: -id,
+        startedAt,
+        phase: "error",
+        percent: 100,
+        label: cancelled ? "Draft market-rate scan cancelled" : "Draft market-rate scan failed",
+        error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
+      });
+      if (isBackgroundWorker) clearProgressSoon(-id);
+      return res.status(cancelled ? 409 : 500).json({
+        error: cancelled ? "Draft market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
+        cancelled,
+      });
+    }
     setRefreshProgress({ propertyId: -id, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
 
     const medianOfSorted = (sorted: number[]): number => {
@@ -18942,6 +18979,7 @@ Return ONLY compact JSON with this exact shape:
       ? "monthly"
       : "seasonal";
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const { getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
@@ -19004,6 +19042,14 @@ Return ONLY compact JSON with this exact shape:
     // null).
     const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
     const startedAt = Date.now();
+    const sidecarStopGeneration = getSidecarStopGeneration();
+    const assertSidecarRunCurrent = () => {
+      if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
+        const err = new Error("sidecar run cancelled by operator stop");
+        err.name = "SidecarRunCancelledError";
+        throw err;
+      }
+    };
     setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: refreshMode === "monthly" ? "Initializing monthly scan" : "Initializing scan" });
 
     if (refreshMode === "monthly") {
@@ -19167,6 +19213,7 @@ Return ONLY compact JSON with this exact shape:
       try {
         let completed = 0;
         for (const win of monthlyWindows) {
+          assertSidecarRunCurrent();
           const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
           setMonthlyProgress(startPct, `Scanning ${win.yearMonth} ${win.season} rates (${completed + 1}/${totalWindows})`);
           const scan = await fetchMultiChannelBuyInByBR({
@@ -19180,7 +19227,9 @@ Return ONLY compact JSON with this exact shape:
             propertyId,
             dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
             sidecarQueueBudgetMs: 15 * 60_000,
+            sidecarStopGeneration,
           });
+          assertSidecarRunCurrent();
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
             ensureBR(br);
@@ -19203,6 +19252,7 @@ Return ONLY compact JSON with this exact shape:
         }
 
         for (const win of holidayWindows) {
+          assertSidecarRunCurrent();
           const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
           setMonthlyProgress(startPct, `Scanning ${win.label} holiday rates (${completed + 1}/${totalWindows})`);
           const scan = await fetchMultiChannelBuyInByBR({
@@ -19216,7 +19266,9 @@ Return ONLY compact JSON with this exact shape:
             propertyId,
             dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
             sidecarQueueBudgetMs: 15 * 60_000,
+            sidecarStopGeneration,
           });
+          assertSidecarRunCurrent();
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {
             ensureBR(br);
@@ -19317,33 +19369,73 @@ Return ONLY compact JSON with this exact shape:
             durationMs: Date.now() - startedAt,
           },
         });
+      } catch (e: any) {
+        const cancelled = e?.name === "SidecarRunCancelledError";
+        setRefreshProgress({
+          propertyId,
+          startedAt,
+          phase: "error",
+          percent: 100,
+          label: cancelled ? "Monthly market-rate scan cancelled" : "Monthly market-rate scan failed",
+          error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
+        });
+        if (isBackgroundWorker) clearProgressSoon(propertyId);
+        console.warn(
+          `[refresh-market-rates] monthly property ${propertyId} ${cancelled ? "cancelled" : "failed"}:`,
+          e?.message ?? e,
+        );
+        return res.status(cancelled ? 409 : 500).json({
+          error: cancelled ? "Monthly market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
+          cancelled,
+        });
       } finally {
         clearInterval(heartbeat);
       }
     }
 
-    const seasonScan = await fetchMultiChannelBuyInBySeason({
-      community: loc.searchName,
-      city: loc.city,
-      state: loc.state,
-      streetAddress: loc.streetAddress,
-      bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-      // PR #297: align every sidecar destination with the same
-      // operator-facing resort name so all channels search the same resort.
-      // Previously this passed `config.community` (the PROPERTY_UNIT_
-      // NEEDS key, e.g. "Kapaa Beachfront") which is a generic
-      // neighborhood name. Vrbo's autocomplete returns Kapaa-area
-      // listings (Lae Nani, Pono Kai, etc.), missing Kaha Lani Resort
-      // entirely. Operator screenshot 2026-04-29 showed Vrbo finds
-      // ~12 Kaha Lani Resort listings (including 3BR) when searched
-      // by resort name. Now sidecar uses the validated resort name
-      // (loc.searchName = "Kaha Lani Resort").
-      searchName: loc.searchName,
-      bedroomCounts: wantBedrooms,
-      propertyId,
-      sidecarQueueBudgetMs: 15 * 60_000,
-      seasonDeadlineMs: 25 * 60_000,
-    });
+    let seasonScan: Awaited<ReturnType<typeof fetchMultiChannelBuyInBySeason>>;
+    try {
+      assertSidecarRunCurrent();
+      seasonScan = await fetchMultiChannelBuyInBySeason({
+        community: loc.searchName,
+        city: loc.city,
+        state: loc.state,
+        streetAddress: loc.streetAddress,
+        bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+        // PR #297: align every sidecar destination with the same
+        // operator-facing resort name so all channels search the same resort.
+        // Previously this passed `config.community` (the PROPERTY_UNIT_
+        // NEEDS key, e.g. "Kapaa Beachfront") which is a generic
+        // neighborhood name. Vrbo's autocomplete returns Kapaa-area
+        // listings (Lae Nani, Pono Kai, etc.), missing Kaha Lani Resort
+        // entirely. Operator screenshot 2026-04-29 showed Vrbo finds
+        // ~12 Kaha Lani Resort listings (including 3BR) when searched
+        // by resort name. Now sidecar uses the validated resort name
+        // (loc.searchName = "Kaha Lani Resort").
+        searchName: loc.searchName,
+        bedroomCounts: wantBedrooms,
+        propertyId,
+        sidecarQueueBudgetMs: 15 * 60_000,
+        seasonDeadlineMs: 25 * 60_000,
+        sidecarStopGeneration,
+      });
+      assertSidecarRunCurrent();
+    } catch (e: any) {
+      const cancelled = e?.name === "SidecarRunCancelledError";
+      setRefreshProgress({
+        propertyId,
+        startedAt,
+        phase: "error",
+        percent: 100,
+        label: cancelled ? "Market-rate scan cancelled" : "Market-rate scan failed",
+        error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
+      });
+      if (isBackgroundWorker) clearProgressSoon(propertyId);
+      return res.status(cancelled ? 409 : 500).json({
+        error: cancelled ? "Market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
+        cancelled,
+      });
+    }
 
     setRefreshProgress({ propertyId, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
 
