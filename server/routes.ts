@@ -18784,12 +18784,8 @@ Return ONLY compact JSON with this exact shape:
       const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
-      // Use the same intent as the Operations direct-booking optimizer:
-      // basis should reflect a buy-in we can actually use without relying
-      // on ordinary Airbnb-only inventory. Prefer PM/direct, VRBO, and
-      // Booking.com; fall back to Airbnb only when those channels returned
-      // nothing usable for this BR/season.
       if (sidecarRan) {
+        if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
         if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
@@ -18831,13 +18827,19 @@ Return ONLY compact JSON with this exact shape:
       const lowRangeMin = lowResult.channelRates.length > 0 ? lowResult.channelRates[0] : sortedSamples[0];
       const lowRangeMax = lowResult.channelRates.length > 0 ? lowResult.channelRates[lowResult.channelRates.length - 1] : sortedSamples[sortedSamples.length - 1];
 
-      const hasNonAirbnbChannel =
+      const hasOnlyAirbnbChannel =
+        !!lowResult.channels.airbnb &&
+        !lowResult.channels.vrbo &&
+        !lowResult.channels.booking &&
+        !lowResult.channels.pm;
+      const hasAnyChannel =
+        !!lowResult.channels.airbnb ||
         !!lowResult.channels.vrbo ||
         !!lowResult.channels.booking ||
         !!lowResult.channels.pm;
-      const basisSource = hasNonAirbnbChannel
-        ? "optimized-buy-in"
-        : "airbnb";
+      const basisSource = hasOnlyAirbnbChannel || !hasAnyChannel
+        ? "airbnb"
+        : "live-multichannel-median";
       await storage.upsertPropertyMarketRate({
         propertyId: -id,
         bedrooms: br,
@@ -19025,10 +19027,9 @@ Return ONLY compact JSON with this exact shape:
     };
     // Helper: compute the per-season basis for a BR from a season's
     // scan result. Every season can include Airbnb, VRBO, Booking, and
-    // PM channel signals. For the Pricing tab, mirror the Operations
-    // direct-booking optimizer: prefer channels we can actually use for
-    // buy-in without ordinary Airbnb-only inventory (PM/direct, VRBO,
-    // Booking.com), then fall back to Airbnb only when nothing else lands.
+    // PM/direct website channel signals. The pricing basis is the median
+    // across whichever of those channels returned a usable all-in nightly
+    // rate for this one 7-night season sample.
     const basisForSeason = (
       scan: typeof seasonScan.perSeason["LOW"],
       br: number,
@@ -19039,6 +19040,7 @@ Return ONLY compact JSON with this exact shape:
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (sidecarRan) {
+        if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
         if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
@@ -19056,7 +19058,7 @@ Return ONLY compact JSON with this exact shape:
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "optimized-buy-in" | "airbnb" | "none";
+      basisSource: "live-multichannel-median" | "airbnb" | "none";
       channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
       channelCount: number;
     };
@@ -19077,16 +19079,22 @@ Return ONLY compact JSON with this exact shape:
       const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
       const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
 
-      const hasNonAirbnbChannel =
+      const hasOnlyAirbnbChannel =
+        !!lowResult.channels.airbnb &&
+        !lowResult.channels.vrbo &&
+        !lowResult.channels.booking &&
+        !lowResult.channels.pm;
+      const hasAnyChannel =
+        !!lowResult.channels.airbnb ||
         !!lowResult.channels.vrbo ||
         !!lowResult.channels.booking ||
         !!lowResult.channels.pm;
       const basisSource: Persisted["basisSource"] =
         lowResult.basis == null
           ? "none"
-          : hasNonAirbnbChannel
-            ? "optimized-buy-in"
-            : "airbnb";
+          : hasOnlyAirbnbChannel || !hasAnyChannel
+            ? "airbnb"
+            : "live-multichannel-median";
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
         // Scan returned no usable LOW basis for this BR. Delete any
