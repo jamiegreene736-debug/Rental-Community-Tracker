@@ -18931,7 +18931,7 @@ Return ONLY compact JSON with this exact shape:
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
-    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
