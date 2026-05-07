@@ -1904,36 +1904,38 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setRefreshStartedAt(Date.now());
     setRefreshProgress({ phase: "starting", percent: 0, label: "Starting…" });
 
-    // Poll progress endpoint while refresh is in flight.
+    // Poll progress endpoint while refresh is in flight. Static
+    // properties are positive ids; drafts/promoted drafts are negative
+    // ids, and the server stores progress under that same negative key.
+    // Poll both so draft refreshes don't sit on the local 0% placeholder.
     let progressTimer: number | null = null;
-    if (propertyId > 0) {
-      const tickProgress = async () => {
-        try {
-          const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
-          if (r.ok) {
-            const p = await r.json() as {
-              phase: string;
-              percent: number;
-              label: string;
-              lastTickAt?: number;
-              daemonOnline?: boolean;
-              daemonLastPollAgeMs?: number | null;
-              warnings?: ScanWarning[];
-            };
-            setRefreshProgress({
-              phase: p.phase,
-              percent: p.percent,
-              label: p.label,
-              lastTickAt: p.lastTickAt,
-              daemonOnline: p.daemonOnline,
-              daemonLastPollAgeMs: p.daemonLastPollAgeMs,
-              warnings: p.warnings,
-            });
-          }
-        } catch {}
-      };
-      progressTimer = window.setInterval(tickProgress, 1500);
-    }
+    const tickProgress = async () => {
+      try {
+        const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
+        if (r.ok) {
+          const p = await r.json() as {
+            phase: string;
+            percent: number;
+            label: string;
+            lastTickAt?: number;
+            daemonOnline?: boolean;
+            daemonLastPollAgeMs?: number | null;
+            warnings?: ScanWarning[];
+          };
+          setRefreshProgress({
+            phase: p.phase,
+            percent: p.percent,
+            label: p.label,
+            lastTickAt: p.lastTickAt,
+            daemonOnline: p.daemonOnline,
+            daemonLastPollAgeMs: p.daemonLastPollAgeMs,
+            warnings: p.warnings,
+          });
+        }
+      } catch {}
+    };
+    void tickProgress();
+    progressTimer = window.setInterval(tickProgress, 1500);
 
     try {
       // Negative ids (drafts) and positive ids (static) both work —
