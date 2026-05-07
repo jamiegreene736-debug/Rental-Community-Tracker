@@ -43,6 +43,8 @@ const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
 const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
+const VRBO_MANUAL_VERIFY_TIMEOUT_MS = Number(process.env.SIDECAR_VRBO_MANUAL_VERIFY_TIMEOUT_MS ?? 8 * 60_000);
+const VRBO_MANUAL_VERIFY_POLL_MS = Number(process.env.SIDECAR_VRBO_MANUAL_VERIFY_POLL_MS ?? 3_000);
 const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETRY_MS ?? 1_500);
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGET_MS ?? 150_000);
@@ -768,6 +770,96 @@ async function dumpPageState(label, requestForLog) {
   } catch {
     return null;
   }
+}
+
+const VRBO_HUMAN_CHALLENGE_RE =
+  /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
+
+function stateLooksLikeVrboHumanChallenge(state) {
+  if (!state) return false;
+  return VRBO_HUMAN_CHALLENGE_RE.test(
+    `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
+  );
+}
+
+async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
+  if (!targetPage || targetPage.isClosed?.()) return false;
+  const state = await targetPage
+    .evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      bodyExcerpt: (document.body?.innerText ?? "").slice(0, 3000),
+      bodyHtmlSnippet: (document.body?.innerHTML ?? "").slice(0, 5000),
+    }))
+    .catch(() => null);
+  return stateLooksLikeVrboHumanChallenge(state);
+}
+
+async function showVrboManualVerificationBanner(targetPage, label) {
+  if (!targetPage || targetPage.isClosed?.()) return;
+  await targetPage
+    .evaluate((safeLabel) => {
+      const id = "vrbo-sidecar-manual-verification-banner";
+      let banner = document.getElementById(id);
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = id;
+        banner.style.cssText = [
+          "position:fixed",
+          "top:0",
+          "left:0",
+          "right:0",
+          "z-index:2147483647",
+          "background:#fff7ed",
+          "color:#7c2d12",
+          "border-bottom:1px solid #fed7aa",
+          "box-shadow:0 8px 30px rgba(15,23,42,.18)",
+          "font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+          "padding:14px 18px",
+          "text-align:left",
+        ].join(";");
+        document.documentElement.appendChild(banner);
+      }
+      banner.textContent =
+        `VRBO manual verification needed for ${safeLabel}. ` +
+        "Complete the check in this Chrome window. The sidecar will resume automatically after the page clears.";
+    }, label)
+    .catch(() => {});
+}
+
+async function waitForVrboManualVerification(targetPage, label, id, initialState = null) {
+  const hasChallenge = initialState
+    ? stateLooksLikeVrboHumanChallenge(initialState)
+    : await pageLooksLikeVrboHumanChallenge(targetPage);
+  if (!hasChallenge) return false;
+
+  log(`${label} ${id}: VRBO manual verification required; waiting for operator to clear it`);
+  await targetPage.bringToFront().catch(() => {});
+  await normalizePageDisplay(targetPage).catch(() => {});
+  await showVrboManualVerificationBanner(targetPage, label);
+
+  const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await targetPage.waitForTimeout(VRBO_MANUAL_VERIFY_POLL_MS).catch(() => {});
+    try {
+      await sendHeartbeat(`manual VRBO verification: ${label}`, true, id);
+    } catch (e) {
+      if (e instanceof SidecarCancelledError) throw e;
+    }
+
+    const stillBlocked = await pageLooksLikeVrboHumanChallenge(targetPage);
+    if (!stillBlocked) {
+      log(`${label} ${id}: VRBO manual verification cleared; resuming`);
+      await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+      await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+      return true;
+    }
+    await showVrboManualVerificationBanner(targetPage, label);
+  }
+
+  throw new Error(
+    "Vrbo manual verification still required. Complete the human check in the sidecar Chrome window, then rerun the request.",
+  );
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
@@ -1612,12 +1704,18 @@ async function processVrboSearch(id, params) {
     `&adults=2&sort=PRICE_LOW_TO_HIGH&currency=USD`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await waitForVrboManualVerification(page, "vrbo_search", id);
   await dismissObstructions(page, "vrbo_search");
   await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   await applyVrboBedroomFilter(bedrooms).catch(() => false);
-  const state = await dumpPageState("vrbo", { id, ...params });
-  if (state && /show us your human side|we can.?t tell if you.?re a human/i.test(state.bodyExcerpt)) {
-    throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
+  let state = await dumpPageState("vrbo", { id, ...params });
+  if (await waitForVrboManualVerification(page, "vrbo_search", id, state)) {
+    await dismissObstructions(page, "vrbo_search_after_manual_verify").catch(() => null);
+    await applyVrboBedroomFilter(bedrooms).catch(() => false);
+    state = await dumpPageState("vrbo", { id, ...params });
+  }
+  if (stateLooksLikeVrboHumanChallenge(state)) {
+    throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
   }
   // Still extract all visible cards and bucket by BR client-side:
   // VRBO's browser-side filter is useful for relevance and operator
@@ -1766,10 +1864,15 @@ async function processVrboPhotoScrape(id, params) {
   await ensureBrowser();
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await waitForVrboManualVerification(page, "vrbo_photo_scrape", id);
   await dismissObstructions(page, "vrbo_photo_scrape");
-  const state = await dumpPageState("vrbo-photo", { id, ...params });
-  if (state && /show us your human side|we can.?t tell if you.?re a human|bot or not/i.test(state.bodyExcerpt)) {
-    throw new Error("Vrbo bot wall — refresh cookies.json (vrbo.com) and kickstart");
+  let state = await dumpPageState("vrbo-photo", { id, ...params });
+  if (await waitForVrboManualVerification(page, "vrbo_photo_scrape", id, state)) {
+    await dismissObstructions(page, "vrbo_photo_scrape_after_manual_verify").catch(() => null);
+    state = await dumpPageState("vrbo-photo", { id, ...params });
+  }
+  if (stateLooksLikeVrboHumanChallenge(state)) {
+    throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
   }
 
   await page
