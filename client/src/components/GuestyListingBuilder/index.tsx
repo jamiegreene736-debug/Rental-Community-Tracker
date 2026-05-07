@@ -1961,7 +1961,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       return p;
     };
     const waitForBackgroundRefresh = async () => {
-      const deadline = Date.now() + 30 * 60 * 1000;
+      const deadline = Date.now() + 90 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
         const p = await readProgress().catch(() => null);
@@ -1969,7 +1969,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (p.phase === "done") return;
         if (p.phase === "error") throw new Error(p.error || p.label || "Refresh failed");
       }
-      throw new Error("Refresh is still running after 30 minutes. You can refresh the page later to load any completed rates.");
+      throw new Error("Refresh is still running after 90 minutes. You can refresh the page later to load any completed rates.");
     };
 
     try {

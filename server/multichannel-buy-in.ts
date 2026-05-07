@@ -433,6 +433,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // availability scans do not skip sidecar: LOW/HIGH/HOLIDAY all use
   // Airbnb + VRBO + Booking + PM website searches.
   skipSidecar?: boolean;
+  // Manual market-rate refreshes run in the background now, so they can
+  // tolerate a deeper local Chrome queue than request/response flows.
+  sidecarQueueBudgetMs?: number;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
 
@@ -455,6 +458,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
 
   const targetDest = args.searchName ?? args.community;
   const nights = nightsBetween(checkIn, checkOut);
+  const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
 
   // Fan out every website search concurrently. The sidecar daemon still
   // serializes Chrome work, but enqueuing together prevents a slow PM
@@ -512,7 +516,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             checkOut,
             bedrooms: br,
             walletBudgetMs: 120_000,
-            queueBudgetMs: 285_000,
+            queueBudgetMs: sidecarQueueBudgetMs,
           });
           let cheapest = Infinity;
           let availableCount = 0;
@@ -560,7 +564,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // property = 90s VRBO + 90s Booking serialized = 180s,
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
-            queueBudgetMs: 285_000,
+            queueBudgetMs: sidecarQueueBudgetMs,
           });
           if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
           // Filter to listings that actually quote a per-night and
@@ -614,7 +618,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             // property = 90s VRBO + 90s Booking serialized = 180s,
             // still well under Railway's 5-min edge timeout.
             walletBudgetMs: 90_000,
-            queueBudgetMs: 285_000,
+            queueBudgetMs: sidecarQueueBudgetMs,
           });
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the
@@ -1051,6 +1055,8 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   searchName?: string;
   bedroomCounts: number[];
   propertyId: number; // for progress tracking
+  sidecarQueueBudgetMs?: number;
+  seasonDeadlineMs?: number;
 }): Promise<MultiSeasonBuyInResult> {
   const startedAt = Date.now();
   const region: RegionKey = args.state.toLowerCase().match(/^(florida|fl)$/) ? "florida" : "hawaii";
@@ -1065,37 +1071,21 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   setPhase("starting", 0, "Starting multi-season scan");
 
   // All three seasons get the full multichannel website scan (Airbnb
-  // + VRBO + Booking + PM through sidecar). Pre-PR #305 only LOW used the sidecar;
-  // operator wanted HIGH and HOLIDAY medians grounded in real
-  // VRBO/Booking observations too. Daemon serializes the sidecar
-  // calls (single Chrome instance), so total wall ≈ N_BRs × 4 channels
-  // × 3 seasons × 90s = 5–18 min for typical 1–2 BR portfolios.
+  // + VRBO + Booking + PM through sidecar). Run the seasons in a
+  // deterministic sequence instead of queueing all three at once:
+  // the local sidecar has a single Chrome worker, so concurrent
+  // season launches can push HOLIDAY behind LOW/HIGH and make the
+  // outer deadline return before holiday gets a fair run.
   const lowWindow = pickSeasonWindow(region, "LOW");
   const highWindow = pickSeasonWindow(region, "HIGH");
   const holidayWindow = pickSeasonWindow(region, "HOLIDAY");
+  const seasonWindows: Record<SeasonKey, { checkIn: string; checkOut: string } | null> = {
+    LOW: lowWindow,
+    HIGH: highWindow,
+    HOLIDAY: holidayWindow,
+  };
 
   setPhase("airbnb-low", 3, `Queueing Airbnb/VRBO/Booking/PM sidecar scans (LOW: ${lowWindow?.checkIn ?? "—"})`);
-
-  const lowPromise = lowWindow
-    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: lowWindow })
-    : Promise.resolve(null);
-  const highPromise = highWindow
-    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: highWindow })
-    : Promise.resolve(null);
-  const holidayPromise = holidayWindow
-    ? fetchMultiChannelBuyInByBR({ ...args, dateOverride: holidayWindow })
-    : Promise.resolve(null);
-
-  // Progress phases as each season's full result resolves. The
-  // `airbnb-*` phase name is retained for client compatibility; all
-  // channels are queued together and the `sidecar-*` markers represent
-  // each season fully done.
-  //
-  // Order isn't deterministic — daemon dequeues in FIFO order so
-  // whichever season was enqueued first finishes first. The percent
-  // we set is a floor, not a step counter (later phases can only
-  // raise the percent, never lower it) so a Promise resolving in a
-  // surprise order doesn't make the bar jump backward.
   let highestPercent = 0;
   const accumulatedWarnings: ScanWarning[] = [];
   const setPhaseAtLeast = (phase: RefreshProgressState["phase"], percent: number, label: string) => {
@@ -1115,10 +1105,6 @@ export async function fetchMultiChannelBuyInBySeason(args: {
       warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
     });
   };
-  // Helper: when a season's per-BR result lands, re-label its
-  // placeholder warnings with the real season key and merge into
-  // the accumulator. setPhaseAtLeast then surfaces them on the next
-  // progress write.
   const ingestSeasonWarnings = (
     season: SeasonKey,
     result: MultiChannelBuyInResult | null,
@@ -1132,48 +1118,71 @@ export async function fetchMultiChannelBuyInBySeason(args: {
       });
     }
   };
-  void lowPromise.then((r) => {
-    ingestSeasonWarnings("LOW", r);
-    setPhaseAtLeast("sidecar-low", 35, "LOW season multichannel scan done");
-  });
-  void highPromise.then((r) => {
-    ingestSeasonWarnings("HIGH", r);
-    setPhaseAtLeast("sidecar-high", 65, "HIGH season multichannel scan done");
-  });
-  void holidayPromise.then((r) => {
-    ingestSeasonWarnings("HOLIDAY", r);
-    setPhaseAtLeast("sidecar-holiday", 90, "HOLIDAY season multichannel scan done");
-  });
 
-  // Outer deadline: 15 min hard cap. Sidecar daemon could in theory
-  // wedge on a single op (Chrome crashes, network blip, etc.); the
-  // per-op walletBudgetMs covers individual ops but the sum across
-  // 6–18 ops can pile up. If we exceed 15 min, abort the wait —
-  // partial perSeason results (whichever Promises resolved) get
-  // returned so the caller can salvage what completed.
-  const DEADLINE_MS = 15 * 60_000;
-  const waitWithDeadline = <T>(p: Promise<T>): Promise<T | null> =>
-    Promise.race([
-      p,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), DEADLINE_MS)),
-    ]);
+  const deadlineMs = args.seasonDeadlineMs ?? 25 * 60_000;
+  const waitWithDeadline = async <T>(p: Promise<T>, season: SeasonKey): Promise<T | null> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => {
+            accumulatedWarnings.push({
+              season,
+              channel: "engine",
+              kind: "timeout",
+              message: `${season} scan exceeded ${Math.round(deadlineMs / 60_000)} minutes; using the seasonal fallback if no rate landed.`,
+            });
+            resolve(null);
+          }, deadlineMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  };
 
-  const [low, high, holiday] = await Promise.all([
-    waitWithDeadline(lowPromise),
-    waitWithDeadline(highPromise),
-    waitWithDeadline(holidayPromise),
-  ]);
-  const hitDeadline = (low === null && lowWindow !== null) ||
-    (high === null && highWindow !== null) ||
-    (holiday === null && holidayWindow !== null);
-  if (hitDeadline) {
-    console.warn(`[multichannel-buy-in] hit 15-min deadline, returning partial seasons`);
-  }
+  const perSeason: Record<SeasonKey, MultiChannelBuyInResult | null> = { LOW: null, HIGH: null, HOLIDAY: null };
+  const scanSeason = async (
+    season: SeasonKey,
+    startPhase: RefreshProgressState["phase"],
+    donePhase: RefreshProgressState["phase"],
+    startPercent: number,
+    donePercent: number,
+  ) => {
+    const window = seasonWindows[season];
+    if (!window) {
+      setPhaseAtLeast(donePhase, donePercent, `${season} season has no matching sample window`);
+      return;
+    }
+    setPhaseAtLeast(startPhase, startPercent, `${season} season multichannel scan (${window.checkIn} to ${window.checkOut})`);
+    const result = await waitWithDeadline(
+      fetchMultiChannelBuyInByBR({
+        ...args,
+        dateOverride: window,
+        sidecarQueueBudgetMs: args.sidecarQueueBudgetMs,
+      }),
+      season,
+    );
+    perSeason[season] = result;
+    ingestSeasonWarnings(season, result);
+    setPhaseAtLeast(
+      donePhase,
+      donePercent,
+      result
+        ? `${season} season multichannel scan done`
+        : `${season} season timed out; fallback will be used if needed`,
+    );
+  };
+
+  await scanSeason("LOW", "airbnb-low", "sidecar-low", 3, 35);
+  await scanSeason("HIGH", "airbnb-high", "sidecar-high", 38, 65);
+  await scanSeason("HOLIDAY", "airbnb-holiday", "sidecar-holiday", 68, 90);
 
   setPhaseAtLeast("persisting", 95, "Persisting medians");
 
   return {
-    perSeason: { LOW: low, HIGH: high, HOLIDAY: holiday },
+    perSeason,
     region,
     durationMs: Date.now() - startedAt,
   };

@@ -18763,6 +18763,8 @@ Return ONLY compact JSON with this exact shape:
       searchName: draft.name,        // sidecar destination — same resort name
       bedroomCounts,
       propertyId: -id,               // negative id convention for drafts
+      sidecarQueueBudgetMs: 15 * 60_000,
+      seasonDeadlineMs: 25 * 60_000,
     });
     setRefreshProgress({ propertyId: -id, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
 
@@ -19007,6 +19009,8 @@ Return ONLY compact JSON with this exact shape:
       searchName: loc.searchName,
       bedroomCounts: wantBedrooms,
       propertyId,
+      sidecarQueueBudgetMs: 15 * 60_000,
+      seasonDeadlineMs: 25 * 60_000,
     });
 
     setRefreshProgress({ propertyId, startedAt, phase: "persisting", percent: 95, label: "Persisting per-season medians" });
