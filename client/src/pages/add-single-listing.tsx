@@ -245,6 +245,8 @@ export default function AddSingleListing() {
         attempts: FindAttempt[];
         attemptCount: number;
         totalCandidates: number;
+        candidateCap?: number;
+        stoppedBecause?: "wall-budget" | "candidate-cap" | null;
       }
     | {
         found: false;
@@ -252,6 +254,8 @@ export default function AddSingleListing() {
         attempts: FindAttempt[];
         attemptCount: number;
         totalCandidates: number;
+        candidateCap?: number;
+        stoppedBecause?: "wall-budget" | "candidate-cap" | null;
       };
   const [findLoading, setFindLoading] = useState(false);
   const [findResult, setFindResult] = useState<FindResult | null>(null);
@@ -276,7 +280,7 @@ export default function AddSingleListing() {
   //   candidate-scrape / candidate-rejected / candidate-qualifier /
   //   candidate-qualifier-done / result.
   // Drives the Step 1 progress bar so the operator can see the
-  // wizard walk Zillow candidates in real time instead of staring
+  // wizard walk real-estate candidates in real time instead of staring
   // at a generic spinner for 30-180 seconds.
   type CandidateProgress = {
     url: string;
@@ -293,6 +297,7 @@ export default function AddSingleListing() {
     // index is built (or skipped, when feature flag is off).
     phase: "discovering" | "ota-indexing" | "candidates" | "done";
     totalCandidates: number;
+    discoveredCandidates: number;
     candidatesProcessed: number;
     current: CandidateProgress | null;
     rejected: number;
@@ -309,6 +314,7 @@ export default function AddSingleListing() {
   }>({
     phase: "discovering",
     totalCandidates: 0,
+    discoveredCandidates: 0,
     candidatesProcessed: 0,
     current: null,
     rejected: 0,
@@ -513,6 +519,7 @@ export default function AddSingleListing() {
     setFindProgress({
       phase: "discovering",
       totalCandidates: 0,
+      discoveredCandidates: 0,
       candidatesProcessed: 0,
       current: null,
       rejected: 0,
@@ -600,10 +607,17 @@ export default function AddSingleListing() {
           } else if (evt.type === "discovery-done") {
             setFindProgress((prev) => ({
               ...prev,
-              totalCandidates: evt.totalCandidates ?? 0,
+              discoveredCandidates: evt.totalCandidates ?? 0,
+              totalCandidates: evt.candidateCap ?? prev.totalCandidates,
               // Phase stays "discovering" until either ota-index-start
               // fires (verify-first on) or we go straight to
               // "candidates" via the first candidate-start event.
+            }));
+          } else if (evt.type === "candidate-plan") {
+            setFindProgress((prev) => ({
+              ...prev,
+              discoveredCandidates: evt.totalCandidates ?? prev.discoveredCandidates,
+              totalCandidates: evt.candidateCap ?? evt.totalCandidates ?? prev.totalCandidates,
             }));
           } else if (evt.type === "ota-index-start") {
             setFindProgress((prev) => ({ ...prev, phase: "ota-indexing" }));
@@ -660,6 +674,7 @@ export default function AddSingleListing() {
             setFindProgress((prev) => ({
               ...prev,
               phase: "candidates",
+              totalCandidates: evt.total ?? prev.totalCandidates,
               current: cp,
             }));
           } else if (evt.type === "candidate-scrape") {
@@ -1678,14 +1693,19 @@ export default function AddSingleListing() {
               <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  {findProgress.phase === "discovering" && "Discovering Zillow candidates…"}
+                  {findProgress.phase === "discovering" && "Discovering real-estate candidates…"}
                   {findProgress.phase === "ota-indexing" && "Indexing OTA listings (Airbnb / VRBO / Booking)…"}
                   {findProgress.phase === "candidates" && (
                     <>
-                      Walking candidate{" "}
+                      Checking candidate{" "}
                       <span className="font-mono">
                         {findProgress.current?.index ?? 0}/{findProgress.totalCandidates}
                       </span>
+                      {findProgress.discoveredCandidates > findProgress.totalCandidates && (
+                        <span className="text-muted-foreground">
+                          {" "}of {findProgress.discoveredCandidates} discovered
+                        </span>
+                      )}
                     </>
                   )}
                   {findProgress.phase === "done" && "Wrapping up…"}
@@ -1760,6 +1780,7 @@ export default function AddSingleListing() {
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="text-[11px] text-muted-foreground">
                     {findProgress.candidatesProcessed} processed
+                    {findProgress.discoveredCandidates > findProgress.totalCandidates && ` · ${findProgress.discoveredCandidates} discovered`}
                     {findProgress.rejected > 0 && ` · ${findProgress.rejected} rejected`}
                     {findProgress.prefilteredCount > 0 && ` (${findProgress.prefilteredCount} pre-filtered, no scrape needed)`}
                   </div>
@@ -1819,10 +1840,16 @@ export default function AddSingleListing() {
                   No clean unit found
                 </div>
                 <p className="text-sm text-red-900">{findResult.reason}</p>
+                {findResult.totalCandidates > findResult.attemptCount && (
+                  <div className="text-xs text-red-900/80 border border-red-200 bg-white/60 rounded-md px-3 py-2">
+                    The search found {findResult.totalCandidates} possible real-estate listings, but this pass checked {findResult.attemptCount}.
+                    Use <span className="font-medium">Continue unchecked candidates</span> to skip the listings already reviewed and keep walking the remaining pool.
+                  </div>
+                )}
                 {findResult.attempts.length > 0 && (
                   <details className="text-xs">
                     <summary className="cursor-pointer text-red-800 hover:text-red-900">
-                      Show all {findResult.attempts.length} candidate{findResult.attempts.length === 1 ? "" : "s"} we checked
+                      Show all {findResult.attempts.length} candidate{findResult.attempts.length === 1 ? "" : "s"} checked in this pass
                     </summary>
                     <ul className="mt-2 space-y-1 pl-3">
                       {findResult.attempts.map((a, i) => (
@@ -1838,6 +1865,20 @@ export default function AddSingleListing() {
                   </details>
                 )}
                 <div className="flex flex-wrap gap-2 pt-1">
+                  {findResult.totalCandidates > findResult.attemptCount && findResult.attempts.length > 0 && (
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        const attemptedUrls = findResult.attempts.map((a) => a.url).filter(Boolean);
+                        const nextSkip = Array.from(new Set([...skipUrls, ...attemptedUrls]));
+                        setSkipUrls(nextSkip);
+                        setFindResult(null);
+                        findCleanUnit(nextSkip);
+                      }}
+                    >
+                      Continue unchecked candidates
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" onClick={() => { setFindResult(null); findCleanUnit([]); }}>
                     Try again
                   </Button>
@@ -1907,7 +1948,7 @@ export default function AddSingleListing() {
                     </div>
                   )}
                   <div className="text-xs text-muted-foreground">
-                    Walked {findResult.attemptCount} of {findResult.totalCandidates} Zillow candidate{findResult.totalCandidates === 1 ? "" : "s"} through the OTA cross-listing check before picking this one.
+                    Walked {findResult.attemptCount} of {findResult.totalCandidates} real-estate candidate{findResult.totalCandidates === 1 ? "" : "s"} through the OTA cross-listing check before picking this one.
                   </div>
                 </div>
 

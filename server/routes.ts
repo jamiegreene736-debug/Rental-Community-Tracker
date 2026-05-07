@@ -18080,6 +18080,13 @@ Return ONLY compact JSON with this exact shape:
     const candidatePriority = (url: string): number => {
       const platform = candidateMeta.get(url.toLowerCase())?.platform
         ?? (/zillow\.com/i.test(url) ? "zillow" : /redfin\.com/i.test(url) ? "redfin" : /realtor\.com/i.test(url) ? "realtor" : "brokerage");
+      if (!isCityWide) {
+        if (platform === "realtor") return 0;
+        if (platform === "redfin") return 1;
+        if (platform === "zillow") return 2;
+        if (platform === "brokerage") return 3;
+        return 4;
+      }
       if (platform === "zillow") return 0;
       if (platform === "brokerage") return 1;
       if (platform === "redfin") return 2;
@@ -18112,8 +18119,8 @@ Return ONLY compact JSON with this exact shape:
       finishWithResult({
         found: false,
         reason: isCityWide
-          ? `No condo listings found in ${city}, ${state} ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`}.`
-          : `No Zillow listings found for "${communityName}" ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`} in ${city}, ${state}.`,
+          ? `No condo/townhouse real-estate listings found in ${city}, ${state} ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`}.`
+          : `No real-estate listings found for "${communityName}" ${isAnyBedroom ? "(any size)" : `(${numericBedrooms}BR)`} in ${city}, ${state}.`,
         attempts: [],
       });
       return;
@@ -18234,8 +18241,14 @@ Return ONLY compact JSON with this exact shape:
     // budget (12 min) still gates total runtime — at ~15-25s
     // each, the loop bails around candidate 30-50 on slow scrape
     // days but walks the full 80 on fast days.
-    const RAW_CAP = isCityWide ? 80 : 30;
+    const RAW_CAP = isCityWide ? 80 : 60;
     const candidateCap = Math.min(candidateUrls.length, RAW_CAP);
+    emit({
+      type: "candidate-plan",
+      totalCandidates: candidateUrls.length,
+      candidateCap,
+      capped: candidateCap < candidateUrls.length,
+    });
 
     // CODEX NOTE (2026-05-04, claude/verify-then-discover): helper
     // that mirrors the same slug-parsing the loop does below. We
@@ -18683,6 +18696,8 @@ Return ONLY compact JSON with this exact shape:
         attempts,
         attemptCount: attempts.length,
         totalCandidates: candidateUrls.length,
+        candidateCap,
+        stoppedBecause: null,
       });
       return;
     }
@@ -18719,13 +18734,18 @@ Return ONLY compact JSON with this exact shape:
     const scopeLabel = isCityWide
       ? `in ${city}, ${state} (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`
       : `for "${communityName}" (${isAnyBedroom ? "any size" : `${numericBedrooms}BR`})`;
-    const reason = `Checked ${attempts.length} listing${attempts.length === 1 ? "" : "s"} ${scopeLabel} — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.`;
+    const coverageNote = attempts.length < candidateUrls.length
+      ? ` Search discovered ${candidateUrls.length} candidates and checked ${attempts.length}${bailedOnWallBudget ? " before hitting the time budget" : ` in this pass`}.`
+      : "";
+    const reason = `Checked ${attempts.length} listing${attempts.length === 1 ? "" : "s"} ${scopeLabel} — none qualified${reasonParts.length > 0 ? ` (${reasonParts.join(", ")})` : ""}.${coverageNote}`;
     finishWithResult({
       found: false,
       reason,
       attempts,
       attemptCount: attempts.length,
       totalCandidates: candidateUrls.length,
+      candidateCap,
+      stoppedBecause: bailedOnWallBudget ? "wall-budget" : (candidateCap < candidateUrls.length ? "candidate-cap" : null),
     });
   });
 
