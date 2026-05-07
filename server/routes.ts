@@ -18754,7 +18754,7 @@ Return ONLY compact JSON with this exact shape:
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
-      if (channelRates.length > 0) basis = channelRates[0];
+      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
       else if (typeof channels.airbnb === "number" && channels.airbnb > 0) basis = channels.airbnb;
       else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
       return { basis, channelRates, samples: samples.length, channels };
@@ -18769,6 +18769,15 @@ Return ONLY compact JSON with this exact shape:
       // Airbnb, VRBO, Booking.com, and PM website-search rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
+      const fallbackSeasonBasis = (season: "HIGH" | "HOLIDAY"): number | null => {
+        if (lowResult.basis == null || lowResult.basis <= 0) return null;
+        const multiplier = seasonScan.region === "florida"
+          ? (season === "HIGH" ? 1.25 : 1.70)
+          : (season === "HIGH" ? 1.30 : 1.80);
+        return Math.round(lowResult.basis * multiplier);
+      };
+      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
+      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
         await storage.deletePropertyMarketRate(-id, br);
@@ -18791,8 +18800,8 @@ Return ONLY compact JSON with this exact shape:
         propertyId: -id,
         bedrooms: br,
         medianNightly: String(lowResult.basis),
-        medianNightlyHigh: highResult.basis != null ? String(highResult.basis) : null,
-        medianNightlyHoliday: holidayResult.basis != null ? String(holidayResult.basis) : null,
+        medianNightlyHigh: highBasis != null ? String(highBasis) : null,
+        medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.samples,
@@ -18951,7 +18960,7 @@ Return ONLY compact JSON with this exact shape:
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
-      if (channelRates.length > 0) basis = channelRates[0];
+      if (channelRates.length > 0) basis = medianOfSorted(channelRates);
       else if (typeof channels.airbnb === "number" && channels.airbnb > 0) basis = channels.airbnb;
       else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
       return { basis, channelRates, airbnbSamples: samples.length, channels };
@@ -18973,6 +18982,15 @@ Return ONLY compact JSON with this exact shape:
       // Airbnb, VRBO, Booking.com, and PM website-search rates.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
+      const fallbackSeasonBasis = (season: "HIGH" | "HOLIDAY"): number | null => {
+        if (lowResult.basis == null || lowResult.basis <= 0) return null;
+        const multiplier = seasonScan.region === "florida"
+          ? (season === "HIGH" ? 1.25 : 1.70)
+          : (season === "HIGH" ? 1.30 : 1.80);
+        return Math.round(lowResult.basis * multiplier);
+      };
+      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
+      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
 
       const hasNonAirbnbChannel =
         !!lowResult.channels.vrbo ||
@@ -19017,8 +19035,8 @@ Return ONLY compact JSON with this exact shape:
         propertyId,
         bedrooms: br,
         medianNightly: String(lowResult.basis),
-        medianNightlyHigh: highResult.basis != null ? String(highResult.basis) : null,
-        medianNightlyHoliday: holidayResult.basis != null ? String(holidayResult.basis) : null,
+        medianNightlyHigh: highBasis != null ? String(highBasis) : null,
+        medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.airbnbSamples,
@@ -19027,8 +19045,8 @@ Return ONLY compact JSON with this exact shape:
       persisted.push({
         bedrooms: br,
         low: lowResult.basis,
-        high: highResult.basis,
-        holiday: holidayResult.basis,
+        high: highBasis,
+        holiday: holidayBasis,
         basisSource,
         channels: lowResult.channels,
         channelCount: lowResult.channelRates.length,

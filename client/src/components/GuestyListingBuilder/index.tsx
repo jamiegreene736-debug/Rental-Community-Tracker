@@ -1825,7 +1825,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "live-multichannel-median" | "airbnb" | "none";
+      basisSource: "optimized-buy-in" | "live-multichannel-median" | "airbnb" | "none";
       channelCount: number;
       // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
       // as basis numbers, but the compact chip row shows the LOW
@@ -1975,7 +1975,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             low: typeof p.low === "number" ? p.low : 0,
             high: typeof p.high === "number" ? p.high : null,
             holiday: typeof p.holiday === "number" ? p.holiday : null,
-            basisSource: (p.basisSource === "live-multichannel-median" || p.basisSource === "airbnb")
+            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "airbnb")
               ? p.basisSource
               : "none",
             channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
@@ -3521,7 +3521,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = MEDIAN of the verified nightly channel signals (Airbnb / VRBO / Booking.com / PM) for the LOW-season sample window. Rates are normalized all-in: Airbnb sidecar totals are used as shown; VRBO, Booking.com, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). HIGH and HOLIDAY use their own sidecar medians when available.">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = optimized median of the usable buy-in channels (PM/direct, VRBO, Booking.com) for the LOW-season sample window. Ordinary Airbnb is used only as a fallback when no usable buy-in channel returns a rate. Rates are normalized all-in: VRBO, Booking.com, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). HIGH and HOLIDAY use their own sidecar optimized basis when available, with seasonal fallback when empty.">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
@@ -3723,7 +3723,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     const high = snapshotRow?.high ?? live?.medianNightlyHigh ?? null;
                                     const holiday = snapshotRow?.holiday ?? live?.medianNightlyHoliday ?? null;
                                     const basisSource = snapshotRow?.basisSource
-                                      ?? (live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
+                                      ?? (live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
+                                        : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
                                         : live?.source === "airbnb" ? "airbnb" as const
                                         : live ? "airbnb" as const : "none" as const);
                                     const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
@@ -3749,8 +3750,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {seasonChip("HIGH", high, "#d97706")}
                                           {seasonChip("HOLIDAY", holiday, "#dc2626")}
                                           <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
-                                            {basisSource === "live-multichannel-median"
-                                              ? `LOW = median of ${channelCount} channels`
+                                            {basisSource === "optimized-buy-in"
+                                              ? `LOW = optimized median of ${channelCount} channels`
+                                              : basisSource === "live-multichannel-median"
+                                              ? `LOW = legacy median of ${channelCount} channels`
                                               : basisSource === "airbnb"
                                                 ? "LOW = Airbnb-only fallback"
                                                 : "no data"}
@@ -3768,7 +3771,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). Basis = median across verified Airbnb/VRBO/Booking/PM channel signals, all-in (taxes + fees included or normalized). When a season's basis is missing — e.g. HOLIDAY scan returned empty — the formula falls back to LOW × the seasonal multiplier so the table always has a price.
+                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). Basis = optimized median across usable buy-in channels: PM/direct, VRBO, and Booking.com. Ordinary Airbnb is used only as a fallback when no usable buy-in channel returns a rate. When a season scan returns empty, the chip uses LOW × the seasonal multiplier so the table always has a price.
                                 </div>
                               </div>
                             )}
