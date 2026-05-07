@@ -3582,7 +3582,7 @@ export async function registerRoutes(
       // populated — falls back to BUY_IN_RATES[pricingArea][${BR}BR] ×
       // season multiplier otherwise.
       const units = property.units.map((u, idx) => {
-        const nightlyRate = getBuyInRate(pricingArea, u.bedrooms, mapping.propertyId, season);
+        const nightlyRate = getBuyInRate(pricingArea, u.bedrooms, mapping.propertyId, season, yearMonth);
         const lineTotal = nightlyRate * nights;
         return {
           label: u.unitNumber ? `Unit ${u.unitNumber}` : `Unit ${String.fromCharCode(65 + idx)}`,
@@ -18709,7 +18709,10 @@ Return ONLY compact JSON with this exact shape:
       });
     }
 
-    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const refreshMode = String(req.query.mode ?? "") === "monthly" || String(req.query.deep ?? "") === "1"
+      ? "monthly"
+      : "seasonal";
+    const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
@@ -18936,10 +18939,10 @@ Return ONLY compact JSON with this exact shape:
     };
     if (runBackground && !isBackgroundWorker) {
       const startedAt = Date.now();
-      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued market-rate refresh" });
+      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: refreshMode === "monthly" ? "Queued monthly market-rate refresh" : "Queued market-rate refresh" });
       const port = process.env.PORT || "5000";
       setTimeout(() => {
-        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1`, { method: "POST" })
+        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=${refreshMode}`, { method: "POST" })
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
@@ -18991,7 +18994,305 @@ Return ONLY compact JSON with this exact shape:
     // null).
     const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
     const startedAt = Date.now();
-    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 0, label: "Initializing scan" });
+    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: refreshMode === "monthly" ? "Initializing monthly scan" : "Initializing scan" });
+
+    if (refreshMode === "monthly") {
+      const { getSeasonForMonth, getCommunityRegion } = await import("@shared/pricing-rates");
+      type SeasonLabel = "LOW" | "HIGH" | "HOLIDAY";
+      type ChannelSnapshot = { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
+      type MonthlyRatePayload = {
+        medianNightly: number;
+        season: SeasonLabel;
+        checkIn: string;
+        checkOut: string;
+        channelCount: number;
+        sampleCount: number;
+        channels: ChannelSnapshot;
+      };
+      type PersistedMonthly = {
+        bedrooms: number;
+        low: number;
+        high: number | null;
+        holiday: number | null;
+        basisSource: "monthly-multichannel-median" | "airbnb" | "none";
+        channels: ChannelSnapshot;
+        channelCount: number;
+        monthlyCount: number;
+      };
+
+      const medianOfSorted = (sorted: number[]): number => {
+        if (sorted.length === 0) return 0;
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0
+          ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+          : sorted[mid];
+      };
+      const median = (values: number[]): number | null => {
+        const sorted = values.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+        return sorted.length > 0 ? medianOfSorted(sorted) : null;
+      };
+      const basisForScan = (scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null, br: number) => {
+        if (!scan) return { basis: null as number | null, channelRates: [] as number[], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } as ChannelSnapshot };
+        const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+        const samples = scan.ratesByBR[br] ?? [];
+        const channelRates = [channels.airbnb, channels.vrbo, channels.booking, channels.pm]
+          .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0)
+          .sort((a, b) => a - b);
+        let basis: number | null = null;
+        if (channelRates.length > 0) basis = medianOfSorted(channelRates);
+        else if (typeof channels.airbnb === "number" && channels.airbnb > 0) basis = channels.airbnb;
+        else if (samples.length > 0) basis = medianOfSorted([...samples].sort((a, b) => a - b));
+        return { basis, channelRates, airbnbSamples: samples.length, channels };
+      };
+
+      const pricingRegion = getCommunityRegion(config.community);
+      const ymd = (d: Date) => d.toISOString().slice(0, 10);
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      const monthlyWindows: Array<{ yearMonth: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
+      for (let i = 0; i < 24; i++) {
+        const monthDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i, 1));
+        const yearMonth = `${monthDate.getUTCFullYear()}-${String(monthDate.getUTCMonth() + 1).padStart(2, "0")}`;
+        const checkIn = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 15));
+        if (checkIn <= today) checkIn.setUTCDate(today.getUTCDate() + 2);
+        const checkOut = new Date(checkIn);
+        checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+        monthlyWindows.push({
+          yearMonth,
+          season: getSeasonForMonth(yearMonth, pricingRegion) as SeasonLabel,
+          checkIn: ymd(checkIn),
+          checkOut: ymd(checkOut),
+        });
+      }
+
+      const horizonEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 24, 1));
+      const holidayDefs: Array<{ label: string; sm: number; sd: number }> = [
+        { label: "Christmas / New Year", sm: 12, sd: 20 },
+        { label: "Independence Day Week", sm: 7, sd: 1 },
+        { label: "Thanksgiving Week", sm: 11, sd: 22 },
+        { label: "Spring Break", sm: 3, sd: 15 },
+        { label: "Presidents' Weekend", sm: 2, sd: 14 },
+      ];
+      const holidayWindows: Array<{ label: string; checkIn: string; checkOut: string }> = [];
+      for (const year of [today.getUTCFullYear(), today.getUTCFullYear() + 1, today.getUTCFullYear() + 2]) {
+        for (const h of holidayDefs) {
+          const checkIn = new Date(Date.UTC(year, h.sm - 1, h.sd + 2));
+          if (checkIn <= today || checkIn >= horizonEnd) continue;
+          const checkOut = new Date(checkIn);
+          checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+          holidayWindows.push({ label: h.label, checkIn: ymd(checkIn), checkOut: ymd(checkOut) });
+        }
+      }
+      holidayWindows.sort((a, b) => a.checkIn.localeCompare(b.checkIn));
+
+      const totalWindows = monthlyWindows.length + holidayWindows.length;
+      const monthlyByBR = new Map<number, Record<string, MonthlyRatePayload>>();
+      const seasonBuckets = new Map<number, Record<SeasonLabel, number[]>>();
+      const sourceFlags = new Map<number, { hasAnyChannel: boolean; hasNonAirbnb: boolean; channelCount: number }>();
+      const latestChannels = new Map<number, ChannelSnapshot>();
+      const accumulatedWarnings: Array<{
+        season: SeasonLabel;
+        channel: "airbnb" | "vrbo" | "booking" | "pm" | "engine";
+        kind: "captcha" | "blocked" | "rate-limit" | "timeout" | "network" | "unknown";
+        message: string;
+        reason?: string;
+      }> = [];
+
+      const setMonthlyProgress = (percent: number, label: string) => {
+        const current = getRefreshProgress(propertyId);
+        setRefreshProgress({
+          propertyId,
+          startedAt,
+          phase: "monthly",
+          percent: Math.max(1, Math.min(94, percent)),
+          label,
+          daemonOnline: current?.daemonOnline,
+          daemonLastPollAgeMs: current?.daemonLastPollAgeMs,
+          warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
+        });
+      };
+      const heartbeat = setInterval(() => {
+        const current = getRefreshProgress(propertyId);
+        if (!current || current.phase === "done" || current.phase === "error") return;
+        setRefreshProgress({ ...current, lastTickAt: Date.now() });
+      }, 15_000);
+      const absorbScan = (scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null, season: SeasonLabel) => {
+        if (!scan?.warnings) return;
+        for (const w of scan.warnings) {
+          accumulatedWarnings.push({
+            ...w,
+            season,
+            message: w.message || `${season} ${w.channel} ${w.kind}`,
+          });
+        }
+      };
+      const ensureBR = (br: number) => {
+        if (!monthlyByBR.has(br)) monthlyByBR.set(br, {});
+        if (!seasonBuckets.has(br)) seasonBuckets.set(br, { LOW: [], HIGH: [], HOLIDAY: [] });
+        if (!sourceFlags.has(br)) sourceFlags.set(br, { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 });
+      };
+      const noteSource = (br: number, channels: ChannelSnapshot, channelRates: number[]) => {
+        const flags = sourceFlags.get(br) ?? { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 };
+        if (channelRates.length > 0) {
+          flags.hasAnyChannel = true;
+          flags.channelCount += channelRates.length;
+        }
+        if ((channels.vrbo ?? 0) > 0 || (channels.booking ?? 0) > 0 || (channels.pm ?? 0) > 0) {
+          flags.hasNonAirbnb = true;
+        }
+        sourceFlags.set(br, flags);
+        latestChannels.set(br, channels);
+      };
+
+      try {
+        let completed = 0;
+        for (const win of monthlyWindows) {
+          const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
+          setMonthlyProgress(startPct, `Scanning ${win.yearMonth} ${win.season} rates (${completed + 1}/${totalWindows})`);
+          const scan = await fetchMultiChannelBuyInByBR({
+            community: loc.searchName,
+            city: loc.city,
+            state: loc.state,
+            streetAddress: loc.streetAddress,
+            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+            searchName: loc.searchName,
+            bedroomCounts: wantBedrooms,
+            propertyId,
+            dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
+            sidecarQueueBudgetMs: 15 * 60_000,
+          });
+          absorbScan(scan, win.season);
+          for (const br of wantBedrooms) {
+            ensureBR(br);
+            const result = basisForScan(scan, br);
+            if (result.basis == null || result.basis <= 0) continue;
+            monthlyByBR.get(br)![win.yearMonth] = {
+              medianNightly: result.basis,
+              season: win.season,
+              checkIn: win.checkIn,
+              checkOut: win.checkOut,
+              channelCount: result.channelRates.length,
+              sampleCount: result.channelRates.length > 0 ? result.channelRates.length : result.airbnbSamples,
+              channels: result.channels,
+            };
+            seasonBuckets.get(br)![win.season].push(result.basis);
+            noteSource(br, result.channels, result.channelRates);
+          }
+          completed++;
+          setMonthlyProgress(Math.round((completed / Math.max(1, totalWindows)) * 90) + 2, `Completed ${win.yearMonth} ${win.season} rates (${completed}/${totalWindows})`);
+        }
+
+        for (const win of holidayWindows) {
+          const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
+          setMonthlyProgress(startPct, `Scanning ${win.label} holiday rates (${completed + 1}/${totalWindows})`);
+          const scan = await fetchMultiChannelBuyInByBR({
+            community: loc.searchName,
+            city: loc.city,
+            state: loc.state,
+            streetAddress: loc.streetAddress,
+            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+            searchName: loc.searchName,
+            bedroomCounts: wantBedrooms,
+            propertyId,
+            dateOverride: { checkIn: win.checkIn, checkOut: win.checkOut },
+            sidecarQueueBudgetMs: 15 * 60_000,
+          });
+          absorbScan(scan, "HOLIDAY");
+          for (const br of wantBedrooms) {
+            ensureBR(br);
+            const result = basisForScan(scan, br);
+            if (result.basis == null || result.basis <= 0) continue;
+            seasonBuckets.get(br)!.HOLIDAY.push(result.basis);
+            noteSource(br, result.channels, result.channelRates);
+          }
+          completed++;
+          setMonthlyProgress(Math.round((completed / Math.max(1, totalWindows)) * 90) + 2, `Completed ${win.label} holiday rates (${completed}/${totalWindows})`);
+        }
+
+        setRefreshProgress({ propertyId, startedAt, phase: "persisting", percent: 95, label: "Persisting monthly medians" });
+        const persisted: PersistedMonthly[] = [];
+        for (const br of wantBedrooms) {
+          ensureBR(br);
+          const monthlyRates = monthlyByBR.get(br) ?? {};
+          const buckets = seasonBuckets.get(br)!;
+          const monthlyValues = Object.values(monthlyRates).map((r) => r.medianNightly);
+          const lowBasis = median(buckets.LOW) ?? median(monthlyValues);
+          const highBasis = median(buckets.HIGH);
+          const holidayBasis = median(buckets.HOLIDAY);
+          if (lowBasis == null || lowBasis <= 0) {
+            await storage.deletePropertyMarketRate(propertyId, br);
+            persisted.push({
+              bedrooms: br,
+              low: 0,
+              high: null,
+              holiday: null,
+              basisSource: "none",
+              channels: latestChannels.get(br) ?? { airbnb: null, vrbo: null, booking: null, pm: null },
+              channelCount: 0,
+              monthlyCount: 0,
+            });
+            continue;
+          }
+          const allBasisValues = [...monthlyValues, highBasis, holidayBasis].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
+          const flags = sourceFlags.get(br) ?? { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 };
+          const source: PersistedMonthly["basisSource"] = flags.hasNonAirbnb || (flags.hasAnyChannel && flags.channelCount > 1)
+            ? "monthly-multichannel-median"
+            : "airbnb";
+          await storage.upsertPropertyMarketRate({
+            propertyId,
+            bedrooms: br,
+            medianNightly: String(lowBasis),
+            medianNightlyHigh: highBasis != null ? String(highBasis) : null,
+            medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
+            monthlyRates,
+            lowNightly: String(Math.min(...allBasisValues)),
+            highNightly: String(Math.max(...allBasisValues)),
+            sampleCount: flags.channelCount || monthlyValues.length,
+            source,
+          });
+          persisted.push({
+            bedrooms: br,
+            low: lowBasis,
+            high: highBasis,
+            holiday: holidayBasis,
+            basisSource: source,
+            channels: latestChannels.get(br) ?? { airbnb: null, vrbo: null, booking: null, pm: null },
+            channelCount: flags.channelCount,
+            monthlyCount: Object.keys(monthlyRates).length,
+          });
+        }
+
+        setRefreshProgress({ propertyId, startedAt, phase: "done", percent: 100, label: "Done" });
+        if (isBackgroundWorker) clearProgressSoon(propertyId);
+        else clearRefreshProgress(propertyId);
+
+        console.log(
+          `[refresh-market-rates] monthly property ${propertyId} (${config.community}) ${Date.now() - startedAt}ms: ` +
+          persisted.map((p) =>
+            `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.monthlyCount}mo HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
+          ).join(", "),
+        );
+        return res.json({
+          ok: true,
+          propertyId,
+          community: config.community,
+          mode: "monthly",
+          persisted,
+          snapshot: {
+            seasons: {
+              LOW: monthlyWindows.find((w) => w.season === "LOW") ?? null,
+              HIGH: monthlyWindows.find((w) => w.season === "HIGH") ?? null,
+              HOLIDAY: holidayWindows[0] ? { checkIn: holidayWindows[0].checkIn, checkOut: holidayWindows[0].checkOut, daemonOnline: true } : null,
+            },
+            region: pricingRegion,
+            durationMs: Date.now() - startedAt,
+          },
+        });
+      } finally {
+        clearInterval(heartbeat);
+      }
+    }
+
     const seasonScan = await fetchMultiChannelBuyInBySeason({
       community: loc.searchName,
       city: loc.city,
@@ -19201,10 +19502,10 @@ Return ONLY compact JSON with this exact shape:
   // `PROPERTY_UNIT_NEEDS` plus every saved community draft, calling
   // the per-id refresh endpoints in series. Used for the initial
   // backfill after this feature ships and as the work loop for the
-  // weekly cron in `availability-scheduler.ts`. Sequential (not
-  // parallel) because each call hits SearchAPI once per bedroom
-  // count — running 12 properties × ~3 BR variants in parallel would
-  // burst-limit the SearchAPI key. Total runtime: ~30s.
+  // monthly cron in `availability-scheduler.ts`. Sequential (not
+  // parallel) because each static-property refresh drives the local
+  // Chrome sidecar through many dated windows. Total runtime can be
+  // long, which is why the normal operator flow uses background mode.
   app.post("/api/admin/refresh-all-market-rates", async (_req, res) => {
     if (!process.env.SEARCHAPI_API_KEY) {
       return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
@@ -19221,7 +19522,7 @@ Return ONLY compact JSON with this exact shape:
 
     for (const id of staticIds) {
       try {
-        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates`, { method: "POST" });
+        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=monthly`, { method: "POST" });
         const data = (await r.json().catch(() => ({}))) as any;
         results.push({ id, kind: "static", ok: r.ok, error: r.ok ? undefined : data?.error });
       } catch (e: any) {

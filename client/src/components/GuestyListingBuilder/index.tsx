@@ -1825,7 +1825,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "optimized-buy-in" | "live-multichannel-median" | "airbnb" | "none";
+      basisSource: "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "airbnb" | "none";
       channelCount: number;
       // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
       // as basis numbers, but the compact chip row shows the LOW
@@ -1902,7 +1902,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!propertyId || marketRatesRefreshing) return;
     setMarketRatesRefreshing(true);
     setRefreshStartedAt(Date.now());
-    setRefreshProgress({ phase: "starting", percent: 0, label: "Starting…" });
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing monthly scan…" });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -1961,7 +1961,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       return p;
     };
     const waitForBackgroundRefresh = async () => {
-      const deadline = Date.now() + 90 * 60 * 1000;
+      const deadline = Date.now() + 4 * 60 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
         const p = await readProgress().catch(() => null);
@@ -1978,7 +1978,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const basePath = propertyId < 0
         ? `/api/community/${-propertyId}/refresh-pricing`
         : `/api/property/${propertyId}/refresh-market-rates`;
-      const path = `${basePath}?background=1`;
+      const path = propertyId > 0
+        ? `${basePath}?background=1&mode=monthly`
+        : `${basePath}?background=1`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
       const r = await fetch(path, { method: "POST", signal: controller.signal });
@@ -2011,7 +2013,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              Per-season basis updated for LOW / HIGH / HOLIDAY
+              Monthly market-rate basis updated
             </span>
           ),
         });
@@ -2042,7 +2044,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             low: typeof p.low === "number" ? p.low : 0,
             high: typeof p.high === "number" ? p.high : null,
             holiday: typeof p.holiday === "number" ? p.holiday : null,
-            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "airbnb")
+            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "airbnb")
               ? p.basisSource
               : "none",
             channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
@@ -2083,7 +2085,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             >
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            Per-season basis updated for LOW / HIGH / HOLIDAY
+            Monthly market-rate basis updated
           </span>
         ),
       });
@@ -3588,13 +3590,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites for one 7-night sample in each season. Rates are collected through the local Chrome sidecar; PM/direct websites are discovered by API search and then searched through the sidecar. VRBO, Booking.com, and PM rates are either sidecar-confirmed all-in totals or scaled by the region tax factor (Hawaii ≈ 15.5%, Florida ≈ 11%). Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee). HIGH and HOLIDAY use their own season sample when available, with seasonal fallback when empty.">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. The monthly refresh scans one 7-night sample for each visible month, plus holiday sample windows. Rates are collected through the local Chrome sidecar; PM/direct websites are discovered by API search and then searched through the sidecar. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
                                     return (
-                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh market rates' to fetch."
+                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh monthly market rates' to fetch."
                                         style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
                                         {bedrooms}BR fallback
                                       </span>
@@ -3613,6 +3615,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     ? `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
                                     : live.source === "airbnb"
                                       ? "Airbnb-only channel basis"
+                                      : live.source === "monthly-multichannel-median"
+                                        ? "monthly channel median"
                                       : live.source;
                                   return (
                                     <span key={bedrooms}
@@ -3638,9 +3642,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Multi-season multi-channel scan. Pulls a 7-night sample for each of LOW / HIGH / HOLIDAY by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (per-season basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work (single Chrome), so wall time can be several minutes. Cancellable mid-flight; partial results persist. Auto-refreshes weekly via the scheduler."
+                                  title="Monthly multi-channel scan. Pulls one 7-night sample for each visible month, plus holiday sample windows, by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (monthly basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work through one Chrome instance, so wall time can be long. Cancellable mid-flight; completed monthly samples persist. Auto-refreshes monthly via the scheduler."
                                 >
-                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh market rates"}
+                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh monthly market rates"}
                                 </button>
                               </div>
                             )}
@@ -3680,7 +3684,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                    <span style={{ fontWeight: 500 }}>Scanning per-season basis…</span>
+                                    <span style={{ fontWeight: 500 }}>Scanning monthly market-rate basis…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{refreshProgress.percent}%</span>
                                     <button
@@ -3715,10 +3719,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isStale && (
                                     <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
-                                      ⚠ No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry, or wait — partial results from completed seasons are kept after this scan finishes.
+                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry, or wait; partial results from completed monthly windows are kept after this scan finishes.
                                     </div>
                                   )}
-                                  {/* Per-season / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. Surfaced as each season completes — see PR #312. */}
+                                  {/* Per-window / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. */}
                                   {refreshProgress.warnings && refreshProgress.warnings.length > 0 && (
                                     <div style={{ marginTop: 4 }}>
                                       {refreshProgress.warnings.map((w, i) => {
@@ -3736,7 +3740,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Multi-channel scan; the daemon serializes through one Chrome instance — typical wall time 5–15 min for multi-unit listings.
+                                    Monthly multi-channel scan; the daemon serializes through one Chrome instance, so this can take a while. Progress advances after each completed month or holiday window.
                                   </div>
                                 </div>
                               );
@@ -3757,15 +3761,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Per-season buy-in basis
+                                    Monthly buy-in basis
                                     {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Each season samples Airbnb, VRBO, Booking.com, and PM website search-result rates through the Chrome sidecar where available.">
-                                    Auto-refresh every 7 days · click ↻ to scan now
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Monthly rows use their own 7-night month sample when available. LOW/HIGH/HOLIDAY chips summarize the persisted month and holiday samples.">
+                                    Auto-refresh every 30 days · click ↻ to scan now
                                   </span>
                                 </div>
                                 {/* Window labels — only shown after a
@@ -3791,6 +3795,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     const basisSource = snapshotRow?.basisSource
                                       ?? (live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
                                         : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
+                                        : live?.source === "monthly-multichannel-median" ? "monthly-multichannel-median" as const
                                         : live?.source === "airbnb" ? "airbnb" as const
                                         : live ? "airbnb" as const : "none" as const);
                                     const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
@@ -3818,6 +3823,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
                                             {basisSource === "optimized-buy-in"
                                               ? `LOW = median of ${channelCount} channels`
+                                              : basisSource === "monthly-multichannel-median"
+                                              ? `LOW = monthly median across ${channelCount} channel samples`
                                               : basisSource === "live-multichannel-median"
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "airbnb"
@@ -3837,7 +3844,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Each season's basis drives the Guesty sell rate for that season's months via (basis × 1.20) ÷ (1 − channelFee). Basis = median across usable all-in channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites for one 7-night sample in that season. When a season scan returns empty, the chip uses LOW × the seasonal multiplier so the table always has a price.
+                                  Each month now uses its own persisted 7-night sample when available. The LOW/HIGH/HOLIDAY chips summarize the monthly and holiday samples; missing months still fall back to the previous seasonal/static basis so the table always has a price.
                                 </div>
                               </div>
                             )}

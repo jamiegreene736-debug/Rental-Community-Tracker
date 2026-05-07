@@ -166,6 +166,7 @@ type LiveBuyInEntry = {
   // legacy single-window OR the season window was unreachable.
   medianNightlyHigh: number | null;
   medianNightlyHoliday: number | null;
+  monthlyRates: Record<string, MonthlyMarketRate>;
   sampleCount: number;
   refreshedAt: string;
   source: string;
@@ -173,12 +174,23 @@ type LiveBuyInEntry = {
 const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
 const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
 
+export type MonthlyMarketRate = {
+  medianNightly: number;
+  season?: SeasonType;
+  checkIn?: string;
+  checkOut?: string;
+  channelCount?: number;
+  sampleCount?: number;
+  channels?: { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null };
+};
+
 export type LivePropertyMarketRateInput = {
   propertyId: number;
   bedrooms: number;
   medianNightly: number | string;
   medianNightlyHigh?: number | string | null;
   medianNightlyHoliday?: number | string | null;
+  monthlyRates?: Record<string, MonthlyMarketRate> | null;
   sampleCount: number;
   refreshedAt: string;
   source: string;
@@ -190,6 +202,35 @@ function parseNullableRate(v: number | string | null | undefined): number | null
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const parsed: Record<string, MonthlyMarketRate> = {};
+  for (const [yearMonth, raw] of Object.entries(input as Record<string, any>)) {
+    if (!/^\d{4}-\d{2}$/.test(yearMonth)) continue;
+    if (!raw || typeof raw !== "object") continue;
+    const medianNightly = parseNullableRate(raw.medianNightly);
+    if (medianNightly == null) continue;
+    const season = raw.season === "HIGH" || raw.season === "LOW" || raw.season === "HOLIDAY"
+      ? raw.season
+      : undefined;
+    parsed[yearMonth] = {
+      medianNightly,
+      season,
+      checkIn: typeof raw.checkIn === "string" ? raw.checkIn : undefined,
+      checkOut: typeof raw.checkOut === "string" ? raw.checkOut : undefined,
+      channelCount: typeof raw.channelCount === "number" ? raw.channelCount : undefined,
+      sampleCount: typeof raw.sampleCount === "number" ? raw.sampleCount : undefined,
+      channels: raw.channels && typeof raw.channels === "object" ? {
+        airbnb: parseNullableRate(raw.channels.airbnb),
+        vrbo: parseNullableRate(raw.channels.vrbo),
+        booking: parseNullableRate(raw.channels.booking),
+        pm: parseNullableRate(raw.channels.pm),
+      } : undefined,
+    };
+  }
+  return parsed;
+}
+
 export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
   _liveBuyIns.clear();
   for (const r of rates) {
@@ -199,6 +240,7 @@ export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[])
       medianNightly: median,
       medianNightlyHigh: parseNullableRate(r.medianNightlyHigh),
       medianNightlyHoliday: parseNullableRate(r.medianNightlyHoliday),
+      monthlyRates: parseMonthlyRates(r.monthlyRates),
       sampleCount: r.sampleCount,
       refreshedAt: r.refreshedAt,
       source: r.source,
@@ -228,10 +270,13 @@ export function getBuyInRate(
   bedrooms: number,
   propertyId?: number,
   season?: SeasonType,
+  yearMonth?: string,
 ): number {
   if (propertyId != null) {
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
     if (live) {
+      const monthly = yearMonth ? live.monthlyRates[yearMonth] : undefined;
+      if (monthly && monthly.medianNightly > 0) return monthly.medianNightly;
       // Season-specific basis when available + requested.
       if (season === "HIGH" && live.medianNightlyHigh != null) return live.medianNightlyHigh;
       if (season === "HOLIDAY" && live.medianNightlyHoliday != null) return live.medianNightlyHoliday;
@@ -338,7 +383,7 @@ export function totalNightlyBuyInForMonth(
   const season = getSeasonForMonth(yearMonth, region);
   let total = 0;
   for (const slot of unitSlots) {
-    total += getBuyInRate(community, slot.bedrooms, propertyId, season);
+    total += getBuyInRate(community, slot.bedrooms, propertyId, season, yearMonth);
   }
   return total;
 }

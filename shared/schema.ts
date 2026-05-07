@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, numeric, timestamp, serial, date, boolean, doublePrecision } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, numeric, timestamp, serial, date, boolean, doublePrecision, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -392,6 +392,15 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   medianNightly: numeric("median_nightly", { precision: 10, scale: 2 }).notNull(),
   medianNightlyHigh: numeric("median_nightly_high", { precision: 10, scale: 2 }),
   medianNightlyHoliday: numeric("median_nightly_holiday", { precision: 10, scale: 2 }),
+  monthlyRates: jsonb("monthly_rates").$type<Record<string, {
+    medianNightly: number;
+    season?: "LOW" | "HIGH" | "HOLIDAY";
+    checkIn?: string;
+    checkOut?: string;
+    channelCount?: number;
+    sampleCount?: number;
+    channels?: { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null };
+  }>>().default(sql`'{}'::jsonb`).notNull(),
   lowNightly: numeric("low_nightly", { precision: 10, scale: 2 }),
   highNightly: numeric("high_nightly", { precision: 10, scale: 2 }),
   sampleCount: integer("sample_count").notNull().default(0),

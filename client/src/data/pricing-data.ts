@@ -331,7 +331,7 @@ function generateMonthlyRates(
       // getBuyInRate reads per-season basis from live cache when
       // available; falls through to LOW × multiplier internally
       // when not.
-      buyInRate = getBuyInRate(community, bedrooms, propertyId, season);
+      buyInRate = getBuyInRate(community, bedrooms, propertyId, season, yearMonth);
     } else {
       // Legacy callers (no propertyId/bedrooms): apply multiplier
       // to the base.

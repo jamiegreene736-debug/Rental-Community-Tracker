@@ -974,6 +974,7 @@ export type RefreshProgressState = {
   startedAt: number;
   phase:
     | "starting"
+    | "monthly"
     | "airbnb-low" | "airbnb-high" | "airbnb-holiday"
     | "sidecar-low" | "sidecar-high" | "sidecar-holiday"
     | "persisting" | "done" | "error";
