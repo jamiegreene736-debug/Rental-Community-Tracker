@@ -1936,13 +1936,49 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
     void tickProgress();
     progressTimer = window.setInterval(tickProgress, 1500);
+    const readProgress = async () => {
+      const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
+      if (!r.ok) return null;
+      const p = await r.json() as {
+        phase: string;
+        percent: number;
+        label: string;
+        error?: string;
+        lastTickAt?: number;
+        daemonOnline?: boolean;
+        daemonLastPollAgeMs?: number | null;
+        warnings?: ScanWarning[];
+      };
+      setRefreshProgress({
+        phase: p.phase,
+        percent: p.percent,
+        label: p.label,
+        lastTickAt: p.lastTickAt,
+        daemonOnline: p.daemonOnline,
+        daemonLastPollAgeMs: p.daemonLastPollAgeMs,
+        warnings: p.warnings,
+      });
+      return p;
+    };
+    const waitForBackgroundRefresh = async () => {
+      const deadline = Date.now() + 30 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const p = await readProgress().catch(() => null);
+        if (!p) continue;
+        if (p.phase === "done") return;
+        if (p.phase === "error") throw new Error(p.error || p.label || "Refresh failed");
+      }
+      throw new Error("Refresh is still running after 30 minutes. You can refresh the page later to load any completed rates.");
+    };
 
     try {
       // Negative ids (drafts) and positive ids (static) both work —
       // the static endpoint redirects negative ids to the draft path.
-      const path = propertyId < 0
+      const basePath = propertyId < 0
         ? `/api/community/${-propertyId}/refresh-pricing`
         : `/api/property/${propertyId}/refresh-market-rates`;
+      const path = `${basePath}?background=1`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
       const r = await fetch(path, { method: "POST", signal: controller.signal });
@@ -1952,6 +1988,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         return;
       }
       const data = await r.json().catch(() => ({} as Record<string, unknown>));
+      if ((data as any)?.accepted === true) {
+        await waitForBackgroundRefresh();
+        setLiveSnapshot(null);
+        await reloadMarketRates();
+        toast({
+          duration: Infinity,
+          title: "Market rates refreshed",
+          description: (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#16a34a"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                style={{ flexShrink: 0 }}
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              Per-season basis updated for LOW / HIGH / HOLIDAY
+            </span>
+          ),
+        });
+        return;
+      }
       const persisted = (data as any)?.persisted;
       const snapshot = (data as any)?.snapshot;
       // Static-property endpoint (PR #282 onwards) returns

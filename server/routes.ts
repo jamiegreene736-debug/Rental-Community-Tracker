@@ -18710,6 +18710,46 @@ Return ONLY compact JSON with this exact shape:
     }
 
     const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const runBackground = String(req.query.background ?? "") === "1";
+    const isBackgroundWorker = String(req.query.run ?? "") === "1";
+    const clearProgressSoon = (propertyKey: number) => {
+      setTimeout(() => clearRefreshProgress(propertyKey), 5 * 60 * 1000);
+    };
+    if (runBackground && !isBackgroundWorker) {
+      const propertyKey = -id;
+      const startedAt = Date.now();
+      setRefreshProgress({ propertyId: propertyKey, startedAt, phase: "starting", percent: 1, label: "Queued market-rate refresh" });
+      const port = process.env.PORT || "5000";
+      setTimeout(() => {
+        void fetch(`http://127.0.0.1:${port}/api/community/${id}/refresh-pricing?run=1`, { method: "POST" })
+          .then(async (r) => {
+            if (!r.ok) {
+              const text = await r.text().catch(() => "");
+              setRefreshProgress({
+                propertyId: propertyKey,
+                startedAt,
+                phase: "error",
+                percent: 100,
+                label: "Refresh failed",
+                error: `HTTP ${r.status}: ${text.slice(0, 200)}`,
+              });
+              clearProgressSoon(propertyKey);
+            }
+          })
+          .catch((e: any) => {
+            setRefreshProgress({
+              propertyId: propertyKey,
+              startedAt,
+              phase: "error",
+              percent: 100,
+              label: "Refresh failed",
+              error: e?.message ?? String(e),
+            });
+            clearProgressSoon(propertyKey);
+          });
+      }, 0);
+      return res.status(202).json({ ok: true, accepted: true, propertyId: propertyKey });
+    }
     const startedAt = Date.now();
     setRefreshProgress({ propertyId: -id, startedAt, phase: "starting", percent: 0, label: "Initializing draft scan" });
     const seasonScan = await fetchMultiChannelBuyInBySeason({
@@ -18817,7 +18857,8 @@ Return ONLY compact JSON with this exact shape:
     const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
 
     setRefreshProgress({ propertyId: -id, startedAt, phase: "done", percent: 100, label: "Done" });
-    clearRefreshProgress(-id);
+    if (isBackgroundWorker) clearProgressSoon(-id);
+    else clearRefreshProgress(-id);
 
     console.log(
       `[refresh-pricing] draft ${id} ("${draft.name}") region=${seasonScan.region} ${seasonScan.durationMs}ms · BRs=${bedroomCounts.join(",")} · estimatedLow=${estimatedLowRate} estimatedHigh=${estimatedHighRate}`,
@@ -18883,6 +18924,47 @@ Return ONLY compact JSON with this exact shape:
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
+    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
+    const runBackground = String(req.query.background ?? "") === "1";
+    const isBackgroundWorker = String(req.query.run ?? "") === "1";
+    const clearProgressSoon = (propertyKey: number) => {
+      setTimeout(() => clearRefreshProgress(propertyKey), 5 * 60 * 1000);
+    };
+    if (runBackground && !isBackgroundWorker) {
+      const startedAt = Date.now();
+      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued market-rate refresh" });
+      const port = process.env.PORT || "5000";
+      setTimeout(() => {
+        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1`, { method: "POST" })
+          .then(async (r) => {
+            if (!r.ok) {
+              const text = await r.text().catch(() => "");
+              setRefreshProgress({
+                propertyId,
+                startedAt,
+                phase: "error",
+                percent: 100,
+                label: "Refresh failed",
+                error: `HTTP ${r.status}: ${text.slice(0, 200)}`,
+              });
+              clearProgressSoon(propertyId);
+            }
+          })
+          .catch((e: any) => {
+            setRefreshProgress({
+              propertyId,
+              startedAt,
+              phase: "error",
+              percent: 100,
+              label: "Refresh failed",
+              error: e?.message ?? String(e),
+            });
+            clearProgressSoon(propertyId);
+          });
+      }, 0);
+      return res.status(202).json({ ok: true, accepted: true, propertyId });
+    }
+
     // Multi-season multi-channel scan (PR #282).
     //
     // Pulls per-season basis: LOW + HIGH + HOLIDAY. Each season uses
@@ -18904,7 +18986,6 @@ Return ONLY compact JSON with this exact shape:
     // didn't get scanned (e.g. HOLIDAY pickSeasonWindow returned
     // null).
     const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
-    const { fetchMultiChannelBuyInBySeason, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const startedAt = Date.now();
     setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 0, label: "Initializing scan" });
     const seasonScan = await fetchMultiChannelBuyInBySeason({
@@ -19054,7 +19135,8 @@ Return ONLY compact JSON with this exact shape:
     }
 
     setRefreshProgress({ propertyId, startedAt, phase: "done", percent: 100, label: "Done" });
-    clearRefreshProgress(propertyId);
+    if (isBackgroundWorker) clearProgressSoon(propertyId);
+    else clearRefreshProgress(propertyId);
 
     console.log(
       `[refresh-market-rates] property ${propertyId} (${config.community}) region=${seasonScan.region} ${seasonScan.durationMs}ms: ` +
