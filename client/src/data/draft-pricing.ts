@@ -8,7 +8,7 @@
 // pricingArea (the BUY_IN_RATES key the operator picked on Step 5)
 // or the AI-estimated low rate as a fallback.
 //
-// We re-use the same season multipliers / markup formula as the static
+// We re-use the same season multipliers / clean-margin base-rate formula as the static
 // path so a draft and an active property render the same 24-month
 // schedule shape — operators can compare them apples-to-apples.
 
@@ -19,6 +19,7 @@ import {
   type MonthRate,
   type SeasonType,
   MARKUP,
+  cleanBaseRateFromBuyIn,
 } from "./pricing-data";
 import {
   BUY_IN_RATES,
@@ -86,7 +87,7 @@ function generateMonthlyRatesForUnit(
     const season = getSeasonForMonth(yearMonth, region) as SeasonType;
     const multiplier = SEASON_MULTIPLIERS[region][season];
     const buyInRate = Math.round(baseBuyIn * multiplier);
-    const sellRate = Math.round(buyInRate * MARKUP);
+    const sellRate = cleanBaseRateFromBuyIn(buyInRate);
     return {
       month: MONTH_NAMES[monthIndex],
       year,
@@ -119,7 +120,7 @@ export function buildDraftPropertyPricing(
     bedrooms: u1Br,
     community,
     baseBuyIn: unit1BaseBuyIn,
-    baseSellRate: Math.round(unit1BaseBuyIn * MARKUP),
+    baseSellRate: cleanBaseRateFromBuyIn(unit1BaseBuyIn),
     monthlyRates: generateMonthlyRatesForUnit(unit1BaseBuyIn, region),
   };
   const unit2: UnitPricing = {
@@ -128,7 +129,7 @@ export function buildDraftPropertyPricing(
     bedrooms: u2Br,
     community,
     baseBuyIn: unit2BaseBuyIn,
-    baseSellRate: Math.round(unit2BaseBuyIn * MARKUP),
+    baseSellRate: cleanBaseRateFromBuyIn(unit2BaseBuyIn),
     monthlyRates: generateMonthlyRatesForUnit(unit2BaseBuyIn, region),
   };
 

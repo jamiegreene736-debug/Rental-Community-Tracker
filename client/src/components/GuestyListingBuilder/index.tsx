@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useLocation } from "wouter";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
-import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
@@ -266,16 +266,16 @@ function ChannelMarkupCard({
   // channel with the fee-differential markup above then lands at the same
   // margin. Returns one rate per month — server expands to daily.
   const computeSeasonalRates = (): Array<{ yearMonth: string; price: number; buyIn: number }> => {
-    const feeDirect = CHANNEL_HOST_FEE.direct ?? 0;
     const m = targetMarginPct / 100;
     return seasonalMonths
       .filter((row) => row.totalBuyIn > 0)
       .map((row) => ({
         yearMonth: row.yearMonth,
         buyIn: row.totalBuyIn,
-        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn
-        // ⇒ price = (1 + m) × buyIn / (1 - feeDirect)
-        price: Math.round(((1 + m) * row.totalBuyIn) / (1 - feeDirect)),
+        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn.
+        // Use the same helper as the pricing table so "Sheet Rate" and
+        // the pushed Guesty base calendar rate stay in lockstep.
+        price: cleanBaseRateFromBuyIn(row.totalBuyIn, m),
       }));
   };
 
@@ -2135,7 +2135,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (!seenBR.has(u.bedrooms)) { seenBR.add(u.bedrooms); bedrooms.push(u.bedrooms); }
     }
     bedrooms.sort((a, b) => a - b);
-    return bedrooms.map((br) => ({ bedrooms: br, live: getLiveBuyIn(propertyId, br) }));
+    return bedrooms.map((br) => ({
+      bedrooms: br,
+      community: propPricing.units.find((u) => u.bedrooms === br)?.community ?? propPricing.units[0]?.community ?? "",
+      live: getLiveBuyIn(propertyId, br),
+    }));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
@@ -3785,13 +3789,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                 )}
                                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                  {liveBuyInSummary.map(({ bedrooms, live }) => {
+                                  {liveBuyInSummary.map(({ bedrooms, community, live }) => {
                                     // Prefer liveSnapshot.perBR row when fresh — it has channel breakdown.
                                     // Otherwise build from cache (live) — no channel chips, just basis values.
                                     const snapshotRow = liveSnapshot?.perBR.find((r) => r.bedrooms === bedrooms);
                                     const low = snapshotRow?.low ?? live?.medianNightly ?? null;
-                                    const high = snapshotRow?.high ?? live?.medianNightlyHigh ?? null;
-                                    const holiday = snapshotRow?.holiday ?? live?.medianNightlyHoliday ?? null;
+                                    const high = snapshotRow?.high
+                                      ?? (live && community ? getBuyInRate(community, bedrooms, propertyId, "HIGH") : null);
+                                    const holiday = snapshotRow?.holiday
+                                      ?? (live && community ? getBuyInRate(community, bedrooms, propertyId, "HOLIDAY") : null);
                                     const basisSource = snapshotRow?.basisSource
                                       ?? (live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
                                         : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const

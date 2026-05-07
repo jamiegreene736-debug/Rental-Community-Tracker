@@ -252,6 +252,34 @@ export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEnt
   return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
 }
 
+function fallbackSeasonBasisFromLow(
+  community: string,
+  lowBasis: number | null,
+  season: "HIGH" | "HOLIDAY",
+): number | null {
+  if (lowBasis == null || lowBasis <= 0) return null;
+  const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  return Math.round(lowBasis * SEASON_MULTIPLIERS[region][season]);
+}
+
+export function normalizeSeasonalBasis(
+  community: string,
+  lowBasis: number,
+  highBasis: number | null,
+  holidayBasis: number | null,
+): { low: number; high: number | null; holiday: number | null } {
+  const highFloor = fallbackSeasonBasisFromLow(community, lowBasis, "HIGH");
+  const high = highFloor == null
+    ? highBasis
+    : Math.max(highBasis ?? highFloor, highFloor);
+  const holidayFloorBase = fallbackSeasonBasisFromLow(community, lowBasis, "HOLIDAY");
+  const holidayFloor = Math.max(holidayFloorBase ?? 0, high ?? 0) || null;
+  const holiday = holidayFloor == null
+    ? holidayBasis
+    : Math.max(holidayBasis ?? holidayFloor, holidayFloor);
+  return { low: lowBasis, high, holiday };
+}
+
 // Fallback chain (highest → lowest priority):
 //   1. Live per-season basis for (propertyId, bedrooms, season) when
 //      a season is supplied AND the multi-season scan populated it.
@@ -276,10 +304,24 @@ export function getBuyInRate(
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
     if (live) {
       const monthly = yearMonth ? live.monthlyRates[yearMonth] : undefined;
-      if (monthly && monthly.medianNightly > 0) return monthly.medianNightly;
+      const normalized = normalizeSeasonalBasis(
+        community,
+        live.medianNightly,
+        live.medianNightlyHigh,
+        live.medianNightlyHoliday,
+      );
+      if (monthly && monthly.medianNightly > 0) {
+        if (monthly.season === "HIGH" && normalized.high != null) {
+          return Math.max(monthly.medianNightly, normalized.high);
+        }
+        if (monthly.season === "HOLIDAY" && normalized.holiday != null) {
+          return Math.max(monthly.medianNightly, normalized.holiday);
+        }
+        return monthly.medianNightly;
+      }
       // Season-specific basis when available + requested.
-      if (season === "HIGH" && live.medianNightlyHigh != null) return live.medianNightlyHigh;
-      if (season === "HOLIDAY" && live.medianNightlyHoliday != null) return live.medianNightlyHoliday;
+      if (season === "HIGH" && normalized.high != null) return normalized.high;
+      if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
       // LOW or unknown-season → use base. When the caller supplied
       // HIGH/HOLIDAY but per-season basis isn't populated, apply the
       // multiplier so the formula still varies seasonally.

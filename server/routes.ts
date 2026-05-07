@@ -18817,8 +18817,15 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowResult.basis * multiplier);
       };
-      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
-      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
+      const highFloor = fallbackSeasonBasis("HIGH");
+      const highBasis = highFloor == null
+        ? highResult.basis
+        : Math.max(highResult.basis ?? highFloor, highFloor);
+      const holidayFloorBase = fallbackSeasonBasis("HOLIDAY");
+      const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
+      const holidayBasis = holidayFloor == null
+        ? holidayResult.basis
+        : Math.max(holidayResult.basis ?? holidayFloor, holidayFloor);
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
         await storage.deletePropertyMarketRate(-id, br);
@@ -19049,6 +19056,16 @@ Return ONLY compact JSON with this exact shape:
       };
 
       const pricingRegion = getCommunityRegion(config.community);
+      const fallbackSeasonBasis = (
+        lowBasis: number | null,
+        season: "HIGH" | "HOLIDAY",
+      ): number | null => {
+        if (lowBasis == null || lowBasis <= 0) return null;
+        const multiplier = pricingRegion === "florida"
+          ? (season === "HIGH" ? 1.25 : 1.70)
+          : (season === "HIGH" ? 1.30 : 1.80);
+        return Math.round(lowBasis * multiplier);
+      };
       const ymd = (d: Date) => d.toISOString().slice(0, 10);
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
@@ -19220,8 +19237,8 @@ Return ONLY compact JSON with this exact shape:
           const buckets = seasonBuckets.get(br)!;
           const monthlyValues = Object.values(monthlyRates).map((r) => r.medianNightly);
           const lowBasis = median(buckets.LOW) ?? median(monthlyValues);
-          const highBasis = median(buckets.HIGH);
-          const holidayBasis = median(buckets.HOLIDAY);
+          const highRaw = median(buckets.HIGH);
+          const holidayRaw = median(buckets.HOLIDAY);
           if (lowBasis == null || lowBasis <= 0) {
             await storage.deletePropertyMarketRate(propertyId, br);
             persisted.push({
@@ -19236,6 +19253,15 @@ Return ONLY compact JSON with this exact shape:
             });
             continue;
           }
+          const highFloor = fallbackSeasonBasis(lowBasis, "HIGH");
+          const highBasis = highFloor == null
+            ? highRaw
+            : Math.max(highRaw ?? highFloor, highFloor);
+          const holidayFloorBase = fallbackSeasonBasis(lowBasis, "HOLIDAY");
+          const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
+          const holidayBasis = holidayFloor == null
+            ? holidayRaw
+            : Math.max(holidayRaw ?? holidayFloor, holidayFloor);
           const allBasisValues = [...monthlyValues, highBasis, holidayBasis].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
           const flags = sourceFlags.get(br) ?? { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 };
           const source: PersistedMonthly["basisSource"] = flags.hasNonAirbnb || (flags.hasAnyChannel && flags.channelCount > 1)
@@ -19380,8 +19406,15 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowResult.basis * multiplier);
       };
-      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
-      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
+      const highFloor = fallbackSeasonBasis("HIGH");
+      const highBasis = highFloor == null
+        ? highResult.basis
+        : Math.max(highResult.basis ?? highFloor, highFloor);
+      const holidayFloorBase = fallbackSeasonBasis("HOLIDAY");
+      const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
+      const holidayBasis = holidayFloor == null
+        ? holidayResult.basis
+        : Math.max(holidayResult.basis ?? holidayFloor, holidayFloor);
 
       const hasOnlyAirbnbChannel =
         !!lowResult.channels.airbnb &&

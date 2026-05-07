@@ -1,7 +1,9 @@
 // ─────────────────────────────────────────────────────────────
 // PRICING DATA — Redesigned Methodology
 // Season Types: LOW / HIGH / HOLIDAY
-// Sell Rate = Buy-In Cost × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
+// Builder sheet rate = Buy-In Cost with a clean target margin after the
+// Direct/Stripe host fee. OTA channel fee differences are handled separately
+// through channel markups, not baked into the base calendar rate.
 // ─────────────────────────────────────────────────────────────
 
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
@@ -34,8 +36,11 @@ export type PropertyPricing = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// TRANSPARENT MARKUP FORMULA
-// Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
+// LEGACY BUY-IN TRACKER MARKUP FORMULA
+// Some older buy-in views still show the historical split:
+// Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP).
+// The Builder Pricing tab uses `cleanBaseRateFromBuyIn` below instead so
+// "Sheet Rate / Night" matches the clean-margin calendar push.
 // ─────────────────────────────────────────────────────────────
 
 export const PLATFORM_FEE = 0.15;      // 15% — covers Booking.com / Airbnb guest service fees
@@ -69,9 +74,20 @@ export const MIN_PROFIT_MARGIN = 0.20; // 20% — floor we want after channel fe
  *
  * Example: buyIn=$1,172 on Airbnb → 1.20 × 1172 / 0.845 = $1,664.85
  */
-export function minProfitableRate(buyIn: number, channel: ChannelKey): number {
+export function minProfitableRate(
+  buyIn: number,
+  channel: ChannelKey,
+  targetMargin: number = MIN_PROFIT_MARGIN,
+): number {
   const fee = CHANNEL_HOST_FEE[channel] ?? 0;
-  return Math.ceil(((1 + MIN_PROFIT_MARGIN) * buyIn) / (1 - fee));
+  return Math.ceil(((1 + targetMargin) * buyIn) / (1 - fee));
+}
+
+export function cleanBaseRateFromBuyIn(
+  buyIn: number,
+  targetMargin: number = MIN_PROFIT_MARGIN,
+): number {
+  return minProfitableRate(buyIn, "direct", targetMargin);
 }
 
 /**
@@ -338,7 +354,7 @@ function generateMonthlyRates(
       const multiplier = SEASON_MULTIPLIERS[region][season];
       buyInRate = Math.round(baseBuyIn * multiplier);
     }
-    const sellRate = Math.round(buyInRate * MARKUP);
+    const sellRate = cleanBaseRateFromBuyIn(buyInRate);
     return { month: MONTH_NAMES[monthIndex], year, yearMonth, season, buyInRate, sellRate };
   });
 }
@@ -365,7 +381,7 @@ export function calcSellRateFromBuyIn(buyInCost: number): {
 
 // ─────────────────────────────────────────────────────────────
 // SEASONAL RATE REFERENCE — what you'd charge per season for a property
-// Based on community BUY_IN_RATES × season multiplier × MARKUP
+// Based on community BUY_IN_RATES × season multiplier × clean-margin base rate
 // ─────────────────────────────────────────────────────────────
 
 export type SeasonalRateRef = {
@@ -390,7 +406,7 @@ export function getSeasonalRateReference(
       const base = getBuyInRate(config.community, unit.bedrooms, propertyId);
       nightlyBuyIn += Math.round(base * multiplier);
     }
-    const nightlySell = Math.round(nightlyBuyIn * MARKUP);
+    const nightlySell = cleanBaseRateFromBuyIn(nightlyBuyIn);
     return { season, nightly: nightlySell, multiplier };
   });
 
@@ -458,7 +474,7 @@ export function getPropertyPricing(propertyId: number): PropertyPricing | null {
 
   const units: UnitPricing[] = config.units.map((unit) => {
     const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
-    const baseSellRate = Math.round(baseBuyIn * MARKUP);
+    const baseSellRate = cleanBaseRateFromBuyIn(baseBuyIn);
     const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unit.bedrooms);
     return { unitId: unit.unitId, unitLabel: unit.unitLabel, bedrooms: unit.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates };
   });
@@ -506,7 +522,7 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
     const propertyId = parseInt(id, 10);
     for (const unitCfg of config.units) {
       const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms, propertyId);
-      const baseSellRate = Math.round(baseBuyIn * MARKUP);
+      const baseSellRate = cleanBaseRateFromBuyIn(baseBuyIn);
       const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unitCfg.bedrooms);
       results.push({
         propertyId,
@@ -543,7 +559,7 @@ export function calculateStaySellRate(
       const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
       nightlyBuyIn += Math.round(baseBuyIn * multiplier);
     }
-    const nightlySellRate = Math.round(nightlyBuyIn * MARKUP);
+    const nightlySellRate = cleanBaseRateFromBuyIn(nightlyBuyIn);
 
     nightlyBreakdown.push({ date: current.toISOString().split("T")[0], sellRate: nightlySellRate, season });
     totalSellRate += nightlySellRate;
