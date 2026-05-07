@@ -19718,9 +19718,25 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/property/:id/refresh-progress", async (req, res) => {
     const propertyId = parseInt(req.params.id, 10);
     if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid id" });
-    const { getRefreshProgress } = await import("./multichannel-buy-in");
+    const { getRefreshProgress, setRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const state = getRefreshProgress(propertyId);
     if (!state) return res.status(404).json({ error: "no active refresh" });
+    const isTerminal = state.phase === "done" || state.phase === "error";
+    const heartbeatAgeMs = Date.now() - state.lastTickAt;
+    const staleAfterMs = 2 * 60_000;
+    if (!isTerminal && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs > staleAfterMs) {
+      const interrupted = {
+        ...state,
+        phase: "error" as const,
+        label: "Refresh tracking interrupted",
+        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart or worker interruption. Start a fresh monthly refresh after the sidecar goes quiet.`,
+        lastTickAt: state.lastTickAt,
+      };
+      setRefreshProgress(interrupted);
+      clearRefreshProgress(propertyId);
+      res.setHeader("Cache-Control", "no-store");
+      return res.json(interrupted);
+    }
     res.setHeader("Cache-Control", "no-store");
     return res.json(state);
   });
