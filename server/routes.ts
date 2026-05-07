@@ -449,6 +449,34 @@ export interface ListingFacts {
   photoCount?: number;
 }
 
+function coerceListingNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/,/g, " ").trim();
+    const match = cleaned.match(/\d+(?:\.\d+)?/);
+    if (match) {
+      const n = Number(match[0]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    for (const key of ["value", "amount", "count", "total", "number"]) {
+      const n = coerceListingNumber(obj[key]);
+      if (n != null) return n;
+    }
+  }
+  return undefined;
+}
+
+function firstListingNumber(obj: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const n = coerceListingNumber(obj[key]);
+    if (n != null) return n;
+  }
+  return undefined;
+}
+
 // Pick plausible bed/bath counts from a Zillow scraper payload. The various
 // actor schemas expose them under different paths (`bedrooms`, `resoFacts.
 // bedrooms`, `hdpData.homeInfo.bedrooms`), but they all use the same field
@@ -460,8 +488,20 @@ function extractListingFacts(payload: any): ListingFacts {
   function walk(o: any, depth: number): void {
     if (depth > 12 || !o || typeof o !== "object") return;
     if (Array.isArray(o)) { for (const v of o) walk(v, depth + 1); return; }
-    if (facts.bedrooms == null && typeof o.bedrooms === "number" && o.bedrooms > 0 && o.bedrooms < 50) {
-      facts.bedrooms = Math.round(o.bedrooms);
+    if (facts.bedrooms == null) {
+      const bd = firstListingNumber(o, [
+        "bedrooms",
+        "beds",
+        "bed",
+        "numberOfBedrooms",
+        "numBedrooms",
+        "bedroomsTotal",
+        "bedrooms_total",
+        "totalBedrooms",
+      ]);
+      if (bd != null && bd > 0 && bd < 50) {
+        facts.bedrooms = Math.round(bd);
+      }
     }
     if (facts.bathrooms == null) {
       // Prefer the most-precise field we can find. `bathrooms` carries the
@@ -479,17 +519,28 @@ function extractListingFacts(payload: any): ListingFacts {
       // fallback. Three-quarter baths count as 0.75; one-quarter
       // counts as 0.25.
       let b: number | undefined;
-      if (typeof o.bathrooms === "number") b = o.bathrooms;
-      else if (typeof o.bathroomsFloat === "number") b = o.bathroomsFloat;
-      else if (typeof o.bathroomsFull === "number") {
-        b = o.bathroomsFull
-          + (typeof o.bathroomsHalf === "number" ? o.bathroomsHalf * 0.5 : 0)
-          + (typeof o.partialBathrooms === "number" ? o.partialBathrooms * 0.5 : 0)
-          + (typeof o.bathroomsThreeQuarter === "number" ? o.bathroomsThreeQuarter * 0.75 : 0)
-          + (typeof o.bathroomsOneQuarter === "number" ? o.bathroomsOneQuarter * 0.25 : 0);
-      } else if (typeof o.bathroomsTotalInteger === "number") b = o.bathroomsTotalInteger;
-      else if (typeof o.numberOfBathrooms === "number") b = o.numberOfBathrooms;
-      else if (typeof o.numberOfBathroomsTotal === "number") b = o.numberOfBathroomsTotal;
+      b = firstListingNumber(o, [
+        "bathrooms",
+        "baths",
+        "bath",
+        "bathroomsFloat",
+        "bathroomsTotal",
+        "bathroomsTotalDecimal",
+        "bathrooms_total",
+        "totalBathrooms",
+        "numberOfBathrooms",
+        "numberOfBathroomsTotal",
+        "numBathrooms",
+      ]);
+      if (b == null && coerceListingNumber(o.bathroomsFull) != null) {
+        b = coerceListingNumber(o.bathroomsFull)!
+          + (coerceListingNumber(o.bathroomsHalf) ?? 0) * 0.5
+          + (coerceListingNumber(o.partialBathrooms) ?? 0) * 0.5
+          + (coerceListingNumber(o.bathroomsThreeQuarter) ?? 0) * 0.75
+          + (coerceListingNumber(o.bathroomsOneQuarter) ?? 0) * 0.25;
+      } else if (b == null) {
+        b = firstListingNumber(o, ["bathroomsTotalInteger", "fullBathrooms", "totalFullBathrooms"]);
+      }
       if (typeof b === "number" && b > 0 && b < 50) {
         // Snap to nearest 0.5 — Zillow half-baths are always multiples of
         // 0.5, so a non-half fractional is almost certainly noise.
@@ -529,8 +580,18 @@ function extractListingFacts(payload: any): ListingFacts {
     // Some actor variants expose `photoCount`, others nest as
     // `responsivePhotos.length` or `originalPhotos.length`. The
     // walker hits all of them by depth.
-    if (facts.photoCount == null && typeof o.photoCount === "number" && o.photoCount >= 0 && o.photoCount < 1000) {
-      facts.photoCount = o.photoCount;
+    if (facts.photoCount == null) {
+      const pc = firstListingNumber(o, ["photoCount", "photosCount", "imageCount", "imagesCount", "numberOfPhotos"]);
+      if (pc != null && pc >= 0 && pc < 1000) {
+        facts.photoCount = Math.round(pc);
+      } else {
+        for (const key of ["responsivePhotos", "originalPhotos", "photos", "images", "photoUrls", "media"]) {
+          if (Array.isArray(o[key]) && o[key].length > 0 && o[key].length < 1000) {
+            facts.photoCount = o[key].length;
+            break;
+          }
+        }
+      }
     }
     for (const v of Object.values(o)) walk(v, depth + 1);
   }
@@ -552,13 +613,13 @@ function extractFactsFromJsonLd(html: string): ListingFacts {
       const items = Array.isArray(parsed) ? parsed : [parsed];
       for (const obj of items) {
         if (!obj || typeof obj !== "object") continue;
-        const bd = obj.numberOfBedrooms ?? obj.numberOfRooms;
-        const ba = obj.numberOfBathroomsTotal ?? obj.numberOfFullBathrooms;
-        if (out.bedrooms == null && typeof bd === "number" && bd > 0 && bd < 50) {
+        const bd = firstListingNumber(obj, ["numberOfBedrooms", "bedrooms", "beds", "numberOfRooms"]);
+        const ba = firstListingNumber(obj, ["numberOfBathroomsTotal", "numberOfBathrooms", "numberOfFullBathrooms", "bathrooms", "baths"]);
+        if (out.bedrooms == null && bd != null && bd > 0 && bd < 50) {
           out.bedrooms = Math.round(bd);
         }
-        if (out.bathrooms == null && typeof ba === "number" && ba > 0 && ba < 50) {
-          out.bathrooms = Math.floor(ba);
+        if (out.bathrooms == null && ba != null && ba > 0 && ba < 50) {
+          out.bathrooms = Math.round(ba * 2) / 2;
         }
       }
     } catch {}
@@ -603,6 +664,81 @@ function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts
     propertySubType: primary.propertySubType ?? fallback.propertySubType,
     photoCount: primary.photoCount ?? fallback.photoCount,
   };
+}
+
+function parseListingAddressFromUrl(url: string): string | null {
+  const titleCase = (value: string) => value.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+  const clean = (value: string): string | null => {
+    const decoded = decodeURIComponent(value)
+      .replace(/[_-]+/g, " ")
+      .replace(/\b(?:FL|HI|CA|TX|NY|GA|SC|NC|AL|MS|LA|WA|OR|CO|AZ|NV)\b/gi, " ")
+      .replace(/\b\d{5}(?: \d{4})?\b/g, " ")
+      .replace(/\bM\d{4,}(?: \d+)?\b/gi, " ")
+      .replace(/\bzpid\b.*$/i, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const m = decoded.match(
+      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{2,5}[A-Za-z]?)?)\b/i,
+    );
+    return m?.[1] ? titleCase(m[1].trim()) : null;
+  };
+
+  const zillowMatch = url.match(/\/homedetails\/([^/]+)\//i);
+  if (zillowMatch) return clean(zillowMatch[1]);
+
+  const realtorMatch = url.match(/\/realestateandhomes-detail\/([^/?#]+)/i);
+  if (realtorMatch) {
+    const slug = realtorMatch[1];
+    const firstSegment = slug.split("_")[0];
+    return clean(firstSegment) ?? clean(slug);
+  }
+
+  const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)(?:\/unit-([^/]+))?\/home\//i);
+  if (redfinMatch) {
+    const street = redfinMatch[1];
+    const unit = redfinMatch[2] ? ` Unit ${redfinMatch[2]}` : "";
+    return clean(`${street}${unit}`);
+  }
+
+  return null;
+}
+
+function parseListingAddressFromText(text: string): string | null {
+  const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
+  const m = cleaned.match(
+    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{2,5}[A-Za-z]?)?)\b/i,
+  );
+  return m?.[1]?.trim().replace(/\b[a-z]/g, (c) => c.toUpperCase()) ?? null;
+}
+
+function streetRootFromListingAddress(address: string | null): string | null {
+  if (!address) return null;
+  const m = address
+    .toLowerCase()
+    .replace(/&[#a-z0-9]+;/gi, " ")
+    .replace(/[^a-z0-9.'#\s-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
+  if (!m) return null;
+  const typeMap: Record<string, string> = {
+    boulevard: "blvd",
+    road: "rd",
+    street: "st",
+    avenue: "ave",
+    drive: "dr",
+    lane: "ln",
+    circle: "cir",
+    court: "ct",
+    parkway: "pkwy",
+    place: "pl",
+    terrace: "ter",
+  };
+  const streetName = m[2]
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:n|s|e|w|north|south|east|west)\s+/i, "");
+  const streetType = typeMap[m[3]] ?? m[3];
+  return `${m[1]} ${streetName} ${streetType}`;
 }
 
 // Read photos from the specific known-good keys on a Zillow listing
@@ -1216,8 +1352,18 @@ async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; fac
     const seen = new Set<string>();
     const photos: string[] = [];
     const pushPhoto = (raw: unknown) => {
-      if (typeof raw !== "string") return;
-      let u = raw.trim();
+      let u = "";
+      if (typeof raw === "string") u = raw;
+      else if (raw && typeof raw === "object") {
+        const obj = raw as Record<string, unknown>;
+        u = String(obj.url ?? obj.href ?? obj.src ?? obj.contentUrl ?? obj.original ?? obj.large ?? "");
+      }
+      if (!u) return;
+      u = u
+        .trim()
+        .replace(/\\u002F/g, "/")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/g, "&");
       if (u.startsWith("//")) u = `https:${u}`;
       if (!/^https?:\/\//i.test(u)) return;
       if (!/(?:ar\.rdcpix\.com|i\.realtor\.com|rdcpix\.com)/i.test(u)) return;
@@ -1239,6 +1385,8 @@ async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; fac
           const imgs = obj.image;
           if (Array.isArray(imgs)) for (const i of imgs) pushPhoto(i);
           else pushPhoto(imgs);
+          const contentUrl = (obj as any).contentUrl;
+          if (contentUrl) pushPhoto(contentUrl);
         }
       } catch {}
     }
@@ -1253,6 +1401,16 @@ async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; fac
       for (const m of imgMatches) {
         pushPhoto(m[1]);
         if (photos.length >= 30) break;
+      }
+    }
+    // Realtor often embeds CDN URLs inside hydration JSON rather
+    // than clean img tags. Scoped to Realtor's own image CDN, so
+    // this does not widen the Zillow extractor.
+    if (photos.length === 0) {
+      const rawMatches = Array.from(html.matchAll(/https?:\\?\/\\?\/(?:ar\.rdcpix\.com|i\.realtor\.com|[^"'\s<>()]+\.rdcpix\.com)[^"'\s<>()]+/gi));
+      for (const m of rawMatches) {
+        pushPhoto(m[0]);
+        if (photos.length >= 40) break;
       }
     }
 
@@ -17714,6 +17872,21 @@ Return ONLY compact JSON with this exact shape:
         "villa", "villas", "beach", "club", "community", "townhome", "townhomes",
         "townhouse", "townhouses", "apartment", "apartments",
       ]).has(token));
+    const harvestRootCounts = new Map<string, number>();
+    const rememberHarvestRoot = (link: string, title = "", snippet = "") => {
+      if (isCityWide) return;
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
+      );
+      if (!root) return;
+      harvestRootCounts.set(root, (harvestRootCounts.get(root) ?? 0) + 1);
+    };
+    const repeatedHarvestRoots = () => {
+      const repeated = Array.from(harvestRootCounts.entries())
+        .filter(([, count]) => count >= 2)
+        .map(([root]) => root);
+      return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
+    };
     const looksCommunityAnchored = (link: string, title: string, snippet: string): boolean => {
       if (isCityWide) return true;
       const lowerUrl = link.toLowerCase();
@@ -17722,6 +17895,13 @@ Return ONLY compact JSON with this exact shape:
       const hasCommunity = communityTokensForFilter.length === 0
         || communityTokensForFilter.every((token) => haystack.includes(token));
       return hasCity && hasCommunity;
+    };
+    const looksAddressRootAnchored = (link: string, title: string, snippet: string, allowedRoots: Set<string>): boolean => {
+      if (allowedRoots.size === 0) return false;
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
+      );
+      return !!root && allowedRoots.has(root);
     };
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // num=20 in city-wide mode (vs num=10 default) so each query
@@ -17745,7 +17925,12 @@ Return ONLY compact JSON with this exact shape:
         return false;
       }
     };
-    const harvestQueries = async (queries: string[], urlPattern: RegExp, platform: SingleListingSource) => {
+    const harvestQueries = async (
+      queries: string[],
+      urlPattern: RegExp,
+      platform: SingleListingSource,
+      options: { addressRoots?: Set<string> } = {},
+    ) => {
       const results = await Promise.all(queries.map(async (q) => {
         try {
           const resp = await fetch(
@@ -17763,7 +17948,9 @@ Return ONLY compact JSON with this exact shape:
             }))
             .filter((r) => urlPattern.test(r.link))
             .filter((r) => platform !== "brokerage" || isBrokerageCandidateUrl(r.link))
-            .filter((r) => looksCommunityAnchored(r.link, r.title, r.snippet));
+            .filter((r) => options.addressRoots
+              ? looksAddressRootAnchored(r.link, r.title, r.snippet, options.addressRoots)
+              : looksCommunityAnchored(r.link, r.title, r.snippet));
         } catch (e: any) {
           console.warn(`[find-clean-unit] SearchAPI error for "${q}": ${e?.message ?? e}`);
           return [] as Array<{ link: string; title: string; snippet: string }>;
@@ -17782,6 +17969,7 @@ Return ONLY compact JSON with this exact shape:
             title: hit.title,
             snippet: hit.snippet,
           });
+          rememberHarvestRoot(link, hit.title, hit.snippet);
           platformCounts[platform]++;
         }
       }
@@ -17810,6 +17998,7 @@ Return ONLY compact JSON with this exact shape:
         if (skipSet.has(lower)) continue;
         seen.add(lower);
         candidateUrls.push(link);
+        rememberHarvestRoot(link);
         platformCounts.zillow++;
       }
       for (const link of realtorApifyUrls) {
@@ -17818,6 +18007,7 @@ Return ONLY compact JSON with this exact shape:
         if (skipSet.has(lower)) continue;
         seen.add(lower);
         candidateUrls.push(link);
+        rememberHarvestRoot(link);
         platformCounts.realtor++;
       }
       console.log(
@@ -17841,6 +18031,36 @@ Return ONLY compact JSON with this exact shape:
       harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
       harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
     ]);
+    const addressRootSet = repeatedHarvestRoots();
+    if (!isCityWide && addressRootSet.size > 0) {
+      const rootRealtorQueries = Array.from(addressRootSet).flatMap((root) => {
+        const quoted = `"${root}"`;
+        return [
+          `site:realtor.com/realestateandhomes-detail ${quoted} "${city}"`,
+          `site:realtor.com ${quoted} "${city}" "${stateToAbbrev(state)}"`,
+        ];
+      });
+      const rootRedfinQueries = Array.from(addressRootSet).flatMap((root) => {
+        const quoted = `"${root}"`;
+        return [
+          `site:redfin.com ${quoted} "${city}"`,
+        ];
+      });
+      const rootZillowQueries = Array.from(addressRootSet).flatMap((root) => {
+        const quoted = `"${root}"`;
+        return [
+          `site:zillow.com/homedetails ${quoted} "${city}"`,
+        ];
+      });
+      await Promise.all([
+        harvestQueries(rootRealtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor", { addressRoots: addressRootSet }),
+        harvestQueries(rootRedfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin", { addressRoots: addressRootSet }),
+        harvestQueries(rootZillowQueries, /zillow\.com\/homedetails\//i, "zillow", { addressRoots: addressRootSet }),
+      ]);
+      console.log(
+        `[find-clean-unit] address-root expansion for "${communityName}": roots=${Array.from(addressRootSet).join(", ")} total=${candidateUrls.length}`,
+      );
+    }
     const brokerageDetailScore = (url: string): number => {
       const path = (() => {
         try {
@@ -18030,74 +18250,16 @@ Return ONLY compact JSON with this exact shape:
     //   - Realtor: /realestateandhomes-detail/4460-Nehe-Rd_Lihue_HI_96766_M12345-67890
     //     street uses dashes, then underscore-separated City_ST_Zip_PropertyID
     // Returns just the street portion in both cases (no city/state/zip).
-    const addressFromSlug = (url: string): string | null => {
-      const zillowMatch = url.match(/\/homedetails\/([^/]+)\//i);
-      if (zillowMatch) {
-        const raw = zillowMatch[1].replace(/-/g, " ").trim();
-        return raw.replace(/\s+\d{5}(?:\s\w+)?$/, "").trim();
-      }
-      const realtorMatch = url.match(/\/realestateandhomes-detail\/([^/]+)/i);
-      if (realtorMatch) {
-        // First underscore-separated segment is the dashed street.
-        const segments = realtorMatch[1].split("_");
-        if (segments.length === 0) return null;
-        return segments[0].replace(/-/g, " ").trim();
-      }
-      // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
-      // Redfin URL: /<state>/<city>/<address-slug>/home/<id>
-      // or /<state>/<city>/<address-slug>/unit-<unit>/home/<id>.
-      // Parse out the dashed street portion and preserve explicit unit
-      // segments when present.
-      const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)(?:\/unit-([^/]+))?\/home\//i);
-      if (redfinMatch) {
-        const street = redfinMatch[1].replace(/-/g, " ").trim();
-        const unit = redfinMatch[2]?.replace(/-/g, " ").trim();
-        return unit ? `${street} unit ${unit}` : street;
-      }
-      return null;
-    };
-    const addressFromSearchText = (text: string): string | null => {
-      const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
-      const m = cleaned.match(
-        /\b(\d{3,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*[A-Za-z0-9-]+)?)\b/i,
-      );
-      return m?.[1]?.trim() ?? null;
-    };
-    const streetRootFromAddress = (address: string | null): string | null => {
-      if (!address) return null;
-      const m = address
-        .toLowerCase()
-        .replace(/&[#a-z0-9]+;/gi, " ")
-        .replace(/[^a-z0-9.'#\s-]+/g, " ")
-        .replace(/\s+/g, " ")
-        .match(/\b(\d{3,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
-      if (!m) return null;
-      const typeMap: Record<string, string> = {
-        boulevard: "blvd",
-        road: "rd",
-        street: "st",
-        avenue: "ave",
-        drive: "dr",
-        lane: "ln",
-        circle: "cir",
-        court: "ct",
-        parkway: "pkwy",
-        place: "pl",
-        terrace: "ter",
-      };
-      const streetName = m[2]
-        .replace(/\s+/g, " ")
-        .trim()
-        .replace(/^(?:n|s|e|w|north|south|east|west)\s+/i, "");
-      const streetType = typeMap[m[3]] ?? m[3];
-      return `${m[1]} ${streetName} ${streetType}`;
-    };
+    const addressFromSlug = parseListingAddressFromUrl;
+    const addressFromSearchText = parseListingAddressFromText;
+    const streetRootFromAddress = streetRootFromListingAddress;
     const platformForCandidate = (url: string): SingleListingSource => (
       candidateMeta.get(url.toLowerCase())?.platform
         ?? (/zillow\.com/i.test(url) ? "zillow" : /redfin\.com/i.test(url) ? "redfin" : /realtor\.com/i.test(url) ? "realtor" : "brokerage")
     );
     const communityAddressRoots = new Set<string>();
     if (!isCityWide) {
+      const rootCounts = new Map<string, number>();
       for (const candidate of candidateUrls) {
         const platform = platformForCandidate(candidate);
         if (platform === "brokerage") continue;
@@ -18105,7 +18267,11 @@ Return ONLY compact JSON with this exact shape:
         const root = streetRootFromAddress(
           addressFromSlug(candidate) ?? addressFromSearchText(`${metaForCandidate?.title ?? ""} ${metaForCandidate?.snippet ?? ""}`),
         );
-        if (root) communityAddressRoots.add(root);
+        if (root) rootCounts.set(root, (rootCounts.get(root) ?? 0) + 1);
+      }
+      const repeatedRoots = Array.from(rootCounts.entries()).filter(([, count]) => count >= 2);
+      for (const [root] of (repeatedRoots.length > 0 ? repeatedRoots : Array.from(rootCounts.entries()))) {
+        communityAddressRoots.add(root);
       }
       if (communityAddressRoots.size > 0) {
         console.log(
@@ -18232,11 +18398,9 @@ Return ONLY compact JSON with this exact shape:
         emit({ type: "candidate-rejected", url, reason });
         continue;
       }
-      const candidatePlatform = platformForCandidate(url);
       const candidateStreetRoot = streetRootFromAddress(addressGuess);
       if (
         !isCityWide &&
-        candidatePlatform === "brokerage" &&
         communityAddressRoots.size > 0 &&
         candidateStreetRoot &&
         !communityAddressRoots.has(candidateStreetRoot)
