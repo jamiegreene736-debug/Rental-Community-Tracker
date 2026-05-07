@@ -132,6 +132,12 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured message_templates delivery channel column");
 
   await db.execute(sql`
+    ALTER TABLE property_market_rates
+      ADD COLUMN IF NOT EXISTS monthly_rates jsonb NOT NULL DEFAULT '{}'::jsonb
+  `);
+  console.log("[schema] ensured property_market_rates monthly_rates column");
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS quo_sms_messages (
       id serial PRIMARY KEY,
       provider_message_id text NOT NULL UNIQUE,
