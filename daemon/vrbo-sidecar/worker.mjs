@@ -61,6 +61,15 @@ function log(msg, ...rest) {
   console.log(`[${ts}] [vrbo-sidecar]`, msg, ...rest);
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
   return Promise.race([
     Promise.resolve(promise).catch(() => fallback),
@@ -555,6 +564,41 @@ async function resetPage() {
   } catch {
     // about:blank should never fail, but if it does the next
     // ensureBrowser/page.goto will recover.
+  }
+}
+
+async function showCompletePage(opType) {
+  if (!page || page.isClosed?.()) return;
+  try {
+    const now = new Date();
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sidecar Search Complete</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #0f172a; }
+    main { width: min(520px, calc(100vw - 48px)); border: 1px solid #dbeafe; border-radius: 14px; background: #ffffff; box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08); padding: 28px; }
+    .mark { width: 38px; height: 38px; border-radius: 999px; display: grid; place-items: center; background: #dcfce7; color: #15803d; font-size: 24px; margin-bottom: 14px; }
+    h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.2; }
+    p { margin: 0; color: #475569; font-size: 14px; line-height: 1.6; }
+    .meta { margin-top: 14px; padding-top: 14px; border-top: 1px solid #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #64748b; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">✓</div>
+    <h1>Sidecar search complete</h1>
+    <p>The local Chrome sidecar finished the latest ${escapeHtml(opType ?? "search")} request. You can return to the Rental Community Tracker tab.</p>
+    <div class="meta">${escapeHtml(now.toLocaleString())}</div>
+  </main>
+</body>
+</html>`;
+    await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 5_000 });
+    await normalizePageDisplay(page);
+  } catch (e) {
+    log(`complete page failed: ${e?.message ?? e}`);
   }
 }
 
@@ -3993,6 +4037,7 @@ async function processRequest(req) {
     }
   } finally {
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
+    await showCompletePage(opType);
   }
 }
 
