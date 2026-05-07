@@ -1855,15 +1855,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     message: string;
     reason?: string;
   };
-  const [refreshProgress, setRefreshProgress] = useState<{
+  type MarketRefreshProgress = {
     phase: string;
     percent: number;
     label: string;
+    startedAt?: number;
+    error?: string;
     lastTickAt?: number;
     daemonOnline?: boolean;
     daemonLastPollAgeMs?: number | null;
     warnings?: ScanWarning[];
-  } | null>(null);
+  };
+  type MarketRefreshNotice = {
+    propertyId: number;
+    status: "done" | "error";
+    finishedAt: number;
+    startedAt?: number;
+    label: string;
+    error?: string;
+  };
+  const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
+  const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
+  const handledTerminalProgressRef = useRef<string | null>(null);
   // 1Hz ticker so the elapsed-time display + staleness warning re-
   // render between the 1.5s progress polls. Cheap (no network); keyed
   // off marketRatesRefreshing so it stops when the scan ends.
@@ -1886,6 +1900,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       refreshAbortRef.current = null;
     }
   }, []);
+  useEffect(() => {
+    handledTerminalProgressRef.current = null;
+    if (!propertyId || typeof window === "undefined") {
+      setRefreshNotice(null);
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(refreshNoticeKeyFor(propertyId));
+      if (!raw) {
+        setRefreshNotice(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<MarketRefreshNotice>;
+      if (
+        parsed.propertyId === propertyId &&
+        (parsed.status === "done" || parsed.status === "error") &&
+        typeof parsed.finishedAt === "number" &&
+        Number.isFinite(parsed.finishedAt)
+      ) {
+        setRefreshNotice({
+          propertyId,
+          status: parsed.status,
+          finishedAt: parsed.finishedAt,
+          startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
+          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Monthly market-rate scan finished",
+          error: typeof parsed.error === "string" ? parsed.error : undefined,
+        });
+      } else {
+        window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+        setRefreshNotice(null);
+      }
+    } catch {
+      window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+      setRefreshNotice(null);
+    }
+  }, [propertyId]);
+  const recordRefreshNotice = useCallback((notice: Omit<MarketRefreshNotice, "propertyId">) => {
+    if (!propertyId) return;
+    const next: MarketRefreshNotice = { ...notice, propertyId };
+    setRefreshNotice(next);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(refreshNoticeKeyFor(propertyId), JSON.stringify(next));
+      }
+    } catch {}
+  }, [propertyId]);
+  const dismissRefreshNotice = useCallback(() => {
+    setRefreshNotice(null);
+    try {
+      if (propertyId && typeof window !== "undefined") {
+        window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+      }
+    } catch {}
+  }, [propertyId]);
+  const formatRefreshNoticeTime = useCallback((value: number) => {
+    if (!Number.isFinite(value)) return "unknown time";
+    try {
+      return new Date(value).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+    } catch {
+      return new Date(value).toLocaleString();
+    }
+  }, []);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -1902,12 +1981,73 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     void reloadMarketRates();
   }, [reloadMarketRates]);
+  const readServerRefreshProgress = useCallback(async (): Promise<MarketRefreshProgress | null> => {
+    if (!propertyId) return null;
+    const r = await fetch(`/api/property/${propertyId}/refresh-progress`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const p = await r.json() as MarketRefreshProgress;
+    const next: MarketRefreshProgress = {
+      phase: String(p.phase ?? ""),
+      percent: Number.isFinite(p.percent) ? p.percent : 0,
+      label: String(p.label ?? ""),
+      startedAt: typeof p.startedAt === "number" ? p.startedAt : undefined,
+      error: typeof p.error === "string" ? p.error : undefined,
+      lastTickAt: typeof p.lastTickAt === "number" ? p.lastTickAt : undefined,
+      daemonOnline: typeof p.daemonOnline === "boolean" ? p.daemonOnline : undefined,
+      daemonLastPollAgeMs: typeof p.daemonLastPollAgeMs === "number" ? p.daemonLastPollAgeMs : null,
+      warnings: Array.isArray(p.warnings) ? p.warnings : undefined,
+    };
+    setRefreshProgress(next);
+    return next;
+  }, [propertyId]);
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    const poll = async () => {
+      const p = await readServerRefreshProgress().catch(() => null);
+      if (cancelled || !p) return;
+      const isTerminal = p.phase === "done" || p.phase === "error";
+      if (isTerminal) {
+        setMarketRatesRefreshing(false);
+        setRefreshStartedAt(null);
+        const terminalKey = `${propertyId}|${p.phase}|${p.startedAt ?? ""}|${p.error ?? ""}|${p.label ?? ""}`;
+        if (handledTerminalProgressRef.current !== terminalKey) {
+          handledTerminalProgressRef.current = terminalKey;
+          recordRefreshNotice({
+            status: p.phase === "error" ? "error" : "done",
+            finishedAt: Date.now(),
+            startedAt: p.startedAt,
+            label: p.phase === "error"
+              ? (p.label || "Monthly market-rate scan failed")
+              : "Monthly market-rate scan finished",
+            error: p.error,
+          });
+          if (p.phase === "done") {
+            await reloadMarketRates();
+          }
+        }
+        return;
+      }
+      handledTerminalProgressRef.current = null;
+      setRefreshNotice(null);
+      setMarketRatesRefreshing(true);
+      setRefreshStartedAt((current) => current ?? p.startedAt ?? Date.now());
+    };
+    void poll();
+    const timer = window.setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [propertyId, readServerRefreshProgress, recordRefreshNotice, reloadMarketRates]);
 
   const refreshThisPropertyMarketRates = useCallback(async () => {
     if (!propertyId || marketRatesRefreshing) return;
+    const startedAt = Date.now();
     setMarketRatesRefreshing(true);
-    setRefreshStartedAt(Date.now());
-    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing monthly scan…" });
+    setRefreshNotice(null);
+    setRefreshStartedAt(startedAt);
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing monthly scan…", startedAt });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -1915,55 +2055,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // Poll both so draft refreshes don't sit on the local 0% placeholder.
     let progressTimer: number | null = null;
     const tickProgress = async () => {
-      try {
-        const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
-        if (r.ok) {
-          const p = await r.json() as {
-            phase: string;
-            percent: number;
-            label: string;
-            lastTickAt?: number;
-            daemonOnline?: boolean;
-            daemonLastPollAgeMs?: number | null;
-            warnings?: ScanWarning[];
-          };
-          setRefreshProgress({
-            phase: p.phase,
-            percent: p.percent,
-            label: p.label,
-            lastTickAt: p.lastTickAt,
-            daemonOnline: p.daemonOnline,
-            daemonLastPollAgeMs: p.daemonLastPollAgeMs,
-            warnings: p.warnings,
-          });
-        }
-      } catch {}
+      await readServerRefreshProgress().catch(() => null);
     };
     void tickProgress();
     progressTimer = window.setInterval(tickProgress, 1500);
     const readProgress = async () => {
-      const r = await fetch(`/api/property/${propertyId}/refresh-progress`);
-      if (!r.ok) return null;
-      const p = await r.json() as {
-        phase: string;
-        percent: number;
-        label: string;
-        error?: string;
-        lastTickAt?: number;
-        daemonOnline?: boolean;
-        daemonLastPollAgeMs?: number | null;
-        warnings?: ScanWarning[];
-      };
-      setRefreshProgress({
-        phase: p.phase,
-        percent: p.percent,
-        label: p.label,
-        lastTickAt: p.lastTickAt,
-        daemonOnline: p.daemonOnline,
-        daemonLastPollAgeMs: p.daemonLastPollAgeMs,
-        warnings: p.warnings,
-      });
-      return p;
+      return readServerRefreshProgress();
     };
     const waitForBackgroundRefresh = async () => {
       const deadline = Date.now() + 4 * 60 * 60 * 1000;
@@ -1971,7 +2068,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
         const p = await readProgress().catch(() => null);
         if (!p) continue;
-        if (p.phase === "done") return;
+        if (p.phase === "done") {
+          recordRefreshNotice({
+            status: "done",
+            finishedAt: Date.now(),
+            startedAt: p.startedAt ?? startedAt,
+            label: "Monthly market-rate scan finished",
+          });
+          return;
+        }
         if (p.phase === "error") throw new Error(p.error || p.label || "Refresh failed");
       }
       throw new Error("Refresh is still running after 90 minutes. You can refresh the page later to load any completed rates.");
@@ -1991,7 +2096,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const r = await fetch(path, { method: "POST", signal: controller.signal });
       if (!r.ok) {
         const data = await r.json().catch(() => ({}));
-        toast({ title: "Refresh failed", description: data?.error || `HTTP ${r.status}`, variant: "destructive" });
+        const message = data?.error || `HTTP ${r.status}`;
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: message, startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Monthly market-rate scan failed",
+          error: message,
+        });
+        toast({ title: "Refresh failed", description: message, variant: "destructive" });
         return;
       }
       const data = await r.json().catch(() => ({} as Record<string, unknown>));
@@ -1999,6 +2113,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         await waitForBackgroundRefresh();
         setLiveSnapshot(null);
         await reloadMarketRates();
+        recordRefreshNotice({
+          status: "done",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Monthly market-rate scan finished",
+        });
         toast({
           duration: Infinity,
           title: "Market rates refreshed",
@@ -2065,6 +2185,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         setLiveSnapshot(null);
       }
       await reloadMarketRates();
+      recordRefreshNotice({
+        status: "done",
+        finishedAt: Date.now(),
+        startedAt,
+        label: "Monthly market-rate scan finished",
+      });
       // Persistent green-check confirmation — only goes away when the
       // user clicks the X (PR #305). Default Radix duration auto-
       // dismisses at 5s; Infinity keeps it open until manual dismiss.
@@ -2100,16 +2226,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (e?.name === "AbortError") {
         toast({ title: "Refresh cancelled", description: "Server scan continues in the background — refresh later to pick up partial results." });
       } else {
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: e?.message, startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Monthly market-rate scan failed",
+          error: e?.message,
+        });
         toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
       }
     } finally {
       refreshAbortRef.current = null;
       if (progressTimer) window.clearInterval(progressTimer);
-      setRefreshProgress(null);
       setRefreshStartedAt(null);
       setMarketRatesRefreshing(false);
     }
-  }, [propertyId, marketRatesRefreshing, reloadMarketRates, toast]);
+  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordRefreshNotice, reloadMarketRates, toast]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
@@ -3675,7 +3808,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               // re-renders this block each second.
                               void nowTick;
                               const now = Date.now();
-                              const elapsedMs = refreshStartedAt ? now - refreshStartedAt : 0;
+                              const startedAtForDisplay = refreshStartedAt ?? refreshProgress.startedAt ?? null;
+                              const elapsedMs = startedAtForDisplay ? now - startedAtForDisplay : 0;
                               const elapsedMin = Math.floor(elapsedMs / 60000);
                               const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
                               const elapsedStr = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
@@ -3756,6 +3890,50 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </div>
                               );
                             })()}
+                            {!marketRatesRefreshing && refreshNotice && (
+                              <div
+                                style={{
+                                  marginBottom: 8,
+                                  padding: "8px 10px",
+                                  border: `1px solid ${refreshNotice.status === "done" ? "#bbf7d0" : "#fecaca"}`,
+                                  background: refreshNotice.status === "done" ? "#f0fdf4" : "#fef2f2",
+                                  borderRadius: 4,
+                                  color: refreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                  fontSize: 11,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: 12,
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <div>
+                                  <div style={{ fontWeight: 600 }}>
+                                    {refreshNotice.status === "done" ? "Finished last scan" : "Last scan failed"}: {formatRefreshNoticeTime(refreshNotice.finishedAt)}
+                                  </div>
+                                  <div style={{ marginTop: 2, opacity: 0.82 }}>
+                                    {refreshNotice.status === "done"
+                                      ? "Monthly market-rate basis has been saved. This notice stays here until you dismiss it."
+                                      : (refreshNotice.error || refreshNotice.label || "The monthly market-rate refresh did not complete.")}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={dismissRefreshNotice}
+                                  style={{
+                                    fontSize: 10,
+                                    padding: "3px 8px",
+                                    borderRadius: 4,
+                                    border: `1px solid ${refreshNotice.status === "done" ? "#86efac" : "#fca5a5"}`,
+                                    background: "#ffffff",
+                                    color: refreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  Dismiss
+                                </button>
+                              </div>
+                            )}
                             {/* Per-season basis card — ALWAYS visible
                                 when there's persisted basis data for
                                 this property. Earlier this only rendered

@@ -1049,9 +1049,11 @@ export function getRefreshProgress(propertyId: number): RefreshProgressState | n
   return _refreshProgress.get(propertyId) ?? null;
 }
 export function clearRefreshProgress(propertyId: number): void {
-  // Keep "done" or "error" terminal states for 30s so the Pricing tab
-  // sees the final result before the cleanup race.
-  setTimeout(() => _refreshProgress.delete(propertyId), 30_000);
+  // Keep "done" or "error" terminal states long enough for the Pricing
+  // tab to reattach after a Safari reload/sleep or a React remount. The
+  // client persists its own dismissible "last scan" notice after it sees
+  // this terminal state.
+  setTimeout(() => _refreshProgress.delete(propertyId), 10 * 60_000);
 }
 
 // Heartbeat ticker. Every 15s during a non-terminal scan, refresh

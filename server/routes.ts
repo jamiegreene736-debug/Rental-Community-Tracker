@@ -19678,6 +19678,7 @@ Return ONLY compact JSON with this exact shape:
     const { getRefreshProgress } = await import("./multichannel-buy-in");
     const state = getRefreshProgress(propertyId);
     if (!state) return res.status(404).json({ error: "no active refresh" });
+    res.setHeader("Cache-Control", "no-store");
     return res.json(state);
   });
 
