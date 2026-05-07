@@ -280,6 +280,16 @@ export function normalizeSeasonalBasis(
   return { low: lowBasis, high, holiday };
 }
 
+const MONTHLY_BASIS_OUTLIER_BAND = 0.30;
+
+function clampMonthlyBasisToSeason(monthlyBasis: number, seasonBasis: number | null): number {
+  if (!Number.isFinite(monthlyBasis) || monthlyBasis <= 0) return seasonBasis ?? 0;
+  if (seasonBasis == null || !Number.isFinite(seasonBasis) || seasonBasis <= 0) return monthlyBasis;
+  const low = Math.round(seasonBasis * (1 - MONTHLY_BASIS_OUTLIER_BAND));
+  const high = Math.round(seasonBasis * (1 + MONTHLY_BASIS_OUTLIER_BAND));
+  return Math.max(low, Math.min(high, Math.round(monthlyBasis)));
+}
+
 // Fallback chain (highest → lowest priority):
 //   1. Live per-season basis for (propertyId, bedrooms, season) when
 //      a season is supplied AND the multi-season scan populated it.
@@ -311,13 +321,13 @@ export function getBuyInRate(
         live.medianNightlyHoliday,
       );
       if (monthly && monthly.medianNightly > 0) {
-        if (monthly.season === "HIGH" && normalized.high != null) {
-          return Math.max(monthly.medianNightly, normalized.high);
-        }
-        if (monthly.season === "HOLIDAY" && normalized.holiday != null) {
-          return Math.max(monthly.medianNightly, normalized.holiday);
-        }
-        return monthly.medianNightly;
+        const monthlySeason = monthly.season ?? season ?? "LOW";
+        const seasonBasis = monthlySeason === "HIGH"
+          ? normalized.high
+          : monthlySeason === "HOLIDAY"
+            ? normalized.holiday
+            : normalized.low;
+        return clampMonthlyBasisToSeason(monthly.medianNightly, seasonBasis);
       }
       // Season-specific basis when available + requested.
       if (season === "HIGH" && normalized.high != null) return normalized.high;

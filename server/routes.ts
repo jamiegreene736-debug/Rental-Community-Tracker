@@ -9588,7 +9588,8 @@ export async function registerRoutes(
     const months = Math.min(parseInt((req.query.months as string) ?? "24", 10) || 24, 36);
     const startParam = req.query.start as string | undefined;
     const start = startParam ? new Date(startParam) : new Date();
-    start.setDate(1); start.setHours(0, 0, 0, 0);
+    if (startParam) start.setDate(1);
+    start.setHours(0, 0, 0, 0);
     const end = new Date(start);
     end.setMonth(end.getMonth() + months);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -9597,7 +9598,8 @@ export async function registerRoutes(
       // Multi-unit properties have multiple Guesty listings. For now we look up the
       // property's canonical Guesty listing via guestyPropertyMap. Multi-listing
       // support is a follow-up (returning one unit per Guesty listing).
-      const listingId = await storage.getGuestyListingId(propertyId);
+      const listingOverride = typeof req.query.listingId === "string" ? req.query.listingId.trim() : "";
+      const listingId = listingOverride || await storage.getGuestyListingId(propertyId);
       if (!listingId) {
         return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
       }
@@ -9675,6 +9677,9 @@ export async function registerRoutes(
     // Expand monthly rates into per-day entries Guesty will accept.
     type DayEntry = { date: string; price: number };
     const days: DayEntry[] = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStr = today.toISOString().slice(0, 10);
     for (const { yearMonth, price } of monthlyRates) {
       if (!/^\d{4}-\d{2}$/.test(yearMonth)) continue;
       if (!Number.isFinite(price) || price <= 0) continue;
@@ -9682,6 +9687,7 @@ export async function registerRoutes(
       const lastDay = new Date(y, m, 0).getDate(); // day 0 of next month = last day of this
       for (let d = 1; d <= lastDay; d++) {
         const ds = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        if (ds < todayStr) continue;
         days.push({ date: ds, price: Math.round(price) });
       }
     }
@@ -9745,13 +9751,17 @@ export async function registerRoutes(
         const rate: number = Number(d.price ?? d.rate ?? d.nightlyPrice ?? 0);
         if (priceByDate.get(dateStr) === Math.round(rate)) matched++;
       }
+      const fullyVerified = matched >= days.length;
       return res.json({
-        success: failedRanges.length === 0,
+        success: failedRanges.length === 0 && fullyVerified,
         pushedDays: days.length,
         pushedRanges,
         totalRanges: ranges.length,
         failedRanges: failedRanges.slice(0, 5),
         verifiedDays: matched,
+        error: fullyVerified
+          ? undefined
+          : `Guesty read-back only matched ${matched}/${days.length} pushed days. Refresh Guesty or retry the push before trusting the table.`,
         sampleRange: ranges[0],
       });
     } catch (err: any) {
@@ -19112,17 +19122,58 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowBasis * multiplier);
       };
+      const monthlyOutlierBand = 0.30;
+      const clampMonthlyBasisToSeason = (monthlyBasis: number, seasonBasis: number | null): number => {
+        if (!Number.isFinite(monthlyBasis) || monthlyBasis <= 0) return seasonBasis ?? 0;
+        if (seasonBasis == null || !Number.isFinite(seasonBasis) || seasonBasis <= 0) return Math.round(monthlyBasis);
+        const low = Math.round(seasonBasis * (1 - monthlyOutlierBand));
+        const high = Math.round(seasonBasis * (1 + monthlyOutlierBand));
+        return Math.max(low, Math.min(high, Math.round(monthlyBasis)));
+      };
       const ymd = (d: Date) => d.toISOString().slice(0, 10);
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
-      const monthlyWindows: Array<{ yearMonth: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
-      for (let i = 0; i < 24; i++) {
-        const monthDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i, 1));
-        const yearMonth = `${monthDate.getUTCFullYear()}-${String(monthDate.getUTCMonth() + 1).padStart(2, "0")}`;
+      const holidayDefs: Array<{ label: string; sm: number; sd: number; em: number; ed: number }> = [
+        { label: "Christmas / New Year", sm: 12, sd: 20, em: 1, ed: 5 },
+        { label: "Independence Day Week", sm: 7, sd: 1, em: 7, ed: 7 },
+        { label: "Thanksgiving Week", sm: 11, sd: 22, em: 11, ed: 30 },
+        { label: "Spring Break", sm: 3, sd: 15, em: 4, ed: 5 },
+        { label: "Presidents' Weekend", sm: 2, sd: 14, em: 2, ed: 17 },
+      ];
+      const holidayRangeForYear = (year: number, h: (typeof holidayDefs)[number]) => {
+        const start = new Date(Date.UTC(year, h.sm - 1, h.sd));
+        const endYear = h.em < h.sm ? year + 1 : year;
+        const end = new Date(Date.UTC(endYear, h.em - 1, h.ed + 1));
+        return { start, end };
+      };
+      const overlapsHoliday = (start: Date, end: Date): boolean => {
+        for (const year of [start.getUTCFullYear() - 1, start.getUTCFullYear(), start.getUTCFullYear() + 1]) {
+          for (const h of holidayDefs) {
+            const r = holidayRangeForYear(year, h);
+            if (start < r.end && end > r.start) return true;
+          }
+        }
+        return false;
+      };
+      const chooseMonthlyWindow = (monthDate: Date) => {
+        for (const day of [15, 8, 22]) {
+          const checkIn = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), day));
+          if (checkIn <= today) checkIn.setUTCDate(today.getUTCDate() + 2);
+          const checkOut = new Date(checkIn);
+          checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+          if (!overlapsHoliday(checkIn, checkOut)) return { checkIn, checkOut };
+        }
         const checkIn = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 15));
         if (checkIn <= today) checkIn.setUTCDate(today.getUTCDate() + 2);
         const checkOut = new Date(checkIn);
         checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+        return { checkIn, checkOut };
+      };
+      const monthlyWindows: Array<{ yearMonth: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
+      for (let i = 0; i < 24; i++) {
+        const monthDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i, 1));
+        const yearMonth = `${monthDate.getUTCFullYear()}-${String(monthDate.getUTCMonth() + 1).padStart(2, "0")}`;
+        const { checkIn, checkOut } = chooseMonthlyWindow(monthDate);
         monthlyWindows.push({
           yearMonth,
           season: getSeasonForMonth(yearMonth, pricingRegion) as SeasonLabel,
@@ -19132,13 +19183,6 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const horizonEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 24, 1));
-      const holidayDefs: Array<{ label: string; sm: number; sd: number }> = [
-        { label: "Christmas / New Year", sm: 12, sd: 20 },
-        { label: "Independence Day Week", sm: 7, sd: 1 },
-        { label: "Thanksgiving Week", sm: 11, sd: 22 },
-        { label: "Spring Break", sm: 3, sd: 15 },
-        { label: "Presidents' Weekend", sm: 2, sd: 14 },
-      ];
       const holidayWindows: Array<{ label: string; checkIn: string; checkOut: string }> = [];
       for (const year of [today.getUTCFullYear(), today.getUTCFullYear() + 1, today.getUTCFullYear() + 2]) {
         for (const h of holidayDefs) {
@@ -19314,7 +19358,20 @@ Return ONLY compact JSON with this exact shape:
           const holidayBasis = holidayFloor == null
             ? holidayRaw
             : Math.max(holidayRaw ?? holidayFloor, holidayFloor);
-          const allBasisValues = [...monthlyValues, highBasis, holidayBasis].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
+          const clampedMonthlyRates: Record<string, MonthlyRatePayload> = {};
+          for (const [yearMonth, payload] of Object.entries(monthlyRates)) {
+            const seasonBasis = payload.season === "HIGH"
+              ? highBasis
+              : payload.season === "HOLIDAY"
+                ? holidayBasis
+                : lowBasis;
+            clampedMonthlyRates[yearMonth] = {
+              ...payload,
+              medianNightly: clampMonthlyBasisToSeason(payload.medianNightly, seasonBasis),
+            };
+          }
+          const clampedMonthlyValues = Object.values(clampedMonthlyRates).map((r) => r.medianNightly);
+          const allBasisValues = [...clampedMonthlyValues, highBasis, holidayBasis].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
           const flags = sourceFlags.get(br) ?? { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 };
           const source: PersistedMonthly["basisSource"] = flags.hasNonAirbnb || (flags.hasAnyChannel && flags.channelCount > 1)
             ? "monthly-multichannel-median"
@@ -19325,7 +19382,7 @@ Return ONLY compact JSON with this exact shape:
             medianNightly: String(lowBasis),
             medianNightlyHigh: highBasis != null ? String(highBasis) : null,
             medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
-            monthlyRates,
+            monthlyRates: clampedMonthlyRates,
             lowNightly: String(Math.min(...allBasisValues)),
             highNightly: String(Math.max(...allBasisValues)),
             sampleCount: flags.channelCount || monthlyValues.length,

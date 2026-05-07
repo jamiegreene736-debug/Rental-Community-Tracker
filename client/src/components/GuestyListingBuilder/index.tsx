@@ -308,7 +308,12 @@ function ChannelMarkupCard({
         }),
       });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (!r.ok || data.success === false) {
+        const failed = Array.isArray(data.failedRanges) && data.failedRanges.length > 0
+          ? ` First failed range: ${data.failedRanges[0]?.range?.startDate ?? "unknown"}-${data.failedRanges[0]?.range?.endDate ?? "unknown"}`
+          : "";
+        throw new Error(data.error || `Guesty calendar push did not fully verify.${failed}`.trim());
+      }
       setSeasonalPushResult({ ...data, plan });
       // Apply the pushed plan directly to the parent's Guesty-rates state
       // so the 24-month table updates immediately. We don't trust a
@@ -2208,7 +2213,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     let cancelled = false;
     setGuestyRatesLoading(true);
     setGuestyRatesError(null);
-    fetch(`/api/builder/guesty-monthly-rates/${propertyId}?months=24`)
+    const qs = new URLSearchParams({ months: "24" });
+    if (selectedId) qs.set("listingId", selectedId);
+    fetch(`/api/builder/guesty-monthly-rates/${propertyId}?${qs.toString()}`)
       .then(async (r) => {
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
@@ -2231,7 +2238,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (!cancelled) setGuestyRatesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [propertyId]);
+  }, [propertyId, selectedId]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
