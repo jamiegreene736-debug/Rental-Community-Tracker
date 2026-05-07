@@ -3943,11 +3943,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <th>Month</th>
                                   <th>Season</th>
                                   <th>Buy-In / Night</th>
-                                  <th>Sheet Rate / Night</th>
-                                  <th>Guesty Rate / Night</th>
+                                  <th>Sheet Base / Night</th>
+                                  <th>Guesty Base / Night</th>
                                   <th>Market Position</th>
                                   <th colSpan={4} style={{ textAlign: "center", borderLeft: "1px solid #e5e7eb" }}>
-                                    Net Profit per Channel (at Guesty rate) — {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% floor target
+                                    Guest Sell Rate + Net Profit per Channel — {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% floor target
                                   </th>
                                 </tr>
                                 <tr>
@@ -3975,7 +3975,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   // For each channel, compute what the host actually nets
                                   // at the current Guesty rate, and whether it meets the 20% floor.
                                   const channelCells = (["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch) => {
-                                    if (!guesty) return { ch, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch), mk: 0 };
+                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch), mk: 0 };
                                     // Apply per-channel markup — what the guest actually pays
                                     // on this channel is Guesty base rate * (1 + markup).
                                     // Host then nets that * (1 - channel fee).
@@ -3993,7 +3993,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     // 0.5bp tolerance so 19.9995% rounds up to "clears the
                                     // floor" instead of flipping cells red on dust.
                                     const ok = margin >= MIN_PROFIT_MARGIN - 0.0005;
-                                    return { ch, profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
+                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
                                   });
                                   return (
                                     <tr key={row.yearMonth}>
@@ -4130,9 +4130,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         const textColor = c.ok ? "#166534" : "#991b1b";
                                         const mkPct = (c.mk * 100).toFixed(1);
                                         const hoverText =
-                                          `Need ≥ $${c.min.toLocaleString()}/night at 0% markup to hit 20% on ${c.ch}.`
-                                          + (c.mk > 0 ? ` Markup +${mkPct}% → channel rate $${Math.round(guesty!.avgRate * (1 + c.mk)).toLocaleString()}.` : "")
-                                          + ` Current net: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
+                                          `Guest-facing ${c.ch} sell rate: $${c.sellRate!.toLocaleString()}/night.`
+                                          + ` Guesty base rate: $${guesty!.avgRate.toLocaleString()}/night.`
+                                          + (c.mk > 0 ? ` Channel markup: +${mkPct}%.` : " No channel markup.")
+                                          + ` Floor to hit 20% on ${c.ch}: $${c.min.toLocaleString()}/night.`
+                                          + ` Estimated net profit: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
                                         return (
                                           <td
                                             key={c.ch}
@@ -4147,9 +4149,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                               whiteSpace: "nowrap",
                                             }}
                                           >
-                                            ${c.profit.toLocaleString()}
+                                            <div style={{ fontSize: 12, fontWeight: 700 }}>
+                                              Sell ${c.sellRate!.toLocaleString()}
+                                            </div>
+                                            <div style={{ fontSize: 9, fontWeight: 600, opacity: 0.9 }}>
+                                              Net ${c.profit.toLocaleString()} · {(c.margin! * 100).toFixed(0)}%
+                                            </div>
                                             <div style={{ fontSize: 9, fontWeight: 400, opacity: 0.75 }}>
-                                              {(c.margin! * 100).toFixed(0)}% · min ${c.min.toLocaleString()}
+                                              base ${guesty!.avgRate.toLocaleString()} · floor ${c.min.toLocaleString()}
                                               {c.mk > 0 && <> · <b>+{mkPct}%</b> mk</>}
                                             </div>
                                           </td>
@@ -4161,10 +4168,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </tbody>
                             </table>
                             <div style={{ marginTop: 10, fontSize: 11, color: "#6b7280", lineHeight: 1.5 }}>
-                              <b>Legend.</b> Each channel cell shows <b>net profit per night</b> at Guesty's current rate (after subtracting that channel's host fee).
+                              <b>Legend.</b> <b>Guesty Base</b> is the calendar rate stored in Guesty. Each channel cell starts with the <b>guest-facing sell rate</b> after that channel's markup, then the estimated net profit after that channel's host fee.
                               <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears 20% floor.
                               {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the rate or add a channel markup</b>.
-                              {" "}Second line shows actual margin % and the minimum rate needed on that channel. Hover a cell for the full breakdown.
+                              {" "}<b>Floor</b> is the minimum guest sell rate needed on that channel. Hover a cell for the full breakdown.
                             </div>
                           </>
                         )}
