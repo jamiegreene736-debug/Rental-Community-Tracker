@@ -1879,13 +1879,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     error?: string;
   };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy or server restart. Any already-queued sidecar browser work may keep finishing, but this pricing page can no longer measure that run. Start a fresh monthly refresh after the sidecar goes quiet.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
   const handledTerminalProgressRef = useRef<string | null>(null);
+  const marketRatesRefreshingRef = useRef(false);
+  const refreshProgressRef = useRef<MarketRefreshProgress | null>(null);
+  const missingProgressPollsRef = useRef(0);
+  const lostProgressRecordedRef = useRef(false);
   // 1Hz ticker so the elapsed-time display + staleness warning re-
   // render between the 1.5s progress polls. Cheap (no network); keyed
   // off marketRatesRefreshing so it stops when the scan ends.
   const [nowTick, setNowTick] = useState(0);
+  useEffect(() => {
+    marketRatesRefreshingRef.current = marketRatesRefreshing;
+  }, [marketRatesRefreshing]);
+  useEffect(() => {
+    refreshProgressRef.current = refreshProgress;
+  }, [refreshProgress]);
   useEffect(() => {
     if (!marketRatesRefreshing) return;
     const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
@@ -1906,6 +1917,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, []);
   useEffect(() => {
     handledTerminalProgressRef.current = null;
+    missingProgressPollsRef.current = 0;
+    lostProgressRecordedRef.current = false;
     if (!propertyId || typeof window === "undefined") {
       setRefreshNotice(null);
       return;
@@ -1969,6 +1982,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       return new Date(value).toLocaleString();
     }
   }, []);
+  const recordLostRefreshTracking = useCallback(() => {
+    if (lostProgressRecordedRef.current) return;
+    lostProgressRecordedRef.current = true;
+    const previous = refreshProgressRef.current;
+    setMarketRatesRefreshing(false);
+    setRefreshStartedAt(null);
+    setRefreshProgress({
+      phase: "error",
+      percent: previous?.percent ?? 100,
+      label: "Refresh tracking interrupted",
+      error: REFRESH_TRACKING_LOST_MESSAGE,
+      startedAt: previous?.startedAt,
+      progressDone: previous?.progressDone,
+      progressTotal: previous?.progressTotal,
+      progressCurrent: previous?.progressCurrent,
+      progressWindowLabel: previous?.progressWindowLabel,
+      lastTickAt: previous?.lastTickAt,
+      daemonOnline: previous?.daemonOnline,
+      daemonLastPollAgeMs: previous?.daemonLastPollAgeMs,
+      warnings: previous?.warnings,
+    });
+    recordRefreshNotice({
+      status: "error",
+      finishedAt: Date.now(),
+      startedAt: previous?.startedAt,
+      label: "Refresh tracking interrupted",
+      error: REFRESH_TRACKING_LOST_MESSAGE,
+    });
+  }, [recordRefreshNotice]);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -1985,10 +2027,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     void reloadMarketRates();
   }, [reloadMarketRates]);
-  const readServerRefreshProgress = useCallback(async (): Promise<MarketRefreshProgress | null> => {
-    if (!propertyId) return null;
+  type MarketRefreshProgressRead =
+    | { kind: "active"; progress: MarketRefreshProgress }
+    | { kind: "missing" }
+    | { kind: "failed"; message: string };
+  const readServerRefreshProgress = useCallback(async (): Promise<MarketRefreshProgressRead> => {
+    if (!propertyId) return { kind: "missing" };
     const r = await fetch(`/api/property/${propertyId}/refresh-progress`, { cache: "no-store" });
-    if (!r.ok) return null;
+    if (r.status === 404) return { kind: "missing" };
+    if (!r.ok) return { kind: "failed", message: `HTTP ${r.status}` };
     const p = await r.json() as MarketRefreshProgress;
     const next: MarketRefreshProgress = {
       phase: String(p.phase ?? ""),
@@ -2006,14 +2053,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       warnings: Array.isArray(p.warnings) ? p.warnings : undefined,
     };
     setRefreshProgress(next);
-    return next;
+    return { kind: "active", progress: next };
   }, [propertyId]);
   useEffect(() => {
     if (!propertyId) return;
     let cancelled = false;
     const poll = async () => {
-      const p = await readServerRefreshProgress().catch(() => null);
-      if (cancelled || !p) return;
+      const result = await readServerRefreshProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
+      if (cancelled) return;
+      if (result.kind === "missing") {
+        const localProgress = refreshProgressRef.current;
+        const hadRunningLocalRefresh =
+          marketRatesRefreshingRef.current ||
+          (localProgress != null && localProgress.phase !== "done" && localProgress.phase !== "error");
+        if (hadRunningLocalRefresh) {
+          missingProgressPollsRef.current += 1;
+          if (missingProgressPollsRef.current >= 3) recordLostRefreshTracking();
+        }
+        return;
+      }
+      if (result.kind === "failed") return;
+      missingProgressPollsRef.current = 0;
+      lostProgressRecordedRef.current = false;
+      const p = result.progress;
       const isTerminal = p.phase === "done" || p.phase === "error";
       if (isTerminal) {
         setMarketRatesRefreshing(false);
@@ -2047,11 +2109,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [propertyId, readServerRefreshProgress, recordRefreshNotice, reloadMarketRates]);
+  }, [propertyId, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates]);
 
   const refreshThisPropertyMarketRates = useCallback(async () => {
     if (!propertyId || marketRatesRefreshing) return;
     const startedAt = Date.now();
+    missingProgressPollsRef.current = 0;
+    lostProgressRecordedRef.current = false;
     setMarketRatesRefreshing(true);
     setRefreshNotice(null);
     setRefreshStartedAt(startedAt);
@@ -2074,8 +2138,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const deadline = Date.now() + 4 * 60 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
-        const p = await readProgress().catch(() => null);
-        if (!p) continue;
+        const result = await readProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
+        if (result.kind === "missing") {
+          missingProgressPollsRef.current += 1;
+          if (missingProgressPollsRef.current >= 3) {
+            recordLostRefreshTracking();
+            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
+          }
+          continue;
+        }
+        if (result.kind === "failed") continue;
+        missingProgressPollsRef.current = 0;
+        lostProgressRecordedRef.current = false;
+        const p = result.progress;
         if (p.phase === "done") {
           recordRefreshNotice({
             status: "done",
