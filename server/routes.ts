@@ -19208,14 +19208,25 @@ Return ONLY compact JSON with this exact shape:
         reason?: string;
       }> = [];
 
-      const setMonthlyProgress = (percent: number, label: string) => {
+      const setMonthlyProgress = (args: {
+        completed: number;
+        label: string;
+        current?: number;
+        currentLabel?: string;
+      }) => {
         const current = getRefreshProgress(propertyId);
+        const done = Math.max(0, Math.min(totalWindows, args.completed));
+        const percent = totalWindows > 0 ? Math.round((done / totalWindows) * 100) : 0;
         setRefreshProgress({
           propertyId,
           startedAt,
           phase: "monthly",
-          percent: Math.max(1, Math.min(94, percent)),
-          label,
+          percent: Math.max(0, Math.min(100, percent)),
+          label: args.label,
+          progressDone: done,
+          progressTotal: totalWindows,
+          progressCurrent: typeof args.current === "number" ? Math.max(1, Math.min(totalWindows, args.current)) : undefined,
+          progressWindowLabel: args.currentLabel,
           daemonOnline: current?.daemonOnline,
           daemonLastPollAgeMs: current?.daemonLastPollAgeMs,
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
@@ -19258,8 +19269,13 @@ Return ONLY compact JSON with this exact shape:
         let completed = 0;
         for (const win of monthlyWindows) {
           assertSidecarRunCurrent();
-          const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
-          setMonthlyProgress(startPct, `Scanning ${win.yearMonth} ${win.season} rates (${completed + 1}/${totalWindows})`);
+          const currentLabel = `${win.yearMonth} ${win.season} rates`;
+          setMonthlyProgress({
+            completed,
+            current: completed + 1,
+            currentLabel,
+            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
           const scan = await fetchMultiChannelBuyInByBR({
             community: loc.searchName,
             city: loc.city,
@@ -19292,13 +19308,21 @@ Return ONLY compact JSON with this exact shape:
             noteSource(br, result.channels, result.channelRates);
           }
           completed++;
-          setMonthlyProgress(Math.round((completed / Math.max(1, totalWindows)) * 90) + 2, `Completed ${win.yearMonth} ${win.season} rates (${completed}/${totalWindows})`);
+          setMonthlyProgress({
+            completed,
+            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
         }
 
         for (const win of holidayWindows) {
           assertSidecarRunCurrent();
-          const startPct = Math.round((completed / Math.max(1, totalWindows)) * 90) + 2;
-          setMonthlyProgress(startPct, `Scanning ${win.label} holiday rates (${completed + 1}/${totalWindows})`);
+          const currentLabel = `${win.label} holiday rates`;
+          setMonthlyProgress({
+            completed,
+            current: completed + 1,
+            currentLabel,
+            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
           const scan = await fetchMultiChannelBuyInByBR({
             community: loc.searchName,
             city: loc.city,
@@ -19322,10 +19346,21 @@ Return ONLY compact JSON with this exact shape:
             noteSource(br, result.channels, result.channelRates);
           }
           completed++;
-          setMonthlyProgress(Math.round((completed / Math.max(1, totalWindows)) * 90) + 2, `Completed ${win.label} holiday rates (${completed}/${totalWindows})`);
+          setMonthlyProgress({
+            completed,
+            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
         }
 
-        setRefreshProgress({ propertyId, startedAt, phase: "persisting", percent: 95, label: "Persisting monthly medians" });
+        setRefreshProgress({
+          propertyId,
+          startedAt,
+          phase: "persisting",
+          percent: 100,
+          label: "Persisting monthly medians",
+          progressDone: totalWindows,
+          progressTotal: totalWindows,
+        });
         const persisted: PersistedMonthly[] = [];
         for (const br of wantBedrooms) {
           ensureBR(br);
@@ -19400,7 +19435,15 @@ Return ONLY compact JSON with this exact shape:
           });
         }
 
-        setRefreshProgress({ propertyId, startedAt, phase: "done", percent: 100, label: "Done" });
+        setRefreshProgress({
+          propertyId,
+          startedAt,
+          phase: "done",
+          percent: 100,
+          label: "Done",
+          progressDone: totalWindows,
+          progressTotal: totalWindows,
+        });
         if (isBackgroundWorker) clearProgressSoon(propertyId);
         else clearRefreshProgress(propertyId);
 

@@ -1861,6 +1861,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     label: string;
     startedAt?: number;
     error?: string;
+    progressDone?: number;
+    progressTotal?: number;
+    progressCurrent?: number;
+    progressWindowLabel?: string;
     lastTickAt?: number;
     daemonOnline?: boolean;
     daemonLastPollAgeMs?: number | null;
@@ -1992,6 +1996,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       label: String(p.label ?? ""),
       startedAt: typeof p.startedAt === "number" ? p.startedAt : undefined,
       error: typeof p.error === "string" ? p.error : undefined,
+      progressDone: typeof p.progressDone === "number" ? p.progressDone : undefined,
+      progressTotal: typeof p.progressTotal === "number" ? p.progressTotal : undefined,
+      progressCurrent: typeof p.progressCurrent === "number" ? p.progressCurrent : undefined,
+      progressWindowLabel: typeof p.progressWindowLabel === "string" ? p.progressWindowLabel : undefined,
       lastTickAt: typeof p.lastTickAt === "number" ? p.lastTickAt : undefined,
       daemonOnline: typeof p.daemonOnline === "boolean" ? p.daemonOnline : undefined,
       daemonLastPollAgeMs: typeof p.daemonLastPollAgeMs === "number" ? p.daemonLastPollAgeMs : null,
@@ -3793,15 +3801,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             )}
                             {/* Inline progress bar — visible while a
-                                refresh is in flight. Server-side phase
-                                drives the percent (0% starting →
-                                3% airbnb-low → 35% sidecar-low →
-                                65% sidecar-high → 90% sidecar-holiday →
-                                95% persisting → 100% done). Cancel
-                                button calls AbortController.abort() —
-                                server scan continues to record progress
-                                in the background, the client just
-                                stops awaiting. */}
+                                refresh is in flight. Monthly refreshes
+                                use exact work-unit counters from the
+                                server: completed 7-night windows /
+                                total monthly + holiday windows. The
+                                lighter segment shows the current window
+                                being worked; the solid segment shows
+                                windows already finished. Cancel calls
+                                AbortController.abort() — server scan
+                                continues in the background. */}
                             {marketRatesRefreshing && refreshProgress && (() => {
                               // Computed values for freeze detection.
                               // nowTick is unused-but-referenced so React
@@ -3826,12 +3834,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 : refreshProgress.daemonOnline === false
                                 ? { label: "Daemon offline", color: "#b91c1c" }
                                 : { label: "Daemon status unknown", color: "#6b7280" };
+                              const hasWindowProgress =
+                                typeof refreshProgress.progressDone === "number" &&
+                                typeof refreshProgress.progressTotal === "number" &&
+                                refreshProgress.progressTotal > 0;
+                              const completedWindows = hasWindowProgress
+                                ? Math.max(0, Math.min(refreshProgress.progressTotal!, refreshProgress.progressDone!))
+                                : 0;
+                              const totalWindows = hasWindowProgress ? refreshProgress.progressTotal! : 0;
+                              const currentWindow = hasWindowProgress && typeof refreshProgress.progressCurrent === "number"
+                                ? Math.max(1, Math.min(totalWindows, refreshProgress.progressCurrent))
+                                : null;
+                              const completedPercent = hasWindowProgress
+                                ? Math.round((completedWindows / totalWindows) * 100)
+                                : Math.max(0, Math.min(100, refreshProgress.percent));
+                              const activeWindowPercent = hasWindowProgress && currentWindow != null
+                                ? Math.round((currentWindow / totalWindows) * 100)
+                                : completedPercent;
+                              const progressText = hasWindowProgress
+                                ? `${completedWindows}/${totalWindows} windows · ${completedPercent}%`
+                                : `${Math.max(0, Math.min(100, refreshProgress.percent))}%`;
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
                                     <span style={{ fontWeight: 500 }}>Scanning monthly market-rate basis…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
-                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{refreshProgress.percent}%</span>
+                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
                                     <button
                                       type="button"
                                       onClick={cancelRefresh}
@@ -3849,10 +3877,38 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       Cancel
                                     </button>
                                   </div>
-                                  <div style={{ height: 6, background: isStale ? "#fee2e2" : "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
-                                    <div style={{ width: `${Math.max(0, Math.min(100, refreshProgress.percent))}%`, height: "100%", background: isStale ? "#dc2626" : "#2563eb", transition: "width 250ms ease" }} />
+                                  <div style={{ position: "relative", height: 6, background: isStale ? "#fee2e2" : "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
+                                    {hasWindowProgress && currentWindow != null && (
+                                      <div
+                                        style={{
+                                          position: "absolute",
+                                          left: 0,
+                                          top: 0,
+                                          width: `${Math.max(0, Math.min(100, activeWindowPercent))}%`,
+                                          height: "100%",
+                                          background: isStale ? "#fecaca" : "#bfdbfe",
+                                          transition: "width 250ms ease",
+                                        }}
+                                      />
+                                    )}
+                                    <div
+                                      style={{
+                                        position: "absolute",
+                                        left: 0,
+                                        top: 0,
+                                        width: `${Math.max(0, Math.min(100, completedPercent))}%`,
+                                        height: "100%",
+                                        background: isStale ? "#dc2626" : "#2563eb",
+                                        transition: "width 250ms ease",
+                                      }}
+                                    />
                                   </div>
                                   <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
+                                  {hasWindowProgress && refreshProgress.progressWindowLabel && currentWindow != null && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      Current window {currentWindow}/{totalWindows}: {refreshProgress.progressWindowLabel}
+                                    </div>
+                                  )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
                                   <div style={{ marginTop: 4, display: "flex", gap: 12, fontSize: 9, opacity: 0.85 }}>
                                     <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>

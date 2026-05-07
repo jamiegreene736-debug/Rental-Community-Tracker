@@ -1010,8 +1010,9 @@ function pickSeasonWindow(
 //   done | error
 //
 // Each season queues Airbnb / VRBO / Booking.com / PM website work
-// through the daemon's single Chrome. The sidecar-* phases account
-// for most of the wall time and the percentages reflect that.
+// through the daemon's single Chrome. Monthly pricing refreshes also
+// include exact window counters so the UI can show completed 7-night
+// samples instead of relying on a rough phase estimate.
 export type RefreshProgressState = {
   propertyId: number;
   startedAt: number;
@@ -1024,6 +1025,14 @@ export type RefreshProgressState = {
   percent: number;
   label: string;
   error?: string;
+  // Optional exact work-unit counters for long monthly market-rate
+  // scans. `percent` remains the generic fallback, but the Pricing tab
+  // prefers these when present so the bar reflects real windows
+  // completed instead of a rough phase estimate.
+  progressDone?: number;
+  progressTotal?: number;
+  progressCurrent?: number;
+  progressWindowLabel?: string;
   // Freeze-detection fields (PR #311). lastTickAt is updated by a
   // 15-second heartbeat AND every setPhase call — so the client can
   // tell the scan is still alive even when no phase boundary has
