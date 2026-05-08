@@ -394,6 +394,7 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-mauna-kai": "Mauna Kai Princeville",
   "community-kaha-lani": "Kaha Lani Resort",
   "community-lae-nani": "Lae Nani Resort",
+  "community-makahuena": "Makahuena at Poipu",
   "community-poipu-beachside": "Poipu Brenneckes Beachside",
   "community-kaiulani": "Kaiulani of Princeville",
   "community-poipu-oceanfront": "Poipu Brenneckes Oceanfront",
@@ -410,6 +411,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-mauna-kai": "3920 Wyllie Rd",                  // Mauna Kai Princeville
   "community-kaha-lani": "4460 Nehe Rd",                    // Kaha Lani Resort
   "community-lae-nani": "410 Papaloa Rd",                   // Lae Nani Resort
+  "community-makahuena": "1661 Pe'e Rd",                    // Makahuena at Poipu
   "community-poipu-beachside": "2298 Ho'one Rd",            // Poipu Brenneckes Beachside
   "community-kaiulani": "4100 Queen Emma's Dr",             // Kaiulani of Princeville
   "community-poipu-oceanfront": "2350 Ho'one Rd",           // Poipu Brenneckes Oceanfront
@@ -8355,6 +8357,7 @@ export async function registerRoutes(
     // in practice (operator-verified $256 LOW basis from a single
     // Airbnb sample today).
     "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii",                                                lat: 22.0360, lng: -159.3370 },
+    "Makahuena at Poipu":{ searchName: "Makahuena at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "1661 Pe'e Rd",                lat: 21.8728, lng: -159.4448 },
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
@@ -16447,7 +16450,29 @@ Return ONLY compact JSON with this exact shape:
     const normalizedStreetAddress = typeof streetAddress === "string" ? streetAddress.trim() : "";
     const normalizedPropertyAddress = typeof propertyAddress === "string" ? propertyAddress.trim() : "";
     const addressStreet = normalizedPropertyAddress.split(",")[0]?.trim() || "";
-    const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder] || normalizedBodyName;
+    const folderCommunityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
+    const folderCommunityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder];
+    const normalizeCommunityKey = (value: string) => value
+      .toLowerCase()
+      .replace(/&[#a-z0-9]+;/gi, " ")
+      .replace(/\b(?:resort|at|the)\b/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+    const folderBodyConflict = !!(
+      folderCommunityName
+      && normalizedBodyName
+      && normalizeCommunityKey(folderCommunityName) !== normalizeCommunityKey(normalizedBodyName)
+    );
+    if (folderBodyConflict) {
+      console.error(
+        `[find-unit] folder/body community mismatch: folder=${safeFolder} maps to "${folderCommunityName}", ` +
+        `body="${normalizedBodyName}" — trusting body/address to avoid cross-resort candidates`,
+      );
+    }
+    const communityName = folderBodyConflict
+      ? normalizedBodyName
+      : folderCommunityName || normalizedBodyName;
     if (!communityName) {
       return res.status(400).json({
         error: "Unknown community folder",
@@ -16455,7 +16480,9 @@ Return ONLY compact JSON with this exact shape:
       });
     }
 
-    const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || normalizedStreetAddress || addressStreet || communityName;
+    const communityAddress = folderBodyConflict
+      ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
+      : folderCommunityAddress || normalizedStreetAddress || addressStreet || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
     // Step 1 — Google search for replacement REAL-ESTATE listing URLs.
@@ -16681,6 +16708,9 @@ Return ONLY compact JSON with this exact shape:
     // OTA photos create a feedback loop with the photo-listing
     // scanner.
 
+    const directRoot = streetRootFromListingAddress(communityAddress);
+    const directAllowedRoots = directRoot ? new Set([directRoot]) : undefined;
+
     for (const siteQuery of searchQueries) {
       try {
         console.error(`[find-unit] Searching: ${siteQuery}`);
@@ -16700,7 +16730,7 @@ Return ONLY compact JSON with this exact shape:
           const source = detectSource(link);
           if (!source) continue;
           const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
-          addCandidateUrl(link, source, `${r.title || ""} ${r.snippet || ""}`, thumbnail);
+          addCandidateUrl(link, source, `${r.title || ""} ${r.snippet || ""}`, thumbnail, directAllowedRoots);
         }
         // PR #329: removed the per-query break-out cap. The previous
         // cap of 15 caused a real bug: with 9 queries (5 Zillow + 2
@@ -16727,7 +16757,6 @@ Return ONLY compact JSON with this exact shape:
     // roots so broad city inventory cannot leak into this community.
     const communityLoc = resolveCommunityLocation();
     const allowedRoots = repeatedCandidateRoots();
-    const directRoot = streetRootFromListingAddress(communityAddress);
     if (directRoot) allowedRoots.add(directRoot);
     if (communityLoc && allowedRoots.size > 0) {
       const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([

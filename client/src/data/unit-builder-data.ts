@@ -1340,8 +1340,8 @@ Important: This listing represents our managed portfolio of similar units within
     getLicense: "GE-025-430-9876-01",   // SAMPLE — replace with real Makahuena GET
     strPermit: "TVR-2024-999",          // SAMPLE — replace with real Makahuena STR permit
     hasPhotos: true,
-    communityPhotos: COMMUNITY_LAE_NANI,
-    communityPhotoFolder: "community-lae-nani",
+    communityPhotos: [],
+    communityPhotoFolder: "community-makahuena",
     units: [
       {
         // SAMPLE unit number — follows the real Makahuena 4-digit
