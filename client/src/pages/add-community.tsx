@@ -607,7 +607,7 @@ export default function AddCommunity() {
         setStrPermit(data.strPermitSample);
       }
       if (data.warning) {
-        toast({ title: "AI draft incomplete", description: data.warning, variant: "destructive" });
+        toast({ title: "Draft fallback ready", description: data.warning });
       }
     } catch (e: any) {
       toast({ title: "Listing generation failed", description: e.message, variant: "destructive" });
