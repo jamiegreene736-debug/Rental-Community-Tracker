@@ -127,6 +127,7 @@ export type SidecarPmSiteSearchParams = {
   checkOut: string;
   bedrooms: number;
   perSiteLimit?: number;
+  maxSites?: number;
   budgetMs?: number;
 };
 
@@ -230,7 +231,7 @@ export type SidecarPropertyCandidate = {
   totalPrice: number;
   nightlyPrice: number;
   bedrooms?: number;
-  bedroomSource?: "search-card" | "detail-page" | "unknown";
+  bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
   sourceLabel?: string;
   image?: string;
   snippet?: string;
@@ -440,7 +441,7 @@ function makeRequestKey(
         .map((s) => `${s.label}:${s.searchUrl || s.baseUrl}`)
         .sort()
         .join(",");
-      return `pm_site_search|${sites}|${p.searchTerm.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}|${p.perSiteLimit ?? 6}`;
+      return `pm_site_search|${sites}|${p.searchTerm.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}|${p.perSiteLimit ?? 6}|${p.maxSites ?? "all"}`;
     }
     case "pm_url_check": {
       const p = params as SidecarPmUrlCheckParams;
@@ -1158,6 +1159,7 @@ export async function searchPmSitesViaSidecar(opts: {
   checkOut: string;
   bedrooms: number;
   perSiteLimit?: number;
+  maxSites?: number;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
@@ -1187,8 +1189,9 @@ export async function searchPmSitesViaSidecar(opts: {
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
         perSiteLimit: opts.perSiteLimit,
+        maxSites: opts.maxSites,
         budgetMs: opts.walletBudgetMs
-          ? Math.max(15_000, Math.min(135_000, opts.walletBudgetMs - 30_000))
+          ? Math.max(15_000, Math.min(210_000, opts.walletBudgetMs - 30_000))
           : undefined,
       },
     },

@@ -4111,10 +4111,10 @@ function buildPmSearchUrl(site, searchTerm, checkIn, checkOut, bedrooms) {
   }
 }
 
-async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limit, expectedNights) {
+async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limit, expectedNights, bedroomFilterApplied = false) {
   const baseUrl = site.baseUrl;
   return withSoftTimeout(
-    targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit, expectedNights }) => {
+    targetPage.evaluate(({ baseUrl, searchTerm, bedrooms, limit, expectedNights, bedroomFilterApplied }) => {
       function clean(raw) {
         return String(raw || "").replace(/\s+/g, " ").trim();
       }
@@ -4231,8 +4231,10 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         }
         const fullText = clean(card?.textContent || a.textContent || "");
         if (!looksDetail(url, fullText)) continue;
-        const br = extractBedrooms(fullText);
-        if (br === null || br < bedrooms) continue;
+        const cardBedrooms = extractBedrooms(fullText);
+        if (cardBedrooms !== null && cardBedrooms < bedrooms) continue;
+        if (cardBedrooms === null && !bedroomFilterApplied) continue;
+        const br = cardBedrooms ?? bedrooms;
         const price = parsePrice(fullText);
         if (!price) continue;
         const title =
@@ -4247,14 +4249,14 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           totalPrice: price.totalPrice,
           nightlyPrice: price.nightlyPrice,
           bedrooms: br,
-          bedroomSource: "search-card",
+          bedroomSource: cardBedrooms === null ? "search-filter" : "search-card",
           image: imageFrom(card),
           snippet: fullText.slice(0, 220),
         });
         if (out.length >= limit) break;
       }
       return out;
-    }, { baseUrl, searchTerm, bedrooms: Number.parseInt(String(bedrooms ?? ""), 10), limit, expectedNights }),
+    }, { baseUrl, searchTerm, bedrooms: Number.parseInt(String(bedrooms ?? ""), 10), limit, expectedNights, bedroomFilterApplied: Boolean(bedroomFilterApplied) }),
     5_000,
     [],
   );
@@ -4262,14 +4264,18 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
 
 async function processPmSiteSearch(id, params) {
   const { sites = [], searchTerm, checkIn, checkOut, bedrooms, perSiteLimit = 3 } = params;
+  const maxSitesRaw = Number(params.maxSites ?? sites.length);
+  const maxSites = Number.isFinite(maxSitesRaw) && maxSitesRaw > 0
+    ? Math.min(sites.length, Math.max(1, Math.round(maxSitesRaw)))
+    : sites.length;
   const budgetMs = Number(params.budgetMs ?? PM_SITE_SEARCH_BUDGET_MS);
   const deadline = Date.now() + Math.max(15_000, budgetMs);
   const hasBudget = (reserveMs = 0) => Date.now() + reserveMs < deadline;
-  log(`pm_site_search ${id}: ${sites.length} sites searchTerm="${searchTerm}" ${checkIn}→${checkOut} ${bedrooms}BR budget=${budgetMs}ms`);
+  log(`pm_site_search ${id}: ${sites.length} sites (max ${maxSites}) searchTerm="${searchTerm}" ${checkIn}→${checkOut} ${bedrooms}BR budget=${budgetMs}ms`);
   await ensureBrowser();
   const out = [];
   const tabs = new Set();
-  for (const site of sites.slice(0, 8)) {
+  for (const site of sites.slice(0, maxSites)) {
     if (!hasBudget(8_000)) {
       log(`pm_site_search ${id}: stopping before ${site.label}; budget nearly exhausted`);
       break;
@@ -4301,7 +4307,8 @@ async function processPmSiteSearch(id, params) {
       await withSoftTimeout(tab.waitForLoadState("networkidle", { timeout: 5_000 }), 5_500);
       await tab.waitForTimeout(PAGE_SETTLE_MS);
       await sendHeartbeat(`PM websites: reading results from ${site.label}`, true, id);
-      const cards = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit, nightsBetween(checkIn, checkOut));
+      const bedroomFilterApplied = Boolean(bedroomFilled) || /(?:bedrooms?|beds?)=\d/i.test(String(url));
+      const cards = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit, nightsBetween(checkIn, checkOut), bedroomFilterApplied);
       log(`pm_site_search ${id}: ${site.label} priced result cards=${cards.length}`);
       for (const card of cards) {
         const total = Number(card.totalPrice || 0);

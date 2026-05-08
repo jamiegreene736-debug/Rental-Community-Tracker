@@ -3916,9 +3916,9 @@ export async function registerRoutes(
   // because the local Chrome sidecar drains one queue item at a time;
   // the route writes harmless JSON whitespace while waiting so the edge
   // sees the app is still alive, then ends with the real JSON body.
-  const FIND_BUY_IN_ROUTE_BUDGET_MS = 210_000;
+  const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
   const FIND_BUY_IN_RESPONSE_KEEPALIVE_MS = 15_000;
-  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 190_000;
+  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 250_000;
   const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
@@ -4969,7 +4969,7 @@ export async function registerRoutes(
       verified?: "yes" | "no" | "unclear" | "skipped";
       verifiedNightlyPrice?: number | null;
       verifiedReason?: string;
-      bedroomSource?: "search-card" | "detail-page" | "unknown";
+      bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
     };
 
     const asNum = (v: unknown): number => {
@@ -5747,7 +5747,7 @@ export async function registerRoutes(
     // Only runs for Poipu — SP's footprint is Poipu only, so no point
     // hitting the sitemap from a non-Poipu search. `community.toLowerCase()`
     // contains "poipu" for both "Poipu Kai" and "Pili Mai at Poipu".
-    const isPoipu = false;
+    const isPoipu = /\bpoipu\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`);
     const spDiscoveryPromise: Promise<Candidate[]> = isPoipu
       ? (async () => {
           pmDiscoveryStats.spCalls++;
@@ -5810,7 +5810,9 @@ export async function registerRoutes(
     // sitemap walk. We still gate to "is Hawaii" because both PMs are
     // HI-only and we don't want to walk their sitemaps for, say, a
     // Florida search.
-    const isHawaii = false;
+    const isHawaii =
+      communityRegion === "hawaii" ||
+      /\b(?:hawaii|kauai|koloa|poipu|princeville|kapaa|maui|oahu|kona)\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`);
 
     const vrpDiscoveryPromise = (
       siteKey: keyof typeof VRP_SITES,
@@ -6109,18 +6111,20 @@ export async function registerRoutes(
       }
       try {
         const discoveredPmSites = await pmSearchApiSiteDiscoveryPromise.catch(() => []);
-        const pmSites = [
-          { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
-          { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
-          { label: VRP_SITES.cbIslandVacations.label, baseUrl: VRP_SITES.cbIslandVacations.baseUrl, searchUrl: "https://www.cbislandvacations.com/browse-all-kauai-vacation-rentals/" },
-          { label: VRP_SITES.pikoProperties.label, baseUrl: VRP_SITES.pikoProperties.baseUrl, searchUrl: "https://pikoproperties.com/rentals/" },
-          { label: VRP_SITES.evrhi.label, baseUrl: VRP_SITES.evrhi.baseUrl, searchUrl: "https://evrhi.com/kauai-rentals/" },
-          { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com", searchUrl: "https://gathervacations.com/vacation-rentals/hawaii/kauai-rentals/" },
-          { label: STREAMLINE_SITES.alekonaKauai.label, baseUrl: STREAMLINE_SITES.alekonaKauai.baseUrl, searchUrl: "https://alekonakauai.com/search-results/" },
-          { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${bedrooms}-bedroom/` },
-        ];
+        const knownHawaiiPmSites = isHawaii
+          ? [
+              { label: "Suite Paradise", baseUrl: "https://www.suite-paradise.com", searchUrl: "https://www.suite-paradise.com/poipu-vacation-rentals" },
+              { label: VRP_SITES.parrishKauai.label, baseUrl: VRP_SITES.parrishKauai.baseUrl, searchUrl: "https://www.parrishkauai.com/kauai-rentals/" },
+              { label: VRP_SITES.cbIslandVacations.label, baseUrl: VRP_SITES.cbIslandVacations.baseUrl, searchUrl: "https://www.cbislandvacations.com/browse-all-kauai-vacation-rentals/" },
+              { label: VRP_SITES.pikoProperties.label, baseUrl: VRP_SITES.pikoProperties.baseUrl, searchUrl: "https://pikoproperties.com/rentals/" },
+              { label: VRP_SITES.evrhi.label, baseUrl: VRP_SITES.evrhi.baseUrl, searchUrl: "https://evrhi.com/kauai-rentals/" },
+              { label: "Gather Vacations", baseUrl: "https://www.gathervacations.com", searchUrl: "https://gathervacations.com/vacation-rentals/hawaii/kauai-rentals/" },
+              { label: STREAMLINE_SITES.alekonaKauai.label, baseUrl: STREAMLINE_SITES.alekonaKauai.baseUrl, searchUrl: "https://alekonakauai.com/search-results/" },
+              { label: STREAMLINE_SITES.princevilleVacationRentals.label, baseUrl: STREAMLINE_SITES.princevilleVacationRentals.baseUrl, searchUrl: `https://princevillevacationrentals.com/${bedrooms}-bedroom/` },
+            ]
+          : [];
         const seenPmHosts = new Set<string>();
-        const pmSitesForSearch = [...pmSites, ...discoveredPmSites].filter((site) => {
+        const pmSitesForSearch = [...knownHawaiiPmSites, ...discoveredPmSites].filter((site) => {
           try {
             const host = new URL(site.baseUrl).hostname.replace(/^www\./, "");
             if (seenPmHosts.has(host)) return false;
@@ -6137,8 +6141,9 @@ export async function registerRoutes(
           checkIn,
 	          checkOut,
 	          bedrooms,
-          perSiteLimit: 3,
-          walletBudgetMs: 105_000,
+          perSiteLimit: 5,
+          maxSites: Math.min(18, pmSitesForSearch.length),
+          walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           signal: pmWebsiteSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
@@ -6150,7 +6155,7 @@ export async function registerRoutes(
         return r.candidates
           .filter((c) => {
             const explicit = rawCandidateExplicitBedroomSignal(c);
-            const sourceBedroom = (c as any).bedroomSource === "search-card" && typeof c.bedrooms === "number"
+            const sourceBedroom = ["search-card", "search-filter"].includes(String((c as any).bedroomSource)) && typeof c.bedrooms === "number"
               ? c.bedrooms
               : null;
             const inferred = explicit ?? sourceBedroom;
@@ -6160,7 +6165,8 @@ export async function registerRoutes(
             const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
             const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
             const explicit = rawCandidateExplicitBedroomSignal(c);
-            const sourceBedroom = (c as any).bedroomSource === "search-card" && typeof c.bedrooms === "number"
+            const sidecarBedroomSource = String((c as any).bedroomSource ?? "");
+            const sourceBedroom = ["search-card", "search-filter"].includes(sidecarBedroomSource) && typeof c.bedrooms === "number"
               ? c.bedrooms
               : undefined;
             const candidateBedrooms = explicit ?? sourceBedroom;
@@ -6172,7 +6178,7 @@ export async function registerRoutes(
               nightlyPrice: Math.round(nightly),
               totalPrice: Math.round(total),
               bedrooms: candidateBedrooms,
-              bedroomSource: (c as any).bedroomSource === "search-card" ? "search-card" : undefined,
+              bedroomSource: sidecarBedroomSource === "search-filter" ? "search-filter" : sidecarBedroomSource === "search-card" ? "search-card" : undefined,
               image: c.image,
               snippet: c.snippet,
               verified: "yes",
@@ -6234,14 +6240,14 @@ export async function registerRoutes(
       // only fires on the first request after a Railway restart.
       // Other scrapers keep their original 30s budget — they're
       // either small inventories or already JSON-backed.
-      withTimeout(spDiscoveryPromise, 25_000, [] as Candidate[], "sp-sitemap"),
-      withTimeout(pkDiscoveryPromise, 25_000, [] as Candidate[], "pk-sitemap"),
-      withTimeout(cbDiscoveryPromise, 25_000, [] as Candidate[], "cb-sitemap"),
-      withTimeout(pikoDiscoveryPromise, 12_000, [] as Candidate[], "piko-sitemap"),
-      withTimeout(evrhiDiscoveryPromise, 12_000, [] as Candidate[], "evrhi-sitemap"),
-      withTimeout(gvDiscoveryPromise, 12_000, [] as Candidate[], "gv-sitemap"),
-      withTimeout(slAlekonaDiscoveryPromise, 12_000, [] as Candidate[], "sl-alekona"),
-      withTimeout(slPrincevilleDiscoveryPromise, 12_000, [] as Candidate[], "sl-princeville"),
+      withTimeout(spDiscoveryPromise, 45_000, [] as Candidate[], "sp-sitemap"),
+      withTimeout(pkDiscoveryPromise, 120_000, [] as Candidate[], "pk-sitemap"),
+      withTimeout(cbDiscoveryPromise, 75_000, [] as Candidate[], "cb-sitemap"),
+      withTimeout(pikoDiscoveryPromise, 45_000, [] as Candidate[], "piko-sitemap"),
+      withTimeout(evrhiDiscoveryPromise, 45_000, [] as Candidate[], "evrhi-sitemap"),
+      withTimeout(gvDiscoveryPromise, 45_000, [] as Candidate[], "gv-sitemap"),
+      withTimeout(slAlekonaDiscoveryPromise, 45_000, [] as Candidate[], "sl-alekona"),
+      withTimeout(slPrincevilleDiscoveryPromise, 45_000, [] as Candidate[], "sl-princeville"),
     ]);
     // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
     // unpriced), but dedupe by URL — sitemap walks and Google may both
