@@ -11983,6 +11983,58 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
+  // POST /api/admin/solve-coordinates-captcha
+  //
+  // Used by the local/server Chrome sidecar when VRBO shows a custom
+  // slider CAPTCHA. The daemon captures the visible challenge box,
+  // sends the image here, and Railway calls 2Captcha with the API key
+  // kept in env. The response is a point in the screenshot; the daemon
+  // performs the actual mouse drag in the headed Chrome session.
+  //
+  // Body: { imageBase64, comment?, pollSeconds? }
+  // Returns: { ok: true, coordinates, captchaId, cost? } | { ok: false, error }
+  app.post("/api/admin/solve-coordinates-captcha", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const apiKey = process.env.TWOCAPTCHA_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
+    }
+    const body = req.body as {
+      imageBase64?: unknown;
+      comment?: unknown;
+      pollSeconds?: unknown;
+    };
+    const imageBase64 = typeof body.imageBase64 === "string" ? body.imageBase64.trim() : "";
+    if (!imageBase64) return res.status(400).json({ ok: false, error: "imageBase64 required" });
+    if (imageBase64.length > 1_200_000) {
+      return res.status(413).json({ ok: false, error: "imageBase64 too large for 2Captcha coordinate solve" });
+    }
+    const pollSeconds = typeof body.pollSeconds === "number" && body.pollSeconds > 0 && body.pollSeconds < 600
+      ? body.pollSeconds
+      : undefined;
+    const comment = typeof body.comment === "string" ? body.comment.slice(0, 500) : undefined;
+
+    try {
+      const { solveCoordinatesCaptcha } = await import("./captcha-solver");
+      console.log(`[solve-coordinates-captcha] imageBytes≈${Math.round(imageBase64.length * 0.75)} comment="${(comment ?? "").slice(0, 80)}"`);
+      const result = await solveCoordinatesCaptcha(imageBase64, apiKey, {
+        comment,
+        pollSeconds,
+        minClicks: 1,
+        maxClicks: 1,
+      });
+      if (result.ok) {
+        console.log(`[solve-coordinates-captcha] ✓ id=${result.captchaId} points=${result.coordinates.length}`);
+      } else {
+        console.error(`[solve-coordinates-captcha] ✗ ${result.error}`);
+      }
+      res.json(result);
+    } catch (e: any) {
+      console.error(`[solve-coordinates-captcha] unhandled error: ${e?.message ?? e}`);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
   // ADMIN_SECRET so only the operator's worker (not arbitrary callers)
   // can claim queue items.

@@ -33,9 +33,13 @@ export type CaptchaSolveResult =
 
 type SubmitResponse = { status: number; request: string };
 type PollResponse = { status: number; request: string };
+export type CoordinatesCaptchaSolveResult =
+  | { ok: true; coordinates: Array<{ x: number; y: number }>; captchaId: string; cost?: string }
+  | { ok: false; error: string };
 
 const SUBMIT_URL = "https://2captcha.com/in.php";
 const POLL_URL = "https://2captcha.com/res.php";
+const API_V2_BASE_URL = "https://api.2captcha.com";
 
 /**
  * Submit a base64-encoded image to 2captcha and poll until the
@@ -289,4 +293,103 @@ export async function solveRecaptchaV3(
     opts.pollSeconds ?? RECAPTCHA_DEFAULT_POLL_SECONDS,
     opts.pollIntervalMs ?? RECAPTCHA_DEFAULT_POLL_INTERVAL_MS,
   );
+}
+
+/**
+ * Solve coordinate-based image challenges, used by the VRBO local
+ * sidecar for slider CAPTCHA walls. 2Captcha's CoordinatesTask asks a
+ * worker to click the target point in the screenshot; the sidecar then
+ * converts that point into a mouse drag from the slider handle.
+ *
+ * We use 2Captcha API v2 here because CoordinatesTask returns
+ * structured `{ x, y }` objects instead of the older text format.
+ */
+export async function solveCoordinatesCaptcha(
+  imageBase64: string,
+  apiKey: string,
+  opts: {
+    comment?: string;
+    imgInstructionsBase64?: string;
+    pollSeconds?: number;
+    pollIntervalMs?: number;
+    minClicks?: number;
+    maxClicks?: number;
+  } = {},
+): Promise<CoordinatesCaptchaSolveResult> {
+  const pollSeconds = opts.pollSeconds ?? 120;
+  const pollIntervalMs = opts.pollIntervalMs ?? 3000;
+  const body = imageBase64.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
+  if (!body) return { ok: false, error: "imageBase64 is empty" };
+
+  const task: Record<string, unknown> = {
+    type: "CoordinatesTask",
+    body,
+    comment:
+      opts.comment ??
+      "Find the target gap/puzzle location for this slider CAPTCHA. Click the center of the target location.",
+    minClicks: opts.minClicks ?? 1,
+    maxClicks: opts.maxClicks ?? 1,
+  };
+  if (opts.imgInstructionsBase64) {
+    task.imgInstructions = opts.imgInstructionsBase64.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
+  }
+
+  let createData: any;
+  try {
+    const createRes = await fetch(`${API_V2_BASE_URL}/createTask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientKey: apiKey, task }),
+    });
+    createData = await createRes.json();
+  } catch (e: any) {
+    return { ok: false, error: `2captcha coordinate submit network error: ${e?.message ?? String(e)}` };
+  }
+
+  if (createData?.errorId !== 0 || !createData?.taskId) {
+    return {
+      ok: false,
+      error: `2captcha coordinate submit rejected: ${createData?.errorCode ?? "UNKNOWN"} ${createData?.errorDescription ?? ""}`.trim(),
+    };
+  }
+
+  const captchaId = String(createData.taskId);
+  const deadline = Date.now() + pollSeconds * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    let pollData: any;
+    try {
+      const pollRes = await fetch(`${API_V2_BASE_URL}/getTaskResult`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientKey: apiKey, taskId: createData.taskId }),
+      });
+      pollData = await pollRes.json();
+    } catch {
+      continue;
+    }
+
+    if (pollData?.errorId && pollData.errorId !== 0) {
+      return {
+        ok: false,
+        error: `2captcha coordinate poll returned error after id ${captchaId}: ${pollData.errorCode ?? "UNKNOWN"} ${pollData.errorDescription ?? ""}`.trim(),
+      };
+    }
+    if (pollData?.status === "ready") {
+      const coordinates = Array.isArray(pollData?.solution?.coordinates)
+        ? pollData.solution.coordinates
+            .map((p: any) => ({ x: Number(p?.x), y: Number(p?.y) }))
+            .filter((p: { x: number; y: number }) => Number.isFinite(p.x) && Number.isFinite(p.y))
+        : [];
+      if (coordinates.length === 0) {
+        return { ok: false, error: `2captcha coordinate result ${captchaId} had no usable coordinates` };
+      }
+      return { ok: true, coordinates, captchaId, cost: pollData.cost };
+    }
+  }
+
+  return {
+    ok: false,
+    error: `2captcha didn't return coordinate solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`,
+  };
 }

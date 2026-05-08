@@ -55,6 +55,9 @@ const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGE
 const PER_REQUEST_BUDGET_MS = 90_000;
 const VIEWPORT = { width: 1280, height: 820 };
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
+const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
+const VRBO_2CAPTCHA_POLL_SECONDS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS ?? 120);
+const VRBO_2CAPTCHA_MAX_ATTEMPTS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS ?? 1);
 
 let browser = null;
 let context = null;
@@ -829,6 +832,241 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
+async function findVrboChallengeBox(targetPage = page) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return targetPage.evaluate(() => {
+    const challengeRe =
+      /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
+    const isVisible = (el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return (
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        rect.width >= 120 &&
+        rect.height >= 80 &&
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth
+      );
+    };
+    const candidates = Array.from(document.querySelectorAll("body *"))
+      .filter((el) => el instanceof HTMLElement && isVisible(el))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        const attr = `${el.id || ""} ${el.className || ""} ${el.getAttribute("aria-label") || ""}`;
+        let score = 0;
+        if (challengeRe.test(text)) score += 8;
+        if (/captcha|px-|challenge|human|verify|slider/i.test(attr)) score += 4;
+        if (rect.width >= 260 && rect.height >= 160) score += 2;
+        if (rect.width <= 1000 && rect.height <= 1000) score += 1;
+        return { el, rect, text, score };
+      })
+      .filter((c) => c.score > 0)
+      .sort((a, b) => b.score - a.score || b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+    const best = candidates[0];
+    if (!best) return null;
+    const x = Math.max(0, Math.floor(best.rect.left));
+    const y = Math.max(0, Math.floor(best.rect.top));
+    const maxWidth = Math.max(1, window.innerWidth - x);
+    const maxHeight = Math.max(1, window.innerHeight - y);
+    return {
+      x,
+      y,
+      width: Math.min(1000, Math.max(1, Math.ceil(best.rect.width)), maxWidth),
+      height: Math.min(1000, Math.max(1, Math.ceil(best.rect.height)), maxHeight),
+      text: best.text.slice(0, 500),
+    };
+  }).catch(() => null);
+}
+
+async function findVrboSliderHandle(targetPage = page, clip = null) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return targetPage.evaluate((clipArg) => {
+    const sliderRe = /press and hold|slide|slider|drag|hold/i;
+    const isVisible = (el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return (
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        rect.width >= 20 &&
+        rect.height >= 20 &&
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth
+      );
+    };
+    const withinClip = (rect) => {
+      if (!clipArg) return true;
+      return (
+        rect.left >= clipArg.x - 10 &&
+        rect.right <= clipArg.x + clipArg.width + 10 &&
+        rect.top >= clipArg.y - 10 &&
+        rect.bottom <= clipArg.y + clipArg.height + 10
+      );
+    };
+    const selector = [
+      '[role="slider"]',
+      'input[type="range"]',
+      'button',
+      '[class*="slider" i]',
+      '[class*="slide" i]',
+      '[class*="captcha" i]',
+      '[class*="handle" i]',
+      '[aria-label*="slide" i]',
+      '[aria-label*="hold" i]',
+      '[aria-label*="captcha" i]',
+    ].join(",");
+    const candidates = Array.from(document.querySelectorAll(selector))
+      .filter((el) => el instanceof HTMLElement && isVisible(el))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = `${el.innerText || el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.className || ""}`.replace(/\s+/g, " ");
+        let score = 0;
+        if (sliderRe.test(text)) score += 8;
+        if (el.getAttribute("role") === "slider") score += 8;
+        if (el instanceof HTMLInputElement && el.type === "range") score += 8;
+        if (rect.width <= 160 && rect.height <= 120) score += 2;
+        if (clipArg && withinClip(rect)) score += 3;
+        return { rect, text, score };
+      })
+      .filter((c) => c.score > 0)
+      .sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (!best) return null;
+    return {
+      x: best.rect.left,
+      y: best.rect.top,
+      width: best.rect.width,
+      height: best.rect.height,
+      text: best.text.slice(0, 300),
+    };
+  }, clip).catch(() => null);
+}
+
+async function solveCoordinatesCaptchaViaServer(imageBase64, comment, id) {
+  const r = await fetchJson(`${SERVER}/api/admin/solve-coordinates-captcha`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      imageBase64,
+      comment,
+      pollSeconds: VRBO_2CAPTCHA_POLL_SECONDS,
+    }),
+  });
+  if (!r?.ok) {
+    throw new Error(r?.error ?? "2Captcha coordinate solver failed");
+  }
+  const point = Array.isArray(r.coordinates) ? r.coordinates[0] : null;
+  if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) {
+    throw new Error("2Captcha did not return a usable coordinate");
+  }
+  log(`vrbo captcha ${id}: 2Captcha coordinate id=${r.captchaId} x=${point.x} y=${point.y}${r.cost ? ` cost=${r.cost}` : ""}`);
+  return { x: Number(point.x), y: Number(point.y), captchaId: r.captchaId };
+}
+
+async function dragVrboSliderToPoint(targetPage, handle, absoluteTarget) {
+  const startX = handle.x + handle.width / 2;
+  const startY = handle.y + handle.height / 2;
+  const targetX = Math.max(startX + 35, Math.min(absoluteTarget.x, startX + 850));
+  const targetY = startY + Math.max(-8, Math.min(8, absoluteTarget.y - startY));
+  await targetPage.mouse.move(startX, startY);
+  await targetPage.waitForTimeout(120).catch(() => {});
+  await targetPage.mouse.down();
+  const steps = 28;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const eased = 1 - Math.pow(1 - t, 2.2);
+    const jitter = i % 4 === 0 ? 1.5 : i % 5 === 0 ? -1 : 0;
+    await targetPage.mouse.move(
+      startX + (targetX - startX) * eased,
+      startY + (targetY - startY) * t + jitter,
+      { steps: 1 },
+    );
+    await targetPage.waitForTimeout(18 + Math.round(Math.random() * 20)).catch(() => {});
+  }
+  await targetPage.waitForTimeout(250).catch(() => {});
+  await targetPage.mouse.up();
+}
+
+async function tryPressAndHoldChallenge(targetPage, handle, label, id) {
+  if (!handle || !/press and hold|hold/i.test(handle.text ?? "")) return false;
+  log(`${label} ${id}: attempting press-and-hold CAPTCHA clear`);
+  const x = handle.x + handle.width / 2;
+  const y = handle.y + handle.height / 2;
+  await targetPage.mouse.move(x, y);
+  await targetPage.mouse.down();
+  const started = Date.now();
+  while (Date.now() - started < 9000) {
+    await targetPage.waitForTimeout(1000).catch(() => {});
+    if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
+      await targetPage.mouse.up().catch(() => {});
+      return true;
+    }
+  }
+  await targetPage.mouse.up().catch(() => {});
+  await targetPage.waitForTimeout(2500).catch(() => {});
+  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
+}
+
+async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
+  if (!VRBO_2CAPTCHA_ENABLED) return false;
+  for (let attempt = 1; attempt <= Math.max(1, VRBO_2CAPTCHA_MAX_ATTEMPTS); attempt++) {
+    try {
+      const clip = await findVrboChallengeBox(targetPage);
+      if (!clip) {
+        log(`${label} ${id}: no VRBO CAPTCHA box found for 2Captcha attempt`);
+        return false;
+      }
+      const handle = await findVrboSliderHandle(targetPage, clip);
+      if (await tryPressAndHoldChallenge(targetPage, handle, label, id)) {
+        log(`${label} ${id}: press-and-hold challenge cleared`);
+        return true;
+      }
+      if (!handle) {
+        log(`${label} ${id}: no slider handle found for 2Captcha attempt`);
+        return false;
+      }
+
+      await sendHeartbeat(`2Captcha VRBO slider attempt ${attempt}`, true, id);
+      const imageBuffer = await targetPage.screenshot({
+        type: "jpeg",
+        quality: 70,
+        clip: {
+          x: clip.x,
+          y: clip.y,
+          width: Math.max(1, clip.width),
+          height: Math.max(1, clip.height),
+        },
+      });
+      const imageBase64 = imageBuffer.toString("base64");
+      const point = await solveCoordinatesCaptchaViaServer(
+        imageBase64,
+        "This is a VRBO slider CAPTCHA. Click the center of the puzzle gap/target where the slider should be dragged. Return one coordinate only.",
+        id,
+      );
+      const absoluteTarget = { x: clip.x + point.x, y: clip.y + point.y };
+      log(
+        `${label} ${id}: dragging VRBO slider from x=${Math.round(handle.x + handle.width / 2)} to x=${Math.round(absoluteTarget.x)} (attempt ${attempt})`,
+      );
+      await dragVrboSliderToPoint(targetPage, handle, absoluteTarget);
+      await targetPage.waitForTimeout(5000).catch(() => {});
+      if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
+        log(`${label} ${id}: VRBO CAPTCHA cleared by 2Captcha`);
+        return true;
+      }
+      log(`${label} ${id}: 2Captcha slider attempt ${attempt} did not clear challenge`);
+    } catch (e) {
+      log(`${label} ${id}: 2Captcha slider attempt ${attempt} failed: ${e?.message ?? e}`);
+    }
+  }
+  return false;
+}
+
 async function showVrboManualVerificationBanner(targetPage, label) {
   if (!targetPage || targetPage.isClosed?.()) return;
   await targetPage
@@ -867,9 +1105,16 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     : await pageLooksLikeVrboHumanChallenge(targetPage);
   if (!hasChallenge) return false;
 
-  log(`${label} ${id}: VRBO manual verification required; waiting for operator to clear it`);
   await targetPage.bringToFront().catch(() => {});
   await normalizePageDisplay(targetPage).catch(() => {});
+  log(`${label} ${id}: VRBO verification challenge detected; trying 2Captcha slider solver before manual fallback`);
+  if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {
+    await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    return true;
+  }
+
+  log(`${label} ${id}: VRBO manual verification required; waiting for operator to clear it`);
   await showVrboManualVerificationBanner(targetPage, label);
 
   const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;

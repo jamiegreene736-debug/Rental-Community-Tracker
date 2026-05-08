@@ -114,6 +114,29 @@ Advanced explicit endpoint list:
 export SERVER_CHROME_ENDPOINTS="chrome-server-1=http://10.0.0.8:9223|http://10.0.0.8:4445|http://10.0.0.8:7901,chrome-server-2=http://10.0.0.8:9224|http://10.0.0.8:4446|http://10.0.0.8:7902"
 ```
 
+## VRBO slider CAPTCHA automation
+
+When VRBO shows a slider CAPTCHA, the daemon first tries to clear it
+with 2Captcha before falling back to manual verification. The 2Captcha
+key stays on Railway:
+
+```sh
+railway variables set TWOCAPTCHA_API_KEY=<your-key>
+```
+
+Daemon knobs:
+
+```sh
+SIDECAR_VRBO_2CAPTCHA=1                 # default; set 0 to disable
+SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS=120  # default solve wait
+SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS=1    # default attempts per wall
+```
+
+The daemon captures the visible challenge box, Railway submits it as a
+2Captcha CoordinatesTask, and the daemon drags the slider in the headed
+Chrome window using the returned coordinate. If the challenge does not
+clear, the normal manual banner still appears.
+
 If the daemon's Chrome session is stuck (rare — manifests as
 "Browser context management is not supported" on connect), kill
 the Chrome process and restart:
