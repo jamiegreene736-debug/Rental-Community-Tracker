@@ -17104,64 +17104,152 @@ Return ONLY compact JSON with this exact shape:
       if (!searchApiKey) {
         return res.status(503).json({ error: "Discovery requires SEARCHAPI_API_KEY (only direct url calls work without it)" });
       }
-      // Multi-query Zillow discovery. Mirrors the staged-search pattern
-      // /api/replacement/find-unit uses: try the most specific query
-      // first (street address), then community-name + bedrooms-hint,
-      // then bare community name. First query that returns a Zillow
-      // /homedetails/ link wins. Earlier single-query version only ran
-      // the bedroom-hinted variant, which came up empty on communities
-      // whose Zillow listings don't say "N bedroom" in the title — so
-      // the preflight ended up with zero photos for everything from
-      // the wizard's algorithm-suggested pairings (Caribe Cove etc.).
+      // Multi-source real-estate discovery for Add Community / Combo
+      // Step 4. SearchAPI finds resort-anchored Zillow/Realtor detail
+      // URLs first; once we know the resort's street roots, Apify's
+      // native city search actors supplement both Zillow and Realtor
+      // and are filtered back down to those roots. This keeps Apify's
+      // better inventory coverage without letting broad city results
+      // leak into the selected resort.
       const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
-      const queries: string[] = [];
+      type DiscoverySource = "zillow" | "realtor";
+      const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
+      const seen = new Set<string>();
+      const harvestRootCounts = new Map<string, number>();
+      const rememberRoot = (link: string, title = "", snippet = "") => {
+        const root = streetRootFromListingAddress(
+          parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
+        );
+        if (!root) return;
+        harvestRootCounts.set(root, (harvestRootCounts.get(root) ?? 0) + 1);
+      };
+      const repeatedRoots = () => {
+        const repeated = Array.from(harvestRootCounts.entries())
+          .filter(([, count]) => count >= 2)
+          .map(([root]) => root);
+        return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
+      };
+      const addCandidate = (link: string, source: DiscoverySource, title = "", snippet = "", allowedRoots?: Set<string>) => {
+        const lower = link.toLowerCase();
+        if (seen.has(lower) || skipSet.has(lower)) return;
+        if (allowedRoots && allowedRoots.size > 0) {
+          const root = streetRootFromListingAddress(
+            parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
+          );
+          if (!root || !allowedRoots.has(root)) return;
+        }
+        seen.add(lower);
+        candidateUrls.push({ url: link, source });
+        rememberRoot(link, title, snippet);
+      };
+
+      const zillowQueries: string[] = [];
+      const realtorQueries: string[] = [];
       if (streetAddress) {
-        queries.push(`site:zillow.com "${streetAddress}"`);
+        zillowQueries.push(`site:zillow.com "${streetAddress}"`);
+        realtorQueries.push(`site:realtor.com "${streetAddress}"`);
       }
       const brHint = bedrooms ? `${bedrooms} bedroom` : "";
       if (brHint) {
-        queries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
+        zillowQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
+        realtorQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
       }
-      queries.push(`site:zillow.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+      zillowQueries.push(`site:zillow.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+      realtorQueries.push(`site:realtor.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
       // Last-ditch: bare quoted community name, no city/state. Catches
       // distinctive names ("Pili Mai", "Caribe Cove Resort") that
       // Google indexes well even without geographic disambiguation.
-      queries.push(`site:zillow.com "${communityName}"`);
+      zillowQueries.push(`site:zillow.com "${communityName}"`);
+      realtorQueries.push(`site:realtor.com "${communityName}"`);
 
-      for (const q of queries) {
-        try {
-          const resp = await fetch(
-            `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+      const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
+        await Promise.all(queries.map(async (q) => {
+          try {
+            const resp = await fetch(
+              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+            );
+            if (!resp.ok) {
+              console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+              return;
+            }
+            const data = await resp.json() as any;
+            const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
+            for (const r of organic) {
+              const link = String(r.link ?? "");
+              if (!pattern.test(link)) continue;
+              addCandidate(link, source, String(r.title ?? ""), String(r.snippet ?? ""));
+            }
+          } catch (e: any) {
+            console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
+          }
+        }));
+      };
+
+      await Promise.all([
+        runDiscoveryQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
+        runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+      ]);
+
+      if (city && state) {
+        const roots = repeatedRoots();
+        if (roots.size > 0) {
+          const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
+            harvestZillowUrlsViaApifySearch(city, state, 300),
+            harvestRealtorUrlsViaApifySearch(city, state, 300),
+          ]);
+          for (const link of zillowApifyUrls) addCandidate(link, "zillow", "", "", roots);
+          for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", roots);
+          console.log(
+            `[fetch-unit-photos] Apify supplement for "${communityName}": ` +
+            `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
+            `roots=${Array.from(roots).join(", ") || "none"} total=${candidateUrls.length}`,
           );
-          if (!resp.ok) {
-            console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+        } else {
+          console.log(`[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`);
+        }
+      }
+
+      // Prefer Realtor first because older/off-market Realtor pages
+      // often expose facts/photos more reliably than Zillow in
+      // Florida condo buildings. Zillow remains the fallback.
+      candidateUrls.sort((a, b) => {
+        const priority: Record<DiscoverySource, number> = { realtor: 0, zillow: 1 };
+        return priority[a.source] - priority[b.source];
+      });
+
+      for (const candidate of candidateUrls) {
+        const facts: ListingFacts = {};
+        try {
+          const photos = await scrapeListingPhotos(candidate.url, undefined, facts);
+          if (photos.length === 0) {
+            console.warn(`[fetch-unit-photos] ${candidate.source} candidate returned 0 photos: ${candidate.url}`);
             continue;
           }
-          const data = await resp.json() as any;
-          const organic = (data.organic_results || []) as Array<{ link?: string; title?: string }>;
-          const candidates = organic
-            .map((r) => String(r.link ?? ""))
-            .filter((l) => /zillow\.com\/homedetails\//i.test(l))
-            .filter((l) => !skipSet.has(l.toLowerCase()));
-          if (candidates.length > 0) {
-            listingUrl = candidates[0];
-            foundVia = "search";
-            console.log(`[fetch-unit-photos] discovery hit on query "${q}" → ${listingUrl}`);
-            break;
+          const scrapedBR = facts.bedrooms ?? null;
+          if (bedrooms && scrapedBR !== null && scrapedBR !== bedrooms) {
+            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${bedrooms}BR`);
+            continue;
           }
+          res.json({
+            photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+            sourceUrl: candidate.url,
+            foundVia: "search",
+            facts,
+          });
+          return;
         } catch (e: any) {
-          console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
+          console.warn(`[fetch-unit-photos] candidate scrape failed for ${candidate.url}: ${e.message}`);
         }
       }
 
       if (!listingUrl) {
-        // No matching Zillow listing — return empty so the page's
+        // No matching real-estate listing — return empty so the page's
         // empty state covers it. Not an error.
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia: "search",
-          note: `No Zillow listing found for "${communityName}"${bedrooms ? ` (${bedrooms}BR)` : ""}.`,
+          note: `No Zillow/Realtor listing found for "${communityName}"${bedrooms ? ` (${bedrooms}BR)` : ""}.`,
         });
       }
     }
@@ -17568,7 +17656,7 @@ Return ONLY compact JSON with this exact shape:
             `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=20&api_key=${apiKey}`,
             { signal: AbortSignal.timeout(15_000) },
           );
-          if (!resp.ok) return [] as Array<{ link: string; title: string; snippet: string }>;
+          if (!resp.ok) return [] as string[];
           const data = await resp.json() as any;
           const organic = (data.organic_results || []) as Array<{ link?: string }>;
           const urls: string[] = [];
@@ -17592,6 +17680,44 @@ Return ONLY compact JSON with this exact shape:
       runQueries(zillowQueries, /zillow\.com\/homedetails\//i),
       runQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i),
     ]);
+
+    // SearchAPI gives us community-anchored snippets; use the repeated
+    // street roots from those hits to safely fold in Apify's city-wide
+    // Zillow/Realtor search actors. This keeps the operator-facing
+    // inventory count aligned with the actual find-clean-unit path.
+    const rootCounts = new Map<string, number>();
+    for (const link of Array.from(zillowSet).concat(Array.from(realtorSet))) {
+      const root = streetRootFromListingAddress(parseListingAddressFromUrl(link));
+      if (!root) continue;
+      rootCounts.set(root, (rootCounts.get(root) ?? 0) + 1);
+    }
+    const apifyRoots = new Set(
+      Array.from(rootCounts.entries())
+        .filter(([, count]) => count >= 2)
+        .map(([root]) => root),
+    );
+    if (apifyRoots.size === 0) {
+      for (const root of Array.from(rootCounts.keys())) apifyRoots.add(root);
+    }
+    if (apifyRoots.size > 0) {
+      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
+        harvestZillowUrlsViaApifySearch(city, state, 300),
+        harvestRealtorUrlsViaApifySearch(city, state, 300),
+      ]);
+      for (const link of zillowApifyUrls) {
+        const root = streetRootFromListingAddress(parseListingAddressFromUrl(link));
+        if (root && apifyRoots.has(root)) zillowSet.add(link.toLowerCase());
+      }
+      for (const link of realtorApifyUrls) {
+        const root = streetRootFromListingAddress(parseListingAddressFromUrl(link));
+        if (root && apifyRoots.has(root)) realtorSet.add(link.toLowerCase());
+      }
+      console.log(
+        `[community-inventory] Apify supplement "${communityName}": ` +
+        `roots=${Array.from(apifyRoots).join(", ")} zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length}`,
+      );
+    }
+
     const combinedUrls = Array.from(zillowSet).concat(Array.from(realtorSet));
     const seen = new Set<string>(combinedUrls);
     const sampleUrls = combinedUrls.slice(0, 6);
@@ -17627,9 +17753,8 @@ Return ONLY compact JSON with this exact shape:
   // simplified single-listing wizard. Operator picks
   // {community, city, state, bedrooms} on Step 1; this endpoint
   // does the rest:
-  //   1. SearchAPI Google site:zillow.com for the community + BR
-  //      (multi-query staged search, same pattern as
-  //      /api/community/fetch-unit-photos).
+  //   1. Discover Zillow/Realtor candidates from SearchAPI plus
+  //      Apify search supplements filtered to the selected resort.
   //   2. For each Zillow candidate (up to ~8), scrape facts +
   //      address.
   //   3. Verify the bedroom count matches the requested BR.
@@ -17951,7 +18076,7 @@ Return ONLY compact JSON with this exact shape:
             `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=${searchApiNum}&api_key=${apiKey}`,
             { signal: AbortSignal.timeout(15_000) },
           );
-          if (!resp.ok) return [] as string[];
+          if (!resp.ok) return [] as Array<{ link: string; title: string; snippet: string }>;
           const data = await resp.json() as any;
           const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
           return organic
@@ -18013,11 +18138,10 @@ Return ONLY compact JSON with this exact shape:
     // Recommended by Grok consult 2026-05-04. Falls back to the
     // existing Google site: discovery if Apify is not configured
     // (no APIFY_API_TOKEN), the actor errors out, or it returns
-    // zero URLs. Community-anchored mode skips this — direct
-    // Apify SEARCH with a community name doesn't filter as well
-    // as a community-anchored Google site: query, and the
-    // existing Google flow already harvests enough URLs for a
-    // single resort.
+    // zero URLs. Community-anchored mode also uses Apify below,
+    // but only after Google/SearchAPI has discovered repeated
+    // street roots, so the broad city-wide actor output can be
+    // narrowed back to the selected resort.
     if (isCityWide) {
       const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
         harvestZillowUrlsViaApifySearch(city, state, 500),
