@@ -16370,19 +16370,40 @@ Return ONLY compact JSON with this exact shape:
     // whether the source unit is also on Airbnb. The default
     // (cleanChannel undefined) keeps the existing all-three-clean
     // strict behavior for the dashboard's Replace & push.
-    const { communityFolder, requiredBedrooms, skipUrls = [], strict = false, cleanChannel } = req.body as {
+    const {
+      communityFolder,
+      requiredBedrooms,
+      skipUrls = [],
+      strict = false,
+      cleanChannel,
+      communityName: bodyCommunityName,
+      propertyAddress,
+      streetAddress,
+    } = req.body as {
       communityFolder: string;
       requiredBedrooms?: number;
       skipUrls?: string[];
       strict?: boolean;
       cleanChannel?: "airbnb" | "vrbo" | "booking";
+      communityName?: string;
+      propertyAddress?: string;
+      streetAddress?: string;
     };
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
-    const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
-    if (!communityName) return res.status(400).json({ error: "Unknown community folder" });
+    const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
+    const normalizedStreetAddress = typeof streetAddress === "string" ? streetAddress.trim() : "";
+    const normalizedPropertyAddress = typeof propertyAddress === "string" ? propertyAddress.trim() : "";
+    const addressStreet = normalizedPropertyAddress.split(",")[0]?.trim() || "";
+    const communityName = COMMUNITY_FOLDER_TO_NAME[safeFolder] || normalizedBodyName;
+    if (!communityName) {
+      return res.status(400).json({
+        error: "Unknown community folder",
+        message: "This draft property is missing its community name, so the replacement search cannot build a resort query.",
+      });
+    }
 
-    const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || communityName;
+    const communityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder] || normalizedStreetAddress || addressStreet || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
 
     // Step 1 — Google search for replacement REAL-ESTATE listing URLs.

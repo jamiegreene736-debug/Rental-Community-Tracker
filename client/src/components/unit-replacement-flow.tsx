@@ -21,6 +21,22 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
+function humanizeApiError(err: unknown, fallback: string) {
+  const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const stripped = raw.replace(/^\d+:\s*/, "").trim();
+  if (!stripped) return fallback;
+
+  try {
+    const parsed = JSON.parse(stripped);
+    if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message;
+    if (typeof parsed?.error === "string" && parsed.error.trim()) return parsed.error;
+  } catch {
+    // Not a JSON error body; use the server's text as-is.
+  }
+
+  return stripped || fallback;
+}
+
 export type UnitStub = {
   id: string;
   unitNumber: string;
@@ -70,6 +86,8 @@ export function UnitReplacementFlow({
   unit,
   allUnits,
   communityFolder,
+  communityName,
+  propertyAddress,
   propertyId,
   skipUrls = [],
   onClose,
@@ -78,6 +96,8 @@ export function UnitReplacementFlow({
   unit: UnitStub;
   allUnits: UnitStub[];
   communityFolder: string;
+  communityName?: string;
+  propertyAddress?: string;
   propertyId: number;
   skipUrls?: string[];
   onClose?: () => void;
@@ -103,6 +123,8 @@ export function UnitReplacementFlow({
     try {
       const resp = await apiRequest("POST", "/api/replacement/find-unit", {
         communityFolder,
+        communityName,
+        propertyAddress,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
       });
@@ -115,9 +137,9 @@ export function UnitReplacementFlow({
         setStage("found");
         setResult(data.unit);
       }
-    } catch {
+    } catch (err) {
       setStage("error");
-      setSwapError("Failed to connect. Please try again.");
+      setSwapError(humanizeApiError(err, "Failed to connect. Please try again."));
     }
   }
 
@@ -151,7 +173,7 @@ export function UnitReplacementFlow({
       onUnitReplaced?.(selectedUnit.id, result, swapId);
       onClose?.();
     } catch (err: any) {
-      setSwapError(err?.message || "Failed to record swap. Please try again.");
+      setSwapError(humanizeApiError(err, "Failed to record swap. Please try again."));
       setStage("found");
     }
   }
@@ -207,7 +229,7 @@ export function UnitReplacementFlow({
           </div>
 
           {stage === "idle" && (
-            <Button size="sm" className="w-full" onClick={search} data-testid="button-start-unit-search">
+            <Button size="sm" className="w-full" onClick={() => search()} data-testid="button-start-unit-search">
               <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
               Find Replacement Unit
             </Button>

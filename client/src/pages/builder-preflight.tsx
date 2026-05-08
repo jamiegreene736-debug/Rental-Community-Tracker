@@ -1253,6 +1253,8 @@ export default function BuilderPreflight() {
                 replacementLabel: unitOverrides[u.id]?.unitLabel,
               }))}
               communityFolder={property.communityPhotoFolder}
+              communityName={property.complexName}
+              propertyAddress={property.address}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
               onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); }}
