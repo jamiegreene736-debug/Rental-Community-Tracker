@@ -609,13 +609,39 @@ export default function BuilderPreflight() {
         {id < 0 && (
           <Card className="p-6 mb-6">
             <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
-            <p className="text-sm text-muted-foreground mb-4">
-              The reverse-image-search half of the Platform Check below needs
-              photos to scan. Click <strong>Find Photos</strong> for each unit
-              and we'll search Zillow for a representative listing at{" "}
-              <strong>{property.complexName}</strong>, scrape its photos, and
-              save them to the draft. Then click Re-run on the Platform Check.
-            </p>
+            {(() => {
+              const allUnitsHavePhotos = property.units.length > 0
+                && property.units.every((unit) => (unit.photos?.length ?? 0) > 0);
+              const someUnitsHavePhotos = property.units.some((unit) => (unit.photos?.length ?? 0) > 0);
+              if (allUnitsHavePhotos) {
+                return (
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Photos are already saved for every unit at{" "}
+                    <strong>{property.complexName}</strong>. The Platform Check
+                    can use the photos on file now. Use <strong>Find different photos</strong>{" "}
+                    only if the saved Zillow match looks wrong or you want to replace a unit&apos;s photo set.
+                  </p>
+                );
+              }
+              if (someUnitsHavePhotos) {
+                return (
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Some units already have photos saved. Click <strong>Find Photos</strong>{" "}
+                    for any unit without photos, or <strong>Find different photos</strong>{" "}
+                    if an existing saved match looks wrong. Then click Re-run on the Platform Check.
+                  </p>
+                );
+              }
+              return (
+                <p className="text-sm text-muted-foreground mb-4">
+                  The reverse-image-search half of the Platform Check below needs
+                  photos to scan. Click <strong>Find Photos</strong> for each unit
+                  and we&apos;ll search Zillow for a representative listing at{" "}
+                  <strong>{property.complexName}</strong>, scrape its photos, and
+                  save them to the draft. Then click Re-run on the Platform Check.
+                </p>
+              );
+            })()}
             <div className="space-y-3">
               {property.units.map((unit, i) => {
                 const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
@@ -638,7 +664,7 @@ export default function BuilderPreflight() {
                       {scrapingUnitId === unit.id ? (
                         <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Searching Zillow…</>
                       ) : folderHasPhotos ? (
-                        <><RefreshCw className="h-3 w-3 mr-1" /> Try another</>
+                        <><RefreshCw className="h-3 w-3 mr-1" /> Find different photos</>
                       ) : (
                         <><Search className="h-3 w-3 mr-1" /> Find Photos</>
                       )}
