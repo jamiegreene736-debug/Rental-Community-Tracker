@@ -17111,11 +17111,11 @@ Return ONLY compact JSON with this exact shape:
           //   listings where our samples might miss the sole bedroom
           //   photo). ~$0.004 per candidate. See probeInteriorCoverage.
           //
-          // PR #324: lowered 12 → 8. Operator hit a case where 1
-          // candidate had 8-11 photos and got rejected; vision probe
-          // accepts on bedroom-OR-bathroom evidence which works fine
-          // with 8 photos (we'd just sample 8/8 instead of 8/12+).
-          const MIN_PHOTOS = 8;
+          // Lower floor for replacement repair: a smaller real-estate
+          // gallery is still usable if the vision probe sees bedroom
+          // or bathroom evidence, and the UI already warns when photo
+          // count is sparse.
+          const MIN_PHOTOS = 5;
           let scrapedPhotoUrls: string[] = [];
           const candidateFacts: ListingFacts = {};
           try {
