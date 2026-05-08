@@ -219,10 +219,11 @@ export default function BuilderPreflight() {
   // skipped (it has nothing to feed Google Lens), so the check returns "no
   // signals" regardless of whether the property is actually listed somewhere.
   //
-  // Mirrors the same Zillow-discovery logic /api/replacement/find-unit
-  // uses for active properties: searches Zillow by community + street
-  // address + bedroom count, picks the first /homedetails/ result, scrapes
-  // its photos. Operator clicks one button per unit; URL paste isn't needed.
+  // Mirrors the same real-estate discovery logic /api/replacement/find-unit
+  // uses for active properties: searches Zillow/Realtor by community +
+  // street address + bedroom count, supplements with Apify when a resort
+  // street root is known, then scrapes the first usable detail result.
+  // Operator clicks one button per unit; URL paste isn't needed.
   const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
   // Track URLs the operator has already accepted/rejected so the
   // "Try another" path skips them. Reset when the property changes.
@@ -267,8 +268,8 @@ export default function BuilderPreflight() {
       const sourceUrl: string | null = fetchData?.sourceUrl ?? null;
       if (photos.length === 0) {
         toast({
-          title: "No Zillow listing found",
-          description: fetchData?.note || `Couldn't find a representative ${unit.bedrooms}BR listing at ${property.complexName}. The community may not have Zillow coverage.`,
+          title: "No real-estate listing found",
+          description: fetchData?.note || `Couldn't find a representative ${unit.bedrooms}BR listing at ${property.complexName}. The community may not have Zillow/Realtor coverage.`,
           variant: "destructive",
         });
         return;

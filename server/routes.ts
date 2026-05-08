@@ -15932,6 +15932,7 @@ Return ONLY compact JSON with this exact shape:
             const sourceLinks = [
               ...(searchData.visual_matches || []),
               ...(searchData.organic_results || []),
+              ...(searchData.image_results || []),
               ...(searchData.pages_with_matching_images || []),
               ...(searchData.knowledge_graph ? [searchData.knowledge_graph] : []),
             ].map((r: any) => String(r?.link || r?.url || r?.source || r?.source_url || ""))
@@ -16170,6 +16171,7 @@ Return ONLY compact JSON with this exact shape:
           const allResults = [
             ...(searchData.visual_matches || []),
             ...(searchData.organic_results || []),
+            ...(searchData.image_results || []),
             ...(searchData.pages_with_matching_images || []),
           ];
           const foundPlatforms: string[] = [];
@@ -16382,6 +16384,9 @@ Return ONLY compact JSON with this exact shape:
       thumbnail: string;   // Google-provided thumbnail for the result card
     }
     const candidates: Candidate[] = [];
+    const candidateUrlSet = new Set<string>();
+    const skipUrlSet = new Set((skipUrls ?? []).map((u) => String(u).toLowerCase()));
+    const harvestRootCounts = new Map<string, number>();
 
     // Detect which source a Google-result URL belongs to. URL must
     // be a per-listing detail page, not a search-results or category
@@ -16465,6 +16470,82 @@ Return ONLY compact JSON with this exact shape:
       return "";
     };
 
+    const displayAddressFromUrl = (url: string, source: CandidateSource): string => {
+      let addrSlug = "";
+      if (source === "zillow") {
+        addrSlug = url.match(/homedetails\/([^/]+)\//)?.[1] || "";
+      } else if (source === "realtor") {
+        addrSlug = (url.match(/realestateandhomes-detail\/([^/?]+)/)?.[1] || "").split("_")[0];
+      } else if (source === "redfin") {
+        addrSlug = url.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
+      }
+      return decodeURIComponent(addrSlug)
+        .replace(/-/g, " ")
+        .replace(/\b\w/g, (c: string) => c.toUpperCase())
+        .replace(/\d{5}$/, "")
+        .trim();
+    };
+
+    const rememberCandidateRoot = (url: string, contextText = "") => {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+      );
+      if (!root) return;
+      harvestRootCounts.set(root, (harvestRootCounts.get(root) ?? 0) + 1);
+    };
+
+    const repeatedCandidateRoots = () => {
+      const repeated = Array.from(harvestRootCounts.entries())
+        .filter(([, count]) => count >= 2)
+        .map(([root]) => root);
+      return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
+    };
+
+    const candidateRootMatches = (url: string, allowedRoots: Set<string>): boolean => {
+      if (allowedRoots.size === 0) return false;
+      const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
+      return !!root && allowedRoots.has(root);
+    };
+
+    const addCandidateUrl = (link: string, source: CandidateSource, contextText = "", thumbnail = "", allowedRoots?: Set<string>) => {
+      if (!link) return;
+      const lower = link.toLowerCase();
+      if (candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
+      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots)) return;
+      const detected = detectSource(link);
+      if (detected !== source) return;
+      let unitNumber = extractUnitNumber(link, source, contextText);
+      if (!unitNumber) unitNumber = extractUnitNumberFromText(contextText);
+      if (!unitNumber && source === "zillow") {
+        const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
+        const parts = slug.split("-");
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
+            unitNumber = parts[i];
+            break;
+          }
+        }
+      }
+      const addrDisplay = displayAddressFromUrl(link, source);
+      candidateUrlSet.add(lower);
+      candidates.push({ sourceUrl: link, source, address: addrDisplay || communityName, unitNumber, thumbnail });
+      rememberCandidateRoot(link, contextText);
+    };
+
+    const resolveCommunityLocation = (): { city: string; state: string } | null => {
+      const exact = Object.values(COMMUNITY_LOCATION_BY_KEY).find((loc) =>
+        loc.searchName.toLowerCase() === communityName.toLowerCase()
+        || (loc.streetAddress && streetRootFromListingAddress(loc.streetAddress) === streetRootFromListingAddress(communityAddress)),
+      );
+      if (exact) return { city: exact.city, state: exact.state };
+      if (/princeville/i.test(communityName)) return { city: "Princeville", state: "Hawaii" };
+      if (/kaha lani/i.test(communityName)) return { city: "Wailua", state: "Hawaii" };
+      if (/kekaha/i.test(communityName)) return { city: "Kekaha", state: "Hawaii" };
+      if (/keauhou/i.test(communityName)) return { city: "Kailua-Kona", state: "Hawaii" };
+      if (/poipu|pili mai|regency/i.test(communityName)) return { city: "Koloa", state: "Hawaii" };
+      return null;
+    };
+
     // Search-query pool. Per-source queries combined.
     //   "for sale" bias        — for-sale listings far less likely
     //                            on VRBO. Highest-value variant.
@@ -16509,46 +16590,8 @@ Return ONLY compact JSON with this exact shape:
           const link: string = r.link || "";
           const source = detectSource(link);
           if (!source) continue;
-          if (skipUrls.includes(link)) continue;
-          // Dedupe: don't add the same URL twice if it surfaces in
-          // multiple queries.
-          if (candidates.some((c) => c.sourceUrl === link)) continue;
-
-          let unitNumber = extractUnitNumber(link, source, `${r.title || ""} ${r.snippet || ""}`);
-          if (!unitNumber) unitNumber = extractUnitNumberFromText(`${r.title || ""} ${r.snippet || ""}`);
-          // Zillow's old fall-through: no parts.split logic below
-          // gets inlined into the per-source branches above.
-          // Fall through to legacy slug scan if nothing matched.
-          if (!unitNumber && source === "zillow") {
-            const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
-            const parts = slug.split("-");
-            for (let i = parts.length - 1; i >= 1; i--) {
-              if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
-                unitNumber = parts[i];
-                break;
-              }
-            }
-          }
-
-          // Per-source slug → human-readable address heuristic.
-          // Used purely for display in the candidate response;
-          // platform check still runs against communityAddress.
-          let addrSlug = "";
-          if (source === "zillow") {
-            addrSlug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
-          } else if (source === "realtor") {
-            addrSlug = (link.match(/realestateandhomes-detail\/([^/?]+)/)?.[1] || "").split("_")[0];
-          } else if (source === "redfin") {
-            addrSlug = link.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
-          }
-          const addrDisplay = decodeURIComponent(addrSlug)
-            .replace(/-/g, " ")
-            .replace(/\b\w/g, (c: string) => c.toUpperCase())
-            .replace(/\d{5}$/, "").trim();
-
           const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
-
-          candidates.push({ sourceUrl: link, source, address: addrDisplay || communityName, unitNumber, thumbnail });
+          addCandidateUrl(link, source, `${r.title || ""} ${r.snippet || ""}`, thumbnail);
         }
         // PR #329: removed the per-query break-out cap. The previous
         // cap of 15 caused a real bug: with 9 queries (5 Zillow + 2
@@ -16565,6 +16608,37 @@ Return ONLY compact JSON with this exact shape:
       } catch (e: any) {
         console.error(`[find-unit] Search error: ${e?.message}`);
       }
+    }
+
+    // Apify search supplement for Preflight replacement/remediation.
+    // SearchAPI's Google index is often shallow for large condo
+    // buildings; Apify's native Zillow/Realtor search actors can
+    // surface detail URLs Google misses. We only add Apify results
+    // when they match the selected resort's known/discovered street
+    // roots so broad city inventory cannot leak into this community.
+    const communityLoc = resolveCommunityLocation();
+    const allowedRoots = repeatedCandidateRoots();
+    const directRoot = streetRootFromListingAddress(communityAddress);
+    if (directRoot) allowedRoots.add(directRoot);
+    if (communityLoc && allowedRoots.size > 0) {
+      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
+        harvestZillowUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
+        harvestRealtorUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
+      ]);
+      const beforeApify = candidates.length;
+      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", allowedRoots);
+      for (const link of zillowApifyUrls) addCandidateUrl(link, "zillow", "", "", allowedRoots);
+      console.error(
+        `[find-unit] Apify supplement: city=${communityLoc.city}, state=${communityLoc.state}, ` +
+        `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
+        `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
+      );
+    } else {
+      console.error(
+        `[find-unit] Apify supplement skipped: ` +
+        `location=${communityLoc ? `${communityLoc.city}, ${communityLoc.state}` : "unknown"} ` +
+        `roots=${Array.from(allowedRoots).join(", ") || "none"}`,
+      );
     }
 
     // PR #329 / #338: sort candidates by source priority before
