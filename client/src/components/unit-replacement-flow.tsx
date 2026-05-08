@@ -127,6 +127,7 @@ export function UnitReplacementFlow({
         propertyAddress,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
+        strict: true,
       });
       const data = await resp.json();
       if (data.error) {
