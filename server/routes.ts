@@ -16417,26 +16417,26 @@ Return ONLY compact JSON with this exact shape:
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    // `strict` opts a caller into rejecting candidates with any
-    // UNKNOWN platform verdict, not just FOUND. The default (loose)
-    // behavior accepts a candidate when SearchAPI errors leave us
-    // genuinely unsure; strict mode treats that as a possible
-    // contamination and skips the candidate. Used by the photo-listing
-    // alert remediation flow where a wrong pick re-publishes someone
-    // else's stolen photos to our Guesty listing.
+    // `strict` opts channel-remediation callers into rejecting
+    // candidates with any UNKNOWN platform verdict, not just FOUND.
+    // The default preflight replacement behavior is loose: it accepts
+    // a candidate when SearchAPI errors leave us genuinely unsure, then
+    // continues through the bedroom/photo/vision checks. Old cached
+    // client bundles may still send `strict: true`, so the flag is
+    // only honored when the caller is also channel-scoped below.
     // `cleanChannel` opts a caller into checking ONE channel only —
     // the candidate just needs to be clean on that channel; presence
     // on the other two OTAs is OK. Used by the per-channel
     // isolate-replace-disconnect flow where we're about to upload
     // photos to (say) VRBO independently of Guesty, so we don't care
-    // whether the source unit is also on Airbnb. The default
-    // (cleanChannel undefined) keeps the existing all-three-clean
-    // strict behavior for the dashboard's Replace & push.
+    // whether the source unit is also on Airbnb. When cleanChannel is
+    // omitted, the normal preflight replacement path checks all three
+    // OTAs for known FOUND matches but does not reject UNKNOWN matches.
     const {
       communityFolder,
       requiredBedrooms,
       skipUrls = [],
-      strict = false,
+      strict: requestedStrict = false,
       cleanChannel,
       communityName: bodyCommunityName,
       propertyAddress,
@@ -16451,6 +16451,7 @@ Return ONLY compact JSON with this exact shape:
       propertyAddress?: string;
       streetAddress?: string;
     };
+    const strict = requestedStrict === true && !!cleanChannel;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
