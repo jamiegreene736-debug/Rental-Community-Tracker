@@ -16993,7 +16993,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-unknown-strict" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
+      verdict: "skipped-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -17069,10 +17069,27 @@ Return ONLY compact JSON with this exact shape:
           // with 8 photos (we'd just sample 8/8 instead of 8/12+).
           const MIN_PHOTOS = 8;
           let scrapedPhotoUrls: string[] = [];
+          const candidateFacts: ListingFacts = {};
           try {
-            const scraped = await scrapeListingPhotos(sourceUrl);
+            const scraped = await scrapeListingPhotos(sourceUrl, undefined, candidateFacts);
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
+          const actualBedrooms = candidateFacts.bedrooms;
+          if (
+            typeof requiredBedrooms === "number"
+            && Number.isFinite(requiredBedrooms)
+            && typeof actualBedrooms === "number"
+            && actualBedrooms < requiredBedrooms
+          ) {
+            console.error(`[find-unit] [${source}] ${sourceUrl} has ${actualBedrooms}BR, need ${requiredBedrooms}BR — skipping`);
+            attempts.push({
+              sourceUrl, source, address, unit: unitNumber || "?",
+              verdict: "skipped-bedroom-mismatch",
+              reason: `Listing is ${actualBedrooms}BR, but this replacement needs at least ${requiredBedrooms}BR.`,
+              platformCheck,
+            });
+            continue;
+          }
           const photoCount = scrapedPhotoUrls.length;
           console.error(`[find-unit] [${source}] ${sourceUrl} → ${photoCount} photos (need ≥${MIN_PHOTOS})`);
           if (photoCount < MIN_PHOTOS) {
@@ -17114,7 +17131,7 @@ Return ONLY compact JSON with this exact shape:
               url: sourceUrl,
               address,
               unitLabel: unitNumber ? `Unit #${unitNumber}` : "New unit",
-              bedrooms: requiredBedrooms ?? null,
+              bedrooms: actualBedrooms ?? requiredBedrooms ?? null,
               source: sourceLabel(source),
               photos,
               photoCount,
@@ -17146,6 +17163,7 @@ Return ONLY compact JSON with this exact shape:
     const breakdown = {
       "skipped-found": 0,
       "skipped-unknown-strict": 0,
+      "skipped-bedroom-mismatch": 0,
       "skipped-too-few-photos": 0,
       "skipped-vision-rejected": 0,
       error: 0,
@@ -17165,6 +17183,7 @@ Return ONLY compact JSON with this exact shape:
       const parts: string[] = [];
       if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
       if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
+      if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
       if (breakdown.error > 0) parts.push(`${breakdown.error} errored`);
