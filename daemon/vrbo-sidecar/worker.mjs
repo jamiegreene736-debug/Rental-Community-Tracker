@@ -39,8 +39,11 @@ const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 
+const CHROME_PRIMARY = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
+const WORKER_ROLE = String(process.env.SIDECAR_WORKER_ROLE ?? (CHROME_PRIMARY === "server" ? "server" : "local")).toLowerCase();
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
+const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
 const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
 const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
@@ -4204,6 +4207,13 @@ async function tick() {
 
   let req = null;
   try {
+    // Server-backed workers are overflow consumers. Give the local
+    // Mac worker first claim on fresh queue items; if it is busy or
+    // offline, the request will still be pending after this short
+    // delay and a server worker can take it.
+    if (WORKER_ROLE === "server" && SERVER_WORKER_CLAIM_DELAY_MS > 0) {
+      await new Promise((r) => setTimeout(r, SERVER_WORKER_CLAIM_DELAY_MS));
+    }
     req = await pollNext();
   } catch (e) {
     consecutiveErrors++;
@@ -4245,7 +4255,7 @@ async function tick() {
 
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
-  log(`Chrome primary: ${process.env.CHROME_PRIMARY ?? "local"}`);
+  log(`Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}`);
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   try {

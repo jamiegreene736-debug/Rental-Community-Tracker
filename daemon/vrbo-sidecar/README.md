@@ -84,6 +84,19 @@ export SERVER_CHROME_BASE_NOVNC_PORT=7901
 export MAX_SERVER_INSTANCES=4
 ```
 
+To actually consume several queue jobs at once, keep the normal local
+LaunchAgent running and start one lightweight local overflow worker per
+remote Chrome:
+
+```sh
+./scripts/start-local-server-workers.sh 4
+```
+
+Those workers run on the Mac so they can open the noVNC page in your
+default browser, but the browser automation itself happens inside the
+server Chrome containers. They wait briefly before claiming work, which
+keeps local Chrome primary when it is idle.
+
 When local Chrome is busy or unavailable, the daemon prints:
 
 ```text
