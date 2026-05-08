@@ -5,6 +5,8 @@
 // Run: npx tsx tests/pipeline-logic.test.ts
 
 import assert from "node:assert/strict";
+import { researchCommunitiesForCity } from "../server/community-research";
+import { checkCommunityType } from "../shared/community-type";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -884,7 +886,54 @@ console.log("\nSidecar date signal suite");
 
   assert.equal(hasBothDates("June 13 total $3,200", "2026-06-13", "2026-06-20"), false);
   assert.equal(hasBothDates("Jun 13 to Jun 20 total $3,200", "2026-06-13", "2026-06-20"), true);
-  console.log("  ✓ generic sidecar prices require both requested dates");
+console.log("  ✓ generic sidecar prices require both requested dates");
+}
+
+// ---------- Community research/type guards ----------
+console.log("\ncommunity research/type suite");
+
+assert.equal(
+  checkCommunityType("condo-style villas", "Attached condominium-style resort units").eligible,
+  true,
+  "attached condo villa language should be allowed",
+);
+console.log("  ✓ allows condo-style villas when the condo signal is explicit");
+
+assert.equal(
+  checkCommunityType("detached villas", "Standalone vacation villas").eligible,
+  false,
+  "detached villas should remain disqualified",
+);
+console.log("  ✓ detached villas remain disqualified");
+
+const originalFetch = globalThis.fetch;
+const originalSearchKey = process.env.SEARCHAPI_API_KEY;
+const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+process.env.SEARCHAPI_API_KEY = "test-search-key";
+delete process.env.ANTHROPIC_API_KEY;
+globalThis.fetch = (async () => new Response(JSON.stringify({ organic_results: [] }), {
+  status: 200,
+  headers: { "Content-Type": "application/json" },
+})) as typeof fetch;
+
+try {
+  const kona = await researchCommunitiesForCity("Kailua-Kona", "Hawaii");
+  assert.ok(kona.length >= 3, "Kailua-Kona should fall back to curated condo/townhome candidates");
+  assert.ok(
+    kona.some((c) => c.name === "Na Hale O Keauhou"),
+    "Kailua-Kona fallback should include Na Hale O Keauhou",
+  );
+  assert.ok(
+    kona.every((c) => checkCommunityType(c.unitTypes, c.researchSummary).eligible),
+    "curated fallback candidates should pass the shared community type guard",
+  );
+  console.log("  ✓ Kailua-Kona has curated fallback communities when search/AI under-find it");
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchKey;
+  if (originalAnthropicKey == null) delete process.env.ANTHROPIC_API_KEY;
+  else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
 }
 
 console.log("\nall suites passed ✅");

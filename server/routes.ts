@@ -20250,7 +20250,7 @@ Return ONLY compact JSON with this exact shape:
   // GET /api/community/top-markets/seeds
   // Returns the curated seed list so the UI can show a preview / checkboxes.
   app.get("/api/community/top-markets/seeds", (_req, res) => {
-    res.json({ seeds: TOP_MARKET_SEEDS });
+    res.json({ seeds: TOP_MARKET_SEEDS, markets: TOP_MARKET_SEEDS });
   });
 
   // GET /api/community/city-suggest?state=Florida&query=des

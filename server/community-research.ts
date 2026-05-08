@@ -55,6 +55,19 @@ type KnownSingleListingCommunitySeed = {
   sourceUrl?: string;
 };
 
+type KnownComboCommunitySeed = {
+  city: RegExp;
+  state: RegExp;
+  name: string;
+  unitTypes: string;
+  bedroomMix: string;
+  combinedBedroomsTypical: number;
+  confidenceScore: number;
+  combinabilityScore: number;
+  researchSummary: string;
+  sourceUrl: string;
+};
+
 // CODEX NOTE (2026-05-05, codex/single-listing-known-facts):
 // The single-listing wizard depends on Claude's resort research
 // for the card name, bedroom buttons, and rough resort unit count.
@@ -172,6 +185,69 @@ const KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS: KnownSingleListingCommunitySeed[] = 
   },
 ];
 
+const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
+  {
+    city: /^kailua-kona$/i,
+    state: /^(hi|hawaii)$/i,
+    name: "Na Hale O Keauhou",
+    unitTypes: "townhomes",
+    bedroomMix: "2BR and 3BR townhomes",
+    combinedBedroomsTypical: 5,
+    confidenceScore: 84,
+    combinabilityScore: 72,
+    sourceUrl: "https://www.alohacondos.com/bigisland/na-hale-o-keauhou",
+    researchSummary: "Keauhou townhome community with recurring 2BR/3BR vacation-rental inventory suitable for bundling nearby units.",
+  },
+  {
+    city: /^kailua-kona$/i,
+    state: /^(hi|hawaii)$/i,
+    name: "Alii Cove",
+    unitTypes: "condos and townhomes",
+    bedroomMix: "2BR and 3BR condos/townhomes",
+    combinedBedroomsTypical: 5,
+    confidenceScore: 80,
+    combinabilityScore: 68,
+    sourceUrl: "https://www.hawaiigaga.com/big-island/condos/alii-cove.aspx",
+    researchSummary: "Gated Kailua-Kona condo/townhome community with 2BR and 3BR vacation-rental inventory.",
+  },
+  {
+    city: /^kailua-kona$/i,
+    state: /^(hi|hawaii)$/i,
+    name: "Kona Reef Resort",
+    unitTypes: "condos",
+    bedroomMix: "mostly 1BR and 2BR condos",
+    combinedBedroomsTypical: 4,
+    confidenceScore: 78,
+    combinabilityScore: 56,
+    sourceUrl: "https://www.hawaiigaga.com/big-island/condos/kona-reef.aspx",
+    researchSummary: "Kailua-Kona oceanfront condominium resort with individually rented condo units; strongest for 2BR plus 2BR bundles.",
+  },
+  {
+    city: /^kailua-kona$/i,
+    state: /^(hi|hawaii)$/i,
+    name: "Keauhou Kona Surf & Racquet Club",
+    unitTypes: "condos and townhomes",
+    bedroomMix: "2BR and 3BR condos/townhomes",
+    combinedBedroomsTypical: 5,
+    confidenceScore: 78,
+    combinabilityScore: 66,
+    sourceUrl: "https://www.alohacondos.com/bigisland/keauhou-kona-surf-and-racquet-club",
+    researchSummary: "Large Keauhou condo/townhome resort community with 2BR/3BR vacation rental inventory.",
+  },
+  {
+    city: /^kailua-kona$/i,
+    state: /^(hi|hawaii)$/i,
+    name: "White Sands Village",
+    unitTypes: "condos",
+    bedroomMix: "mostly 2BR condos",
+    combinedBedroomsTypical: 4,
+    confidenceScore: 72,
+    combinabilityScore: 54,
+    sourceUrl: "https://www.hawaiigaga.com/big-island/condos/white-sands-village.aspx",
+    researchSummary: "Kailua-Kona condo community near Magic Sands with recurring 2BR vacation-rental inventory.",
+  },
+];
+
 function knownSingleListingSeedsForCity(city: string, state: string): ResearchedCommunity[] {
   return KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS
     .filter((seed) => seed.city.test(city.trim()) && seed.state.test(state.trim()))
@@ -190,6 +266,27 @@ function knownSingleListingSeedsForCity(city: string, state: string): Researched
       fromWorldKnowledge: true,
       availableBedrooms: seed.availableBedrooms,
       estimatedTotalUnits: seed.estimatedTotalUnits,
+    }));
+}
+
+function knownComboSeedsForCity(city: string, state: string): ResearchedCommunity[] {
+  return KNOWN_COMBO_COMMUNITY_SEEDS
+    .filter((seed) => seed.city.test(city.trim()) && seed.state.test(state.trim()))
+    .filter((seed) => checkCommunityType(seed.unitTypes, seed.researchSummary).eligible)
+    .map((seed) => ({
+      name: seed.name,
+      city,
+      state,
+      estimatedLowRate: null,
+      estimatedHighRate: null,
+      unitTypes: seed.unitTypes,
+      confidenceScore: seed.confidenceScore,
+      researchSummary: seed.researchSummary,
+      sourceUrl: seed.sourceUrl,
+      bedroomMix: seed.bedroomMix,
+      combinedBedroomsTypical: seed.combinedBedroomsTypical,
+      combinabilityScore: seed.combinabilityScore,
+      fromWorldKnowledge: true,
     }));
 }
 
@@ -575,6 +672,8 @@ export async function researchCommunitiesForCity(
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!searchApiKey) throw new Error("SEARCHAPI_API_KEY not configured");
+  const knownComboSeeds = mode === "combo" ? knownComboSeedsForCity(city, state) : [];
+  const knownComboNames = knownComboSeeds.map((seed) => `"${seed.name}"`).join(" OR ");
 
   // Combo queries focus on individually-owned 2BR/3BR mix (combinable).
   // Single-listing queries expand to lists/round-ups of "best vacation
@@ -593,6 +692,11 @@ export async function researchCommunitiesForCity(
         `"${city}" "${state}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned -villa -"single family" -efficiency -studio -hotel`,
         `"${city}" "${state}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned -villa -"single family" -studio`,
         `"${city}" "${state}" beach condo resort 2BR 3BR individually owned vacation rental -hotel -timeshare -efficiency`,
+        `"${city}" "${state}" "2 bedroom" "condo" "vacation rental" resort`,
+        `"${city}" "${state}" "3 bedroom" "condo" OR "townhome" "vacation rental"`,
+        ...(knownComboNames
+          ? [`"${city}" "${state}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR`]
+          : []),
       ];
 
   const allResults: Array<{ title: string; link: string; snippet: string }> = [];
@@ -629,7 +733,7 @@ export async function researchCommunitiesForCity(
   // Resort) without any organic results to anchor on. Combo mode
   // keeps the original "no results = no results" behavior because
   // its prompt is too combinability-focused to work cold.
-  if (unique.length === 0 && mode === "combo") return [];
+  if (unique.length === 0 && mode === "combo" && knownComboSeeds.length === 0) return [];
 
   // Spot-check the typical per-unit nightly rate for a community by
   // hitting SearchAPI's airbnb engine for a 7-night window 30 days out
@@ -751,9 +855,17 @@ SCORING:
     <30: mostly studios → skip
 
 Use (1) the search results below, and (2) your own knowledge — add up to 3 well-known communities in "${city}, ${state}" that fit, marked fromWorldKnowledge:true.
+If a resort markets attached condominium/townhome inventory as "villas", only call it a fit when the units are shared-wall condos/townhomes; detached villas remain disqualified. In that case, set unitTypes to "condos", "townhomes", or "condo-style villas" rather than generic "villas".
+
+KNOWN LOCAL CANDIDATES to consider for "${city}, ${state}" if the search results are sparse:
+${knownComboSeeds.length
+  ? knownComboSeeds.map((seed) => `- ${seed.name}: ${seed.unitTypes}; ${seed.bedroomMix}; ${seed.researchSummary}`).join("\n")
+  : "- none"}
 
 SEARCH RESULTS for "${city}, ${state}":
-${unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")}
+${unique.length
+  ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")
+  : "(No organic results returned. Use only well-known local candidates you can classify with high confidence.)"}
 
 Output JSON array. Each element:
 {"communityName":"...","bedroomMix":"...","combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
@@ -900,6 +1012,10 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         results.push(seed);
       }
     }
+  }
+
+  if (mode === "combo" && results.length === 0) {
+    results.push(...knownComboSeeds);
   }
 
   results.sort((a, b) => {

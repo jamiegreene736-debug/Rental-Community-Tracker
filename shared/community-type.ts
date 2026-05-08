@@ -1,7 +1,7 @@
 // Central rule: the business only supports condo / townhome communities.
-// Villas, single-family homes, detached houses, estates, and pool homes are
-// explicitly disqualified — combining two of them isn't the same product as
-// combining two condos in the same building / townhome row.
+// Detached villas, single-family homes, detached houses, estates, and pool
+// homes are explicitly disqualified — combining two of them isn't the same
+// product as combining two condos in the same building / townhome row.
 //
 // Used by the add-community flow (pre-filter research results, reject save)
 // and client-side rendering (grey out ineligible cards). Keep in /shared so
@@ -12,8 +12,6 @@
 // matched with word boundaries to avoid false matches on substrings (e.g.
 // "villa" inside "Villafranca" or a brand name).
 const DISQUALIFYING_TERMS = [
-  "villa",
-  "villas",
   "detached",
   "single family",
   "single-family",
@@ -28,6 +26,12 @@ const DISQUALIFYING_TERMS = [
   "private house",
   "guest quarters",
   "main house",
+];
+
+const VILLA_TERMS = ["villa", "villas"];
+const ATTACHED_VILLA_PATTERNS = [
+  /\bcondo(?:minium)?[-\s]+(?:style[-\s]+)?villas?\b/i,
+  /\btown(?:home|house)[-\s]+(?:style[-\s]+)?villas?\b/i,
 ];
 
 // Qualifying terms — one of these should appear in `unitTypes` so we don't
@@ -89,6 +93,15 @@ export function checkCommunityType(
         eligible: false,
         reason: `unit types field contains "${disq}" — only condo/townhome communities are supported`,
         matchedDisqualifier: disq,
+      };
+    }
+    const villaTerm = VILLA_TERMS.find((t) => containsTerm(typeText, t));
+    const villaIsAttachedCondoLanguage = ATTACHED_VILLA_PATTERNS.some((re) => re.test(typeText));
+    if (villaTerm && !villaIsAttachedCondoLanguage) {
+      return {
+        eligible: false,
+        reason: `unit types field contains "${villaTerm}" — only condo/townhome communities are supported`,
+        matchedDisqualifier: villaTerm,
       };
     }
     const hasQualifier = QUALIFYING_TERMS.some((t) => containsTerm(typeText, t));

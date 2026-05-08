@@ -305,8 +305,11 @@ export default function AddCommunity() {
     if (!seedMarkets) {
       try {
         const resp = await fetch("/api/community/top-markets/seeds");
-        const data = await resp.json() as { seeds?: Array<{ city: string; state: string; tag: string }> };
-        const list = data.seeds ?? [];
+        const data = await resp.json() as {
+          seeds?: Array<{ city: string; state: string; tag: string }>;
+          markets?: Array<{ city: string; state: string; tag: string }>;
+        };
+        const list = data.seeds ?? data.markets ?? [];
         setSeedMarkets(list);
         // Pre-select everything so the user can hit Run immediately if
         // they want the original auto-all behavior. They can uncheck what
