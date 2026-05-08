@@ -152,6 +152,7 @@ export default function BuilderPreflight() {
       .finally(() => setDraftLoading(false));
   }, [id, staticProperty]);
   const property = staticProperty ?? draftProperty;
+  const isPromotedDraft = id < 0;
 
   const { toast } = useToast();
 
@@ -324,17 +325,16 @@ export default function BuilderPreflight() {
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
 
   // Load any previously saved unit swaps from the DB, then auto-run the
-  // platform check if no swaps are blocking it. Gated on `property` so
-  // promoted drafts (which load `draftProperty` async) actually fire
-  // the check once their data lands — earlier `[id]`-only deps meant
-  // the effect ran once with `property = null` and never re-fired.
+  // platform check for static builder properties if no swaps are blocking it.
+  // Promoted drafts can arrive with freshly scraped photos and should not kick
+  // off reverse-image search until the operator explicitly asks for it.
   useEffect(() => {
     if (!id || !property) return;
     fetch(`/api/unit-swaps/${id}`)
       .then(r => r.ok ? r.json() : null)
       .then((data: { swaps: any[] } | null) => {
         if (!data?.swaps?.length) {
-          if (!autoRunFired.current) {
+          if (!isPromotedDraft && !autoRunFired.current) {
             autoRunFired.current = true;
             runPlatformCheck();
           }
@@ -357,7 +357,7 @@ export default function BuilderPreflight() {
         setSwapsCommitted(allCommitted);
       })
       .catch(() => {
-        if (!autoRunFired.current) {
+        if (!isPromotedDraft && !autoRunFired.current) {
           autoRunFired.current = true;
           runPlatformCheck();
         }
@@ -606,7 +606,7 @@ export default function BuilderPreflight() {
             properties — operator clicks one button per unit, no URL
             paste needed. "Try another" walks through subsequent
             results so a bad first match isn't a dead end. */}
-        {id < 0 && (
+        {isPromotedDraft && (
           <Card className="p-6 mb-6">
             <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
             {(() => {
@@ -618,8 +618,9 @@ export default function BuilderPreflight() {
                   <p className="text-sm text-muted-foreground mb-4">
                     Photos are already saved for every unit at{" "}
                     <strong>{property.complexName}</strong>. The Platform Check
-                    can use the photos on file now. Use <strong>Find different photos</strong>{" "}
-                    only if the saved Zillow match looks wrong or you want to replace a unit&apos;s photo set.
+                    can use the photos on file when you click <strong>Run check</strong>{" "}
+                    below. Use <strong>Find different photos</strong> only if the saved
+                    Zillow match looks wrong or you want to replace a unit&apos;s photo set.
                   </p>
                 );
               }
@@ -628,7 +629,8 @@ export default function BuilderPreflight() {
                   <p className="text-sm text-muted-foreground mb-4">
                     Some units already have photos saved. Click <strong>Find Photos</strong>{" "}
                     for any unit without photos, or <strong>Find different photos</strong>{" "}
-                    if an existing saved match looks wrong. Then click Re-run on the Platform Check.
+                    if an existing saved match looks wrong. Then click <strong>Run check</strong>{" "}
+                    on the Platform Check.
                   </p>
                 );
               }
@@ -638,7 +640,8 @@ export default function BuilderPreflight() {
                   photos to scan. Click <strong>Find Photos</strong> for each unit
                   and we&apos;ll search Zillow for a representative listing at{" "}
                   <strong>{property.complexName}</strong>, scrape its photos, and
-                  save them to the draft. Then click Re-run on the Platform Check.
+                  save them to the draft. Then click <strong>Run check</strong>{" "}
+                  on the Platform Check.
                 </p>
               );
             })()}
@@ -690,23 +693,33 @@ export default function BuilderPreflight() {
         <Card className="p-6 mb-6">
           <div className="flex items-start justify-between gap-4 mb-1">
             <h2 className="text-base font-semibold">Platform Check</h2>
-            {platformDone && (
+            {!isCheckRunning && (
               <Button
-                id="btn-rerun-checks"
-                aria-label="Re-run platform check"
+                id={platformDone ? "btn-rerun-checks" : "btn-run-checks"}
+                aria-label={platformDone ? "Re-run platform check" : "Run platform check"}
                 variant="ghost"
                 size="sm"
                 onClick={rerunChecks}
-                disabled={isCheckRunning}
                 className="h-7 px-2 text-xs flex-shrink-0"
               >
-                <RotateCcw className="h-3 w-3 mr-1" />
-                Re-run
+                {platformDone ? (
+                  <>
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    Re-run
+                  </>
+                ) : (
+                  <>
+                    <Search className="h-3 w-3 mr-1" />
+                    Run check
+                  </>
+                )}
               </Button>
             )}
           </div>
           <p className="text-sm text-muted-foreground mb-4">
-            Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search.
+            {isPromotedDraft
+              ? "Click Run check when you're ready. It searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."
+              : "Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."}
           </p>
 
           {/* Committed swaps summary — renders every unit (swapped OR original)
