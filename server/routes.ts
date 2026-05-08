@@ -16491,6 +16491,34 @@ Return ONLY compact JSON with this exact shape:
       ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
       : folderCommunityAddress || normalizedStreetAddress || addressStreet || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
+    const routeStartedAt = Date.now();
+    const ROUTE_BUDGET_MS = 210_000;
+    const APIFY_SUPPLEMENT_BUDGET_MS = 75_000;
+    const PLATFORM_SEARCH_TIMEOUT_MS = 12_000;
+    const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
+    const MAX_CANDIDATES_TO_CHECK = 45;
+    const hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
+    const withStepTimeout = async <T,>(
+      promise: Promise<T>,
+      ms: number,
+      fallback: T,
+      label: string,
+    ): Promise<T> => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<T>((resolve) => {
+            timer = setTimeout(() => {
+              console.warn(`[find-unit] ${label} timed out after ${ms}ms`);
+              resolve(fallback);
+            }, ms);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
 
     // Step 1 — Google search for replacement REAL-ESTATE listing URLs.
     // PR #338 (operator directive 2026-04-30): VRBO removed as a
@@ -16723,6 +16751,7 @@ Return ONLY compact JSON with this exact shape:
         console.error(`[find-unit] Searching: ${siteQuery}`);
         const searchResp = await fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=10&api_key=${searchApiKey}`,
+          { signal: AbortSignal.timeout(PLATFORM_SEARCH_TIMEOUT_MS) },
         );
         if (!searchResp.ok) {
           console.error(`[find-unit] SearchAPI HTTP ${searchResp.status}`);
@@ -16766,10 +16795,15 @@ Return ONLY compact JSON with this exact shape:
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
     if (communityLoc && allowedRoots.size > 0) {
-      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-        harvestZillowUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
-        harvestRealtorUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
-      ]);
+      const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
+        Promise.all([
+          harvestZillowUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
+          harvestRealtorUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
+        ]),
+        APIFY_SUPPLEMENT_BUDGET_MS,
+        [[], []] as [string[], string[]],
+        "Apify replacement supplement",
+      );
       const beforeApify = candidates.length;
       for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", allowedRoots);
       for (const link of zillowApifyUrls) addCandidateUrl(link, "zillow", "", "", allowedRoots);
@@ -16840,6 +16874,7 @@ Return ONLY compact JSON with this exact shape:
       try {
         const resp = await fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
+          { signal: AbortSignal.timeout(PLATFORM_SEARCH_TIMEOUT_MS) },
         );
         if (!resp.ok) {
           console.error(`[find-unit] SearchAPI HTTP ${resp.status} for "${q}"`);
@@ -17010,7 +17045,14 @@ Return ONLY compact JSON with this exact shape:
     const sourceLabel = (s: CandidateSource): string =>
       s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : s === "redfin" ? "Redfin" : "VRBO";
 
-    for (const candidate of candidates) {
+    let budgetStopped = false;
+    const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
+    for (const candidate of candidatesToCheck) {
+      if (!hasRouteBudget(25_000)) {
+        budgetStopped = true;
+        console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
+        break;
+      }
       try {
         const { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
 
@@ -17077,7 +17119,12 @@ Return ONLY compact JSON with this exact shape:
           let scrapedPhotoUrls: string[] = [];
           const candidateFacts: ListingFacts = {};
           try {
-            const scraped = await scrapeListingPhotos(sourceUrl, undefined, candidateFacts);
+            const scraped = await withStepTimeout(
+              scrapeListingPhotos(sourceUrl, undefined, candidateFacts, { sidecarWalletMs: 20_000 }),
+              PHOTO_SCRAPE_TIMEOUT_MS,
+              [] as ScrapedPhoto[],
+              `photo scrape ${sourceUrl}`,
+            );
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
           const actualBedrooms = candidateFacts.bedrooms;
@@ -17187,6 +17234,8 @@ Return ONLY compact JSON with this exact shape:
       diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
     } else {
       const parts: string[] = [];
+      if (budgetStopped) parts.push(`stopped after ${attempts.length}/${totalCandidates} candidates to avoid a stuck request`);
+      if (totalCandidates > MAX_CANDIDATES_TO_CHECK) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
       if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
       if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
@@ -17213,6 +17262,9 @@ Return ONLY compact JSON with this exact shape:
         sourceBreakdown,
         breakdown,
         attempts,
+        checkedCandidates: attempts.length,
+        maxCandidatesChecked: MAX_CANDIDATES_TO_CHECK,
+        budgetStopped,
       },
     });
   });

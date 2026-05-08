@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Loader2,
   RefreshCw,
@@ -107,15 +107,26 @@ export function UnitReplacementFlow({
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
   // URLs the user explicitly skipped via "Try another" — fed back into
   // the next find-unit call so we don't surface the same listing again.
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
 
+  const isWorking = stage === "searching" || stage === "checking";
+  useEffect(() => {
+    if (!isWorking) return;
+    const id = window.setInterval(() => setProgressTick((tick) => tick + 1), 1_000);
+    return () => window.clearInterval(id);
+  }, [isWorking]);
+
   async function search(opts: { extraSkip?: string } = {}) {
     setResult(null);
     setSwapError(null);
+    setSearchStartedAt(Date.now());
+    setProgressTick(0);
     setStage("searching");
     setTimeout(() => setStage(s => s === "searching" ? "checking" : s), 2000);
     const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
@@ -141,6 +152,8 @@ export function UnitReplacementFlow({
     } catch (err) {
       setStage("error");
       setSwapError(humanizeApiError(err, "Failed to connect. Please try again."));
+    } finally {
+      setSearchStartedAt(null);
     }
   }
 
@@ -190,6 +203,19 @@ export function UnitReplacementFlow({
     : stage === "checking"
       ? [false, true, false]
       : [false, false, false];
+  const elapsedSeconds = searchStartedAt
+    ? Math.max(progressTick, Math.floor((Date.now() - searchStartedAt) / 1000))
+    : 0;
+  const progressPercent = stage === "searching"
+    ? Math.min(42, 10 + elapsedSeconds * 2.2)
+    : stage === "checking"
+      ? Math.min(94, 42 + Math.max(0, elapsedSeconds - 2) * 0.75)
+      : stage === "found"
+        ? 100
+        : 0;
+  const elapsedLabel = elapsedSeconds >= 60
+    ? `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`
+    : `${elapsedSeconds}s`;
 
   return (
     <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-3 space-y-3">
@@ -243,6 +269,32 @@ export function UnitReplacementFlow({
                 <span>
                   {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
                 </span>
+              </div>
+              <div className="space-y-1.5">
+                <div
+                  className="h-2 w-full overflow-hidden rounded-full bg-amber-100 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(progressPercent)}
+                  aria-label="Replacement search progress"
+                  data-testid="replacement-search-progress"
+                >
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-teal-500 to-blue-700 transition-all duration-700"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                  <span>{Math.round(progressPercent)}% · {elapsedLabel}</span>
+                  <span className="text-right">
+                    {stage === "searching"
+                      ? "Finding real-estate candidates"
+                      : elapsedSeconds > 90
+                        ? "Still checking candidates; this can take a few minutes"
+                        : "Verifying candidate is not already listed"}
+                  </span>
+                </div>
               </div>
               <div className="flex gap-1.5">
                 {steps.map((label, i) => (
