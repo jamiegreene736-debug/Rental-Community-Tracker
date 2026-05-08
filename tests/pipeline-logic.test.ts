@@ -5,6 +5,7 @@
 // Run: npx tsx tests/pipeline-logic.test.ts
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { researchCommunitiesForCity } from "../server/community-research";
 import { checkCommunityType } from "../shared/community-type";
 
@@ -935,5 +936,13 @@ try {
   if (originalAnthropicKey == null) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
 }
+
+const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+assert.equal(
+  routeSource.includes("${DISCLOSURE}"),
+  false,
+  "generate-listing fallback must not reference removed DISCLOSURE constant",
+);
+console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference");
 
 console.log("\nall suites passed ✅");

@@ -22103,32 +22103,70 @@ Return ONLY compact JSON with this exact shape:
       return "STR-099-99";
     })();
 
-    if (!anthropicKey) {
-      // CODEX NOTE (2026-05-04, claude/single-listing): branch the
-      // no-Anthropic fallback so single-listing drafts get a coherent
-      // single-unit fallback string instead of "Two condos at…".
+    const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
+
+    const fallbackUnitDraft = (unit: { bedrooms: number }): {
+      bedrooms: number;
+      bathrooms: string;
+      sqft: string;
+      maxGuests: number;
+      bedding: string;
+      shortDescription: string;
+      longDescription: string;
+    } => {
+      const bedrooms = unit.bedrooms || 2;
+      const maxGuests = bedrooms * 2 + 2;
+      return {
+        bedrooms,
+        bathrooms: bedrooms >= 3 ? "2.5" : "2",
+        sqft: bedrooms >= 3 ? "~1,400" : "~1,100",
+        maxGuests,
+        bedding: bedrooms >= 3
+          ? "King primary bedroom, queen second bedroom, two twins or queen third bedroom, and a sleeper sofa in the living area."
+          : "King primary bedroom, queen second bedroom, and a sleeper sofa in the living area.",
+        shortDescription: `${bedrooms}BR vacation condo at ${communityName} in ${city}.`,
+        longDescription: `This ${bedrooms}-bedroom vacation condo at ${communityName} gives guests a comfortable home base in ${city}, ${state}. The layout is designed for families or small groups, with private bedrooms, shared living space, and easy access to the surrounding resort area.`,
+      };
+    };
+
+    const fallbackDraft = (warning?: string) => {
       const fallbackTitle = singleListing
-        ? `${communityName} ${unit1.bedrooms}BR for ${unit1.bedrooms * 2}!`.slice(0, 50)
-        : `${communityName} ${combinedBedrooms}BR for ${combinedBedrooms * 2}!`.slice(0, 50);
-      const fallbackDescription = singleListing
-        ? `Standalone ${unit1.bedrooms}BR condo at ${communityName} in ${city}, ${state}. Sleeps ~${unit1.bedrooms * 2}.`
-        : `Two condos at ${communityName} in ${city}, ${state}. Unit A is ${unit1.bedrooms}BR, Unit B is ${unit2!.bedrooms}BR — ${combinedBedrooms}BR combined. ${walk.description} Guests receive separate access codes per unit at check-in.`;
-      return res.json({
+        ? `${communityName} ${unit1.bedrooms}BR in ${city}!`.slice(0, 50)
+        : `${communityName} ${combinedBedrooms}BR for ${guestCapacity}!`.slice(0, 50);
+      const summary = singleListing
+        ? `Enjoy a standalone ${unit1.bedrooms}-bedroom vacation condo at ${communityName} in ${city}, ${state}. This comfortable home base is ready for beach days, dining, and exploring the surrounding area.`
+        : `Bring the group together at ${communityName} in ${city}, ${state}, with ${combinedBedrooms} bedrooms across two nearby condos. The setup gives guests extra privacy while keeping everyone close for shared vacation time.`;
+      const space = singleListing
+        ? `This standalone unit includes ${unit1.bedrooms} bedrooms and a practical condo-style layout for guests who want a comfortable base near ${communityName}. Update the bedroom layout, bedding, bathrooms, and amenities once the exact unit details are confirmed.`
+        : `This bundled stay combines Unit A (${unit1.bedrooms}BR) and Unit B (${unit2!.bedrooms}BR) at ${communityName}. The units are ${walk.description.toLowerCase()} Guests receive separate access details for each unit at check-in. Update bedding, bathrooms, and amenity details once the exact units are confirmed.`;
+      const neighborhood = `${communityName} places guests in the ${city}, ${state} area, close to local beaches, restaurants, shopping, and outdoor activities. Add specific nearby landmarks and drive times before publishing.`;
+      const transit = `A rental car is recommended for exploring ${city} and the surrounding area. Add airport distance, parking details, and walkability notes once the exact unit location is confirmed.`;
+      const description = [summary, space, `THE NEIGHBORHOOD\n\n${neighborhood}`, `GETTING AROUND\n\n${transit}`].join("\n\n");
+
+      return {
         title: fallbackTitle,
         bookingTitle: fallbackTitle,
         propertyType: "Condominium",
-        description: fallbackDescription,
-        summary: "",
-        space: fallbackDescription,
-        neighborhood: "",
-        transit: "",
-        unitA: null,
-        unitB: null,
+        description,
+        summary,
+        space,
+        neighborhood,
+        transit,
+        unitA: fallbackUnitDraft(unit1),
+        unitB: singleListing || !unit2 ? null : fallbackUnitDraft(unit2),
         combinedBedrooms,
         suggestedRate,
         walk,
         strPermitSample,
-      });
+        ...(warning ? { warning } : {}),
+      };
+    };
+
+    if (!anthropicKey) {
+      // CODEX NOTE (2026-05-04, claude/single-listing): branch the
+      // no-Anthropic fallback so single-listing drafts get a coherent
+      // single-unit fallback string instead of "Two condos at…".
+      return res.json(fallbackDraft());
     }
 
     // Structured-output prompt. Mirrors the fields the existing
@@ -22147,7 +22185,6 @@ Return ONLY compact JSON with this exact shape:
     // text rather than two parallel routes — output JSON shape is
     // identical (just `unitB` is null for singles), so the wizard
     // and downstream save flow can use a single client call.
-    const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
     const prompt = singleListing
       ? `Generate a structured vacation rental listing draft for a STANDALONE single-unit listing at ${communityName} in ${city}, ${state}.
 
@@ -22319,29 +22356,7 @@ CONSTRAINTS
       // CODEX NOTE (2026-05-04, claude/single-listing): branched
       // catch-block fallback so single-listing failures get a coherent
       // single-unit fallback string instead of "combines two units".
-      const fallbackTitle = singleListing
-        ? `${communityName} — ${unit1.bedrooms}BR Standalone | ${city}, ${state}`.slice(0, 80)
-        : `${communityName} — ${combinedBedrooms}BR Combined | ${city}, ${state}`.slice(0, 80);
-      const fallbackDescription = singleListing
-        ? `Standalone ${unit1.bedrooms}-bedroom unit at ${communityName} in ${city}, ${state}.`
-        : `${DISCLOSURE}\n\nThis listing combines two units at ${communityName} in ${city}, ${state}. ${walk.description}`;
-      return res.json({
-        title: fallbackTitle,
-        bookingTitle: fallbackTitle,
-        propertyType: "Condominium",
-        description: fallbackDescription,
-        summary: "",
-        space: fallbackDescription,
-        neighborhood: "",
-        transit: "",
-        unitA: null,
-        unitB: null,
-        combinedBedrooms,
-        suggestedRate,
-        walk,
-        strPermitSample,
-        warning: `AI draft generation failed (${e.message}). Edit the fields below directly.`,
-      });
+      return res.json(fallbackDraft(`AI draft generation failed (${e.message}). Edit the fields below directly.`));
     }
   });
 
