@@ -608,13 +608,6 @@ export default function BuilderPreflight() {
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
 
-  // Does any unit across any platform show a "listed" status?
-  const anyUnitListed = effectiveUnits.some(unit => {
-    const r = results[unit.id];
-    if (!r) return false;
-    return PLATFORM_LIST.some(({ key }) => isListedStatus(r.platforms[key].status));
-  });
-
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-3xl mx-auto px-4 py-8">
@@ -1111,7 +1104,6 @@ export default function BuilderPreflight() {
                       const isReplaced = (unit as any)._isReplaced;
                       const displayAddress = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
                       const unitChecking = checkingUnitIds.has(unit.id);
-                      const listed = r && isListedStatus(r.status);
                       return (
                         <tr
                           key={`${key}-${unit.id}`}
@@ -1134,8 +1126,8 @@ export default function BuilderPreflight() {
                             {r && (
                               <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
                             )}
-                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition) */}
-                            {key === "airbnb" && listed && !isReplaced && property.communityPhotoFolder && (
+                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition). */}
+                            {key === "airbnb" && property.communityPhotoFolder && !swapsCommitted && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -1147,7 +1139,7 @@ export default function BuilderPreflight() {
                                 }}
                               >
                                 <RefreshCw className="h-3 w-3 mr-1" />
-                                Replace this unit
+                                {isReplaced ? "Change replacement" : "Replace this unit"}
                               </Button>
                             )}
                           </td>
@@ -1212,7 +1204,7 @@ export default function BuilderPreflight() {
               Continue to Builder <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
           )}
-          {anyUnitListed && property.communityPhotoFolder && (
+          {property.communityPhotoFolder && (
             <Button
               id="btn-use-different-unit"
               aria-label="Find a replacement unit"
@@ -1224,7 +1216,7 @@ export default function BuilderPreflight() {
               }}
               className="sm:w-auto"
             >
-              Use a Different Unit
+              Find / Replace a Unit
             </Button>
           )}
         </div>
