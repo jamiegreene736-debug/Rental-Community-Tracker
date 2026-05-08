@@ -945,4 +945,13 @@ assert.equal(
 );
 console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference");
 
+const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
+for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {
+  assert.ok(
+    schemaMaintenanceSource.includes(`ADD COLUMN IF NOT EXISTS ${col}`),
+    `runtime schema maintenance must ensure community_drafts.${col}`,
+  );
+}
+console.log("  ✓ runtime schema guard covers community_drafts listing draft columns");
+
 console.log("\nall suites passed ✅");

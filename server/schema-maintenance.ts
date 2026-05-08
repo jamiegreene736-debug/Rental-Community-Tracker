@@ -138,6 +138,33 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured property_market_rates monthly_rates column");
 
   await db.execute(sql`
+    ALTER TABLE community_drafts
+      ADD COLUMN IF NOT EXISTS street_address text,
+      ADD COLUMN IF NOT EXISTS unit1_bathrooms text,
+      ADD COLUMN IF NOT EXISTS unit1_sqft text,
+      ADD COLUMN IF NOT EXISTS unit1_max_guests integer,
+      ADD COLUMN IF NOT EXISTS unit1_bedding text,
+      ADD COLUMN IF NOT EXISTS unit1_short_description text,
+      ADD COLUMN IF NOT EXISTS unit1_long_description text,
+      ADD COLUMN IF NOT EXISTS unit1_photo_folder text,
+      ADD COLUMN IF NOT EXISTS unit2_bathrooms text,
+      ADD COLUMN IF NOT EXISTS unit2_sqft text,
+      ADD COLUMN IF NOT EXISTS unit2_max_guests integer,
+      ADD COLUMN IF NOT EXISTS unit2_bedding text,
+      ADD COLUMN IF NOT EXISTS unit2_short_description text,
+      ADD COLUMN IF NOT EXISTS unit2_long_description text,
+      ADD COLUMN IF NOT EXISTS unit2_photo_folder text,
+      ADD COLUMN IF NOT EXISTS pricing_area text,
+      ADD COLUMN IF NOT EXISTS single_listing boolean,
+      ADD COLUMN IF NOT EXISTS booking_title text,
+      ADD COLUMN IF NOT EXISTS property_type text,
+      ADD COLUMN IF NOT EXISTS neighborhood text,
+      ADD COLUMN IF NOT EXISTS transit text,
+      ADD COLUMN IF NOT EXISTS str_permit text
+  `);
+  console.log("[schema] ensured community_drafts listing draft columns");
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS quo_sms_messages (
       id serial PRIMARY KEY,
       provider_message_id text NOT NULL UNIQUE,
