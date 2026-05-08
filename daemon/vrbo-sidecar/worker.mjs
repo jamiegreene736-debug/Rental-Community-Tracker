@@ -23,6 +23,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import { ChromeSidecarManager } from "./chrome-sidecar-manager.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COOKIES_FILE = path.join(__dirname, "cookies.json");
@@ -56,6 +57,7 @@ let browser = null;
 let context = null;
 let page = null;
 let contextGuardsInstalled = false;
+let activeChromeAllocation = null;
 
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
@@ -501,6 +503,32 @@ async function ensureChromeRunning() {
   throw new Error("Chrome spawned but CDP did not become ready within 20s");
 }
 
+const chromeSidecarManager = new ChromeSidecarManager({ viewport: VIEWPORT, log });
+
+async function acquireChromeForRequest(request = {}) {
+  if (activeChromeAllocation) return activeChromeAllocation;
+  activeChromeAllocation = await chromeSidecarManager.acquire(request);
+  log(
+    `using ${activeChromeAllocation.label} via CDP (${activeChromeAllocation.cdpUrl})` +
+      (activeChromeAllocation.noVncUrl ? `; live view ${activeChromeAllocation.noVncUrl}` : ""),
+  );
+  if (activeChromeAllocation.noVncUrl && request.id) {
+    await sendHeartbeat(`server Chrome live view ${activeChromeAllocation.noVncUrl}`, true, request.id).catch(() => {});
+  }
+  return activeChromeAllocation;
+}
+
+async function releaseChromeForRequest() {
+  if (!activeChromeAllocation) return;
+  const allocation = activeChromeAllocation;
+  activeChromeAllocation = null;
+  try {
+    await allocation.release?.();
+  } catch (e) {
+    log(`release ${allocation.label} failed: ${e?.message ?? e}`);
+  }
+}
+
 async function normalizePageDisplay(targetPage = page) {
   if (!targetPage || targetPage.isClosed?.()) return;
   await withSoftTimeout(targetPage.setViewportSize(VIEWPORT), 1_500);
@@ -515,10 +543,10 @@ async function normalizePageDisplay(targetPage = page) {
 }
 
 async function ensureBrowser() {
+  const allocation = await acquireChromeForRequest();
   if (browser && context && page && !page.isClosed()) return;
-  await ensureChromeRunning();
-  log("connecting to Chrome via CDP…");
-  browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+  log(`connecting to Chrome via CDP (${allocation.label})…`);
+  browser = await chromium.connectOverCDP(allocation.cdpUrl);
   context = browser.contexts()[0] ?? (await browser.newContext());
   await installContextGuards();
   const cookies = loadCookies();
@@ -611,6 +639,7 @@ async function teardownBrowser(reason) {
   context = null;
   page = null;
   contextGuardsInstalled = false;
+  await releaseChromeForRequest();
 }
 
 async function fetchJson(url, init) {
@@ -695,7 +724,9 @@ async function syncRemoteCookies() {
     const fp = data?.fingerprint ?? null;
     if (!cookies.length) return false;
     if (fp && fp === lastAppliedCookieFingerprint) return false;
-    if (!context) await ensureBrowser();
+    // Avoid claiming a local/server browser while idle just to sync
+    // cookies. The next real request will acquire the sidecar and then
+    // apply the latest server-pushed cookie set before navigation.
     if (!context) return false;
     // Normalise to Playwright shape (same as loadCookies()).
     const sameSiteMap = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
@@ -4115,6 +4146,12 @@ async function processRequest(req) {
     bedrooms: req.bedrooms,
   };
 
+  // Acquire the browser at the request boundary so the manager can
+  // keep local Chrome as the primary path, detect a busy local sidecar,
+  // and transparently fall back to a server noVNC sidecar when needed.
+  await acquireChromeForRequest({ id: req.id, opType });
+  await ensureBrowser();
+
   // PR #307: clear the daemon page between ops so each scrape starts
   // from a known blank state — no carryover from the previous scrape's
   // modals, observers, timers, or scroll position. The batch op
@@ -4141,6 +4178,11 @@ async function processRequest(req) {
   } finally {
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
     await showCompletePage(opType);
+    if (activeChromeAllocation?.ephemeral) {
+      await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
+    } else {
+      await releaseChromeForRequest();
+    }
   }
 }
 
@@ -4203,13 +4245,13 @@ async function tick() {
 
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
-  log(`Chrome binary: ${CHROME_BINARY}`);
-  log(`Chrome user-data-dir: ${CHROME_DATA_DIR}`);
+  log(`Chrome primary: ${process.env.CHROME_PRIMARY ?? "local"}`);
+  log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
+  log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   try {
-    await ensureBrowser();
+    await chromeSidecarManager.warmPrimaryLocal();
   } catch (e) {
-    log(`startup failed: ${e.message}`);
-    process.exit(1);
+    log(`local Chrome warmup skipped: ${e.message}`);
   }
   process.on("SIGINT", async () => { await teardownBrowser("SIGINT"); process.exit(0); });
   process.on("SIGTERM", async () => { await teardownBrowser("SIGTERM"); process.exit(0); });

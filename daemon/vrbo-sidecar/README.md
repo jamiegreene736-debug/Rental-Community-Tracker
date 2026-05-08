@@ -17,6 +17,10 @@ copy to `~/Downloads/vrbo-sidecar/worker.mjs` followed by
 
 - `worker.mjs` — the daemon itself. Plain Node ESM, no build step.
   Runs the queue poll loop and dispatches to per-op-type processors.
+- `chrome-sidecar-manager.mjs` — Chrome routing helper. It keeps the
+  local Chrome CDP endpoint as the primary path, detects a busy local
+  request lock, and falls back to configured server Chrome/noVNC
+  sidecars when needed.
 
 ## Files NOT in this directory (operator-side state)
 
@@ -58,6 +62,43 @@ or manually unblock the sidecar browser, restart the daemon with:
 
 ```sh
 SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/worker.mjs
+```
+
+## Server Chrome fallback
+
+Local Chrome remains the default. To allow overflow work to run on
+headed Chrome containers on a remote server, start the remote services:
+
+```sh
+./scripts/start-server-sidecars.sh 4
+```
+
+Then set these on the Mac running the daemon:
+
+```sh
+export CHROME_PRIMARY=local
+export SERVER_CHROME_HOST=<SERVER_IP_OR_DNS>
+export SERVER_CHROME_BASE_PORT=9223
+export SERVER_CHROME_BASE_WEBDRIVER_PORT=4445
+export SERVER_CHROME_BASE_NOVNC_PORT=7901
+export MAX_SERVER_INSTANCES=4
+```
+
+When local Chrome is busy or unavailable, the daemon prints:
+
+```text
+Local Chrome sidecar is currently in use, utilizing server processing...
+Opened live view for this job: http://SERVER_IP:7901
+Watch the search happening in real time.
+```
+
+It also opens the matching noVNC URL in the default browser so the
+remote headed Chrome session is visible while the job runs.
+
+Advanced explicit endpoint list:
+
+```sh
+export SERVER_CHROME_ENDPOINTS="chrome-server-1=http://10.0.0.8:9223|http://10.0.0.8:4445|http://10.0.0.8:7901,chrome-server-2=http://10.0.0.8:9224|http://10.0.0.8:4446|http://10.0.0.8:7902"
 ```
 
 If the daemon's Chrome session is stuck (rare — manifests as
