@@ -253,15 +253,31 @@ export default function BuilderPreflight() {
     if (id >= 0 || !property) return; // promoted drafts only
     const draftId = -id;
     const { street, city, state } = parsePropertyAddress(property.address);
+    const loadSourceUrl = async (folder?: string): Promise<string | null> => {
+      if (!folder) return null;
+      try {
+        const r = await apiRequest("GET", `/api/builder/photo-source/${encodeURIComponent(folder)}`);
+        const data = await r.json() as { source?: { sourceListing?: { url?: string } } | null };
+        const url = data?.source?.sourceListing?.url;
+        return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+      } catch {
+        return null;
+      }
+    };
     setScrapingUnitId(unit.id);
     try {
+      const existingSources = await Promise.all(property.units.map((u) => loadSourceUrl(u.photoFolder)));
+      const skipUrls = Array.from(new Set([
+        ...(skippedUrlsByUnit[unit.id] ?? []),
+        ...existingSources.filter((u): u is string => !!u),
+      ]));
       const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
         communityName: property.complexName,
         streetAddress: street || undefined,
         city: city || undefined,
         state: state || undefined,
         bedrooms: unit.bedrooms,
-        skipUrls: skippedUrlsByUnit[unit.id] ?? [],
+        skipUrls,
       });
       const fetchData = await fetchR.json();
       const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
@@ -278,8 +294,8 @@ export default function BuilderPreflight() {
       // its existing folder. The endpoint skips a unit when its URL list
       // is empty.
       const persistBody = unitIndex === 0
-        ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [] }
-        : { unit1Photos: [], unit2Photos: photos.map((p) => p.url) };
+        ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl }
+        : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl };
       const persistR = await apiRequest("POST", `/api/community/${draftId}/persist-photos`, persistBody);
       const persistData = await persistR.json();
       const saved = unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;

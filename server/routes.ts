@@ -16,6 +16,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
+import sharp from "sharp";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
@@ -15183,6 +15184,41 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
+  app.post("/api/photos/rotate", async (req, res) => {
+    const body = (req.body ?? {}) as { folder?: unknown; filename?: unknown; degrees?: unknown };
+    const folder = typeof body.folder === "string" ? body.folder : "";
+    const filename = typeof body.filename === "string" ? body.filename : "";
+    const rawDegrees = Number(body.degrees ?? 90);
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    if (!filename || !/^[\w.-]+\.(jpe?g|png|webp)$/i.test(filename)) {
+      return res.status(400).json({ error: "invalid filename" });
+    }
+    const degrees = ((rawDegrees % 360) + 360) % 360;
+    if (![90, 180, 270].includes(degrees)) {
+      return res.status(400).json({ error: "degrees must be 90, 180, or 270" });
+    }
+    const filePath = path.join(process.cwd(), "client/public/photos", folder, filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "photo not found" });
+    try {
+      const input = await fs.promises.readFile(filePath);
+      const oriented = await sharp(input, { failOn: "none" }).rotate().toBuffer();
+      let pipeline = sharp(oriented, { failOn: "none" }).rotate(degrees);
+      const ext = path.extname(filename).toLowerCase();
+      if (ext === ".png") {
+        pipeline = pipeline.png({ compressionLevel: 9 });
+      } else if (ext === ".webp") {
+        pipeline = pipeline.webp({ quality: 92 });
+      } else {
+        pipeline = pipeline.jpeg({ quality: 92, mozjpeg: true });
+      }
+      const output = await pipeline.toBuffer();
+      await fs.promises.writeFile(filePath, output);
+      res.json({ ok: true, folder, filename, degrees });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Photo labels: read + relabel ──────────────────────────────────────
   // Returns the Claude-vision-generated captions for a given folder plus
   // any human overrides (userLabel / userCategory / hidden). The curation
@@ -17185,7 +17221,17 @@ Return ONLY compact JSON with this exact shape:
       // and are filtered back down to those roots. This keeps Apify's
       // better inventory coverage without letting broad city results
       // leak into the selected resort.
-      const skipSet = new Set((skipUrls ?? []).map((u) => u.toLowerCase()));
+      const listingKey = (raw: string): string => {
+        try {
+          const u = new URL(raw);
+          const host = u.hostname.replace(/^www\./i, "").toLowerCase();
+          const pathOnly = u.pathname.replace(/\/+$/, "").toLowerCase();
+          return `${host}${pathOnly}`;
+        } catch {
+          return raw.trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
+        }
+      };
+      const skipSet = new Set((skipUrls ?? []).map((u) => listingKey(u)));
       type DiscoverySource = "zillow" | "realtor";
       const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
       const seen = new Set<string>();
@@ -17204,15 +17250,15 @@ Return ONLY compact JSON with this exact shape:
         return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
       };
       const addCandidate = (link: string, source: DiscoverySource, title = "", snippet = "", allowedRoots?: Set<string>) => {
-        const lower = link.toLowerCase();
-        if (seen.has(lower) || skipSet.has(lower)) return;
+        const key = listingKey(link);
+        if (seen.has(key) || skipSet.has(key)) return;
         if (allowedRoots && allowedRoots.size > 0) {
           const root = streetRootFromListingAddress(
             parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
           );
           if (!root || !allowedRoots.has(root)) return;
         }
-        seen.add(lower);
+        seen.add(key);
         candidateUrls.push({ url: link, source });
         rememberRoot(link, title, snippet);
       };
@@ -20235,7 +20281,7 @@ Return ONLY compact JSON with this exact shape:
 
   // POST /api/community/:id/persist-photos
   //
-  // Body: { unit1Photos: string[], unit2Photos: string[] }
+  // Body: { unit1Photos: string[], unit2Photos: string[], unit1SourceUrl?, unit2SourceUrl? }
   //
   // The Add a New Community wizard scrapes Zillow / runs a
   // discovery search and surfaces candidate photos in Step 4.
@@ -20257,9 +20303,26 @@ Return ONLY compact JSON with this exact shape:
     const draftId = parseInt(req.params.id, 10);
     if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
 
-    const body = req.body as { unit1Photos?: string[]; unit2Photos?: string[] };
+    const body = req.body as {
+      unit1Photos?: string[];
+      unit2Photos?: string[];
+      unit1SourceUrl?: string | null;
+      unit2SourceUrl?: string | null;
+    };
     const unit1Urls = Array.isArray(body.unit1Photos) ? body.unit1Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
     const unit2Urls = Array.isArray(body.unit2Photos) ? body.unit2Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
+    const unit1SourceUrl = typeof body.unit1SourceUrl === "string" && /^https?:\/\//i.test(body.unit1SourceUrl) ? body.unit1SourceUrl : null;
+    const unit2SourceUrl = typeof body.unit2SourceUrl === "string" && /^https?:\/\//i.test(body.unit2SourceUrl) ? body.unit2SourceUrl : null;
+    const photoKey = (u: string) => u.replace(/[?#].*$/, "").toLowerCase();
+    if (unit1Urls.length > 0 && unit2Urls.length > 0) {
+      const unit1Set = new Set(unit1Urls.map(photoKey));
+      const overlap = unit2Urls.filter((u) => unit1Set.has(photoKey(u))).length;
+      if (overlap / Math.min(unit1Urls.length, unit2Urls.length) >= 0.8) {
+        return res.status(409).json({
+          error: "Unit A and Unit B photo sets are identical. Pick a different photo source before saving.",
+        });
+      }
+    }
 
     const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
     const MAX_PER_UNIT = 25;
@@ -20283,7 +20346,15 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
-    const persistUnit = async (urls: string[], folder: string): Promise<{ folder: string; saved: number } | null> => {
+    const platformForSource = (sourceUrl: string): string =>
+      /zillow\.com/i.test(sourceUrl) ? "zillow"
+        : /realtor\.com/i.test(sourceUrl) ? "realtor"
+          : /homes\.com/i.test(sourceUrl) ? "homes.com"
+            : /vrbo\.com/i.test(sourceUrl) ? "vrbo"
+              : /airbnb\.com/i.test(sourceUrl) ? "airbnb"
+                : "other";
+
+    const persistUnit = async (urls: string[], folder: string, sourceUrl: string | null, unitLabel: string): Promise<{ folder: string; saved: number } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
       // Wipe any prior contents so re-saving doesn't accumulate.
@@ -20293,17 +20364,34 @@ Return ONLY compact JSON with this exact shape:
       const capped = urls.slice(0, MAX_PER_UNIT);
       const results = await Promise.all(capped.map((u, i) => downloadOne(u, folderPath, i)));
       const saved = results.filter(Boolean).length;
+      if (sourceUrl) {
+        await fs.promises.writeFile(path.join(folderPath, "_source.json"), JSON.stringify({
+          sourceListing: {
+            url: sourceUrl,
+            platform: platformForSource(sourceUrl),
+            selectedAt: new Date().toISOString(),
+            source: "add-community-draft",
+          },
+          unitLabel,
+        }, null, 2));
+      }
       return { folder, saved };
     };
 
     try {
       const [u1, u2] = await Promise.all([
-        persistUnit(unit1Urls, `draft-${draftId}-unit-a`),
-        persistUnit(unit2Urls, `draft-${draftId}-unit-b`),
+        persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A"),
+        persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B"),
       ]);
       const update: Record<string, string | null> = {};
-      if (u1) update.unit1PhotoFolder = u1.folder;
-      if (u2) update.unit2PhotoFolder = u2.folder;
+      if (u1) {
+        update.unit1PhotoFolder = u1.folder;
+        if (unit1SourceUrl) update.unit1Url = unit1SourceUrl;
+      }
+      if (u2) {
+        update.unit2PhotoFolder = u2.folder;
+        if (unit2SourceUrl) update.unit2Url = unit2SourceUrl;
+      }
       if (Object.keys(update).length > 0) {
         await storage.updateCommunityDraft(draftId, update);
       }

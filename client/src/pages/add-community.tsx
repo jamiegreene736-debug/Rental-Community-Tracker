@@ -196,6 +196,8 @@ export default function AddCommunity() {
   // Step 4
   const [unit1Photos, setUnit1Photos] = useState<PhotoItem[]>([]);
   const [unit2Photos, setUnit2Photos] = useState<PhotoItem[]>([]);
+  const [unit1PhotoSourceUrl, setUnit1PhotoSourceUrl] = useState<string | null>(null);
+  const [unit2PhotoSourceUrl, setUnit2PhotoSourceUrl] = useState<string | null>(null);
   const [photosLoading, setPhotosLoading] = useState(false);
   const [photoChecks, setPhotoChecks] = useState<Record<string, PhotoCheckResult | "checking">>({});
 
@@ -485,6 +487,8 @@ export default function AddCommunity() {
     setPhotosLoading(true);
     setUnit1Photos([]);
     setUnit2Photos([]);
+    setUnit1PhotoSourceUrl(null);
+    setUnit2PhotoSourceUrl(null);
     setPhotoChecks({});
 
     // Two call shapes for /fetch-unit-photos:
@@ -498,7 +502,7 @@ export default function AddCommunity() {
     //
     // We only short-circuit to the empty state when neither path
     // can run (no URL AND insufficient community info to search).
-    const buildBody = (u: UnitResult) =>
+    const buildBody = (u: UnitResult, skipUrls: string[] = []) =>
       u.url
         ? { url: u.url }
         : {
@@ -506,26 +510,11 @@ export default function AddCommunity() {
             city: selectedCommunity?.city,
             state: selectedCommunity?.state,
             bedrooms: u.bedrooms ?? undefined,
+            skipUrls,
           };
     const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && u.bedrooms));
 
-    const fetches: Array<Promise<void>> = [];
-    if (canFetch(selectedUnit1)) {
-      fetches.push(
-        apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit1))
-          .then((r) => r.json())
-          .then((d) => setUnit1Photos((d.photos || []).slice(0, 25))),
-      );
-    }
-    if (canFetch(selectedUnit2)) {
-      fetches.push(
-        apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2))
-          .then((r) => r.json())
-          .then((d) => setUnit2Photos((d.photos || []).slice(0, 25))),
-      );
-    }
-
-    if (fetches.length === 0) {
+    if (!canFetch(selectedUnit1) && !canFetch(selectedUnit2)) {
       // Nothing we can fetch with — neither a URL nor enough
       // community info to search. The page's empty state covers it.
       setPhotosLoading(false);
@@ -533,7 +522,61 @@ export default function AddCommunity() {
     }
 
     try {
-      await Promise.all(fetches);
+      const listingKey = (raw: string | null | undefined): string => {
+        if (!raw) return "";
+        try {
+          const u = new URL(raw);
+          return `${u.hostname.replace(/^www\./i, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+        } catch {
+          return raw.trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
+        }
+      };
+      const photoSetLooksSame = (a: PhotoItem[], b: PhotoItem[]): boolean => {
+        if (a.length === 0 || b.length === 0) return false;
+        const keys = new Set(a.map((p) => p.url.replace(/[?#].*$/, "").toLowerCase()));
+        const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
+        return overlap / Math.min(a.length, b.length) >= 0.8;
+      };
+      let firstSourceUrl: string | null = null;
+      let firstPhotos: PhotoItem[] = [];
+      if (canFetch(selectedUnit1)) {
+        const r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit1));
+        const d = await r.json();
+        firstSourceUrl = typeof d.sourceUrl === "string" ? d.sourceUrl : selectedUnit1.url || null;
+        firstPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
+        setUnit1PhotoSourceUrl(firstSourceUrl);
+        setUnit1Photos(firstPhotos);
+      }
+      if (canFetch(selectedUnit2)) {
+        // When both combo units are discovered by "community + bedrooms"
+        // (common for two 2BR units), the server otherwise returns the same
+        // top Zillow/Realtor listing twice. Skip Unit A's source when finding
+        // Unit B so the two draft folders do not persist identical photos.
+        const skipUrls = firstSourceUrl && !selectedUnit2.url ? [firstSourceUrl] : [];
+        let r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, skipUrls));
+        let d = await r.json();
+        if (!selectedUnit2.url && firstSourceUrl && listingKey(d.sourceUrl) === listingKey(firstSourceUrl)) {
+          r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, [firstSourceUrl, d.sourceUrl]));
+          d = await r.json();
+        }
+        let secondPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
+        if (!selectedUnit2.url && firstSourceUrl && photoSetLooksSame(firstPhotos, secondPhotos)) {
+          const retrySkips = [firstSourceUrl, d.sourceUrl].filter((u): u is string => typeof u === "string" && !!u);
+          r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, retrySkips));
+          d = await r.json();
+          secondPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
+        }
+        if (!selectedUnit2.url && firstPhotos.length > 0 && photoSetLooksSame(firstPhotos, secondPhotos)) {
+          toast({
+            title: "Unit B photos need another source",
+            description: "The search returned the same photo set as Unit A, so I did not attach duplicate Unit B photos. Use Find Photos / Find different photos from pre-flight to pick another source.",
+            variant: "destructive",
+          });
+          secondPhotos = [];
+        }
+        setUnit2PhotoSourceUrl(typeof d.sourceUrl === "string" ? d.sourceUrl : selectedUnit2.url || null);
+        setUnit2Photos(secondPhotos);
+      }
     } catch (e: any) {
       toast({ title: "Photo fetch failed", description: e.message, variant: "destructive" });
     } finally {
@@ -631,7 +674,7 @@ export default function AddCommunity() {
         confidenceScore: selectedCommunity.confidenceScore,
         researchSummary: selectedCommunity.researchSummary,
         sourceUrl: selectedCommunity.sourceUrl,
-        unit1Url: selectedUnit1?.url ?? null,
+        unit1Url: selectedUnit1?.url || unit1PhotoSourceUrl || null,
         unit1Bedrooms: selectedUnit1?.bedrooms ?? null,
         // Per-unit structured fields. Each is nullable on the
         // schema so a draft saved before the operator filled them
@@ -643,7 +686,7 @@ export default function AddCommunity() {
         unit1Bedding: editedUnitA?.bedding ?? null,
         unit1ShortDescription: editedUnitA?.shortDescription ?? null,
         unit1LongDescription: editedUnitA?.longDescription ?? null,
-        unit2Url: selectedUnit2?.url ?? null,
+        unit2Url: selectedUnit2?.url || unit2PhotoSourceUrl || null,
         unit2Bedrooms: selectedUnit2?.bedrooms ?? null,
         unit2Bathrooms: editedUnitB?.bathrooms ?? null,
         unit2Sqft: editedUnitB?.sqft ?? null,
@@ -675,6 +718,8 @@ export default function AddCommunity() {
           await apiRequest("POST", `/api/community/${draftId}/persist-photos`, {
             unit1Photos: unit1Photos.map((p) => p.url),
             unit2Photos: unit2Photos.map((p) => p.url),
+            unit1SourceUrl: selectedUnit1?.url || unit1PhotoSourceUrl || null,
+            unit2SourceUrl: selectedUnit2?.url || unit2PhotoSourceUrl || null,
           });
         } catch (e: any) {
           console.warn(`[add-community] photo persist failed: ${e?.message}`);
@@ -713,7 +758,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1461,11 +1506,23 @@ export default function AddCommunity() {
                     )}
 
                     {[
-                      { label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos },
-                      { label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos },
-                    ].map(({ label, photos }) => (
+                      { label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
+                      { label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
+                    ].map(({ label, photos, sourceUrl }) => (
                       <div key={label} className="mb-6">
-                        <h3 className="font-medium text-sm mb-3">{label}</h3>
+                        <div className="flex items-center gap-2 mb-3">
+                          <h3 className="font-medium text-sm">{label}</h3>
+                          {sourceUrl && (
+                            <a
+                              href={sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-primary hover:underline"
+                            >
+                              View source listing
+                            </a>
+                          )}
+                        </div>
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                           {photos.map((p, i) => {
                             const checkResult = photoChecks[p.url];

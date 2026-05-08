@@ -18,6 +18,7 @@
 // field each photo carries.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { RotateCcw, RotateCw } from "lucide-react";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
 
@@ -99,6 +100,8 @@ export default function PhotoCurator({
   const [meta, setMeta] = useState<Map<string, LabelMeta>>(new Map());
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [rotatingKey, setRotatingKey] = useState<string | null>(null);
+  const [cacheBusters, setCacheBusters] = useState<Map<string, number>>(new Map());
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -166,6 +169,35 @@ export default function PhotoCurator({
         alert(`Save failed: ${e.message}`);
       } finally {
         setSavingKey(null);
+      }
+    },
+    [onOverridesChanged],
+  );
+
+  const rotatePhoto = useCallback(
+    async (folder: string, filename: string, degrees: 90 | 270) => {
+      const key = `${folder}/${filename}`;
+      setRotatingKey(key);
+      try {
+        const resp = await fetch("/api/photos/rotate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder, filename, degrees }),
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          throw new Error((body as any)?.error || `HTTP ${resp.status}`);
+        }
+        setCacheBusters((prev) => {
+          const next = new Map(prev);
+          next.set(key, Date.now());
+          return next;
+        });
+        onOverridesChanged?.();
+      } catch (e: any) {
+        alert(`Rotate failed: ${e.message}`);
+      } finally {
+        setRotatingKey(null);
       }
     },
     [onOverridesChanged],
@@ -415,6 +447,8 @@ export default function PhotoCurator({
                   tile={tile}
                   index={tileIdx + 1}
                   saving={savingKey === tile.key}
+                  rotating={rotatingKey === tile.key}
+                  cacheBust={cacheBusters.get(tile.key)}
                   onEditCaption={(caption) => {
                     if (!tile.folder || !tile.filename) return;
                     patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
@@ -422,6 +456,10 @@ export default function PhotoCurator({
                   onDelete={() => {
                     if (!tile.folder || !tile.filename) return;
                     patchLabel(tile.folder, tile.filename, { hidden: !tile.meta?.hidden });
+                  }}
+                  onRotate={(degrees) => {
+                    if (!tile.folder || !tile.filename) return;
+                    rotatePhoto(tile.folder, tile.filename, degrees);
                   }}
                 />
               ))}
@@ -443,8 +481,11 @@ function PhotoTile({
   tile,
   index,
   saving,
+  rotating,
+  cacheBust,
   onEditCaption,
   onDelete,
+  onRotate,
 }: {
   tile: {
     key: string;
@@ -456,8 +497,11 @@ function PhotoTile({
   };
   index: number;
   saving: boolean;
+  rotating: boolean;
+  cacheBust?: number;
   onEditCaption: (caption: string) => void;
   onDelete: () => void;
+  onRotate: (degrees: 90 | 270) => void;
 }) {
   // Effective caption — user override wins, else labeler output, else
   // whatever the parent passed in (static label fallback), else blank.
@@ -469,6 +513,9 @@ function PhotoTile({
 
   const hidden = !!tile.meta?.hidden;
   const cannotEdit = !tile.folder;
+  const displayUrl = cacheBust
+    ? `${tile.url}${tile.url.includes("?") ? "&" : "?"}v=${cacheBust}`
+    : tile.url;
 
   return (
     <div style={{
@@ -479,7 +526,7 @@ function PhotoTile({
     }}>
       <div style={{ position: "relative", aspectRatio: "4/3", background: "#f3f4f6" }}>
         <img
-          src={tile.url}
+          src={displayUrl}
           alt={effectiveCaption}
           loading="lazy"
           style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
@@ -544,6 +591,36 @@ function PhotoTile({
             alignSelf: "flex-start",
           }}
         >{hidden ? "↺ restore" : "✕ delete"}</button>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          <button
+            disabled={cannotEdit || saving || rotating}
+            onClick={() => onRotate(270)}
+            title="Rotate photo left and save"
+            aria-label="Rotate photo left and save"
+            style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              width: 26, height: 24, background: "#eef2ff", color: "#3730a3",
+              border: 0, borderRadius: 3, cursor: cannotEdit || saving || rotating ? "not-allowed" : "pointer",
+              opacity: cannotEdit || saving || rotating ? 0.55 : 1,
+            }}
+          >
+            <RotateCcw size={13} />
+          </button>
+          <button
+            disabled={cannotEdit || saving || rotating}
+            onClick={() => onRotate(90)}
+            title="Rotate photo right and save"
+            aria-label="Rotate photo right and save"
+            style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              width: 26, height: 24, background: "#eef2ff", color: "#3730a3",
+              border: 0, borderRadius: 3, cursor: cannotEdit || saving || rotating ? "not-allowed" : "pointer",
+              opacity: cannotEdit || saving || rotating ? 0.55 : 1,
+            }}
+          >
+            <RotateCw size={13} />
+          </button>
+        </div>
       </div>
     </div>
   );
