@@ -314,6 +314,8 @@ export default function BuilderPreflight() {
   const [completedCount, setCompletedCount] = useState(0);
   const [totalUnits, setTotalUnits] = useState(0);
   const [checkPhase, setCheckPhase] = useState<"text" | "photo" | "done" | null>(null);
+  const [checkStartedAt, setCheckStartedAt] = useState<number | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
   const [results, setResults] = useState<ProgressiveResults>({});
   const [platformDone, setPlatformDone] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
@@ -324,6 +326,13 @@ export default function BuilderPreflight() {
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
+
+  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
+  useEffect(() => {
+    if (!isCheckRunning) return;
+    const id = setInterval(() => setProgressTick(t => t + 1), 1_000);
+    return () => clearInterval(id);
+  }, [isCheckRunning]);
 
   // Load any previously saved unit swaps from the DB, then auto-run the
   // platform check for static builder properties if no swaps are blocking it.
@@ -428,6 +437,8 @@ export default function BuilderPreflight() {
     setCompletedCount(0);
     setTotalUnits(unitsToCheck.length);
     setCheckPhase("text");
+    setCheckStartedAt(Date.now());
+    setProgressTick(0);
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
 
@@ -500,6 +511,7 @@ export default function BuilderPreflight() {
 
     setCheckPhase("done");
     setPlatformChecking(false);
+    setCheckStartedAt(null);
     setPlatformDone(true);
   };
 
@@ -558,8 +570,16 @@ export default function BuilderPreflight() {
     runPlatformCheck(updatedUnits);
   }
 
-  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
   const hasAnyResults = Object.keys(results).length > 0;
+  const actualProgress = totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0;
+  const elapsedSeconds = checkStartedAt ? Math.max(progressTick, Math.floor((Date.now() - checkStartedAt) / 1000)) : 0;
+  const activeProgressCap = totalUnits > 0
+    ? Math.min(96, ((completedCount + 0.85) / totalUnits) * 100)
+    : 0;
+  const estimatedWorkingProgress = isCheckRunning && totalUnits > 0
+    ? Math.min(activeProgressCap, actualProgress + 8 + elapsedSeconds * (checkPhase === "photo" ? 1.8 : 2.5))
+    : actualProgress;
+  const platformProgressValue = Math.max(actualProgress, estimatedWorkingProgress);
   const targetUnit = replacementTargetId
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
@@ -997,7 +1017,7 @@ export default function BuilderPreflight() {
                 </span>
                 <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done</span>
               </div>
-              <Progress value={totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0} className="h-2" />
+              <Progress value={platformProgressValue} className="h-2" />
               <p className="text-xs text-muted-foreground">
                 {checkPhase === "photo"
                   ? "Uploading photos to run Google Lens reverse image search — this takes 15–30 s per unit."
