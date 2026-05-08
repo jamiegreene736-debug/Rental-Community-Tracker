@@ -3,7 +3,6 @@ import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import {
   Loader2,
   ArrowRight,
@@ -598,6 +597,13 @@ export default function BuilderPreflight() {
     ? Math.min(activeProgressCap, actualProgress + 8 + elapsedSeconds * (checkPhase === "photo" ? 1.8 : 2.5))
     : actualProgress;
   const platformProgressValue = Math.max(actualProgress, estimatedWorkingProgress);
+  const visiblePlatformProgressValue = isCheckRunning
+    ? Math.max(14, platformProgressValue)
+    : platformProgressValue;
+  const checkingLabels = effectiveUnits
+    .filter((unit) => checkingUnitIds.has(unit.id))
+    .map((unit) => `Unit ${unit.unitNumber}`)
+    .join(", ");
   const targetUnit = replacementTargetId
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
@@ -1022,7 +1028,13 @@ export default function BuilderPreflight() {
 
           {/* Progress bar */}
           {isCheckRunning && totalUnits > 0 && (
-            <div className="mb-5 space-y-2">
+            <div className="mb-5 space-y-2 rounded-md border border-primary/15 bg-primary/5 p-3">
+              <style>{`
+                @keyframes preflight-progress-stripes {
+                  from { background-position: 0 0; }
+                  to { background-position: 32px 0; }
+                }
+              `}</style>
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5 font-medium">
                   {checkPhase === "photo" ? (
@@ -1033,14 +1045,38 @@ export default function BuilderPreflight() {
                     <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking…</>
                   )}
                 </span>
-                <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done</span>
+                <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done · {elapsedSeconds}s</span>
               </div>
-              <Progress value={platformProgressValue} className="h-2" />
-              <p className="text-xs text-muted-foreground">
-                {checkPhase === "photo"
-                  ? "Uploading photos to run Google Lens reverse image search — this takes 15–30 s per unit."
-                  : "Querying search engines for address and unit number matches across all platforms."}
-              </p>
+              <div
+                className="relative h-3 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(visiblePlatformProgressValue)}
+                aria-label="Platform check progress"
+              >
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-700 ease-out"
+                  style={{
+                    width: `${Math.min(100, visiblePlatformProgressValue)}%`,
+                    backgroundImage:
+                      "linear-gradient(45deg, rgba(255,255,255,0.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0.28) 75%, transparent 75%, transparent)",
+                    backgroundSize: "32px 32px",
+                    animation: "preflight-progress-stripes 1s linear infinite",
+                  }}
+                />
+                <div className="absolute inset-0 animate-pulse bg-primary/10" />
+              </div>
+              <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+                <p>
+                  {checkPhase === "photo"
+                    ? "Uploading photos to Google Lens and waiting for reverse-image matches."
+                    : "Querying search engines for address and unit number matches across all platforms."}
+                </p>
+                <p className="font-medium text-foreground/80">
+                  {checkingLabels ? `Working on ${checkingLabels}` : "Finalizing results..."}
+                </p>
+              </div>
             </div>
           )}
 
