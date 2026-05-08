@@ -17190,7 +17190,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls, skipFirst } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -17200,6 +17200,11 @@ Return ONLY compact JSON with this exact shape:
       // URLs the caller already has (e.g. from a previous click) so
       // a "Find another" button can skip listings already surfaced.
       skipUrls?: string[];
+      // Existing draft folders created before _source.json stamping have
+      // photos but no source URL to skip. In that one repair case, the
+      // preflight "Find different photos" action can ask discovery to jump
+      // past the top candidate once.
+      skipFirst?: number;
     };
 
     let listingUrl: string | undefined = url || undefined;
@@ -17337,7 +17342,8 @@ Return ONLY compact JSON with this exact shape:
         return priority[a.source] - priority[b.source];
       });
 
-      for (const candidate of candidateUrls) {
+      const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
+      for (const candidate of candidateUrls.slice(offset)) {
         const facts: ListingFacts = {};
         try {
           const photos = await scrapeListingPhotos(candidate.url, undefined, facts);

@@ -271,6 +271,7 @@ export default function BuilderPreflight() {
         ...(skippedUrlsByUnit[unit.id] ?? []),
         ...existingSources.filter((u): u is string => !!u),
       ]));
+      const currentUnitHasPhotos = property.units.some((u) => u.id === unit.id && (u.photos?.length ?? 0) > 0);
       const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
         communityName: property.complexName,
         streetAddress: street || undefined,
@@ -278,6 +279,7 @@ export default function BuilderPreflight() {
         state: state || undefined,
         bedrooms: unit.bedrooms,
         skipUrls,
+        skipFirst: skipUrls.length === 0 && currentUnitHasPhotos ? 1 : 0,
       });
       const fetchData = await fetchR.json();
       const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
