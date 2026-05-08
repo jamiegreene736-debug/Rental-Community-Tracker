@@ -1585,9 +1585,22 @@ async function scrapeListingPhotos(
   // Photos preserve order from whichever tier returned them.
   if (/realtor\.com\/realestateandhomes-detail/i.test(primaryUrl)) {
     let result = await scrapeRealtorViaApify(primaryUrl);
+    let bestFacts = result.facts;
     if (result.urls.length === 0) {
       console.log(`[scrapeRealtor] Apify returned 0, falling back to direct fetch`);
-      result = await scrapeRealtorViaFetch(primaryUrl);
+      const fallback = await scrapeRealtorViaFetch(primaryUrl);
+      result = {
+        urls: fallback.urls,
+        facts: mergeFacts(bestFacts, fallback.facts),
+      };
+      bestFacts = result.facts;
+    } else if (result.facts.bedrooms == null || result.facts.bathrooms == null) {
+      const fallback = await scrapeRealtorViaFetch(primaryUrl);
+      result = {
+        urls: result.urls,
+        facts: mergeFacts(result.facts, fallback.facts),
+      };
+      bestFacts = result.facts;
     }
     if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeRealtor] direct fetch returned 0, falling back to ScrapingBee`);
@@ -1631,7 +1644,8 @@ async function scrapeListingPhotos(
               }
             } catch {}
           }
-          result = { urls: photos, facts: f };
+          result = { urls: photos, facts: mergeFacts(bestFacts, f) };
+          bestFacts = result.facts;
         }
       } catch (e: any) {
         console.warn(`[scrapeRealtor] ScrapingBee fallback errored: ${e?.message ?? e}`);
@@ -17974,6 +17988,23 @@ Return ONLY compact JSON with this exact shape:
         }
       }
     };
+    const addApifyCandidateUrls = (
+      urls: string[],
+      platform: "zillow" | "realtor",
+      options: { addressRoots?: Set<string> } = {},
+    ) => {
+      for (const link of urls) {
+        const lower = link.toLowerCase();
+        if (seen.has(lower)) continue;
+        if (skipSet.has(lower)) continue;
+        if (options.addressRoots && options.addressRoots.size > 0 && !looksAddressRootAnchored(link, "", "", options.addressRoots)) continue;
+        seen.add(lower);
+        candidateUrls.push(link);
+        rememberHarvestRoot(link);
+        platformCounts[platform]++;
+      }
+    };
+
     // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
     // City-wide mode tries Apify SEARCH actors first
     // (igolaizola~zillow-scraper-ppe / dz_omar~realtor-scraper) — they hit
@@ -17992,24 +18023,8 @@ Return ONLY compact JSON with this exact shape:
         harvestZillowUrlsViaApifySearch(city, state, 500),
         harvestRealtorUrlsViaApifySearch(city, state, 500),
       ]);
-      for (const link of zillowApifyUrls) {
-        const lower = link.toLowerCase();
-        if (seen.has(lower)) continue;
-        if (skipSet.has(lower)) continue;
-        seen.add(lower);
-        candidateUrls.push(link);
-        rememberHarvestRoot(link);
-        platformCounts.zillow++;
-      }
-      for (const link of realtorApifyUrls) {
-        const lower = link.toLowerCase();
-        if (seen.has(lower)) continue;
-        if (skipSet.has(lower)) continue;
-        seen.add(lower);
-        candidateUrls.push(link);
-        rememberHarvestRoot(link);
-        platformCounts.realtor++;
-      }
+      addApifyCandidateUrls(zillowApifyUrls, "zillow");
+      addApifyCandidateUrls(realtorApifyUrls, "realtor");
       console.log(
         `[find-clean-unit] city-wide Apify search: ` +
         `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
@@ -18059,6 +18074,25 @@ Return ONLY compact JSON with this exact shape:
       ]);
       console.log(
         `[find-clean-unit] address-root expansion for "${communityName}": roots=${Array.from(addressRootSet).join(", ")} total=${candidateUrls.length}`,
+      );
+      // Community mode used to skip Apify entirely because raw city-wide
+      // Apify results are too broad for a resort. At this point we have
+      // discovered the resort's repeated street roots from Google/SearchAPI,
+      // so city-wide Apify can be safely narrowed back down to this resort.
+      // This matters for large Fort Myers Beach condos where Google finds
+      // many stale stub URLs but Apify's native Zillow/Realtor search can
+      // surface fresher detail URLs for the same building roots.
+      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
+        harvestZillowUrlsViaApifySearch(city, state, 300),
+        harvestRealtorUrlsViaApifySearch(city, state, 300),
+      ]);
+      const beforeApify = candidateUrls.length;
+      addApifyCandidateUrls(zillowApifyUrls, "zillow", { addressRoots: addressRootSet });
+      addApifyCandidateUrls(realtorApifyUrls, "realtor", { addressRoots: addressRootSet });
+      console.log(
+        `[find-clean-unit] community Apify supplement for "${communityName}": ` +
+        `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
+        `added=${candidateUrls.length - beforeApify} total=${candidateUrls.length}`,
       );
     }
     const brokerageDetailScore = (url: string): number => {
@@ -18241,7 +18275,7 @@ Return ONLY compact JSON with this exact shape:
     // budget (12 min) still gates total runtime — at ~15-25s
     // each, the loop bails around candidate 30-50 on slow scrape
     // days but walks the full 80 on fast days.
-    const RAW_CAP = isCityWide ? 80 : 60;
+    const RAW_CAP = isCityWide ? 80 : (isAnyBedroom ? 90 : 60);
     const candidateCap = Math.min(candidateUrls.length, RAW_CAP);
     emit({
       type: "candidate-plan",
@@ -18558,8 +18592,15 @@ Return ONLY compact JSON with this exact shape:
       const scrapedBR = facts.bedrooms ?? null;
       const scrapedBA = facts.bathrooms ?? null;
 
-      // 5) Post-scrape rejects: stub / wrong type / wrong BR / sold.
-      if (scrapedBR === null) {
+      // 5) Post-scrape rejects: wrong type / wrong BR / true stubs.
+      // For an "Any" search, missing bedroom metadata alone is not a
+      // stub signal. Older Realtor/Zillow sale-history pages often have
+      // good unit photos but omit structured bed/bath fields. In that
+      // mode, photos + OTA-clean is enough to continue; the operator can
+      // edit the bedroom/bath facts later in the builder. Numeric-BR
+      // searches still require scraped bedroom data so we do not accept
+      // the wrong unit size.
+      if (scrapedBR === null && !isAnyBedroom) {
         const reason = `Stub listing — no bedroom data extracted (likely off-market, lot, or building-level page).`;
         attempts.push({ url, bedrooms: null, bathrooms: scrapedBA, address: addressGuess, bedroomMatches: false, qualifies: true, qualifierReason: qualifier.reason, rejectedBecause: reason });
         emit({ type: "candidate-rejected", url, reason });

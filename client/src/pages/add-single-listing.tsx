@@ -784,7 +784,7 @@ export default function AddSingleListing() {
         setStreetAddress(data.unit.address);
         setZillowSourceUrl(data.unit.url);
         setZillowFacts({
-          bedrooms: data.unit.bedrooms,
+          bedrooms: data.unit.bedrooms > 0 ? data.unit.bedrooms : undefined,
           bathrooms: data.unit.bathrooms ?? undefined,
         });
         setQualifierResult(data.unit.qualifier);
@@ -832,7 +832,7 @@ export default function AddSingleListing() {
         }
         toast({
           title: "Found a clean unit",
-          description: `${data.unit.bedrooms}BR at ${data.unit.address} — verified clean of OTA listings by address and photo check.`,
+          description: `${data.unit.bedrooms > 0 ? `${data.unit.bedrooms}BR` : "Bedroom count TBD"} at ${data.unit.address} — verified clean of OTA listings by address and photo check.`,
         });
         setStep(2);
       } else {
@@ -1935,16 +1935,16 @@ export default function AddSingleListing() {
                         The Listing Draft step (Step 4) fills this in with a
                         Claude-generated estimate, so this is just a transient
                         display while the scrape is partial. */}
-                    {zillowFacts.bedrooms ?? findResult.unit.bedrooms} BR
+                    {(zillowFacts.bedrooms ?? findResult.unit.bedrooms) > 0 ? `${zillowFacts.bedrooms ?? findResult.unit.bedrooms} BR` : "BR TBD"}
                     {zillowFacts.bathrooms != null ? ` · ${zillowFacts.bathrooms} BA` : " · BA TBD"}
                     {" · sourced from "}
                     <a href={findResult.unit.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline inline-flex items-center gap-1">
-                      Zillow <ExternalLink className="h-3 w-3" />
+                      real-estate listing <ExternalLink className="h-3 w-3" />
                     </a>
                   </div>
                   {zillowFacts.bathrooms == null && (
                     <div className="text-[11px] text-muted-foreground italic">
-                      Bathroom count wasn't returned by the Zillow scrape — Claude will estimate it on Step 4 (you can edit there).
+                      Bedroom/bathroom facts were incomplete on the source page — Claude will estimate missing values on Step 4 (you can edit there).
                     </div>
                   )}
                   <div className="text-xs text-muted-foreground">
