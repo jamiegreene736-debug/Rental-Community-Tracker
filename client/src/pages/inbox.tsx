@@ -1163,7 +1163,8 @@ function normalizeConversation(c: any): GuestyConversation & {
   // flag means "host action is pending" for a different reason.
   // Computed from the conversation/reservation stub the list endpoint
   // already returns — no extra queries.
-  needsReply: boolean;       // unread incoming message awaits a host response
+  needsReply: boolean;       // latest guest message awaits a host response
+  lastMessageFromGuest: boolean; // durable reply-owed signal; survives simply opening/reading
   needsPreapprove: boolean;  // Airbnb inquiry not yet pre-approved (host has 24h)
   phase?: "inquiry" | "request" | "booked" | "cancelled" | "other";
 } {
@@ -1244,29 +1245,38 @@ function normalizeConversation(c: any): GuestyConversation & {
     c?.createdAt ??
     undefined;
 
-  // Inbox-v2 unread signal lives on `state.readByNonUser` (host hasn't
-  // read it) AND `state.isLastPostFromGuest` (the last message was from
-  // the guest, so a host reply is owed). The legacy string-form checks
-  // (`state === "NEW"` etc.) never fire on the current shape because
-  // `state` is now an object — that's why Michelle's thread had no
-  // unread dot in the list even after two follow-up messages on Apr 30
-  // and May 3. Keep the legacy string checks for old fixtures.
-  // NOTE FOR CODEX: a `readByNonUser: false` alone is not sufficient —
-  // the host might be in the middle of typing a reply, or the guest
-  // might have only acknowledged a previous host message. We need BOTH
-  // halves: unread AND last-from-guest.
-  const stateObjShape =
-    stateObj &&
-    stateObj.readByNonUser === false &&
-    stateObj.isLastPostFromGuest === true;
-  const unread =
+  // Two related but distinct signals:
+  //
+  //   isUnread: Guesty still considers the latest guest post unread.
+  //   needsReply: the last real message came from the guest, so the
+  //               thread remains action-needed even if opening the
+  //               thread marked it read.
+  //
+  // Jamie cares most about "not responded to yet" at a glance. That
+  // means the row indicator and filter use last-from-guest, not only
+  // readByNonUser. It clears only after a host/you message becomes the
+  // latest post, so the status sticks until an actual reply happens.
+  const legacyLastFromGuest =
+    c?.state === "NEW" ||
+    c?.state === "UNREAD" ||
+    c?.state === "UNANSWERED";
+  const lastMsgLooksGuestAuthored =
+    !!preview &&
+    !!lastMsg &&
+    typeof lastMsg === "object" &&
+    Object.keys(lastMsg).length > 0 &&
+    !isHostPost(lastMsg);
+  const lastMessageFromGuest =
+    stateObj?.isLastPostFromGuest === true ||
+    legacyLastFromGuest ||
+    lastMsgLooksGuestAuthored;
+  const unreadSignal =
     (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
     c?.unread === true ||
     meta.unreadCount > 0 ||
-    c?.state === "NEW" ||
-    c?.state === "UNREAD" ||
-    c?.state === "UNANSWERED" ||
-    stateObjShape;
+    legacyLastFromGuest ||
+    stateObj?.readByNonUser === false;
+  const unread = unreadSignal && lastMessageFromGuest;
 
   const reservationId =
     c?.reservationId ??
@@ -1339,7 +1349,8 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayTimestamp: timestamp,
     displayGuestPhone: guestPhone,
     isUnread: !!unread,
-    needsReply: !!unread,
+    needsReply: !!lastMessageFromGuest,
+    lastMessageFromGuest: !!lastMessageFromGuest,
     needsPreapprove,
     phase,
     conversationCheckIn,
@@ -1721,6 +1732,10 @@ export default function InboxPage() {
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
   const [propertyFilter, setPropertyFilter] = useState<string>("all");
+  // Reply-status filter for the conversation list. "unread" here means
+  // "guest is waiting on us" rather than merely "thread was opened" —
+  // see normalizeConversation.needsReply.
+  const [replyStatusFilter, setReplyStatusFilter] = useState<"all" | "unread" | "read">("all");
   // Receipt template state. Pre-populated from Guesty's money fields
   // when the dialog opens; every value is editable so the operator can
   // correct stale Guesty data on the spot. The body regenerates from
@@ -1832,16 +1847,21 @@ export default function InboxPage() {
   // because that helper isn't memoized — re-walking 30 conversations
   // per render is cheap (sub-ms) and avoids a stale-memo trap.
   const filteredConversations = useMemo(() => {
-    const matched = propertyFilter === "all"
+    const propertyMatched = propertyFilter === "all"
       ? conversations
       : conversations.filter((c) => normalizeConversation(c).displayListingName === propertyFilter);
+    const matched = propertyMatched.filter((c) => {
+      if (replyStatusFilter === "all") return true;
+      const needsReply = normalizeConversation(c).needsReply;
+      return replyStatusFilter === "unread" ? needsReply : !needsReply;
+    });
     const ts = (c: any): number => {
       const v = normalizeConversation(c).displayTimestamp;
       const t = v ? new Date(v).getTime() : NaN;
       return Number.isFinite(t) ? t : 0;
     };
     return [...matched].sort((a, b) => ts(b) - ts(a));
-  }, [conversations, propertyFilter]);
+  }, [conversations, propertyFilter, replyStatusFilter]);
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
@@ -2775,11 +2795,11 @@ export default function InboxPage() {
                   <span className="text-sm font-medium shrink-0">Conversations</span>
                   {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
                 </div>
-                {/* Property filter — only visible when there's something to
-                    filter (>1 distinct listing). Hidden when there's a single
-                    property in the inbox so the dropdown isn't dead UI. */}
-                {listingOptions.length > 1 && (
-                  <div className="px-3 py-2 border-b">
+                <div className="px-3 py-2 border-b space-y-2">
+                  {/* Property filter — only visible when there's something to
+                      filter (>1 distinct listing). Hidden when there's a single
+                      property in the inbox so the dropdown isn't dead UI. */}
+                  {listingOptions.length > 1 && (
                     <Select value={propertyFilter} onValueChange={setPropertyFilter}>
                       <SelectTrigger
                         className="h-8 text-xs"
@@ -2794,8 +2814,21 @@ export default function InboxPage() {
                         ))}
                       </SelectContent>
                     </Select>
-                  </div>
-                )}
+                  )}
+                  <Select value={replyStatusFilter} onValueChange={(value) => setReplyStatusFilter(value as "all" | "unread" | "read")}>
+                    <SelectTrigger
+                      className="h-8 text-xs"
+                      data-testid="select-conversation-reply-status-filter"
+                    >
+                      <SelectValue placeholder="All reply statuses" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All reply statuses</SelectItem>
+                      <SelectItem value="unread">Unread / reply needed</SelectItem>
+                      <SelectItem value="read">Read / replied</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 {convError && !convLoading && (
                   <div className="p-6 text-center text-sm text-destructive">
                     <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-30" />
@@ -2811,13 +2844,16 @@ export default function InboxPage() {
                 )}
                 {!convError && conversations.length > 0 && filteredConversations.length === 0 && (
                   <div className="p-6 text-center text-sm text-muted-foreground">
-                    No conversations for that property.{" "}
+                    No conversations match those filters.{" "}
                     <button
                       className="underline text-primary"
-                      onClick={() => setPropertyFilter("all")}
+                      onClick={() => {
+                        setPropertyFilter("all");
+                        setReplyStatusFilter("all");
+                      }}
                       data-testid="button-clear-conversation-filter"
                     >
-                      Clear filter
+                      Clear filters
                     </button>
                   </div>
                 )}
@@ -2834,7 +2870,20 @@ export default function InboxPage() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
-                          <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                          <div
+                            className={`relative w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0 ${
+                              c.needsReply ? "ring-2 ring-amber-300 ring-offset-1 ring-offset-background" : ""
+                            }`}
+                          >
+                            {c.needsReply && (
+                              <span
+                                className="absolute -left-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm"
+                                data-testid={`indicator-reply-owed-avatar-${c._id}`}
+                                aria-label="Unread reply needed"
+                              >
+                                <MessageCircle className="h-2.5 w-2.5" />
+                              </span>
+                            )}
                             <User className="h-3.5 w-3.5 text-primary" />
                           </div>
                           <div className="min-w-0">
