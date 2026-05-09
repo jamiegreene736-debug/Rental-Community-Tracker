@@ -693,6 +693,46 @@ const formatLongDate = (isoYmd: string): string => {
   });
 };
 
+const isVrboOrBookingChannel = (channelRaw?: string): boolean => {
+  const channel = String(channelRaw ?? "").toLowerCase();
+  return channel.includes("vrbo") || channel.includes("homeaway") || channel.includes("booking");
+};
+
+const addDaysToIsoYmd = (iso?: string, days = 0): string | null => {
+  if (!iso) return null;
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
+const inferResortNameForWalk = (propertyName?: string): string | undefined => {
+  const label = String(propertyName ?? "");
+  const resorts = [
+    "Regency at Poipu Kai",
+    "Pili Mai",
+    "Pili Mai at Poipu",
+    "Kaha Lani Resort",
+    "Lae Nani Resort",
+    "Mauna Kai Princeville",
+    "Kaiulani of Princeville",
+    "Keauhou Estates",
+    "Kiahuna Plantation",
+    "Southern Dunes",
+    "Windsor Hills",
+  ];
+  return resorts.find((name) => label.toLowerCase().includes(name.toLowerCase()));
+};
+
+const representativeUnitSetupLine = (propertyName?: string): string => {
+  const walk = fallbackWalkForResort(inferResortNameForWalk(propertyName));
+  return `Your reservation is set up as two separate units. ${walk.description} The units shown are examples of the setup; your assigned units will be very similar quality and will always match the same bedroom counts.`;
+};
+
 const addDays = (date: Date, days: number): Date => {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
@@ -776,10 +816,13 @@ function buildBookingConfirmationBody(args: {
   numNights?: number | null;
   bookingTotal?: number;
   totalPaid?: number;
+  channelRaw?: string;
 }): string {
   const total = args.bookingTotal ?? 0;
   const paid = args.totalPaid ?? 0;
   const balance = Math.max(0, total - paid);
+  const balanceDueIso = addDaysToIsoYmd(args.checkInIso, -120);
+  const shouldMentionBalanceDue = isVrboOrBookingChannel(args.channelRaw) && balance > 0 && !!balanceDueIso;
   const lines: string[] = [
     `Hi ${args.guestFirstName || "there"},`,
     ``,
@@ -796,12 +839,14 @@ function buildBookingConfirmationBody(args: {
     lines.push(``);
     if (total > 0) lines.push(`Booking total: ${formatMoney(total)}`);
     if (paid > 0) lines.push(`Paid to date: ${formatMoney(paid)}`);
-    if (total > 0) lines.push(`Remaining balance: ${formatMoney(balance)}`);
+    if (shouldMentionBalanceDue) {
+      lines.push(`Remaining balance: ${formatMoney(balance)}, due 120 days prior to arrival on ${formatLongDate(balanceDueIso)}.`);
+    }
   }
   lines.push(``);
-  lines.push(`This stay is set up as two units that are minutes from each other. We will send more details about the unit setup in a follow-up message.`);
+  lines.push(representativeUnitSetupLine(args.propertyName));
   lines.push(``);
-  lines.push(`We will send your detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.`);
+  lines.push(`We will send the detailed arrival information 14 days prior to arrival, including addresses, access details, parking, Wi-Fi, and anything else needed for check-in.`);
   lines.push(``);
   lines.push(`Thanks,`);
   lines.push(OUTBOUND_SENDER_NAME);
@@ -2318,7 +2363,7 @@ export default function InboxPage() {
         : channel === "sms" && kind === "post-stay"
           ? buildPostStaySmsBody({ guestFirstName, propertyName })
         : kind === "booking"
-        ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid })
+          ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid, channelRaw })
         : kind === "agreement-request"
           ? buildAgreementRequestBody({ guestFirstName, propertyName, agreementUrl, checkInIso, confirmationCode })
         : kind === "guesty-invoice-payment"

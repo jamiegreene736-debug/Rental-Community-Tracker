@@ -23814,6 +23814,36 @@ CONSTRAINTS
       if (c.includes("booking")) return "Booking.com";
       return "the booking platform";
     })();
+    const channelKey = (channel || "").toLowerCase();
+    const shouldIncludeBalanceDueDate =
+      channelKey.includes("vrbo") ||
+      channelKey.includes("homeaway") ||
+      channelKey.includes("booking");
+    const formatGuestDate = (isoYmd: string): string => {
+      const [y, m, d] = isoYmd.slice(0, 10).split("-").map(Number);
+      if (!y || !m || !d) return isoYmd;
+      return new Date(y, m - 1, d).toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+    };
+    const addDaysToIsoYmd = (iso: string | undefined, days: number): string | null => {
+      if (!iso) return null;
+      const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+      if (!y || !m || !d) return null;
+      const date = new Date(y, m - 1, d);
+      date.setDate(date.getDate() + days);
+      return [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, "0"),
+        String(date.getDate()).padStart(2, "0"),
+      ].join("-");
+    };
+    const balanceDueIso = addDaysToIsoYmd(checkIn, -120);
+    const balanceDueSentence = shouldIncludeBalanceDueDate && balanceDueIso
+      ? `For ${platformName} reservations, the remaining balance is due 120 days prior to arrival, which is ${formatGuestDate(balanceDueIso)}.`
+      : "";
 
     // Tone preamble — prepended to whichever grounded/ungrounded
     // system prompt we pick below. Hawaiian tone: warm, familiar,
@@ -24015,20 +24045,23 @@ Write a helpful, warm, BRIEF welcome note. Polite but to the point. NO conversat
 Structure:
 1. A one-line greeting ("Aloha [Name],").
 2. Confirm their reservation is all set for the property. If check-in and check-out are known, you may mention those dates once.
-3. Explain that this listing is made up of multiple nearby units when the property facts say there is more than one unit. Mention the total bedroom setup and the approximate walking distance between units when available.
-4. Add 1-2 grounded resort/community details from the property facts, such as beachfront location, pool, hot tub, parking, kitchens, air conditioning, or beach access. Do not invent anything not in the facts.
-5. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+3. Explain that the reservation is for two separate units when the property facts say there is more than one unit. Mention the rough walking distance between them using the DISTANCE BETWEEN UNITS fact.
+4. Explain that the units shown are example/representative units: the exact assigned units may vary, but they will be very similar quality and will always match the same bedroom counts.
+5. ${balanceDueSentence ? `Include this payment timing sentence exactly once: "${balanceDueSentence}"` : `Do NOT mention the 120-day remaining-balance rule or a balance due date. That sentence is only for VRBO/HomeAway/Booking.com reservations, and this channel is ${platformName}.`}
+6. Say that detailed arrival information will be sent 14 days prior to arrival, including access details and other check-in details.
+7. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
 
 Hard rules:
 - Do NOT say "Thanks for reaching out" or imply the guest asked a question. They did not.
 - Do NOT ask the guest a question.
 - Do NOT mention internal workflow, operations, Guesty, logs, or that there was no message.
 - Do NOT call the units "combined" or call this a portfolio listing. Say "your reservation includes two nearby units" or "the property includes two nearby units."
+- Do NOT say the guest will stay in the exact units shown in listing examples. Use representative/example language.
 - Do NOT write "We look forward to hosting you!" yourself; the app adds that approved first-contact closer after the body.
 - Do NOT add a second closer like "I'm here if you have questions", "feel free to reach out", or "let me know if anything comes up."
 - If a detail is not in the property facts, leave it out.
 
-Length target: 4-6 sentences of body text (excluding greeting + signature). Keep it natural and guest-facing.
+Length target: 5-8 sentences of body text (excluding greeting + signature). Keep it natural and guest-facing.
 
 Do not include a subject line.`
       : `${accessibilityMandate}${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
@@ -24150,6 +24183,49 @@ Do not include a subject line.`;
         }
         return `${body.trimEnd()}\n\n${addition}`;
       };
+      const ensureWelcomeDraftRequirements = (body: string) => {
+        if (!welcomeDraft) return body;
+        let next = body;
+        const distanceMatch = (propertyContext ?? "").match(/DISTANCE BETWEEN UNITS:\s*([^\n]+)/i);
+        const distanceFact = distanceMatch?.[1]?.replace(/\s*\(approx[^)]*\)\s*$/i, "").trim();
+        const hasMultipleUnits =
+          /Total:\s*\d+\s+bedrooms\s+across\s+(?:[2-9]|\d{2,})\s+units/i.test(propertyContext ?? "") ||
+          !!distanceFact;
+
+        if (hasMultipleUnits && !/\bseparate units\b/i.test(next)) {
+          const unitSentence = distanceFact
+            ? `Your reservation is set up as two separate units. ${distanceFact}`
+            : "Your reservation is set up as two separate nearby units.";
+          next = insertBeforeSignature(next, unitSentence);
+        }
+
+        if (!/\b(example|representative|similar quality|same bedroom count|same bedroom counts)\b/i.test(next)) {
+          next = insertBeforeSignature(
+            next,
+            "The units shown are examples of the setup; your assigned units will be very similar quality and will always match the same bedroom counts.",
+          );
+        }
+
+        if (balanceDueSentence) {
+          if (!/\b120 days prior to arrival\b/i.test(next)) {
+            next = insertBeforeSignature(next, balanceDueSentence);
+          }
+        } else {
+          next = next
+            .replace(/[^.\n]*(?:120 days prior to arrival|remaining balance is due 120 days|balance due 120 days)[^.\n]*[.!?]?/gi, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        }
+
+        if (!/\b14 days (?:prior to|before)\b|\btwo weeks before\b/i.test(next)) {
+          next = insertBeforeSignature(
+            next,
+            "We will send the detailed arrival information 14 days prior to arrival, including access details and the other check-in details.",
+          );
+        }
+
+        return next;
+      };
       const safeGroundFloorSentence = (() => {
         const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
         const propType = typeMatch?.[1];
@@ -24250,7 +24326,7 @@ Do not include a subject line.`;
         return insertBeforeSignature(scrubbed || draft, holdRateLine);
       })();
 
-      const finalDraft = addInitialContactCloser(priceSafeDraft, !!isInitialContact);
+      const finalDraft = addInitialContactCloser(ensureWelcomeDraftRequirements(priceSafeDraft), !!isInitialContact);
       res.json({ draft: finalDraft });
     } catch (err: any) {
       console.error(`[ai-draft] exception: ${err.message}`);
