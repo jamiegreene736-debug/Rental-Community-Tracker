@@ -1260,16 +1260,22 @@ function normalizeConversation(c: any): GuestyConversation & {
     c?.state === "NEW" ||
     c?.state === "UNREAD" ||
     c?.state === "UNANSWERED";
+  const lastMsgLooksSignedHostReply = isSignedHostTemplateBody(preview);
   const lastMsgLooksGuestAuthored =
     !!preview &&
     !!lastMsg &&
     typeof lastMsg === "object" &&
     Object.keys(lastMsg).length > 0 &&
-    !isHostPost(lastMsg);
+    !isHostPost(lastMsg) &&
+    !lastMsgLooksSignedHostReply;
+  const explicitLastFromGuest =
+    typeof stateObj?.isLastPostFromGuest === "boolean"
+      ? stateObj.isLastPostFromGuest
+      : null;
   const lastMessageFromGuest =
-    stateObj?.isLastPostFromGuest === true ||
-    legacyLastFromGuest ||
-    lastMsgLooksGuestAuthored;
+    explicitLastFromGuest !== null
+      ? explicitLastFromGuest
+      : legacyLastFromGuest || lastMsgLooksGuestAuthored;
   const unreadSignal =
     (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
     c?.unread === true ||
@@ -1736,6 +1742,11 @@ export default function InboxPage() {
   // "guest is waiting on us" rather than merely "thread was opened" —
   // see normalizeConversation.needsReply.
   const [replyStatusFilter, setReplyStatusFilter] = useState<"all" | "unread" | "read">("all");
+  // Guesty's conversation list can lag for a short period after
+  // /send-message succeeds. Hide the reply-needed marker locally as
+  // soon as our send completes; if the guest replies again with a newer
+  // last-message timestamp, the marker comes back.
+  const [locallyRepliedAtByConversation, setLocallyRepliedAtByConversation] = useState<Record<string, number>>({});
   // Receipt template state. Pre-populated from Guesty's money fields
   // when the dialog opens; every value is editable so the operator can
   // correct stale Guesty data on the spot. The body regenerates from
@@ -1822,6 +1833,30 @@ export default function InboxPage() {
     "conversations", "results", "data",
   ]);
 
+  const markConversationReplied = (conversationId: string | null) => {
+    if (!conversationId) return;
+    setLocallyRepliedAtByConversation((prev) => ({
+      ...prev,
+      [conversationId]: Date.now(),
+    }));
+  };
+
+  const applyLocalReplyOverride = (raw: GuestyConversation) => {
+    const normalized = normalizeConversation(raw);
+    const localReplyAt = locallyRepliedAtByConversation[normalized._id];
+    if (!localReplyAt) return normalized;
+    const lastActivityAt = normalized.displayTimestamp
+      ? new Date(normalized.displayTimestamp).getTime()
+      : 0;
+    if (Number.isFinite(lastActivityAt) && lastActivityAt > localReplyAt) return normalized;
+    return {
+      ...normalized,
+      isUnread: false,
+      needsReply: false,
+      lastMessageFromGuest: false,
+    };
+  };
+
   // Unique listing names for the property filter dropdown. Sourced from
   // the conversations themselves (no extra fetch) so the dropdown only
   // ever lists properties the operator currently has conversations
@@ -1829,11 +1864,11 @@ export default function InboxPage() {
   const listingOptions = useMemo(() => {
     const set = new Set<string>();
     for (const c of conversations) {
-      const name = normalizeConversation(c).displayListingName;
+      const name = applyLocalReplyOverride(c).displayListingName;
       if (name && name !== "—") set.add(name);
     }
     return Array.from(set).sort();
-  }, [conversations]);
+  }, [conversations, locallyRepliedAtByConversation]);
 
   // Apply the property filter. "all" passes everything through.
   // Then sort by latest activity (newest first) using the same timestamp
@@ -1849,22 +1884,22 @@ export default function InboxPage() {
   const filteredConversations = useMemo(() => {
     const propertyMatched = propertyFilter === "all"
       ? conversations
-      : conversations.filter((c) => normalizeConversation(c).displayListingName === propertyFilter);
+      : conversations.filter((c) => applyLocalReplyOverride(c).displayListingName === propertyFilter);
     const matched = propertyMatched.filter((c) => {
       if (replyStatusFilter === "all") return true;
-      const needsReply = normalizeConversation(c).needsReply;
+      const needsReply = applyLocalReplyOverride(c).needsReply;
       return replyStatusFilter === "unread" ? needsReply : !needsReply;
     });
     const ts = (c: any): number => {
-      const v = normalizeConversation(c).displayTimestamp;
+      const v = applyLocalReplyOverride(c).displayTimestamp;
       const t = v ? new Date(v).getTime() : NaN;
       return Number.isFinite(t) ? t : 0;
     };
     return [...matched].sort((a, b) => ts(b) - ts(a));
-  }, [conversations, propertyFilter, replyStatusFilter]);
+  }, [conversations, propertyFilter, replyStatusFilter, locallyRepliedAtByConversation]);
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
-  const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
+  const selectedConv = selectedConvRaw ? applyLocalReplyOverride(selectedConvRaw) : null;
 
   // Conversation metadata (assignee, priority, integration, etc.)
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
@@ -2256,6 +2291,7 @@ export default function InboxPage() {
       return r.json();
     },
     onSuccess: () => {
+      markConversationReplied(selectedConvId);
       setReplyText("");
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
@@ -2289,6 +2325,7 @@ export default function InboxPage() {
       return r.json();
     },
     onSuccess: () => {
+      markConversationReplied(selectedConvId);
       setReplyText("");
       qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
@@ -2859,7 +2896,7 @@ export default function InboxPage() {
                 )}
                 <TooltipProvider>
                 {filteredConversations.map(rawC => {
-                  const c = normalizeConversation(rawC);
+                  const c = applyLocalReplyOverride(rawC);
                   const active = c._id === selectedConvId;
                   return (
                     <button
