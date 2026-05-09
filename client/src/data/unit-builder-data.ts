@@ -1244,7 +1244,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-630-2345-01",
     getLicense: "GE-024-630-2345-01",
     strPermit: "TVNC-0342",
-    accessibilityNote: "Kaha Lani is a multi-building condominium resort. Individual condos are single-level inside with no internal stairs, but units may be on the ground floor or an upper floor and building-level access can vary by assigned unit/building. Do NOT promise ground-floor, bottom-floor, first-floor, or step-free access unless the exact assigned units have been confirmed. If a guest requires bottom-floor access, say we need to confirm the assigned units before booking.",
+    accessibilityNote: "Kaha Lani is a multi-building condominium resort. Individual condos are single-level inside with no internal stairs, but units may be on the ground floor or an upper floor. For guests with mobility / accessibility needs, we WILL ensure the condo used by the guest who needs bottom-floor access is a ground-floor, single-level condo. If the guest requires BOTH condos to be ground-floor, say we can confirm that before accepting/locking the booking.",
     hasPhotos: true,
     communityPhotos: COMMUNITY_KAHA_LANI,
     communityPhotoFolder: "community-kaha-lani",

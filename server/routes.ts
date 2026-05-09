@@ -23661,7 +23661,7 @@ Source priority for the answer (use the FIRST one that applies):
 
 1. If the property facts include a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
 
-   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. If the block says do NOT promise or says the assigned unit must be confirmed first, do NOT use a firm guarantee.
+   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the unit needed for accessibility is [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll request if available", "after you book", "once your booking is confirmed", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Never ask the guest to book first before we solve the accessibility need.
 
    TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. If the note authorizes a guarantee, a "here's the good news" framing is fine. If the note says the assigned unit must be confirmed first, be honest and calm: "The condos are single-level inside, but I don't want to promise ground-floor access until we confirm the assigned units."
 
@@ -23825,7 +23825,8 @@ Do not include a subject line.`;
         const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
         const propType = typeMatch?.[1];
         if (accessibilityNote && groundFloorPromiseAuthorized) {
-          return `Since a bottom-floor setup is important for your group, here's the good news: ${accessibilityNote}`;
+          const bothRequested = /\bboth\b/i.test(guestMessageText);
+          return `Yes, we can make this work. We'll ensure the condo used by the guest who needs bottom-floor access is a ground-floor, single-level condo. The condos themselves are single-level inside with no internal stairs.${bothRequested ? " If you need both condos on the ground floor, I can confirm that before we accept the booking." : ""}`;
         }
         if (propType === "Condominium") {
           return "The condos are single-level inside with no internal stairs, but that does not automatically mean both are on the ground floor. Since a bottom-floor setup is important, I would want to confirm the assigned units before promising that.";
@@ -23847,6 +23848,22 @@ Do not include a subject line.`;
       // is the soft path, this is the hard guarantee.
       const draft = (() => {
         if (!accessibilityRaised) return humanized;
+        if (groundFloorRaised && groundFloorPromiseAuthorized) {
+          const badAccessibilityHedge = /\b(unfortunately|can't promise|cannot promise|once your booking is confirmed|after you book|after booking|request ground[-\s]?floor|if (?:they're|they are) available|if available|before you arrive|certainty before check[-\s]?in|work with the resort|I would want to confirm|need to confirm .*before promising)\b/i;
+          const withoutBadHedges = humanized
+            .split(/\n{2,}/)
+            .map((paragraph) => paragraph
+              .split(/(?<=[.!?])\s+/)
+              .filter((sentence) => !badAccessibilityHedge.test(sentence))
+              .join(" ")
+              .trim())
+            .filter(Boolean)
+            .join("\n\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+          const hasFirmCommitment = /\b(?:we(?:'ll| will) ensure|we can make this work|ground[-\s]?floor, single[-\s]?level)\b/i.test(withoutBadHedges);
+          return hasFirmCommitment ? withoutBadHedges : insertBeforeSignature(withoutBadHedges, safeGroundFloorSentence);
+        }
         if (groundFloorRaised && !groundFloorPromiseAuthorized) {
           const withoutUnsupportedPromise = humanized
             .replace(/[^.\n]*(?:both units|the units|they|your guest|we(?:'ll| will)|assigned)[^.\n]{0,140}\b(?:ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|downstairs|step[-\s]?free)\b[^.\n]*[.!?]?/gi, "")
