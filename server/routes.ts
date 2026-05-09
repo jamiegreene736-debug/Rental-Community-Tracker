@@ -23671,12 +23671,9 @@ Never mention that units are "combined" or that this is a portfolio listing. Tre
     // Policies the AI must apply when the guest's message asks about
     // them. Phrased as rules so Haiku follows them literally:
     //
-    //   1. Discount asks: cap any offer at 5% off. The AI is allowed
-    //      to OFFER the discount in the draft (saves the host a
-    //      back-and-forth) but never above 5% — no creative "let me
-    //      see if I can do 10%" hedging. Frame it as a one-time
-    //      accommodation, not a standing policy, so we're not
-    //      anchoring future guests.
+    //   1. Discount asks: no special offers. The listing price is the
+    //      price; drafts should politely hold the line without sounding
+    //      defensive or inviting negotiation.
     //
     //   2. Payment-timing asks (smaller deposit, pay later, custom
     //      payment plan): we cannot change the schedule. The booking
@@ -23692,7 +23689,7 @@ Never mention that units are "combined" or that this is a portfolio listing. Tre
     // discounts or payment timing. Don't pre-emptively volunteer them.
     const policyPrompt = `POLICIES (apply only when the guest's message asks about them):
 
-DISCOUNTS: If the guest asks for a discount, special rate, or to lower the price, you may offer up to (and no more than) 5% off the listing price. Do not offer 10% or any larger discount under any circumstance. State the percentage clearly in the draft and frame it as a one-time accommodation for them, not a standing offer. If they ask for more than 5%, politely explain that 5% is the most you can offer.
+DISCOUNTS / SPECIAL OFFERS: Do not offer a discount, special offer, reduced rate, coupon, price match, or any percentage off. The price is the price. If the guest asks for a lower price, reply warmly and briefly that the quoted rate is the best available rate for those dates, then pivot back to the value of the stay or answer their other questions. Do not say "I can offer", "we can do", "I can make", "one-time accommodation", "special offer", "5% off", or any similar discount language.
 
 PAYMENT TIMING: If the guest asks for a smaller deposit, to pay later, to split payments differently, or any change to the payment schedule, explain that ${platformName} controls the payment schedule for this booking and we are not able to adjust it on our end. Apologize briefly that this isn't something you can change. Do not offer to "ask ${platformName}" or "look into it" — there is no workaround on our side. Keep the explanation short and warm; don't dwell on it.`;
 
@@ -23992,7 +23989,27 @@ Do not include a subject line.`;
         return insertBeforeSignature(humanized, fallback);
       })();
 
-      const finalDraft = addInitialContactCloser(draft, !!isInitialContact);
+      const priceRequestRaised = /\b(discount|special\s+(?:offer|rate)|lower\s+(?:price|rate)|reduce(?:d)?\s+(?:price|rate)|cheaper|price\s*match|best\s+price|deal)\b/i.test(guestMessageText);
+      const discountOfferLanguage = /\b(?:\d+\s*%\s*off|discount|special\s+(?:offer|rate)|reduced\s+rate|lower\s+(?:price|rate)|price\s*match|one-time accommodation|I can offer|we can offer|I can do|we can do|I can make|we can make)\b/i;
+      const holdRateLine = "The quoted rate is the best available rate for those dates.";
+      const priceSafeDraft = (() => {
+        if (!priceRequestRaised || !discountOfferLanguage.test(draft)) return draft;
+        const scrubbed = draft
+          .split(/\n{2,}/)
+          .map((paragraph) => paragraph
+            .split(/(?<=[.!?])\s+/)
+            .filter((sentence) => !discountOfferLanguage.test(sentence))
+            .join(" ")
+            .trim())
+          .filter(Boolean)
+          .join("\n\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        if (/\bbest available rate\b/i.test(scrubbed)) return scrubbed;
+        return insertBeforeSignature(scrubbed || draft, holdRateLine);
+      })();
+
+      const finalDraft = addInitialContactCloser(priceSafeDraft, !!isInitialContact);
       res.json({ draft: finalDraft });
     } catch (err: any) {
       console.error(`[ai-draft] exception: ${err.message}`);
