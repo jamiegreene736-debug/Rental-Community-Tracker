@@ -2897,6 +2897,97 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/dashboard/revenue-week", async (_req, res) => {
+    const now = new Date();
+    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const unwrapReservations = (payload: any): any[] => {
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload?.results)) return payload.results;
+      if (Array.isArray(payload?.data)) return payload.data;
+      if (Array.isArray(payload?.data?.results)) return payload.data.results;
+      return [];
+    };
+
+    const asNum = (value: unknown): number => {
+      if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+      if (typeof value === "string") {
+        const parsed = Number(value.replace(/[$,]/g, ""));
+        return Number.isFinite(parsed) ? parsed : 0;
+      }
+      return 0;
+    };
+
+    const reservationRevenue = (reservation: any): number => {
+      const money = reservation?.money ?? {};
+      const grossFare =
+        asNum(money.fareAccommodation) +
+        asNum(money.fareCleaning) +
+        asNum(money.guestServiceFee) +
+        asNum(money.totalTaxes);
+      const candidates = [
+        money.totalPrice,
+        money.fare?.guestPrice,
+        grossFare,
+        money.totalPaid,
+        reservation?.totalPrice,
+        reservation?.totalAmount,
+      ];
+      for (const candidate of candidates) {
+        const n = asNum(candidate);
+        if (n > 0) return n;
+      }
+      return 0;
+    };
+
+    const createdAt = (reservation: any): Date | null => {
+      const raw = reservation?.createdAt ?? reservation?.created_at ?? reservation?.created;
+      if (!raw) return null;
+      const date = new Date(String(raw));
+      return Number.isNaN(date.getTime()) ? null : date;
+    };
+
+    try {
+      const fields = encodeURIComponent("_id status createdAt listingId money source integration confirmationCode");
+      const filters = encodeURIComponent(JSON.stringify([
+        { field: "createdAt", operator: "$gte", value: start.toISOString() },
+      ]));
+      let data: any;
+      try {
+        data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=200&sort=-createdAt&fields=${fields}`);
+      } catch (filteredErr) {
+        // Some Guesty accounts reject createdAt filters even though list
+        // sorting works. Falling back keeps the dashboard tile useful and
+        // still filters locally before summing.
+        data = await guestyRequest("GET", `/reservations?limit=200&sort=-createdAt&fields=${fields}`);
+      }
+
+      const reservations = unwrapReservations(data);
+      let revenue = 0;
+      let bookingCount = 0;
+
+      for (const reservation of reservations) {
+        const madeAt = createdAt(reservation);
+        if (!madeAt || madeAt < start || madeAt > now) continue;
+        const status = String(reservation?.status ?? "").toLowerCase();
+        if (/cancel|declin|inquir|request|expired|closed/.test(status)) continue;
+        const amount = reservationRevenue(reservation);
+        if (amount <= 0) continue;
+        revenue += amount;
+        bookingCount += 1;
+      }
+
+      res.json({
+        revenue,
+        bookingCount,
+        startDate: start.toISOString(),
+        endDate: now.toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch weekly revenue", message: err.message });
+    }
+  });
+
   app.post("/api/guesty-token", async (_req, res) => {
     try {
       const token = await getGuestyToken();

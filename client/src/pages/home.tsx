@@ -503,6 +503,12 @@ export default function Home() {
   const avgLow = pricedProperties.length
     ? Math.round(pricedProperties.reduce((s, p) => s + (p.lowPrice || 0), 0) / pricedProperties.length)
     : 0;
+  const formatCurrency = (value: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(value);
 
   const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
 
@@ -525,6 +531,18 @@ export default function Home() {
   type ChannelStatusMap = Record<number, { airbnb: ChannelFlag; vrbo: ChannelFlag; bookingCom: ChannelFlag }>;
   const { data: channelStatusData } = useQuery<ChannelStatusMap>({
     queryKey: ["/api/dashboard/channel-status"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  type WeeklyRevenue = {
+    revenue: number;
+    bookingCount: number;
+    startDate: string;
+    endDate: string;
+  };
+  const { data: weeklyRevenue, isLoading: weeklyRevenueLoading } = useQuery<WeeklyRevenue>({
+    queryKey: ["/api/dashboard/revenue-week"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
@@ -769,6 +787,19 @@ export default function Home() {
               <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night</span>
             </div>
             <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
+          </Card>
+          <Card className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Revenue for this week</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
+              {weeklyRevenueLoading ? "..." : formatCurrency(weeklyRevenue?.revenue ?? 0)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Past 7 days across all units
+              {weeklyRevenue ? ` · ${weeklyRevenue.bookingCount} booking${weeklyRevenue.bookingCount === 1 ? "" : "s"}` : ""}
+            </p>
           </Card>
         </div>
 
