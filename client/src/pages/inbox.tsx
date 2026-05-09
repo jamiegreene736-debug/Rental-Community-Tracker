@@ -642,6 +642,17 @@ function isHostPost(p: any): boolean {
   );
 }
 
+function isGuestySystemPost(p: any): boolean {
+  if (p.sentBy === "log") return true;
+  const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
+  if (["log", "system", "internal", "note"].includes(moduleType)) return true;
+  const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
+  return body === "new guest inquiry" ||
+    body === "new inquiry" ||
+    body === "new reservation request" ||
+    body.startsWith("new guest reservation");
+}
+
 function isSignedHostTemplateBody(body: string): boolean {
   return /john carpenter/i.test(body) && /(magical island rentals|vacationrentalexpertz|nexstay)/i.test(body);
 }
@@ -2594,28 +2605,10 @@ export default function InboxPage() {
       const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
       return ta - tb;
     });
-    // Exclude Guesty's automated system / log posts — these have
-    // `module.type === "log"` and a body like "New guest inquiry"
-    // (auto-emitted when an inquiry hits the inbox). Without this
-    // filter the latest "non-host" post on a fresh inquiry is the
-    // log entry, NOT the guest's actual message — so the AI gets
-    // "New guest inquiry" as the guestMessage, the accessibility
-    // regex never fires, and the post-processor never injects a
-    // floor-plan answer (which is exactly the bug Jamie hit on
-    // the Pili Mai Jolene draft).
-    const isSystemPost = (p: any): boolean => {
-      const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
-      if (moduleType === "log" || moduleType === "system" || moduleType === "internal" || moduleType === "note") return true;
-      // Some Guesty accounts surface log posts with no module.type
-      // but a recognizable canned body — catch those too.
-      const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
-      if (body === "new guest inquiry" || body === "new inquiry" || body === "new reservation request" || body.startsWith("new guest reservation")) return true;
-      return false;
-    };
-    const conversationalPosts = sortedAsc.filter((p: any) => !isSystemPost(p));
+    const conversationalPosts = sortedAsc.filter((p: any) => !isGuestySystemPost(p));
     const isInitialContact = !conversationalPosts.some(isHostPost);
     const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
-      if (isSystemPost(p)) return false;
+      if (isGuestySystemPost(p)) return false;
       return !isHostPost(p);
     });
     const guestMessage = String(lastGuestPost?.body ?? lastGuestPost?.text ?? "").trim();
@@ -3165,12 +3158,7 @@ export default function InboxPage() {
                         // auto-reply.ts also filters these — keep the
                         // two definitions in sync if Guesty adds a new
                         // system module type.
-                        .filter((p: any) => {
-                          if (p.sentBy === "log") return false;
-                          const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
-                          if (["log", "system", "internal", "note"].includes(moduleType)) return false;
-                          return true;
-                        })
+                        .filter((p: any) => !isGuestySystemPost(p))
                         .sort((a: any, b: any) => {
                           const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
                           const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
@@ -3788,20 +3776,17 @@ export default function InboxPage() {
                             const checkOutDate = parseStayDate(checkOutIso);
                             const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
                             const needsAgreement = /vrbo|homeaway|booking/i.test(channelRaw);
-                            const postBodies = threadPosts
-                              .map((p: any) => cleanMessageBody(p.body ?? p.text ?? p.message ?? ""))
-                              .filter((body: string) => body.trim().length > 0);
                             const outboundTemplateBodies = threadPosts
                               .map((p: any) => ({
                                 body: cleanMessageBody(p.body ?? p.text ?? p.message ?? ""),
                                 host: isHostPost(p),
+                                system: isGuestySystemPost(p),
                               }))
-                              .filter(({ body, host }: { body: string; host: boolean }) =>
-                                body.trim().length > 0 && (host || isSignedHostTemplateBody(body))
+                              .filter(({ body, host, system }: { body: string; host: boolean; system: boolean }) =>
+                                body.trim().length > 0 && !system && (host || isSignedHostTemplateBody(body))
                               )
                               .map(({ body }: { body: string }) => body);
-                            const sentBodies = outboundTemplateBodies.length > 0 ? outboundTemplateBodies : postBodies;
-                            const wasSent = (pattern: RegExp) => sentBodies.some((body: string) => pattern.test(body));
+                            const wasSent = (pattern: RegExp) => outboundTemplateBodies.some((body: string) => pattern.test(body));
                             const totalPriceFromMoney = asNum(m.totalPrice) || guestGross || 0;
                             const totalPaidFromMoney = asNum(m.totalPaid);
                             const openReceiptDialog = () => {
@@ -3854,7 +3839,7 @@ export default function InboxPage() {
                                 title: "Booking confirmation / next steps",
                                 due: null as Date | null,
                                 dueLabel: "At booking",
-                                sent: wasSent(/this confirms your reservation|mahalo for booking with us|confirmation code|booking total|paid to date|remaining balance|this stay is set up as two units|two separate units|detailed arrival information|reservation.+confirmed|booking.+confirmed|two units.+minute/i),
+                                sent: outboundTemplateBodies.length > 0,
                                 detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
                                 testId: "button-draft-booking-confirmation",
                                 onClick: () => draftStayTemplate({ title: "Booking confirmation / next steps", kind: "booking", ...draftCommon }),
