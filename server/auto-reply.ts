@@ -55,7 +55,8 @@ const RISK_KEYWORDS = [
   "lawyer", "legal", "attorney", "sue", "lawsuit", "subpoena",
   "warrant", "discrimination", "racist", "racism", "harass",
   "harassment", "ada", "disability", "accommodation",
-  "wheelchair", "service animal",
+  "wheelchair", "handicap", "handicapped", "mobility", "walker",
+  "cane", "ground floor", "bottom floor", "stairs", "service animal",
   // Press / media / influencer (rare but high-stakes — always human).
   "press", "journalist", "reporter", "media", "interview",
   "review " /* trailing space avoids "previewed", "reviewing context" */,
@@ -404,7 +405,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
         propertyTypeNote: prop.propertyType === "Townhouse"
           ? "Multi-story attached units WITH internal stairs — relevant for accessibility / ground-floor / mobility questions."
           : prop.propertyType === "Condominium"
-            ? "Single-floor units (no internal stairs). Building-level access may have stairs or elevator depending on the resort."
+            ? "Single-level inside the condo with no internal stairs. This does NOT confirm ground-floor or bottom-floor access; building-level access may involve stairs or elevator depending on assigned unit/building."
             : null,
         // Per-complex floor-plan / accessibility note. Only set on
         // properties where there's meaningful variation propertyType
@@ -600,13 +601,13 @@ The guest raised an accessibility, ground-floor, stairs, mobility, or seniors co
 
 1. If the response has an \`accessibilityNote\` field set, paraphrase it accurately. That note is AUTHORITATIVE — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
 
-   COMMITMENT — when the accessibilityNote says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Do NOT invent commitments the note doesn't support.
+   COMMITMENT — when the accessibilityNote says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. If the note says do NOT promise or says the assigned unit must be confirmed first, do NOT use a firm guarantee.
 
-   TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. Pattern to follow: "Since you mentioned [the specific concern from the guest's message — seniors, mobility, ground-floor preference, etc.] and that you'd prefer [their stated need], here's the good news: ..." Avoid stiff openers like "Here's what matters", "You need", "You have", "Let me address", "Regarding your concern". The "good news" framing fits because we CAN actually accommodate — lead with that warmth, then deliver the firm commitment.
+   TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. If the note authorizes a guarantee, a "here's the good news" framing is fine. If the note says the assigned unit must be confirmed first, be honest and calm: "The condos are single-level inside, but I don't want to promise ground-floor access until we confirm the assigned units."
 
 2. Otherwise fall back to propertyType:
    - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on, say so honestly ("we'd confirm the assigned unit's floor plan before booking") — never guess.
-   - Condominium → confirm units are single-floor (no internal stairs).
+   - Condominium → say the condo itself is single-level with no internal stairs, but that does NOT confirm ground-floor / bottom-floor access. If the guest needs bottom-floor or step-free access, say the assigned unit/building access must be confirmed before booking.
    - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
 
 Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`

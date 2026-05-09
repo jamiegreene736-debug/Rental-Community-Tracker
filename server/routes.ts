@@ -23565,14 +23565,14 @@ ${PLAIN_TEXT_RULES}`;
 - Per-unit bedroom AND bathroom counts
 - Bed types in each bedroom — King, Queen, Twin, sleeper sofa, etc. (the per-unit layout text spells this out)
 - Distance between units (in minutes / steps)
-- Property type — Townhouse means multi-story with internal stairs; Condominium means single-floor unit. This is critical when guests ask about accessibility, ground-floor sleeping, seniors, mobility, or stairs.
+- Property type — Townhouse means multi-story with internal stairs; Condominium means single-level INSIDE the condo only. A condominium can still be on an upper floor. Never treat "single-level condo" as "ground-floor / bottom-floor access." This is critical when guests ask about accessibility, ground-floor sleeping, seniors, mobility, or stairs.
 - Parking, pool, AC, kitchen, beach proximity
 
 ANSWER EVERY QUESTION the guest asks. If they ask 4 separate things, address all 4 — don't skip any and don't end with "what other questions can I answer?" instead of answering the ones already on the screen.
 
 PROXIMITY / ADJACENCY: If the guest asks whether the units are next to each other, adjacent, side-by-side, together, or close, use the DISTANCE BETWEEN UNITS fact directly. If the distance says minutes apart, answer "not directly next door / not side-by-side" first, then give the exact walk time. If this is the only question, keep the body to 2-3 sentences. Do not list Unit A / Unit B bedroom counts, full kitchens, pool, hot tub, shared amenities, or total bedroom setup unless the guest also asked about those details.
 
-If the guest asks something that isn't covered by the provided facts (e.g. they ask if there's a ground-floor bedroom and the layout text doesn't mention it), acknowledge the question and say you'll confirm and follow up — never invent details.
+If the guest asks something that isn't covered by the provided facts (e.g. they ask if both units are ground-floor / bottom-floor and the facts don't explicitly confirm that), acknowledge the question and say the assigned units need to be confirmed before promising it — never invent details.
 
 Never mention that units are "combined" or that this is a portfolio listing. Treat each listing as a single property with multiple units.`
       : `Never mention that units are "combined" or that this is a portfolio listing.`;
@@ -23661,13 +23661,13 @@ Source priority for the answer (use the FIRST one that applies):
 
 1. If the property facts include a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
 
-   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Do NOT invent commitments the note doesn't support.
+   COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the units assigned for your stay are [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll confirm before check-in", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. If the block says do NOT promise or says the assigned unit must be confirmed first, do NOT use a firm guarantee.
 
-   TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. Pattern to follow: "Since you mentioned [the specific concern from the guest's message — seniors, mobility, ground-floor preference, etc.] and that you'd prefer [their stated need], here's the good news: ..." Avoid stiff openers like "Here's what matters", "You need", "You have", "Let me address", "Regarding your concern". The "good news" framing fits because we CAN actually accommodate — lead with that warmth, then deliver the firm commitment.
+   TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. If the note authorizes a guarantee, a "here's the good news" framing is fine. If the note says the assigned unit must be confirmed first, be honest and calm: "The condos are single-level inside, but I don't want to promise ground-floor access until we confirm the assigned units."
 
 2. Otherwise, fall back to the propertyType:
    - Townhouse → tell the guest the units are multi-story townhomes with internal stairs. If you don't know which floor the masters are on: "we'd confirm the assigned unit's floor plan before booking" — never guess. (This soft-hedge phrasing is ONLY for the no-FLOOR-PLAN-block fallback.)
-   - Condominium → confirm units are single-floor (no internal stairs).
+   - Condominium → say the condo itself is single-level with no internal stairs, but that does NOT confirm ground-floor / bottom-floor access. If the guest needs bottom-floor or step-free access, say the assigned unit/building access must be confirmed before booking.
    - Other / unknown → say "we'd confirm the specific unit's floor plan before booking."
 
 Do not roll it into a generic "let me know if you have questions" closer.
@@ -23805,6 +23805,36 @@ Do not include a subject line.`;
       const baseHumanized = humanizeReply(draftMarkdownClean);
       const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
       const humanized = addGuestPersonalTouch(trimmedHumanized, guestMessageText);
+      const groundFloorRaised = /\b(ground\s*floor|bottom\s*floor|first\s*floor|downstairs|step[-\s]?free)\b/i.test(guestMessageText);
+      const noteMatch = (propertyContext ?? "").match(/FLOOR PLAN \/ ACCESSIBILITY:\s*([^]+?)(?=\n\n|\n[A-Z][A-Z ]+:|$)/);
+      const accessibilityNote = noteMatch?.[1]?.trim() ?? "";
+      const groundFloorPromiseAuthorized = !!(
+        accessibilityNote &&
+        /\bwill\b/i.test(accessibilityNote) &&
+        /\b(ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|step[-\s]?free|single[-\s]?level|moana)\b/i.test(accessibilityNote) &&
+        !/\b(do not promise|don't promise|must be confirmed|need to confirm|needs to be confirmed|confirm .*before booking|confirmed before booking)\b/i.test(accessibilityNote)
+      );
+      const insertBeforeSignature = (body: string, addition: string) => {
+        const sigMatch = body.match(/\n\s*(Mahalo|Thank You|Thanks|Best|Regards|Sincerely|Aloha)\s*,\s*\n/i);
+        if (sigMatch && sigMatch.index !== undefined) {
+          return `${body.slice(0, sigMatch.index).trimEnd()}\n\n${addition}${body.slice(sigMatch.index)}`;
+        }
+        return `${body.trimEnd()}\n\n${addition}`;
+      };
+      const safeGroundFloorSentence = (() => {
+        const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
+        const propType = typeMatch?.[1];
+        if (accessibilityNote && groundFloorPromiseAuthorized) {
+          return `Since a bottom-floor setup is important for your group, here's the good news: ${accessibilityNote}`;
+        }
+        if (propType === "Condominium") {
+          return "The condos are single-level inside with no internal stairs, but that does not automatically mean both are on the ground floor. Since a bottom-floor setup is important, I would want to confirm the assigned units before promising that.";
+        }
+        if (propType === "Townhouse") {
+          return "Since a bottom-floor setup is important, I would want to confirm the assigned units' floor plans before promising they will work for your guest's mobility needs.";
+        }
+        return "Since a bottom-floor setup is important, I would want to confirm the assigned units before promising that.";
+      })();
 
       // Deterministic accessibility safety net: when the guest's message
       // raised an accessibility / floor-plan / seniors concern but the
@@ -23817,6 +23847,14 @@ Do not include a subject line.`;
       // is the soft path, this is the hard guarantee.
       const draft = (() => {
         if (!accessibilityRaised) return humanized;
+        if (groundFloorRaised && !groundFloorPromiseAuthorized) {
+          const withoutUnsupportedPromise = humanized
+            .replace(/[^.\n]*(?:both units|the units|they|your guest|we(?:'ll| will)|assigned)[^.\n]{0,140}\b(?:ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|downstairs|step[-\s]?free)\b[^.\n]*[.!?]?/gi, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+          const alreadySafe = /\b(?:does not automatically mean|doesn't automatically mean|do not automatically mean|don't want to promise|would want to confirm|need to confirm|must be confirmed|confirm the assigned units|before promising)\b/i.test(withoutUnsupportedPromise);
+          return alreadySafe ? withoutUnsupportedPromise : insertBeforeSignature(withoutUnsupportedPromise, safeGroundFloorSentence);
+        }
         const REPLY_HAS_ACCESS_KEYWORD = /\b(stairs?|floor|level|ground|multi-story|multistory|single-level|elevator|stair[-\s]?free)\b/i;
         if (REPLY_HAS_ACCESS_KEYWORD.test(humanized)) return humanized;
 
@@ -23824,21 +23862,17 @@ Do not include a subject line.`;
         // accessibilityNote (passed in propertyContext as
         // "FLOOR PLAN / ACCESSIBILITY: …"); else propertyType-derived.
         let fallback: string;
-        const noteMatch = (propertyContext ?? "").match(/FLOOR PLAN \/ ACCESSIBILITY:\s*([^]+?)(?=\n\n|\n[A-Z][A-Z ]+:|$)/);
         if (noteMatch) {
-          // Use the operator-authored note verbatim. It's already
-          // phrased with the right tone + commitment language. The
-          // prefix mirrors the warm "here's the good news" pattern
-          // the prompt asks Haiku to use, so even the deterministic
-          // fallback doesn't read clinically.
-          fallback = `Since you mentioned wanting ground-floor units for the seniors in your group, here's the good news: ${noteMatch[1].trim()}`;
+          fallback = groundFloorPromiseAuthorized
+            ? `Since a bottom-floor setup is important for your group, here's the good news: ${noteMatch[1].trim()}`
+            : safeGroundFloorSentence;
         } else {
           const typeMatch = (propertyContext ?? "").match(/Property type:\s*(\w+)/);
           const propType = typeMatch?.[1];
           if (propType === "Townhouse") {
             fallback = "On the seniors / downstairs question — these units are multi-story townhomes with internal stairs. We'd confirm the assigned unit's floor plan before booking, especially for guests with mobility concerns.";
           } else if (propType === "Condominium") {
-            fallback = "On the floor-plan question — these are single-floor condo units with no internal stairs. Building-level access varies (stairs vs. elevator), and we can confirm specifics for the assigned unit before booking.";
+            fallback = "On the floor-plan question — these are single-level condo units with no internal stairs, but that does not confirm ground-floor or bottom-floor access. We would need to confirm the assigned unit/building access before booking.";
           } else {
             fallback = "On the floor-plan question — we'd confirm the specific unit's accessibility before booking.";
           }
@@ -23847,11 +23881,7 @@ Do not include a subject line.`;
         // Insert before the signature block so the sign-off stays at
         // the bottom. Falls back to appending when no signature is
         // detected (rare; humanizeReply normally re-attaches one).
-        const sigMatch = humanized.match(/\n\s*(Mahalo|Thank You|Thanks|Best|Regards|Sincerely|Aloha)\s*,\s*\n/i);
-        if (sigMatch && sigMatch.index !== undefined) {
-          return `${humanized.slice(0, sigMatch.index).trimEnd()}\n\n${fallback}${humanized.slice(sigMatch.index)}`;
-        }
-        return `${humanized.trimEnd()}\n\n${fallback}`;
+        return insertBeforeSignature(humanized, fallback);
       })();
 
       const finalDraft = addInitialContactCloser(draft, !!isInitialContact);

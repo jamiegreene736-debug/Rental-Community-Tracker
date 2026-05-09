@@ -139,10 +139,10 @@ async function buildPropertyContextForDraft(
     parts.push(`Address: ${prop.address}`);
     if (prop.propertyType) {
       // propertyType is load-bearing for accessibility questions —
-      // a Townhouse is multi-story, a Condominium is single-floor.
-      // Surfaces "downstairs unit" / "stairs?" / "ground floor"
-      // questions accurately instead of having the AI guess.
-      parts.push(`Property type: ${prop.propertyType}${prop.propertyType === "Townhouse" ? " (multi-story attached units, has internal stairs)" : prop.propertyType === "Condominium" ? " (single-floor unit)" : ""}`);
+      // a Townhouse is multi-story, while a Condominium is usually
+      // single-level INSIDE the condo. Do not let the AI conflate
+      // that with ground-floor / bottom-floor building access.
+      parts.push(`Property type: ${prop.propertyType}${prop.propertyType === "Townhouse" ? " (multi-story attached units, has internal stairs)" : prop.propertyType === "Condominium" ? " (single-level inside the condo; this does NOT mean ground-floor or bottom-floor access)" : ""}`);
     }
     parts.push(`Total: ${prop.units.reduce((s, u) => s + u.bedrooms, 0)} bedrooms across ${prop.units.length} unit${prop.units.length === 1 ? "" : "s"}, sleeps ${prop.units.reduce((s, u) => s + u.maxGuests, 0)}.`);
     parts.push(`\nUNITS:\n${unitLines}`);
