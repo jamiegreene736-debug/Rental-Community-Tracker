@@ -1628,9 +1628,22 @@ export default function Bookings() {
   // pick the cheapest priced candidate, create the buy-in, and attach it.
   // Collapses the 6-click flow (expand → Find → scroll → Record → Save → ...)
   // into a single button per booking.
-  const [autoFilling, setAutoFilling] = useState<string | null>(null);
-  const [autoFillStartedAtMs, setAutoFillStartedAtMs] = useState<number | null>(null);
-  const autoFillRunRef = useRef<string | null>(null);
+  const [autoFillStartedByReservation, setAutoFillStartedByReservation] = useState<Record<string, number>>({});
+  const autoFillRunRef = useRef<Set<string>>(new Set());
+  const stopTrackingAutoFill = (reservationId?: string) => {
+    if (!reservationId) {
+      autoFillRunRef.current.clear();
+      setAutoFillStartedByReservation({});
+      return;
+    }
+    autoFillRunRef.current.delete(reservationId);
+    setAutoFillStartedByReservation((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+  };
   const autoFillMutation = useMutation({
     mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
       if (!selectedPropertyId) throw new Error("No property selected");
@@ -2110,11 +2123,9 @@ export default function Bookings() {
       };
     },
     onSuccess: ({ reservation, results, comboOptions, searchAudits }) => {
-      autoFillRunRef.current = null;
+      stopTrackingAutoFill(reservation._id);
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      setAutoFilling(null);
-      setAutoFillStartedAtMs(null);
       if (comboOptions.length > 0) {
         setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
       }
@@ -2186,10 +2197,8 @@ export default function Bookings() {
         });
       }
     },
-    onError: (e: any) => {
-      autoFillRunRef.current = null;
-      setAutoFilling(null);
-      setAutoFillStartedAtMs(null);
+    onError: (e: any, variables) => {
+      stopTrackingAutoFill(variables?.reservation?._id);
       const raw = String(e?.message ?? "");
       // Railway returns a 502 JSON envelope when the find-buy-in
       // handler exceeds its edge timeout. Translate that into an
@@ -2209,27 +2218,14 @@ export default function Bookings() {
     },
   });
 
-  const autoFillSidecarQueue = useSidecarQueueStatus(!!autoFilling);
-  const autoFillSidecarActive = !!autoFilling
-    && isSidecarStatusForSearch(autoFillSidecarQueue.status, autoFillStartedAtMs);
-
-  useEffect(() => {
-    if (!autoFilling) return;
-    if (autoFillMutation.isPending || autoFillSidecarActive) return;
-    if (!autoFillSidecarQueue.fetched) return;
-
-    const id = setTimeout(() => {
-      autoFillRunRef.current = null;
-      setAutoFilling(null);
-      setAutoFillStartedAtMs(null);
-    }, 3_000);
-    return () => clearTimeout(id);
-  }, [
-    autoFilling,
-    autoFillMutation.isPending,
-    autoFillSidecarActive,
-    autoFillSidecarQueue.fetched,
-  ]);
+  const activeAutoFillStartedAt = Object.values(autoFillStartedByReservation);
+  const activeAutoFillCount = activeAutoFillStartedAt.length;
+  const earliestAutoFillStartedAtMs = activeAutoFillStartedAt.length > 0
+    ? Math.min(...activeAutoFillStartedAt)
+    : null;
+  const autoFillSidecarQueue = useSidecarQueueStatus(activeAutoFillCount > 0);
+  const autoFillSidecarActive = activeAutoFillCount > 0
+    && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -2502,9 +2498,8 @@ export default function Bookings() {
                   0,
                 );
                 const channel = r.integration?.platform ?? r.source ?? "direct";
-                const rowAutoFillRunning = autoFilling === r._id
-                  && (autoFillMutation.isPending || autoFillSidecarActive);
-                const rowSidecarOnly = autoFilling === r._id
+                const rowAutoFillRunning = r._id in autoFillStartedByReservation;
+                const rowSidecarOnly = rowAutoFillRunning
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
                 const hasAttachedBuyIns = r.slots.some((slot) => !!slot.buyIn);
@@ -2617,17 +2612,19 @@ export default function Bookings() {
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (autoFillRunRef.current || autoFillMutation.isPending || autoFilling) return;
-                                  autoFillRunRef.current = r._id;
+                                  if (autoFillRunRef.current.has(r._id)) return;
+                                  autoFillRunRef.current.add(r._id);
                                   closeSlotSearchesForReservation(r);
-                                  setAutoFillStartedAtMs(Date.now());
-                                  setAutoFilling(r._id);
+                                  setAutoFillStartedByReservation((prev) => ({
+                                    ...prev,
+                                    [r._id]: Date.now(),
+                                  }));
                                   autoFillMutation.mutate({ reservation: r });
                                 }}
-                                disabled={rowAutoFillRunning || autoFillMutation.isPending || !!autoFilling}
+                                disabled={rowAutoFillRunning}
                                 data-testid={`button-auto-fill-${r._id}`}
                               >
-                                {autoFillMutation.isPending && autoFilling === r._id ? (
+                                {rowAutoFillRunning && !rowSidecarOnly ? (
                                   <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
                                 ) : rowSidecarOnly ? (
                                   <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Sidecar verifying…</>
