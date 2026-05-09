@@ -3063,6 +3063,8 @@ export async function registerRoutes(
   app.get("/api/dashboard/revenue-week", async (_req, res) => {
     const now = new Date();
     const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const limit = 100;
+    const maxPages = 20;
 
     const unwrapReservations = (payload: any): any[] => {
       if (Array.isArray(payload)) return payload;
@@ -3103,34 +3105,66 @@ export async function registerRoutes(
       return 0;
     };
 
-    const createdAt = (reservation: any): Date | null => {
-      const raw = reservation?.createdAt ?? reservation?.created_at ?? reservation?.created;
+    // Count "past 7 days" by the booking/confirmation timestamp when
+    // Guesty provides one, falling back to createdAt for older payloads.
+    const bookingActivityAt = (reservation: any): Date | null => {
+      const raw =
+        reservation?.confirmedAt ??
+        reservation?.confirmed_at ??
+        reservation?.bookedAt ??
+        reservation?.booked_at ??
+        reservation?.reservationDate ??
+        reservation?.reservation_date ??
+        reservation?.createdAt ??
+        reservation?.created_at ??
+        reservation?.created;
       if (!raw) return null;
       const date = new Date(String(raw));
       return Number.isNaN(date.getTime()) ? null : date;
     };
 
     try {
-      const fields = encodeURIComponent("_id status createdAt listingId money source integration confirmationCode");
+      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate listingId money source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
         { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
-      let data: any;
+      let reservations: any[] = [];
       try {
-        data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=200&sort=-createdAt&fields=${fields}`);
+        for (let page = 0; page < maxPages; page++) {
+          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
+          const pageRows = unwrapReservations(data);
+          if (pageRows.length === 0) break;
+          reservations.push(...pageRows);
+          const datedRows = pageRows
+            .map(bookingActivityAt)
+            .filter((d): d is Date => !!d);
+          const pageIsOlderThanWindow =
+            datedRows.length > 0 && datedRows.every((d) => d < start);
+          if (pageRows.length < limit || pageIsOlderThanWindow) break;
+        }
       } catch (filteredErr) {
         // Some Guesty accounts reject createdAt filters even though list
-        // sorting works. Falling back keeps the dashboard tile useful and
-        // still filters locally before summing.
-        data = await guestyRequest("GET", `/reservations?limit=200&sort=-createdAt&fields=${fields}`);
+        // sorting works. Fall back to paged reads so the tile remains a
+        // real rolling seven-day window instead of only the first page.
+        for (let page = 0; page < maxPages; page++) {
+          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
+          const pageRows = unwrapReservations(data);
+          if (pageRows.length === 0) break;
+          reservations.push(...pageRows);
+          const datedRows = pageRows
+            .map(bookingActivityAt)
+            .filter((d): d is Date => !!d);
+          const pageIsOlderThanWindow =
+            datedRows.length > 0 && datedRows.every((d) => d < start);
+          if (pageRows.length < limit || pageIsOlderThanWindow) break;
+        }
       }
 
-      const reservations = unwrapReservations(data);
       let revenue = 0;
       let bookingCount = 0;
 
       for (const reservation of reservations) {
-        const madeAt = createdAt(reservation);
+        const madeAt = bookingActivityAt(reservation);
         if (!madeAt || madeAt < start || madeAt > now) continue;
         const status = String(reservation?.status ?? "").toLowerCase();
         if (/cancel|declin|inquir|request|expired|closed/.test(status)) continue;
@@ -3145,6 +3179,7 @@ export async function registerRoutes(
         bookingCount,
         startDate: start.toISOString(),
         endDate: now.toISOString(),
+        windowLabel: "Rolling past 7 days",
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch weekly revenue", message: err.message });

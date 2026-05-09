@@ -540,6 +540,7 @@ export default function Home() {
     bookingCount: number;
     startDate: string;
     endDate: string;
+    windowLabel?: string;
   };
   const { data: weeklyRevenue, isLoading: weeklyRevenueLoading } = useQuery<WeeklyRevenue>({
     queryKey: ["/api/dashboard/revenue-week"],
@@ -791,13 +792,13 @@ export default function Home() {
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
               <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Revenue for this week</span>
+              <span className="text-xs text-muted-foreground font-medium">Revenue, past 7 days</span>
             </div>
             <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
               {weeklyRevenueLoading ? "..." : formatCurrency(weeklyRevenue?.revenue ?? 0)}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Past 7 days across all units
+              Rolling 7-day booking window
               {weeklyRevenue ? ` · ${weeklyRevenue.bookingCount} booking${weeklyRevenue.bookingCount === 1 ? "" : "s"}` : ""}
             </p>
           </Card>
