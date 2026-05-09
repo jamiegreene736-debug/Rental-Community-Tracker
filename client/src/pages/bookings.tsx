@@ -26,6 +26,7 @@ import {
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
+  MapPin, Footprints,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
@@ -233,6 +234,38 @@ type SidecarQueueStatus = {
   }>;
 };
 
+type UnitProximityResponse =
+  | {
+      status: "not_enough";
+      reservationId: string;
+      message?: string;
+    }
+  | {
+      status: "ready";
+      reservationId: string;
+      propertyId: number | null;
+      community: string | null;
+      resortName?: string | null;
+      units: Array<{
+        buyInId: number;
+        unitId: string;
+        unitLabel: string;
+        listingUrl?: string | null;
+        title: string;
+        unitToken: string | null;
+        address: string;
+        addressSource: "saved" | "scraped" | "title-hint" | "resort";
+      }>;
+      walk: {
+        minutes: number;
+        feet: number;
+        description: string;
+        source: "geocoded" | "fallback";
+      };
+      confidence: "exact-address" | "listing-title" | "resort-default";
+      generatedAt: string;
+    };
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function fmtMoney(n: number | string | null | undefined): string {
@@ -332,6 +365,74 @@ function imageUrlKey(url: string | null | undefined): string {
   } catch {
     return String(url).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
   }
+}
+
+function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) {
+  const attachedSlots = reservation.slots.filter((slot) => !!slot.buyIn);
+  const attachedKey = attachedSlots.map((slot) => slot.buyIn?.id).filter(Boolean).join(",");
+  const query = useQuery<UnitProximityResponse>({
+    queryKey: ["/api/bookings", reservation._id, "unit-proximity", attachedKey],
+    queryFn: ({ signal }) => apiGetJson<UnitProximityResponse>(
+      `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
+      signal,
+    ),
+    enabled: attachedSlots.length >= 2,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  if (attachedSlots.length < 2) return null;
+
+  const sourceText = (data: Extract<UnitProximityResponse, { status: "ready" }>) => {
+    if (data.confidence === "exact-address") return "address verified";
+    if (data.confidence === "listing-title") return "estimated from listing titles";
+    return "resort footprint estimate";
+  };
+
+  return (
+    <div className="rounded border border-sky-200 bg-sky-50/65 px-3 py-2 text-xs text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1 font-medium">
+          <Footprints className="h-3.5 w-3.5" />
+          Unit walking distance
+        </span>
+        {query.isLoading ? (
+          <span className="inline-flex items-center gap-1 text-sky-800 dark:text-sky-200">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            checking addresses...
+          </span>
+        ) : query.isError ? (
+          <span className="text-amber-700 dark:text-amber-300">Could not estimate automatically</span>
+        ) : query.data?.status === "ready" ? (
+          <>
+            <Badge className="bg-sky-700 text-white text-[10px]">
+              {query.data.walk.minutes} min walk
+            </Badge>
+            <span className="text-sky-800 dark:text-sky-200">
+              {query.data.walk.description}
+            </span>
+            <span className="text-[10px] text-sky-700 dark:text-sky-300">
+              {sourceText(query.data)}
+            </span>
+          </>
+        ) : (
+          <span className="text-sky-800 dark:text-sky-200">waiting for two attached units</span>
+        )}
+      </div>
+      {query.data?.status === "ready" && (
+        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-sky-800 dark:text-sky-200">
+          {query.data.units.map((unit) => (
+            <span key={unit.buyInId} className="inline-flex items-center gap-1 min-w-0" title={unit.address}>
+              <MapPin className="h-3 w-3 shrink-0" />
+              <span className="font-medium">{unit.unitLabel}</span>
+              <span className="truncate max-w-[320px]">
+                {unit.unitToken ? `#${unit.unitToken} · ` : ""}{unit.address}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function isGenericRentalTitle(title: string): boolean {
@@ -2801,6 +2902,7 @@ export default function Bookings() {
                           </div>
                           );
                         })}
+                        <UnitProximityCard reservation={r} />
                       </div>
                     )}
                   </div>

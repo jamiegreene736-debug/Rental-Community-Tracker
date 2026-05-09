@@ -452,6 +452,169 @@ export interface ListingFacts {
   photoCount?: number;
 }
 
+type ListingAddressGuess = {
+  address: string;
+  source: "saved" | "scraped" | "title-hint" | "resort";
+  title: string;
+  unitToken: string | null;
+};
+
+const listingAddressCache = new Map<string, ListingAddressGuess | null>();
+
+function titleFromBuyInNoteText(notes: string | null | undefined): string {
+  const raw = String(notes ?? "").replace(/\s+/g, " ").trim();
+  const m =
+    raw.match(/(?:Auto-filled from|Bought via)\s+[^—-]+[—-]\s*([^·]+)/i) ||
+    raw.match(/^(?:Auto-filled from|Bought via)\s+([^·]+)/i);
+  return (m?.[1] ?? raw.split(" · ")[0] ?? "").trim();
+}
+
+function extractUnitTokenFromText(value: string): string | null {
+  const text = String(value ?? "");
+  const explicit =
+    text.match(/#\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/) ||
+    text.match(/\b(?:unit|suite|apt|apartment|condo|villa)\s*#?\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/i);
+  if (explicit?.[1]) return explicit[1].toUpperCase();
+  const compact = text.match(/\b([A-Z]\d+[A-Z]?|\d{2,4}[A-Z])\b/i);
+  return compact?.[1]?.toUpperCase() ?? null;
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function addressFromJsonLd(html: string): string | null {
+  const matches = Array.from(html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi));
+  const visit = (value: any): string | null => {
+    if (!value || typeof value !== "object") return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const address = value.address;
+    if (typeof address === "string" && /\d{2,6}\s+/.test(address)) return address.trim();
+    if (address && typeof address === "object") {
+      const parts = [
+        address.streetAddress,
+        address.addressLocality,
+        address.addressRegion,
+        address.postalCode,
+      ].map((p) => String(p ?? "").trim()).filter(Boolean);
+      if (parts.length >= 2 && /\d{2,6}\s+/.test(parts[0])) return parts.join(", ");
+    }
+    for (const item of Object.values(value)) {
+      const found = visit(item);
+      if (found) return found;
+    }
+    return null;
+  };
+  for (const m of matches) {
+    try {
+      const found = visit(JSON.parse(m[1]));
+      if (found) return found;
+    } catch {}
+  }
+  return null;
+}
+
+function addressFromVisibleText(html: string): string | null {
+  const text = htmlToPlainText(html);
+  const street =
+    text.match(/\b\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s+#?\s*[A-Za-z0-9-]+)?\s*,?\s+[A-Za-z][A-Za-z .'-]+,\s*(?:HI|Hawaii|FL|Florida|CA|Colorado|CO|UT|AZ|NV)(?:\s+\d{5})?/i) ||
+    text.match(/\b\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s+#?\s*[A-Za-z0-9-]+)?\b/i);
+  return street?.[0]?.replace(/\s+/g, " ").trim() ?? null;
+}
+
+async function scrapeAddressFromListingUrl(url: string | null | undefined): Promise<string | null> {
+  const sourceUrl = String(url ?? "").trim();
+  if (!/^https?:\/\//i.test(sourceUrl)) return null;
+  const cacheKey = sourceUrl.split("#")[0];
+  if (listingAddressCache.has(cacheKey)) return listingAddressCache.get(cacheKey)?.address ?? null;
+  try {
+    const r = await fetch(sourceUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!r.ok) {
+      listingAddressCache.set(cacheKey, null);
+      return null;
+    }
+    const html = await r.text();
+    const address = addressFromJsonLd(html) ?? addressFromVisibleText(html);
+    listingAddressCache.set(cacheKey, address ? { address, source: "scraped", title: "", unitToken: null } : null);
+    return address;
+  } catch {
+    listingAddressCache.set(cacheKey, null);
+    return null;
+  }
+}
+
+function buildAddressGuess(
+  buyIn: any,
+  communityName: string | null,
+  loc?: { searchName: string; city: string; state: string; streetAddress?: string },
+): ListingAddressGuess {
+  const saved = String(buyIn?.unitAddress ?? "").trim();
+  const title = titleFromBuyInNoteText(buyIn?.notes) || String(buyIn?.propertyName ?? buyIn?.unitLabel ?? "").trim();
+  const urlSlug = (() => {
+    try {
+      const u = new URL(String(buyIn?.airbnbListingUrl ?? ""));
+      return decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "").replace(/[_-]+/g, " ");
+    } catch {
+      return "";
+    }
+  })();
+  const unitToken = extractUnitTokenFromText(`${title} ${urlSlug}`);
+  if (saved) return { address: saved, source: "saved", title, unitToken };
+  if (loc?.streetAddress && unitToken) {
+    return {
+      address: `${loc.streetAddress} #${unitToken}, ${loc.city}, ${loc.state}`,
+      source: "title-hint",
+      title,
+      unitToken,
+    };
+  }
+  const resortName = loc?.searchName ?? communityName ?? String(buyIn?.propertyName ?? "").trim();
+  if (title && loc) {
+    return {
+      address: `${title}, ${loc.city}, ${loc.state}`,
+      source: "title-hint",
+      title,
+      unitToken,
+    };
+  }
+  if (loc?.streetAddress) {
+    return {
+      address: `${loc.streetAddress}, ${loc.city}, ${loc.state}`,
+      source: "resort",
+      title,
+      unitToken,
+    };
+  }
+  return {
+    address: [title, resortName].filter(Boolean).join(", "),
+    source: "resort",
+    title,
+    unitToken,
+  };
+}
+
 function coerceListingNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -3197,6 +3360,84 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
+    }
+  });
+
+  // Automatic proximity check for attached buy-ins on a multi-unit booking.
+  // The UI calls this after at least two slots are filled. It prefers
+  // exact saved/scraped addresses, then uses listing titles + known resort
+  // street/city hints so the operator can spot units that are far apart.
+  app.get("/api/bookings/:reservationId/unit-proximity", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const attached = (await storage.getBuyInsByReservation(reservationId))
+        .filter((b) => b.status !== "cancelled")
+        .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")));
+      if (attached.length < 2) {
+        return res.json({
+          status: "not_enough",
+          reservationId,
+          message: "At least two attached buy-ins are needed before proximity can be estimated.",
+        });
+      }
+
+      const propertyId = Number(attached[0]?.propertyId);
+      const communityName =
+        (Number.isFinite(propertyId) ? PROPERTY_UNIT_NEEDS[propertyId]?.community : undefined) ??
+        String(req.query.resort ?? attached[0]?.propertyName ?? "").trim() ??
+        null;
+      const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
+      const resortName = loc?.searchName ?? communityName ?? undefined;
+
+      const units = await Promise.all(
+        attached.slice(0, 2).map(async (buyIn) => {
+          const guess = buildAddressGuess(buyIn, communityName, loc);
+          const scraped = guess.source === "saved"
+            ? null
+            : await scrapeAddressFromListingUrl(buyIn.airbnbListingUrl).catch(() => null);
+          const finalGuess: ListingAddressGuess = scraped
+            ? { ...guess, address: scraped, source: "scraped" }
+            : guess;
+          return {
+            buyInId: buyIn.id,
+            unitId: buyIn.unitId,
+            unitLabel: buyIn.unitLabel,
+            listingUrl: buyIn.airbnbListingUrl,
+            title: finalGuess.title,
+            unitToken: finalGuess.unitToken,
+            address: finalGuess.address,
+            addressSource: finalGuess.source,
+          };
+        }),
+      );
+
+      let walk = await walkBetween(units[0].address, units[1].address, resortName).catch(() => fallbackWalkForResort(resortName));
+      const exactAddressCount = units.filter((u) => u.addressSource === "saved" || u.addressSource === "scraped").length;
+      if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
+        // Resort-title searches can geocode both units to the same resort
+        // centroid. In that case the resort footprint default is more honest
+        // than telling the operator two unknown buildings are "steps apart."
+        walk = fallbackWalkForResort(resortName);
+      }
+
+      res.json({
+        status: "ready",
+        reservationId,
+        propertyId: Number.isFinite(propertyId) ? propertyId : null,
+        community: communityName,
+        resortName,
+        units,
+        walk,
+        confidence: exactAddressCount >= 2 && walk.source === "geocoded"
+          ? "exact-address"
+          : walk.source === "geocoded"
+            ? "listing-title"
+            : "resort-default",
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to estimate unit proximity", message: err.message });
     }
   });
 
