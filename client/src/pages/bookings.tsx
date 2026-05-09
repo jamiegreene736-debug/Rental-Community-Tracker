@@ -26,7 +26,7 @@ import {
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
-  MapPin, Footprints,
+  MapPin, Footprints, MessageSquare,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
@@ -272,6 +272,15 @@ function fmtMoney(n: number | string | null | undefined): string {
   const v = typeof n === "string" ? parseFloat(n) : (n ?? 0);
   if (!v && v !== 0) return "—";
   return `$${v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+function guestInboxHref(r: GuestyReservation): string {
+  const params = new URLSearchParams();
+  params.set("reservationId", r._id);
+  const guestName = r.guest?.fullName ?? r.guest?.firstName;
+  if (guestName) params.set("guest", guestName);
+  if (r.confirmationCode) params.set("confirmation", r.confirmationCode);
+  return `/inbox?${params.toString()}`;
 }
 
 async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -2609,16 +2618,41 @@ export default function Bookings() {
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
-                    <button
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={() => toggleExpanded(r._id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleExpanded(r._id);
+                        }
+                      }}
                       className="w-full text-left px-3 py-3 sm:px-4 flex items-start md:items-center gap-3 hover:bg-muted/40 transition-colors rounded-lg"
                     >
                       {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
                       <div className="grow min-w-0 grid grid-cols-2 gap-3 md:grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] md:items-center">
                         <div className="min-w-0">
-                          <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
+                            <Button
+                              asChild
+                              size="sm"
+                              variant="outline"
+                              className="h-6 shrink-0 px-2 text-[10px]"
+                              title="Open this guest's conversation in Inbox"
+                              data-testid={`button-guest-inbox-${r._id}`}
+                            >
+                              <Link href={guestInboxHref(r)} onClick={(e) => e.stopPropagation()}>
+                                <MessageSquare className="h-3 w-3 mr-1" />
+                                Guest Inbox
+                              </Link>
+                            </Button>
+                          </div>
                           {r.confirmationCode && (
-                            <p className="text-[10px] text-muted-foreground font-mono">{r.confirmationCode}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono">
+                              {r.confirmationCode}
+                            </p>
                           )}
                         </div>
                         <div className="text-sm col-span-2 md:col-span-1">
@@ -2696,7 +2730,7 @@ export default function Bookings() {
                           )}
                         </div>
                       </div>
-                    </button>
+                    </div>
 
                     {/* Expanded: per-unit-slot detail */}
                     {isOpen && (

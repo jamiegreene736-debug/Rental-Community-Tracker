@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -1123,6 +1123,13 @@ function normalizePhone(value: unknown): string {
   return digits ? `+${digits}` : "";
 }
 
+function normalizeDeepLinkText(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 function findPhoneInObject(node: unknown, depth = 0): string {
   if (!node || depth > 5) return "";
   if (typeof node === "string" || typeof node === "number") {
@@ -1727,6 +1734,7 @@ function InboxBuyInPanel({
 export default function InboxPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const [location] = useLocation();
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
@@ -1773,6 +1781,20 @@ export default function InboxPage() {
   const [receiptBody, setReceiptBody] = useState<string>("");
   const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const deepLinkNoticeRef = useRef<string | null>(null);
+
+  const inboxDeepLink = useMemo(() => {
+    const search = typeof window !== "undefined"
+      ? window.location.search
+      : (location.includes("?") ? `?${location.split("?")[1]}` : "");
+    const params = new URLSearchParams(search);
+    return {
+      conversationId: params.get("conversationId") || params.get("conversation") || null,
+      reservationId: params.get("reservationId") || params.get("reservation") || null,
+      guest: params.get("guest") || null,
+      confirmation: params.get("confirmation") || null,
+    };
+  }, [location]);
 
   const previewTemplateBody = (title: string, body: string, channel: "guesty" | "sms" = "guesty") => {
     setTemplatePreview({ open: true, title, body, channel });
@@ -1818,7 +1840,7 @@ export default function InboxPage() {
       // in the first place — adding `fields=` is what actually makes the
       // unwrapping useful. Verified 2026-05-04 against production: omit
       // it and `state.lastMessage` is missing on every list row.
-      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=30&fields=");
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&fields=");
       if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
       return r.json();
     },
@@ -1897,6 +1919,67 @@ export default function InboxPage() {
     };
     return [...matched].sort((a, b) => ts(b) - ts(a));
   }, [conversations, propertyFilter, replyStatusFilter, locallyRepliedAtByConversation]);
+
+  useEffect(() => {
+    const deepLinkKey = [
+      inboxDeepLink.conversationId,
+      inboxDeepLink.reservationId,
+      inboxDeepLink.guest,
+      inboxDeepLink.confirmation,
+    ].filter(Boolean).join("|");
+    if (!deepLinkKey || convLoading) return;
+
+    const guestTarget = normalizeDeepLinkText(inboxDeepLink.guest);
+    const confirmationTarget = normalizeDeepLinkText(inboxDeepLink.confirmation);
+    const matchesConfirmation = (c: GuestyConversation) => {
+      if (!confirmationTarget) return false;
+      const meta = (c as any)?.meta ?? {};
+      const firstReservation =
+        Array.isArray(meta.reservations) && meta.reservations.length > 0
+          ? meta.reservations[0]
+          : ((c as any)?.reservation ?? meta.reservation ?? null);
+      const code = normalizeDeepLinkText(
+        (c as any)?.confirmationCode ??
+        firstReservation?.confirmationCode ??
+        firstReservation?.confirmation?.code,
+      );
+      return code === confirmationTarget;
+    };
+    const matchesGuest = (c: GuestyConversation) => {
+      if (!guestTarget) return false;
+      const guestName = normalizeDeepLinkText(applyLocalReplyOverride(c).displayGuestName);
+      return guestName === guestTarget || guestName.includes(guestTarget) || guestTarget.includes(guestName);
+    };
+
+    const match =
+      (inboxDeepLink.conversationId
+        ? conversations.find((c) => c._id === inboxDeepLink.conversationId)
+        : undefined) ??
+      (inboxDeepLink.reservationId
+        ? conversations.find((c) => applyLocalReplyOverride(c).reservationId === inboxDeepLink.reservationId)
+        : undefined) ??
+      conversations.find(matchesConfirmation) ??
+      conversations.find(matchesGuest);
+
+    if (match) {
+      const normalized = applyLocalReplyOverride(match);
+      setPropertyFilter("all");
+      setReplyStatusFilter("all");
+      if (selectedConvId !== normalized._id) {
+        setSelectedConvId(normalized._id);
+      }
+      deepLinkNoticeRef.current = deepLinkKey;
+      return;
+    }
+
+    if (conversations.length > 0 && deepLinkNoticeRef.current !== deepLinkKey) {
+      deepLinkNoticeRef.current = deepLinkKey;
+      toast({
+        title: "Conversation not found",
+        description: "Inbox loaded, but this reservation was not in the current Guesty conversation list.",
+      });
+    }
+  }, [inboxDeepLink, conversations, convLoading, selectedConvId, locallyRepliedAtByConversation, toast]);
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? applyLocalReplyOverride(selectedConvRaw) : null;
