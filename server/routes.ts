@@ -5068,6 +5068,7 @@ export async function registerRoutes(
       if (typeof v === "string") return Number(v.replace(/[^\d.]/g, "")) || 0;
       return 0;
     };
+    const roundCurrency = (v: number): number => Math.round(v * 100) / 100;
     const marketRateRows = await storage.getPropertyMarketRates(propertyId).catch((e: any) => {
       console.warn(`[find-buy-in] price plausibility skipped DB market-rate lookup for property ${propertyId}:`, e?.message ?? e);
       return [];
@@ -5925,15 +5926,10 @@ export async function registerRoutes(
           });
           if (units.length > 0) pmDiscoveryStats[hitsKey]++;
           pmDiscoveryStats[totalKey] += units.length;
-          // PR #325: mark verified=yes when the vrp_main API returned
-          // a real per-night price. The vrpjax endpoint is the PM's
-          // own booking API; a quoted nightly means the unit is
-          // bookable for the requested window. Without this, sitemap-
-          // discovered PM units (Keleka Hale at Piko Properties,
-          // Parrish Kauai listings, etc.) failed the cheapest-pool
-          // gate (`c.verified === "yes"`) and didn't surface as
-          // auto-pick candidates even when they were cheaper than the
-          // Airbnb/Vrbo alternatives.
+          // Mark verified=yes only when the vrp_main checkavailability
+          // endpoint returned a full quote. getUnitRates is only the
+          // base rent grid, so base-rent fallbacks stay visible for
+          // audit context but cannot enter the auto-pick pool.
           return units.map((u): Candidate => ({
             source: "pm" as const,
             sourceLabel: site.label,
@@ -5942,10 +5938,12 @@ export async function registerRoutes(
             nightlyPrice: u.nightlyPrice,
             totalPrice: u.totalPrice,
             bedrooms: u.bedrooms,
-            snippet: `${site.label} · ${u.bedrooms}BR · sitemap-discovered, vrp-priced`,
-            verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
-            verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
-            verifiedReason: u.nightlyPrice > 0 ? `${site.label} vrpjax returned a date-specific quote` : undefined,
+            snippet: `${site.label} · ${u.bedrooms}BR · sitemap-discovered, ${u.includesFees ? "all-in quote" : "base rent only"}`,
+            verified: u.includesFees && u.nightlyPrice > 0 ? ("yes" as const) : undefined,
+            verifiedNightlyPrice: u.includesFees && u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+            verifiedReason: u.includesFees && u.nightlyPrice > 0
+              ? `${site.label} checkavailability returned a date-specific all-in quote (total includes taxes + required fees)`
+              : undefined,
           }));
         } catch (e: any) {
           console.error(`[find-buy-in] vrp-discovery:${site.label} error:`, e.message);
@@ -6778,12 +6776,14 @@ export async function registerRoutes(
               // Promote the page-quoted price onto the candidate so the
               // priced filter `nightlyPrice > 0` admits it.
               if (r.available === "yes") {
-                if (typeof r.nightlyPrice === "number" && r.nightlyPrice > 0) {
-                  c.nightlyPrice = Math.round(r.nightlyPrice);
-                  c.totalPrice = Math.round(r.nightlyPrice * nights);
-                } else if (typeof r.totalPrice === "number" && r.totalPrice > 0) {
-                  c.totalPrice = Math.round(r.totalPrice);
-                  c.nightlyPrice = Math.round(r.totalPrice / nights);
+                if (typeof r.totalPrice === "number" && r.totalPrice > 0) {
+                  c.totalPrice = roundCurrency(r.totalPrice);
+                  c.nightlyPrice = roundCurrency(r.totalPrice / nights);
+                  c.verifiedNightlyPrice = c.nightlyPrice;
+                } else if (typeof r.nightlyPrice === "number" && r.nightlyPrice > 0) {
+                  c.nightlyPrice = roundCurrency(r.nightlyPrice);
+                  c.totalPrice = roundCurrency(r.nightlyPrice * nights);
+                  c.verifiedNightlyPrice = c.nightlyPrice;
                 }
               }
             }

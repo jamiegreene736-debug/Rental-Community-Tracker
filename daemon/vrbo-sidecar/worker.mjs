@@ -3505,6 +3505,21 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       return Number.isFinite(n) ? n : 0;
     }
 
+    function roundCents(n) {
+      return Math.round(n * 100) / 100;
+    }
+
+    function displayDate(iso) {
+      const d = new Date(`${iso}T12:00:00Z`);
+      if (!Number.isFinite(d.getTime())) return iso;
+      return d.toLocaleDateString("en-US", {
+        timeZone: "UTC",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+    }
+
     function bedroomPhraseRe(n) {
       if (!n || !Number.isFinite(Number(n))) return null;
       const words = { 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six" };
@@ -3793,6 +3808,38 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
           reason: `VRP calendar: ${requiredMinLOS}-night minimum for ${checkIn}`,
         };
       }
+      const quoteParams = new URLSearchParams();
+      quoteParams.set("check-availability-arrival-date", displayDate(checkIn));
+      quoteParams.set("obj[Arrival]", checkIn);
+      quoteParams.set("check-availability-departure-date", displayDate(checkOut));
+      quoteParams.set("obj[Departure]", checkOut);
+      quoteParams.set("obj[Adults]", "2");
+      quoteParams.set("obj[Children]", "0");
+      quoteParams.set("obj[Vendor]", "Track");
+      quoteParams.set("obj[PropID]", unitId);
+      quoteParams.set("obj[v2]", "1");
+      const quoteResp = await fetch(`/?vrpjax=1&act=checkavailability&par=1&${quoteParams.toString()}`, {
+        headers: {
+          Accept: "application/json, text/javascript, */*; q=0.01",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      }).catch(() => null);
+      if (quoteResp?.ok) {
+        const quoteRaw = await quoteResp.text();
+        let quote = null;
+        try { quote = JSON.parse(quoteRaw); } catch { quote = null; }
+        const totalCost = parseMoneyAmount(quote?.TotalCost ?? quote?.TheTotalCost ?? quote?.TheCost);
+        const quoteNights = Number(quote?.nights);
+        if (!quote?.Error && totalCost > 0 && (!Number.isFinite(quoteNights) || Math.round(quoteNights) === nights)) {
+          const dueToday = parseMoneyAmount(quote?.DueToday);
+          return {
+            available: "yes",
+            nightlyPrice: roundCents(totalCost / nights),
+            totalPrice: roundCents(totalCost),
+            reason: `VRP checkavailability: $${roundCents(totalCost).toLocaleString()} all-in total for ${nights} nights${dueToday > 0 ? ` ($${roundCents(dueToday).toLocaleString()} due now)` : ""} (unitId=${unitId})`,
+          };
+        }
+      }
       if (!rates || typeof rates !== "object") return null;
       let total = 0;
       let pricedNights = 0;
@@ -3805,10 +3852,10 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       }
       if (pricedNights >= Math.ceil(nights * 0.8) && total > 0) {
         return {
-          available: "yes",
-          nightlyPrice: Math.round(total / nights),
-          totalPrice: Math.round(total),
-          reason: `VRP vrpjax: $${Math.round(total).toLocaleString()} total for ${nights} nights (unitId=${unitId})`,
+          available: "unclear",
+          nightlyPrice: null,
+          totalPrice: null,
+          reason: `VRP vrpjax returned base rent only ($${roundCents(total).toLocaleString()}); no all-in quote was available for ${checkIn} → ${checkOut} (unitId=${unitId})`,
         };
       }
       return null;
@@ -3865,6 +3912,11 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
   }
   const genericResult = await targetPage.evaluate(({ checkIn, checkOut, nights }) => {
     const text = (document.body?.innerText ?? "").replace(/\s+/g, " ");
+    const parseMoney = (raw) => {
+      const n = parseFloat(String(raw || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+      return Number.isFinite(n) ? n : 0;
+    };
+    const roundCents = (n) => Math.round(n * 100) / 100;
     const NO_PATTERNS = [
       /not available for these dates/i,
       /no availability/i,
@@ -3901,10 +3953,12 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
         return textReserveRe.test(label);
       });
-    const perNight = text.match(/\$\s*([\d,]+)\s*(?:\/|per|a\s+)?\s*(?:night|nightly)/i);
+    const perNight = text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/|per|a\s+)?\s*(?:night|nightly)/i);
     const totalPrice =
-      text.match(/\$\s*([\d,]+)\s*total/i) ||
-      text.match(/total\s*\$\s*([\d,]+)/i) ||
+      text.match(/total\s+cost\s*:?\s*\$\s*([\d,]+(?:\.\d+)?)/i) ||
+      text.match(/total\s+cost[\s\S]{0,80}?\$\s*([\d,]+(?:\.\d+)?)/i) ||
+      text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*total/i) ||
+      text.match(/total\s*\$\s*([\d,]+(?:\.\d+)?)/i) ||
       text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:including|incl\.?)\s+(?:taxes?\s*(?:&|and)\s*)?fees?/i);
     const totalForStayRe = new RegExp(`\\$\\s*([\\d,]+(?:\\.\\d+)?)\\s*for\\s+${nights}\\s+nights?`, "ig");
     const totalForStayMatches = Array.from(text.matchAll(totalForStayRe));
@@ -3915,14 +3969,14 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       totalForStayMatches.find((m) => currentPriceIdx >= 0 && m.index != null && m.index >= currentPriceIdx && m.index - currentPriceIdx < 700) ||
       totalForStayMatches[0] ||
       null;
-    const nightlyN = perNight ? parseInt(perNight[1].replace(/,/g, ""), 10) : null;
+    const nightlyN = perNight ? roundCents(parseMoney(perNight[1])) : null;
     const totalN = totalPrice
-      ? parseInt(totalPrice[1].replace(/,/g, ""), 10)
+      ? roundCents(parseMoney(totalPrice[1]))
       : preferredTotalForStay
-      ? Math.round(parseFloat(preferredTotalForStay[1].replace(/,/g, "")))
+      ? roundCents(parseMoney(preferredTotalForStay[1]))
       : null;
     const nightlyForSelectedStay = preferredTotalForStay && totalN
-      ? Math.round(totalN / nights)
+      ? roundCents(totalN / nights)
       : nightlyN;
     const dateHintVariants = (iso) => {
       const hints = [iso];
@@ -3965,7 +4019,7 @@ async function scrapePmUrl(targetPage, url, checkIn, checkOut, bedrooms = null) 
       return {
         available: "yes",
         nightlyPrice: nightlyForSelectedStay,
-        totalPrice: totalN ?? (nightlyForSelectedStay ? Math.round(nightlyForSelectedStay * nights) : null),
+        totalPrice: totalN ?? (nightlyForSelectedStay ? roundCents(nightlyForSelectedStay * nights) : null),
         reason: reserveBtn
           ? `Reserve/Book button present${nightlyForSelectedStay ? ` ($${nightlyForSelectedStay}/night)` : ""}${totalN ? ` ($${totalN} total)` : ""}`
           : `Visible price${nightlyForSelectedStay ? ` $${nightlyForSelectedStay}/night` : ""}${totalN ? ` $${totalN} total` : ""}`,

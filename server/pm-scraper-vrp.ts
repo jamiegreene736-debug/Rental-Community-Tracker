@@ -22,6 +22,9 @@
 //     GET {baseUrl}/?vrpjax=1&act=getUnitRates&unitId={id}
 //     Returns { "YYYY-MM-DD": { amount, chargebasis, ... }, ... }
 //                                                          (or "null")
+//     NOTE: this is base rent only. For buy-in pricing, use the
+//     checkavailability quote endpoint below so required fees + taxes
+//     are included in TotalCost.
 //
 //   Availability endpoint:
 //     GET {baseUrl}/?vrpjax=1&act=getUnitBookedDates&par={slug}
@@ -218,6 +221,87 @@ function enumerateNights(checkIn: string, checkOut: string): string[] {
   return result;
 }
 
+function roundCents(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function parseMoney(v: unknown): number {
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function displayDate(iso: string): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+type VrpQuote = {
+  totalPrice: number;
+  nightlyPrice: number;
+  rentTotal: number;
+  taxTotal: number;
+  dueToday: number;
+};
+
+async function fetchVrpQuoteTotal(
+  site: VrpSiteConfig,
+  meta: VrpUnitMeta,
+  checkIn: string,
+  checkOut: string,
+  stayLength: number,
+): Promise<VrpQuote | null> {
+  const params = new URLSearchParams();
+  params.set("check-availability-arrival-date", displayDate(checkIn));
+  params.set("obj[Arrival]", checkIn);
+  params.set("check-availability-departure-date", displayDate(checkOut));
+  params.set("obj[Departure]", checkOut);
+  params.set("obj[Adults]", "2");
+  params.set("obj[Children]", "0");
+  params.set("obj[Vendor]", "Track");
+  params.set("obj[PropID]", meta.unitId);
+  params.set("obj[v2]", "1");
+
+  const r = await fetch(`${site.baseUrl}/?vrpjax=1&act=checkavailability&par=1&${params.toString()}`, {
+    headers: {
+      ...HEADERS,
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) return null;
+  const text = await r.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (data?.Error) return null;
+  const total = parseMoney(data?.TotalCost ?? data?.TheTotalCost ?? data?.TheCost);
+  if (!(total > 0)) return null;
+  const quoteNights = Number(data?.nights);
+  if (Number.isFinite(quoteNights) && quoteNights > 0 && Math.round(quoteNights) !== stayLength) {
+    return null;
+  }
+  return {
+    totalPrice: roundCents(total),
+    nightlyPrice: roundCents(total / stayLength),
+    rentTotal: roundCents(parseMoney(data?.TheRentalRate) || parseMoney(data?.Charges?.find?.((c: any) => c?.Description === "Rent")?.Amount)),
+    taxTotal: roundCents(parseMoney(data?.TotalTax)),
+    dueToday: roundCents(parseMoney(data?.DueToday)),
+  };
+}
+
 export type VrpAvailableUnit = {
   url: string;
   name: string;
@@ -227,6 +311,8 @@ export type VrpAvailableUnit = {
   unitId: string;
   /** Display label of the source PM (e.g. "Parrish Kauai"). */
   sourceLabel: string;
+  /** True when totalPrice is the full bookable quote including required fees/taxes. */
+  includesFees: boolean;
 };
 
 export async function findAvailableVrpUnits(opts: {
@@ -334,14 +420,29 @@ export async function findAvailableVrpUnits(opts: {
       if (pricedNights < Math.ceil(stayLength * 0.8)) return null;
       if (!(total > 0)) return null;
 
+      const quote = await fetchVrpQuoteTotal(site, meta, checkIn, checkOut, stayLength).catch(() => null);
+      if (quote) {
+        return {
+          url: meta.url,
+          name: meta.name,
+          bedrooms: meta.bedrooms,
+          totalPrice: quote.totalPrice,
+          nightlyPrice: quote.nightlyPrice,
+          unitId: meta.unitId,
+          sourceLabel: site.label,
+          includesFees: true,
+        };
+      }
+
       return {
         url: meta.url,
         name: meta.name,
         bedrooms: meta.bedrooms,
-        totalPrice: Math.round(total),
-        nightlyPrice: Math.round(total / stayLength),
+        totalPrice: roundCents(total),
+        nightlyPrice: roundCents(total / stayLength),
         unitId: meta.unitId,
         sourceLabel: site.label,
+        includesFees: false,
       };
     } catch {
       return null;
