@@ -10,17 +10,17 @@ long as the Mac is on.
 The daemon runs on the operator's Mac (not on Railway). It posts
 results back to Railway over HTTPS. The repo holds the canonical
 copy here so subsequent sessions can edit it; deploy is a manual
-copy to `~/Downloads/vrbo-sidecar/worker.mjs` followed by
+copy to `~/Downloads/vrbo-sidecar/` followed by
 `launchctl kickstart -k gui/$UID/com.vrbosidecar.worker`.
 
 ## Files in this directory
 
-- `worker.mjs` — the daemon itself. Plain Node ESM, no build step.
+- `supervisor.mjs` — launchd entrypoint. Starts up to three local
+  worker processes and keeps them alive.
+- `worker.mjs` — one queue worker. Plain Node ESM, no build step.
   Runs the queue poll loop and dispatches to per-op-type processors.
-- `chrome-sidecar-manager.mjs` — Chrome routing helper. It keeps the
-  local Chrome CDP endpoint as the primary path, detects a busy local
-  request lock, and falls back to configured server Chrome/noVNC
-  sidecars when needed.
+- `chrome-sidecar-manager.mjs` — allocates local Chrome sidecars on
+  ports 9222, 9223, and 9224, with separate user-data dirs.
 
 ## Files NOT in this directory (operator-side state)
 
@@ -44,7 +44,7 @@ When this repo's `worker.mjs` is updated:
 
 ```sh
 # From the repo root, sync the new daemon code to your Mac
-cp daemon/vrbo-sidecar/worker.mjs ~/Downloads/vrbo-sidecar/worker.mjs
+cp daemon/vrbo-sidecar/{worker,supervisor,chrome-sidecar-manager}.mjs ~/Downloads/vrbo-sidecar/
 
 # Restart the daemon to pick up the changes
 launchctl kickstart -k "gui/$UID/com.vrbosidecar.worker"
@@ -61,77 +61,24 @@ need without taking over the operator's desktop. If you need to watch
 or manually unblock the sidecar browser, restart the daemon with:
 
 ```sh
-SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/worker.mjs
+SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/supervisor.mjs
 ```
 
-## Server Chrome fallback
+## Local concurrency
 
-Local Chrome remains the default. To allow overflow work to run on
-headed Chrome containers on a remote server, start the remote services:
+Server Chrome fallback is disabled by default. The supervisor starts a
+local worker pool instead, and `chrome-sidecar-manager.mjs` allocates
+up to three local Chrome profiles:
 
-```sh
-./scripts/start-server-sidecars.sh 4
-```
+- `http://127.0.0.1:9222` using `VrboSidecar-Chrome`
+- `http://127.0.0.1:9223` using `VrboSidecar-Chrome-2`
+- `http://127.0.0.1:9224` using `VrboSidecar-Chrome-3`
 
-Then set these on the Mac running the daemon:
-
-```sh
-export CHROME_PRIMARY=local
-export SERVER_CHROME_HOST=<SERVER_IP_OR_DNS>
-export SERVER_CHROME_BASE_PORT=9223
-export SERVER_CHROME_BASE_WEBDRIVER_PORT=4445
-export SERVER_CHROME_BASE_NOVNC_PORT=7901
-export MAX_SERVER_INSTANCES=4
-```
-
-If `CHROME_PROXY_ENABLED=1`, server Chrome sessions use the
-configured proxy. For Bright Data residential proxies, set:
-
-```sh
-export CHROME_PROXY_ENABLED=1
-export CHROME_PROXY_PROVIDER=brightdata
-export CHROME_PROXY_SCHEME=http
-export BRIGHTDATA_PROXY_HOST=brd.superproxy.io
-export BRIGHTDATA_PROXY_PORT=33335
-export BRIGHTDATA_PROXY_USERNAME=brd-customer-...-zone-...
-export BRIGHTDATA_PROXY_PASSWORD=...
-export CHROME_PROXY_COUNTRY=us
-```
-
-The server Chrome manager appends a unique `-session-...` token per
-server browser launch, plus `-country-us` when `CHROME_PROXY_COUNTRY`
-is set and the username does not already include a country. This keeps
-each headed noVNC browser sticky for a job while rotating across jobs.
-
-To actually consume several queue jobs at once, keep the normal local
-LaunchAgent running and start one lightweight local overflow worker per
-remote Chrome:
-
-```sh
-./scripts/start-local-server-workers.sh 4
-```
-
-Those workers run on the Mac so they can open the noVNC page in your
-default browser, but the browser automation itself happens inside the
-server Chrome containers. They wait briefly before claiming work, which
-keeps local Chrome primary when it is idle.
-
-When local Chrome is busy or unavailable, the daemon prints:
-
-```text
-Local Chrome sidecar is currently in use, utilizing server processing...
-Opened live view for this job: http://SERVER_IP:7901
-Watch the search happening in real time.
-```
-
-It also opens the matching noVNC URL in the default browser so the
-remote headed Chrome session is visible while the job runs.
-
-Advanced explicit endpoint list:
-
-```sh
-export SERVER_CHROME_ENDPOINTS="chrome-server-1=http://10.0.0.8:9223|http://10.0.0.8:4445|http://10.0.0.8:7901,chrome-server-2=http://10.0.0.8:9224|http://10.0.0.8:4446|http://10.0.0.8:7902"
-```
+Set `MAX_LOCAL_CHROME_INSTANCES=1`, `2`, or `3` to lower the cap. The
+manager refuses a fourth concurrent job instead of opening more Chrome
+sessions. The supervisor passes `SERVER_CHROME_FALLBACK_ENABLED=0` to
+every worker, so server fallback stays off unless that supervisor or
+launchd configuration is deliberately changed.
 
 ## VRBO slider CAPTCHA automation
 
@@ -180,10 +127,17 @@ launchctl kickstart -k "gui/$UID/com.vrbosidecar.worker"
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>/Users/jamiegreene/Downloads/vrbo-sidecar/worker.mjs</string>
+    <string>/Users/jamiegreene/Downloads/vrbo-sidecar/supervisor.mjs</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MAX_LOCAL_CHROME_INSTANCES</key>
+    <string>3</string>
+    <key>SERVER_CHROME_FALLBACK_ENABLED</key>
+    <string>0</string>
+  </dict>
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>

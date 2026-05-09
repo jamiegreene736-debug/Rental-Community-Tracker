@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 820 };
 const DEFAULT_LOCAL_CDP_PORT = 9222;
+const DEFAULT_MAX_LOCAL_INSTANCES = 3;
 const DEFAULT_SERVER_CDP_BASE_PORT = 9223;
 const DEFAULT_SERVER_WEBDRIVER_BASE_PORT = 4445;
 const DEFAULT_SERVER_NOVNC_BASE_PORT = 7901;
@@ -75,6 +76,19 @@ function writeLock(file, details) {
     file,
     JSON.stringify({ ...details, pid: process.pid, startedAt: Date.now() }, null, 2),
   );
+}
+
+function tryWriteLock(file, details, ttlMs) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (lockIsActive(file, ttlMs)) return false;
+  const payload = JSON.stringify({ ...details, pid: process.pid, startedAt: Date.now() }, null, 2);
+  try {
+    fs.writeFileSync(file, payload, { flag: "wx" });
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  }
 }
 
 const CRC_TABLE = (() => {
@@ -338,15 +352,28 @@ function discoverServerInstances() {
   }));
 }
 
+function localChromeDataDirForIndex(baseDir, index) {
+  if (index === 0) return baseDir;
+  return `${baseDir}-${index + 1}`;
+}
+
+function localBusyLockForIndex(lockDir, explicitLock, index) {
+  if (index === 0) return explicitLock ?? path.join(lockDir, "local-chrome.busy.json");
+  return path.join(lockDir, `local-chrome-${index + 1}.busy.json`);
+}
+
 export class ChromeSidecarManager {
   constructor(options = {}) {
     this.log = options.log ?? (() => {});
     this.viewport = options.viewport ?? DEFAULT_VIEWPORT;
     this.primary = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
-    this.localCdpPort = numberFromEnv("LOCAL_CHROME_PORT", DEFAULT_LOCAL_CDP_PORT);
-    this.localCdpUrl = trimTrailingSlash(
-      process.env.LOCAL_CHROME_CDP_URL ?? `http://127.0.0.1:${this.localCdpPort}`,
+    this.serverFallbackEnabled = boolFromEnv("SERVER_CHROME_FALLBACK_ENABLED", false);
+    this.maxLocalInstances = Math.min(
+      DEFAULT_MAX_LOCAL_INSTANCES,
+      Math.max(1, Math.floor(numberFromEnv("MAX_LOCAL_CHROME_INSTANCES", DEFAULT_MAX_LOCAL_INSTANCES))),
     );
+    this.localCdpPort = numberFromEnv("LOCAL_CHROME_PORT", DEFAULT_LOCAL_CDP_PORT);
+    this.localCdpUrl = trimTrailingSlash(process.env.LOCAL_CHROME_CDP_URL ?? "");
     this.localWebDriverUrl = trimTrailingSlash(process.env.LOCAL_CHROME_WEBDRIVER_URL ?? "");
     this.localNoVncUrl = trimTrailingSlash(process.env.LOCAL_CHROME_NOVNC_URL ?? "");
     this.localChromeBinary = process.env.LOCAL_CHROME_BINARY ?? DEFAULT_CHROME_BINARY;
@@ -362,13 +389,34 @@ export class ChromeSidecarManager {
       process.env.SIDECAR_LOCAL_BUSY_LOCK ??
       path.join(this.lockDir, "local-chrome.busy.json");
     this.lockTtlMs = numberFromEnv("SIDECAR_LOCK_TTL_MS", DEFAULT_LOCK_TTL_MS);
+    this.localInstances = Array.from({ length: this.maxLocalInstances }, (_, index) => {
+      const port = this.localCdpPort + index;
+      return {
+        name: `local-chrome-${index + 1}`,
+        label: `local Chrome sidecar #${index + 1}`,
+        server: false,
+        index,
+        cdpPort: port,
+        cdpUrl: index === 0 && this.localCdpUrl ? this.localCdpUrl : `http://127.0.0.1:${port}`,
+        webdriverUrl: index === 0 ? this.localWebDriverUrl : "",
+        noVncUrl: index === 0 ? this.localNoVncUrl : "",
+        chromeDataDir: localChromeDataDirForIndex(this.localChromeDataDir, index),
+        busyLock: localBusyLockForIndex(
+          this.lockDir,
+          process.env.SIDECAR_LOCAL_BUSY_LOCK ? this.localBusyLock : null,
+          index,
+        ),
+      };
+    });
   }
 
   async warmPrimaryLocal() {
     if (this.primary !== "local") return false;
-    if (await this.isCdpReady(this.localCdpUrl)) return true;
-    await this.launchLocalChrome();
-    return this.waitForCdp(this.localCdpUrl, 20_000);
+    const first = this.localInstances[0];
+    if (!first) return false;
+    if (await this.isCdpReady(first.cdpUrl)) return true;
+    await this.launchLocalChrome(first);
+    return this.waitForCdp(first.cdpUrl, 20_000);
   }
 
   async acquire(request = {}) {
@@ -377,8 +425,10 @@ export class ChromeSidecarManager {
       if (local) return local;
     }
 
-    const server = await this.tryAcquireServer(request);
-    if (server) return server;
+    if (this.serverFallbackEnabled) {
+      const server = await this.tryAcquireServer(request);
+      if (server) return server;
+    }
 
     if (this.primary !== "local") {
       const local = await this.tryAcquireLocal(request);
@@ -386,79 +436,89 @@ export class ChromeSidecarManager {
     }
 
     throw new Error(
-      "No Chrome sidecar is available. Start the local sidecar or configure SERVER_CHROME_HOST / SERVER_CHROME_ENDPOINTS.",
+      `All ${this.maxLocalInstances} local Chrome sidecars are busy. Wait for one to finish, or raise MAX_LOCAL_CHROME_INSTANCES up to ${DEFAULT_MAX_LOCAL_INSTANCES}.`,
     );
   }
 
   async tryAcquireLocal(request = {}) {
-    if (lockIsActive(this.localBusyLock, this.lockTtlMs)) {
-      this.log("local Chrome sidecar busy lock is active; trying server sidecar");
-      return null;
+    for (const instance of this.localInstances) {
+      const allocation = await this.tryAcquireLocalInstance(instance, request);
+      if (allocation) return allocation;
     }
+    this.log(`all ${this.localInstances.length} local Chrome sidecars are busy`);
+    return null;
+  }
+
+  async tryAcquireLocalInstance(instance, request = {}) {
+    const locked = tryWriteLock(instance.busyLock, {
+      type: "local",
+      requestId: request.id ?? null,
+      opType: request.opType ?? null,
+      cdpUrl: instance.cdpUrl,
+      instance: instance.name,
+    }, this.lockTtlMs);
+    if (!locked) return null;
 
     let webdriverSessionId = null;
     let sessionBaseUrl = null;
 
-    if (!(await this.isCdpReady(this.localCdpUrl)) && this.localWebDriverUrl) {
+    if (!(await this.isCdpReady(instance.cdpUrl)) && instance.webdriverUrl) {
       try {
         const session = await this.createSeleniumSession({
-          name: "local Chrome sidecar",
+          name: instance.label,
           server: false,
-          webdriverUrl: this.localWebDriverUrl,
+          webdriverUrl: instance.webdriverUrl,
         });
         webdriverSessionId = session.sessionId;
         sessionBaseUrl = session.baseUrl;
-        await this.waitForCdp(this.localCdpUrl, 15_000);
+        await this.waitForCdp(instance.cdpUrl, 15_000);
       } catch (e) {
-        this.log(`local Selenium Chrome session failed: ${e?.message ?? e}`);
+        this.log(`${instance.label} Selenium session failed: ${e?.message ?? e}`);
       }
     }
 
-    if (!(await this.isCdpReady(this.localCdpUrl))) {
+    if (!(await this.isCdpReady(instance.cdpUrl))) {
       try {
-        await this.launchLocalChrome();
+        await this.launchLocalChrome(instance);
       } catch (e) {
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
-        this.log(`local Chrome launch failed: ${e?.message ?? e}`);
+        safeUnlink(instance.busyLock);
+        this.log(`${instance.label} launch failed: ${e?.message ?? e}`);
         return null;
       }
-      const ready = await this.waitForCdp(this.localCdpUrl, 20_000);
+      const ready = await this.waitForCdp(instance.cdpUrl, 20_000);
       if (!ready) {
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
-        this.log("local Chrome CDP did not become ready; trying server sidecar");
+        safeUnlink(instance.busyLock);
+        this.log(`${instance.label} CDP did not become ready`);
         return null;
       }
     }
 
-    writeLock(this.localBusyLock, {
-      type: "local",
-      requestId: request.id ?? null,
-      opType: request.opType ?? null,
-      cdpUrl: this.localCdpUrl,
-    });
     const heartbeat = setInterval(() => {
-      writeLock(this.localBusyLock, {
+      writeLock(instance.busyLock, {
         type: "local",
         requestId: request.id ?? null,
         opType: request.opType ?? null,
-        cdpUrl: this.localCdpUrl,
+        cdpUrl: instance.cdpUrl,
+        instance: instance.name,
       });
     }, 15_000);
     heartbeat.unref?.();
 
     return {
       type: "local",
-      label: "local Chrome sidecar",
-      cdpUrl: this.localCdpUrl,
-      noVncUrl: this.localNoVncUrl || null,
+      label: instance.label,
+      cdpUrl: instance.cdpUrl,
+      noVncUrl: instance.noVncUrl || null,
       ephemeral: Boolean(webdriverSessionId),
       release: async () => {
         clearInterval(heartbeat);
-        safeUnlink(this.localBusyLock);
+        safeUnlink(instance.busyLock);
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -630,15 +690,15 @@ export class ChromeSidecarManager {
     return { sessionId, baseUrl };
   }
 
-  async launchLocalChrome() {
+  async launchLocalChrome(instance = this.localInstances[0]) {
     if (!fs.existsSync(this.localChromeBinary)) {
       throw new Error(`Google Chrome not found at ${this.localChromeBinary}`);
     }
-    fs.mkdirSync(this.localChromeDataDir, { recursive: true });
+    fs.mkdirSync(instance.chromeDataDir, { recursive: true });
     const chromeArgs = [
-      `--remote-debugging-port=${this.localCdpPort}`,
+      `--remote-debugging-port=${instance.cdpPort}`,
       "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${this.localChromeDataDir}`,
+      `--user-data-dir=${instance.chromeDataDir}`,
       `--window-size=${this.viewport.width},${this.viewport.height + 80}`,
       `--window-position=${this.localVisible ? "120,80" : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
@@ -656,7 +716,7 @@ export class ChromeSidecarManager {
       ? ["-g", "-j", "-n", "-a", "Google Chrome", "--args", ...chromeArgs]
       : chromeArgs;
     this.log(
-      `spawning local Chrome ${launchHiddenOnMac ? "hidden/offscreen " : ""}(port ${this.localCdpPort}, user-data-dir ${this.localChromeDataDir})…`,
+      `spawning ${instance.label} ${launchHiddenOnMac ? "hidden/offscreen " : ""}(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
     );
     const proc = spawn(command, args, { detached: true, stdio: "ignore" });
     proc.unref?.();

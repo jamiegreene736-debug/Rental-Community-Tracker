@@ -38,6 +38,7 @@ const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
+const WORKER_SLOT = process.env.SIDECAR_WORKER_SLOT ?? "1";
 
 const CHROME_PRIMARY = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
 const WORKER_ROLE = String(process.env.SIDECAR_WORKER_ROLE ?? (CHROME_PRIMARY === "server" ? "server" : "local")).toLowerCase();
@@ -68,7 +69,7 @@ let activeChromeAllocation = null;
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
-  console.log(`[${ts}] [vrbo-sidecar]`, msg, ...rest);
+  console.log(`[${ts}] [vrbo-sidecar:${WORKER_SLOT}]`, msg, ...rest);
 }
 
 function escapeHtml(value) {
@@ -4401,9 +4402,8 @@ async function processRequest(req) {
     bedrooms: req.bedrooms,
   };
 
-  // Acquire the browser at the request boundary so the manager can
-  // keep local Chrome as the primary path, detect a busy local sidecar,
-  // and transparently fall back to a server noVNC sidecar when needed.
+  // Acquire the browser at the request boundary so the local worker pool
+  // can spread jobs across up to three Mac Chrome sidecars.
   await acquireChromeForRequest({ id: req.id, opType });
   await ensureBrowser();
 
@@ -4507,7 +4507,7 @@ async function tick() {
 
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
-  log(`Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}`);
+  log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}`);
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   try {
