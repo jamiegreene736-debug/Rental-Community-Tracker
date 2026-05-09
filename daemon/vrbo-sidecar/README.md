@@ -84,6 +84,25 @@ export SERVER_CHROME_BASE_NOVNC_PORT=7901
 export MAX_SERVER_INSTANCES=4
 ```
 
+If `CHROME_PROXY_ENABLED=1`, server Chrome sessions use the
+configured proxy. For Bright Data residential proxies, set:
+
+```sh
+export CHROME_PROXY_ENABLED=1
+export CHROME_PROXY_PROVIDER=brightdata
+export CHROME_PROXY_SCHEME=http
+export BRIGHTDATA_PROXY_HOST=brd.superproxy.io
+export BRIGHTDATA_PROXY_PORT=33335
+export BRIGHTDATA_PROXY_USERNAME=brd-customer-...-zone-...
+export BRIGHTDATA_PROXY_PASSWORD=...
+export CHROME_PROXY_COUNTRY=us
+```
+
+The server Chrome manager appends a unique `-session-...` token per
+server browser launch, plus `-country-us` when `CHROME_PROXY_COUNTRY`
+is set and the username does not already include a country. This keeps
+each headed noVNC browser sticky for a job while rotating across jobs.
+
 To actually consume several queue jobs at once, keep the normal local
 LaunchAgent running and start one lightweight local overflow worker per
 remote Chrome:
