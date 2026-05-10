@@ -4914,8 +4914,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   : checkpointCount > 0
                                   ? `✓ ${checkpointCount * 5} photos already saved to Guesty — uploading remainder…`
                                   : doUpscale
-                                  ? "Upscaling + hosting on ImgBB — ~30s per photo. Progress saved to Guesty every 5 photos."
-                                  : "Hosting on ImgBB — a few seconds per photo. Progress saved to Guesty every 5 photos."}
+                                  ? "Upscaling + hosting for Guesty — ~30s per photo. Progress saved to Guesty every 5 photos."
+                                  : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
                               {/* Live per-photo results */}
                               {pushResults.length > 0 && (

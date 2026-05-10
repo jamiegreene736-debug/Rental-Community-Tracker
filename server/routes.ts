@@ -120,6 +120,95 @@ function agreementBaseUrl(req: any): string {
   return `${proto || "https"}://${host}`.replace(/\/+$/, "");
 }
 
+function publicPhotoBaseUrl(req: any): string {
+  const configured = process.env.PUBLIC_PHOTO_BASE_URL ||
+    process.env.PUBLIC_APP_URL ||
+    process.env.APP_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "");
+  if (configured) {
+    const withProtocol = /^https?:\/\//i.test(configured) ? configured : `https://${configured}`;
+    return withProtocol.replace(/\/+$/, "");
+  }
+  return agreementBaseUrl(req);
+}
+
+function isImgBbRateLimit(status: number, body: string): boolean {
+  return status === 429 || /rate limit|too many requests/i.test(body);
+}
+
+async function uploadBufferToImgBb(imgbbKey: string, buffer: Buffer): Promise<string> {
+  const form = new FormData();
+  form.append("image", buffer.toString("base64"));
+  const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
+    method: "POST",
+    body: form,
+  });
+  const bodyText = await imgbbResp.text();
+  if (!imgbbResp.ok) {
+    const err = new Error(`ImgBB ${imgbbResp.status}: ${bodyText.slice(0, 200)}`) as Error & {
+      status?: number;
+      body?: string;
+      rateLimited?: boolean;
+    };
+    err.status = imgbbResp.status;
+    err.body = bodyText;
+    err.rateLimited = isImgBbRateLimit(imgbbResp.status, bodyText);
+    throw err;
+  }
+  let imgbbData: any;
+  try {
+    imgbbData = JSON.parse(bodyText);
+  } catch {
+    throw new Error("ImgBB returned invalid JSON");
+  }
+  const publicUrl = imgbbData?.data?.url;
+  if (!publicUrl) throw new Error("ImgBB returned no URL");
+  return publicUrl;
+}
+
+async function uploadBufferToImgBbWithRetry(
+  imgbbKey: string,
+  buffer: Buffer,
+  onRetry: (attempt: number, waitMs: number, error: Error & { rateLimited?: boolean }) => void,
+): Promise<string> {
+  const waits = [3000, 8000, 15000];
+  for (let attempt = 0; attempt <= waits.length; attempt++) {
+    try {
+      return await uploadBufferToImgBb(imgbbKey, buffer);
+    } catch (e: any) {
+      const retryable = e?.rateLimited || e?.status === 429 || e?.status >= 500;
+      if (!retryable || attempt >= waits.length) throw e;
+      const waitMs = waits[attempt];
+      onRetry(attempt + 1, waitMs, e);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw new Error("ImgBB upload failed");
+}
+
+function sanitizePublicPathSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "photo";
+}
+
+function hostGuestyPhotoLocally(
+  req: any,
+  guestyListingId: string,
+  safePath: string,
+  index: number,
+  buffer: Buffer,
+  mimeType: string,
+): string {
+  const folder = sanitizePublicPathSegment(guestyListingId);
+  const sourceName = sanitizePublicPathSegment(path.basename(safePath, path.extname(safePath)));
+  const ext = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
+  const filename = `${String(index).padStart(3, "0")}-${Date.now()}-${sourceName}${ext}`;
+  const relativePath = `/photos/_guesty-hosted/${folder}/${filename}`;
+  const targetDir = path.join(process.cwd(), "client", "public", "photos", "_guesty-hosted", folder);
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.writeFileSync(path.join(targetDir, filename), buffer);
+  return `${publicPhotoBaseUrl(req)}${relativePath}`;
+}
+
 function isAgreementChannel(channel: string): boolean {
   const raw = channel.toLowerCase();
   return raw.includes("vrbo") || raw.includes("homeaway") || raw.includes("booking");
@@ -9886,7 +9975,7 @@ export async function registerRoutes(
     const replicateKey = process.env.REPLICATE_API_KEY;
 
     if (!imgbbKey) {
-      return res.status(500).json({ error: "IMGBB_API_KEY not configured — needed to host photos for Guesty" });
+      console.warn("[push-photos] IMGBB_API_KEY not configured — using app-hosted /photos fallback");
     }
 
     const { guestyListingId, photos: rawPhotos, upscale = true } = req.body as {
@@ -10007,40 +10096,62 @@ export async function registerRoutes(
         });
       }
 
-      // Upload to ImgBB to get a publicly accessible URL
+      // Upload to ImgBB to get a publicly accessible URL. If ImgBB rate-limits,
+      // fall back to the app's public /photos path using the already-normalized
+      // bytes so Guesty can still fetch a compliant image.
       let publicUrl: string;
+      let hostedBy: "imgbb" | "app" = "imgbb";
       try {
-        const form = new FormData();
-        form.append("image", finalBuffer.toString("base64"));
-        const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, {
-          method: "POST",
-          body: form,
+        if (!imgbbKey) throw Object.assign(new Error("ImgBB key missing"), { rateLimited: false });
+        publicUrl = await uploadBufferToImgBbWithRetry(imgbbKey, finalBuffer, (attempt, waitMs, err) => {
+          emit({
+            type: "retry",
+            service: "ImgBB",
+            index,
+            total: photos.length,
+            localPath,
+            attempt,
+            waitMs,
+            message: err.rateLimited
+              ? `ImgBB rate limit reached; retrying in ${Math.round(waitMs / 1000)}s`
+              : `ImgBB upload failed; retrying in ${Math.round(waitMs / 1000)}s`,
+          });
+          console.warn(`[push-photos] ImgBB retry ${attempt} for ${index}/${photos.length} ${safePath}: ${err.message}`);
         });
-        if (!imgbbResp.ok) {
-          const errText = await imgbbResp.text();
-          emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB ${imgbbResp.status}: ${errText.slice(0, 100)}` });
-          perPhotoResults.push({ index, localPath, success: false, error: `ImgBB ${imgbbResp.status}` });
-          continue;
-        }
-        const imgbbData = await imgbbResp.json() as any;
-        publicUrl = imgbbData?.data?.url;
-        if (!publicUrl) {
-          emit({ type: "photo", index, total: photos.length, localPath, success: false, error: "ImgBB returned no URL" });
-          perPhotoResults.push({ index, localPath, success: false, error: "ImgBB no URL" });
-          continue;
-        }
       } catch (e: any) {
-        emit({ type: "photo", index, total: photos.length, localPath, success: false, error: `ImgBB error: ${e.message}` });
-        perPhotoResults.push({ index, localPath, success: false, error: e.message });
-        continue;
+        try {
+          publicUrl = hostGuestyPhotoLocally(req, guestyListingId, safePath, index, finalBuffer, finalMime);
+          hostedBy = "app";
+          emit({
+            type: "fallback",
+            service: "app-photo-host",
+            index,
+            total: photos.length,
+            localPath,
+            reason: e?.rateLimited ? "ImgBB rate limit reached" : e?.message || "ImgBB unavailable",
+            url: publicUrl,
+          });
+          console.warn(`[push-photos] ImgBB unavailable for ${index}/${photos.length}; using app-hosted photo ${publicUrl}`);
+        } catch (fallbackError: any) {
+          emit({
+            type: "photo",
+            index,
+            total: photos.length,
+            localPath,
+            success: false,
+            error: `Photo hosting failed: ${fallbackError.message || e.message}`,
+          });
+          perPhotoResults.push({ index, localPath, success: false, error: fallbackError.message || e.message });
+          continue;
+        }
       }
 
-      // ImgBB upload succeeded — queue for Guesty PUT
+      // Public hosting succeeded — queue for Guesty PUT
       if (wasUpscaled) upscaledCount++;
       collected.push({ original: publicUrl, caption: caption || "" });
       perPhotoResults.push({ index, localPath, success: true, url: publicUrl, wasUpscaled });
-      emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, validationChanges, pending: true });
-      console.log(`[push-photos] ✓ ImgBB ${index}/${photos.length} ${safePath}`);
+      emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, validationChanges, hostedBy, pending: true });
+      console.log(`[push-photos] ✓ hosted via ${hostedBy} ${index}/${photos.length} ${safePath}`);
 
       // Checkpoint: commit accumulated photos to Guesty every 5 successful uploads.
       // Each PUT replaces the full pictures array, so we accumulate. This way a server
