@@ -21,6 +21,7 @@ import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
 import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,7 @@ type UnitOverride = {
   bedrooms: number;
   unitLabel: string;
   sourceUrl: string;
+  photoFolder?: string;
   swapId?: number;
 };
 
@@ -372,12 +374,17 @@ export default function BuilderPreflight() {
         const restored: Record<string, UnitOverride> = {};
         let allCommitted = true;
         for (const swap of data.swaps) {
+          const photoFolder =
+            typeof swap.photoFolder === "string" && swap.photoFolder.trim()
+              ? swap.photoFolder
+              : replacementPhotoFolderForUnit(id, swap.oldUnitId);
           restored[swap.oldUnitId] = {
             unitNumber: swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim(),
             address: swap.newAddress,
             bedrooms: swap.newBedrooms ?? 1,
             unitLabel: swap.newUnitLabel,
             sourceUrl: swap.newSourceUrl,
+            photoFolder,
             swapId: swap.id,
           };
           if (!swap.committed) allCommitted = false;
@@ -434,6 +441,7 @@ export default function BuilderPreflight() {
         ...u,
         unitNumber: override.unitNumber,
         bedrooms: override.bedrooms,
+        photoFolder: override.photoFolder ?? u.photoFolder,
         _overrideAddress: override.address,
         _isReplaced: true,
         _replacedLabel: override.unitLabel,
@@ -577,6 +585,7 @@ export default function BuilderPreflight() {
       bedrooms: newUnit.bedrooms ?? property.units.find(u => u.id === oldUnitId)?.bedrooms ?? 1,
       unitLabel: newUnit.unitLabel,
       sourceUrl: newUnit.url,
+      photoFolder: newUnit.photoFolder ?? replacementPhotoFolderForUnit(id, oldUnitId),
       swapId,
     };
     const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
@@ -592,6 +601,7 @@ export default function BuilderPreflight() {
           ...u,
           unitNumber: override.unitNumber,
           bedrooms: override.bedrooms,
+          photoFolder: override.photoFolder ?? u.photoFolder,
           _overrideAddress: override.address,
           _isReplaced: true,
           _replacedLabel: override.unitLabel,
@@ -829,14 +839,15 @@ export default function BuilderPreflight() {
               <div className="space-y-1.5">
                 {property.units.map((origUnit, idx) => {
                   const override = unitOverrides[origUnit.id];
+                  const unitPhotoFolder = override?.photoFolder ?? origUnit.photoFolder;
                   const positionLabel = `Unit ${String.fromCharCode(65 + idx)}`;
                   const rescrapeHandler = async () => {
-                    if (!origUnit.photoFolder) {
+                    if (!unitPhotoFolder) {
                       toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
                       return;
                     }
                     setRescrapingUnitId(origUnit.id);
-                    const folder = origUnit.photoFolder;
+                    const folder = unitPhotoFolder;
                     try {
                       const r = await fetch("/api/builder/rescrape-unit-photos", {
                         method: "POST",
@@ -905,7 +916,7 @@ export default function BuilderPreflight() {
                       setRescrapingUnitId(null);
                     }
                   };
-                  const receipt = origUnit.photoFolder ? rescrapeReceipts[origUnit.photoFolder] : undefined;
+                  const receipt = unitPhotoFolder ? rescrapeReceipts[unitPhotoFolder] : undefined;
                   return (
                     <div key={origUnit.id} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2 space-y-1.5">
                     <div className="flex items-center justify-between gap-2">

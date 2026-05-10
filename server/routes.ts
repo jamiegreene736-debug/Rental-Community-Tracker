@@ -60,6 +60,7 @@ import {
 } from "@shared/pricing-rates";
 import { verificationTokensForFolder } from "@shared/photo-folder-utils";
 import { extractUnitTokens } from "@shared/folder-unit-map";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -17971,72 +17972,103 @@ Return ONLY compact JSON with this exact shape:
   // ============================================================
   // Unit Swaps: Record a confirmed replacement unit for the builder
   //
-  // If the client passes `photoFolder`, we scrape the Zillow listing
-  // (newSourceUrl) and drop its photos into client/public/photos/{photoFolder}/
-  // so the builder's Photos tab reflects the real replacement unit, not
-  // the original stub folder. Fire-and-forget so the POST stays snappy.
+  // Replacement photos are written to a deterministic per-unit folder,
+  // never back into the original unit folder. Some older static entries
+  // intentionally or accidentally share one source folder; writing a 2BR
+  // replacement into that shared folder made the 3BR render the same
+  // replacement gallery in the builder.
   // ============================================================
+  const unitSwapPhotoFolderHasSource = async (folder: string, url: string): Promise<boolean> => {
+    try {
+      const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+      const files = await fs.promises.readdir(folderPath);
+      const hasPhotos = files.some((f) => /\.(?:jpe?g|png|webp)$/i.test(f));
+      if (!hasPhotos) return false;
+      const sourceDoc = JSON.parse(await fs.promises.readFile(path.join(folderPath, "_source.json"), "utf8"));
+      return sourceDoc?.sourceListing?.url === url;
+    } catch {
+      return false;
+    }
+  };
+
+  const hydrateUnitSwapPhotoFolder = async (
+    swap: {
+      propertyId: number;
+      oldUnitId: string;
+      oldBedrooms: number | null;
+      newBedrooms: number | null;
+      newSourceUrl: string;
+    },
+  ): Promise<void> => {
+    const url = swap.newSourceUrl;
+    if (!/^https?:\/\//i.test(url)) return;
+    const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
+    if (await unitSwapPhotoFolderHasSource(folder, url)) return;
+
+    try {
+      const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+      const listingFacts: ListingFacts = {};
+      const scraped = await scrapeListingPhotos(url, undefined, listingFacts);
+      if (!scraped.length) {
+        console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
+        return;
+      }
+
+      const result = await downloadAndPrioritize({
+        folder,
+        folderPath,
+        scrapedUrls: scraped.map((s) => s.url),
+        maxKeep: 25,
+        anthropicKey: process.env.ANTHROPIC_API_KEY,
+        kind: inferKindFromFolder(folder),
+        requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
+        requiredBathrooms: listingFacts.bathrooms ?? undefined,
+      });
+
+      const sourcePath = path.join(folderPath, "_source.json");
+      let sourceDoc: any = {};
+      try { sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
+      sourceDoc.sourceListing = {
+        url,
+        platform: /zillow/i.test(url) ? "zillow" : "other",
+        scrapedDate: new Date().toISOString().slice(0, 10),
+      };
+      sourceDoc.verificationStatus = "needs-review";
+      sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
+      sourceDoc.verifiedBy = "unit-swap";
+      await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+
+      console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
+    } catch (e: any) {
+      console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
+    }
+  };
+
   app.post("/api/unit-swaps", async (req, res) => {
-    const { photoFolder, ...swapBody } = req.body as any;
+    const { photoFolder: _legacyPhotoFolder, ...swapBody } = req.body as any;
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
     }
     const swap = await storage.createUnitSwap(parsed.data);
+    const photoFolder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
 
-    if (typeof photoFolder === "string" && /^[\w-]+$/.test(photoFolder)
-        && typeof swap.newSourceUrl === "string" && /^https?:\/\//i.test(swap.newSourceUrl)) {
-      const url = swap.newSourceUrl;
-      const folder = photoFolder;
-      void (async () => {
-        try {
-          const folderPath = path.join(process.cwd(), "client/public/photos", folder);
-          const listingFacts: ListingFacts = {};
-          const scraped = await scrapeListingPhotos(url, undefined, listingFacts);
-          if (!scraped.length) {
-            console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
-            return;
-          }
+    void hydrateUnitSwapPhotoFolder(swap);
 
-          const result = await downloadAndPrioritize({
-            folder,
-            folderPath,
-            scrapedUrls: scraped.map((s) => s.url),
-            maxKeep: 25,
-            anthropicKey: process.env.ANTHROPIC_API_KEY,
-            kind: inferKindFromFolder(folder),
-            requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
-            requiredBathrooms: listingFacts.bathrooms ?? undefined,
-          });
-
-          // Stamp _source.json so the folder's provenance is recorded.
-          const sourcePath = path.join(folderPath, "_source.json");
-          let sourceDoc: any = {};
-          try { sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
-          sourceDoc.sourceListing = {
-            url, platform: /zillow/i.test(url) ? "zillow" : "other",
-            scrapedDate: new Date().toISOString().slice(0, 10),
-          };
-          sourceDoc.verificationStatus = "needs-review";
-          sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
-          sourceDoc.verifiedBy = "unit-swap";
-          await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
-
-          console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
-        } catch (e: any) {
-          console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
-        }
-      })();
-    }
-
-    return res.json({ swap });
+    return res.json({ swap, photoFolder });
   });
 
   app.get("/api/unit-swaps/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId);
     if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
     const swaps = await storage.getUnitSwaps(propertyId);
-    return res.json({ swaps });
+    for (const swap of swaps) void hydrateUnitSwapPhotoFolder(swap);
+    return res.json({
+      swaps: swaps.map((swap) => ({
+        ...swap,
+        photoFolder: replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId),
+      })),
+    });
   });
 
   app.delete("/api/unit-swaps/:id", async (req, res) => {

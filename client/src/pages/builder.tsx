@@ -12,6 +12,17 @@ import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { usePhotoLabels } from "@/hooks/use-photo-labels";
 import { loadDraftFullDataByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+
+type BuilderUnitSwap = {
+  oldUnitId: string;
+  newUnitLabel: string;
+  newAddress: string;
+  newBedrooms?: number | null;
+  newSourceUrl: string;
+  committed?: boolean;
+  photoFolder?: string;
+};
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
 function parseAddress(addr: string) {
@@ -65,7 +76,52 @@ export default function Builder() {
       .catch(() => { /* leave draftProperty null → renders the not-found state */ })
       .finally(() => setDraftLoading(false));
   }, [propertyId, staticProperty]);
-  const property = staticProperty ?? draftProperty;
+  const baseProperty = staticProperty ?? draftProperty;
+  const [unitSwaps, setUnitSwaps] = useState<Record<string, BuilderUnitSwap>>({});
+  useEffect(() => {
+    if (!baseProperty || !Number.isFinite(propertyId) || propertyId < 0) {
+      setUnitSwaps({});
+      return;
+    }
+
+    let cancelled = false;
+    fetch(`/api/unit-swaps/${propertyId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { swaps?: BuilderUnitSwap[] } | null) => {
+        if (cancelled) return;
+        const next: Record<string, BuilderUnitSwap> = {};
+        for (const swap of data?.swaps ?? []) {
+          if (!swap?.oldUnitId || swap.committed === false) continue;
+          next[swap.oldUnitId] = swap;
+        }
+        setUnitSwaps(next);
+      })
+      .catch(() => {
+        if (!cancelled) setUnitSwaps({});
+      });
+    return () => { cancelled = true; };
+  }, [baseProperty, propertyId]);
+
+  const property = useMemo<PropertyUnitBuilder | null>(() => {
+    if (!baseProperty) return null;
+    if (!Object.keys(unitSwaps).length) return baseProperty;
+
+    return {
+      ...baseProperty,
+      units: baseProperty.units.map((unit) => {
+        const swap = unitSwaps[unit.id];
+        if (!swap) return unit;
+        const unitNumber = swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim() || unit.unitNumber;
+        return {
+          ...unit,
+          unitNumber,
+          bedrooms: swap.newBedrooms ?? unit.bedrooms,
+          photoFolder: swap.photoFolder ?? replacementPhotoFolderForUnit(propertyId, unit.id),
+          photos: [],
+        };
+      }),
+    };
+  }, [baseProperty, propertyId, unitSwaps]);
 
   // For active properties, pricing comes from the static
   // PROPERTY_UNIT_CONFIGS-based generator. For promoted drafts, the

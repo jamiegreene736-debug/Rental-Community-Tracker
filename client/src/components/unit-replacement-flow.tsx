@@ -68,6 +68,7 @@ export type ReplacementUnitData = {
   bedrooms: number | null;
   source: string;
   photos: { url: string; label: string }[];
+  photoFolder?: string;
   // Count of full-size photos the Apify scraper found on the source
   // listing. Server only returns candidates with >= 12 photos, but we
   // surface the exact number so the user can see they're picking a
@@ -178,9 +179,6 @@ export function UnitReplacementFlow({
         newBedrooms: result.bedrooms,
         newSourceUrl: result.url,
         thumbnailUrl: result.photos[0]?.url || null,
-        // Tell the server which folder to rescrape photos into so the
-        // builder's Photos tab reflects the new unit, not the stub.
-        photoFolder: selectedUnit.photoFolder,
       });
       if (!resp.ok) {
         const err = await resp.json();
@@ -188,8 +186,9 @@ export function UnitReplacementFlow({
       }
       const data = await resp.json();
       const swapId: number = data?.swap?.id ?? 0;
+      const photoFolder = typeof data?.photoFolder === "string" ? data.photoFolder : undefined;
       // Notify parent to apply the replacement and re-run the platform check
-      onUnitReplaced?.(selectedUnit.id, result, swapId);
+      onUnitReplaced?.(selectedUnit.id, { ...result, photoFolder }, swapId);
       onClose?.();
     } catch (err: any) {
       setSwapError(humanizeApiError(err, "Failed to record swap. Please try again."));
