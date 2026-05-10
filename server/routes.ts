@@ -20818,6 +20818,7 @@ Return ONLY compact JSON with this exact shape:
             dateOverride,
             sidecarQueueBudgetMs: 15 * 60_000,
             warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
+            reuseSharedOtaSearch: true,
             sidecarStopGeneration,
             signal: controller.signal,
           });

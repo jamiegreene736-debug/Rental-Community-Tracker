@@ -468,6 +468,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // tolerate a deeper local Chrome queue than request/response flows.
   sidecarQueueBudgetMs?: number;
   warningSeason?: ScanWarning["season"];
+  // Monthly pricing refreshes can reuse one minimum-bedroom OTA search
+  // across larger bedroom counts because the sidecar applies "at least N
+  // bedrooms" filters for Airbnb/VRBO/Booking and returns parsed BR counts
+  // per card. PM/direct searches stay per-BR because site filters vary.
+  reuseSharedOtaSearch?: boolean;
   // Producer-level stop boundary. Long background scans pass the value
   // captured at scan start so a later operator Stop cancels the whole
   // scan, even if Start Queue is clicked again.
@@ -542,7 +547,47 @@ export async function fetchMultiChannelBuyInByBR(args: {
     // without changing every call site.
     reason?: string;
   };
-  const sidecarOps: Promise<SidecarOp>[] = [];
+  const sortedBedroomCounts = Array.from(new Set(args.bedroomCounts))
+    .filter((br) => Number.isFinite(br) && br > 0)
+    .sort((a, b) => a - b);
+  const sharedOtaBedroomCount = sortedBedroomCounts[0] ?? args.bedroomCounts[0];
+  const reuseSharedOtaSearch = args.reuseSharedOtaSearch === true && sortedBedroomCounts.length > 1;
+  const otaSearchBedroomCounts = reuseSharedOtaSearch
+    ? [sharedOtaBedroomCount]
+    : args.bedroomCounts;
+
+  const targetBrsForSearch = (searchBedrooms: number): number[] =>
+    reuseSharedOtaSearch && searchBedrooms === sharedOtaBedroomCount
+      ? sortedBedroomCounts
+      : [searchBedrooms];
+  const candidateTargetBrs = (
+    candidateBedrooms: unknown,
+    searchBedrooms: number,
+    targetBrs: number[],
+  ): number[] => {
+    if (typeof candidateBedrooms === "number" && Number.isFinite(candidateBedrooms)) {
+      return targetBrs.filter((br) => candidateBedrooms === br);
+    }
+    // Preserve the old exact-search behavior for unknown-card bedroom data:
+    // count the candidate only against the search BR, not every reused BR.
+    return targetBrs.includes(searchBedrooms) ? [searchBedrooms] : [];
+  };
+  const sidecarFailureOps = (
+    searchBedrooms: number,
+    channel: ChannelKey,
+    reason: string,
+  ): SidecarOp[] =>
+    targetBrsForSearch(searchBedrooms).map((br) => ({
+      br,
+      channel,
+      cheapestNightly: null,
+      availableCount: 0,
+      rates: channel === "airbnb" ? [] : undefined,
+      workerOnline: false,
+      reason,
+    }));
+
+  const sidecarOps: Promise<SidecarOp[]>[] = [];
   const pmOps: Promise<{
     br: number;
     medianNightly: number | null;
@@ -554,9 +599,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // map but browser-backed entries stay null. Normal pricing refreshes
   // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
   // Booking + PM website searches now.
-  if (!args.skipSidecar) for (const br of args.bedroomCounts) {
+  if (!args.skipSidecar) for (const br of otaSearchBedroomCounts) {
     sidecarOps.push(
-      (async (): Promise<SidecarOp> => {
+      (async (): Promise<SidecarOp[]> => {
         try {
           assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -571,11 +616,12 @@ export async function fetchMultiChannelBuyInByBR(args: {
             signal: args.signal,
             stopGeneration: sidecarStopGeneration,
           });
-          let cheapest = Infinity;
-          let availableCount = 0;
-          const rates: number[] = [];
+          const targetBrs = targetBrsForSearch(br);
+          const byBr = new Map<number, { cheapest: number; availableCount: number; rates: number[] }>();
+          for (const targetBr of targetBrs) {
+            byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, rates: [] });
+          }
           for (const c of r.candidates) {
-            if (c.bedrooms != null && c.bedrooms !== br) continue;
             const total = c.totalPrice > 0
               ? Math.round(c.totalPrice)
               : c.nightlyPrice > 0
@@ -583,27 +629,34 @@ export async function fetchMultiChannelBuyInByBR(args: {
                 : 0;
             if (!(total > 0)) continue;
             const nightly = Math.round(total / nights);
-            rates.push(nightly);
-            availableCount++;
-            if (nightly < cheapest) cheapest = nightly;
+            for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
+              const bucket = byBr.get(targetBr);
+              if (!bucket) continue;
+              bucket.rates.push(nightly);
+              bucket.availableCount++;
+              if (nightly < bucket.cheapest) bucket.cheapest = nightly;
+            }
           }
-          return {
-            br,
-            channel: "airbnb",
-            cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
-            availableCount,
-            rates,
-            workerOnline: r.workerOnline,
-            reason: r.reason,
-          };
+          return targetBrs.map((targetBr) => {
+            const bucket = byBr.get(targetBr);
+            return {
+              br: targetBr,
+              channel: "airbnb",
+              cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
+              availableCount: bucket?.availableCount ?? 0,
+              rates: bucket?.rates ?? [],
+              workerOnline: r.workerOnline,
+              reason: r.reason,
+            };
+          });
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
-          return { br, channel: "airbnb", cheapestNightly: null, availableCount: 0, rates: [], workerOnline: false, reason: e?.message ?? String(e) };
+          return sidecarFailureOps(br, "airbnb", e?.message ?? String(e));
         }
       })(),
     );
     sidecarOps.push(
-      (async (): Promise<SidecarOp> => {
+      (async (): Promise<SidecarOp[]> => {
         try {
           assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -623,7 +676,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             signal: args.signal,
             stopGeneration: sidecarStopGeneration,
           });
-          if (!r) return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: "wrapper returned null" };
+          if (!r) return sidecarFailureOps(br, "vrbo", "wrapper returned null");
           // Filter to listings that actually quote a per-night and
           // (when bedroom count is known) match the requested BR.
           // Sidecar VRBO scrape returns nightlyPrice already
@@ -633,35 +686,43 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // new all-in format ("$X total includes taxes & fees"). If
           // so, downstream skips the per-region tax multiplier — the
           // value is already fully loaded.
-          let cheapest = Infinity;
-          let availableCount = 0;
-          let cheapestIncludesTaxes = false;
+          const targetBrs = targetBrsForSearch(br);
+          const byBr = new Map<number, { cheapest: number; availableCount: number; cheapestIncludesTaxes: boolean }>();
+          for (const targetBr of targetBrs) {
+            byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, cheapestIncludesTaxes: false });
+          }
           for (const c of r.candidates) {
             if (!(c.nightlyPrice > 0)) continue;
-            if (c.bedrooms != null && c.bedrooms !== br) continue;
-            availableCount++;
-            if (c.nightlyPrice < cheapest) {
-              cheapest = c.nightlyPrice;
-              cheapestIncludesTaxes = c.priceIncludesTaxes ?? false;
+            for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
+              const bucket = byBr.get(targetBr);
+              if (!bucket) continue;
+              bucket.availableCount++;
+              if (c.nightlyPrice < bucket.cheapest) {
+                bucket.cheapest = c.nightlyPrice;
+                bucket.cheapestIncludesTaxes = c.priceIncludesTaxes ?? false;
+              }
             }
           }
-          return {
-            br,
-            channel: "vrbo",
-            cheapestNightly: Number.isFinite(cheapest) ? Math.round(cheapest) : null,
-            availableCount,
-            cheapestIncludesTaxes,
-            workerOnline: r.workerOnline,
-            reason: r.reason,
-          };
+          return targetBrs.map((targetBr) => {
+            const bucket = byBr.get(targetBr);
+            return {
+              br: targetBr,
+              channel: "vrbo",
+              cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
+              availableCount: bucket?.availableCount ?? 0,
+              cheapestIncludesTaxes: bucket?.cheapestIncludesTaxes ?? false,
+              workerOnline: r.workerOnline,
+              reason: r.reason,
+            };
+          });
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
-          return { br, channel: "vrbo", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
+          return sidecarFailureOps(br, "vrbo", e?.message ?? String(e));
         }
       })(),
     );
     sidecarOps.push(
-      (async (): Promise<SidecarOp> => {
+      (async (): Promise<SidecarOp[]> => {
         try {
           assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -685,29 +746,40 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // `nightlyPrice = 0` for the caller to derive (see the
           // BookingSearch processor in worker.mjs). Compute nightly
           // from this exact sampled window.
-          let cheapest = Infinity;
-          let availableCount = 0;
+          const targetBrs = targetBrsForSearch(br);
+          const byBr = new Map<number, { cheapest: number; availableCount: number }>();
+          for (const targetBr of targetBrs) {
+            byBr.set(targetBr, { cheapest: Infinity, availableCount: 0 });
+          }
           for (const c of r.candidates) {
             if (!(c.totalPrice > 0)) continue;
-            if (c.bedrooms != null && c.bedrooms !== br) continue;
-            availableCount++;
             const nightly = Math.round(c.totalPrice / nights);
-            if (nightly < cheapest) cheapest = nightly;
+            for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
+              const bucket = byBr.get(targetBr);
+              if (!bucket) continue;
+              bucket.availableCount++;
+              if (nightly < bucket.cheapest) bucket.cheapest = nightly;
+            }
           }
-          return {
-            br,
-            channel: "booking",
-            cheapestNightly: Number.isFinite(cheapest) ? cheapest : null,
-            availableCount,
-            workerOnline: r.workerOnline,
-            reason: r.reason,
-          };
+          return targetBrs.map((targetBr) => {
+            const bucket = byBr.get(targetBr);
+            return {
+              br: targetBr,
+              channel: "booking",
+              cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? bucket.cheapest : null,
+              availableCount: bucket?.availableCount ?? 0,
+              workerOnline: r.workerOnline,
+              reason: r.reason,
+            };
+          });
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
-          return { br, channel: "booking", cheapestNightly: null, availableCount: 0, workerOnline: false, reason: e?.message ?? String(e) };
+          return sidecarFailureOps(br, "booking", e?.message ?? String(e));
         }
       })(),
     );
+  }
+  if (!args.skipSidecar) for (const br of args.bedroomCounts) {
     pmOps.push(fetchPmMarketRatesForBedroom({
       community: args.community,
       city: args.city,
@@ -722,10 +794,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
       signal: args.signal,
     }));
   }
-
   const [airbnbFallbackResult, sidecarResults, pmResults] = await Promise.all([
     airbnbFallbackPromise,
-    Promise.all(sidecarOps),
+    Promise.all(sidecarOps).then((groups) => groups.flat()),
     Promise.all(pmOps),
   ]);
 
