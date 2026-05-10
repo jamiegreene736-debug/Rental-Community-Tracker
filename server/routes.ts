@@ -17469,6 +17469,59 @@ Return ONLY compact JSON with this exact shape:
       return platformCheck;
     }
 
+    const findEquivalentPhotoSource = async (
+      candidate: Candidate,
+      minPhotos: number,
+    ): Promise<{ sourceUrl: string; source: CandidateSource; address: string; unitNumber: string; photos: string[]; facts: ListingFacts } | null> => {
+      const unit = candidate.unitNumber || extractUnitNumberFromText(candidate.address);
+      const queryParts = [
+        candidate.address ? `"${candidate.address}" Zillow` : "",
+        candidate.address ? `site:zillow.com "${candidate.address}"` : "",
+        unit ? `site:zillow.com "${communityAddress}" "${unit}"` : "",
+        unit ? `site:redfin.com "${communityAddress}" "${unit}"` : "",
+        unit ? `site:homes.com "${communityAddress}" "${unit}"` : "",
+      ].filter(Boolean);
+      const seen = new Set<string>([candidate.sourceUrl.toLowerCase()]);
+      for (const q of queryParts) {
+        const hits = await runSearch(q);
+        if (!hits) continue;
+        for (const hit of hits) {
+          const link = String(hit?.link || "");
+          const source = detectSource(link);
+          if (!source || source === "realtor") continue;
+          const lower = link.toLowerCase();
+          if (seen.has(lower) || skipUrlSet.has(lower)) continue;
+          seen.add(lower);
+          if (directRoot && !candidateRootMatches(link, new Set([directRoot]))) continue;
+          let altUnit = extractUnitNumber(link, source, `${hit?.title || ""} ${hit?.snippet || ""}`);
+          if (!altUnit) altUnit = unit;
+          if (unit && altUnit && normalizeSearchText(unit).replace(/\s+/g, "") !== normalizeSearchText(altUnit).replace(/\s+/g, "")) {
+            continue;
+          }
+          const facts: ListingFacts = {};
+          const scraped = await withStepTimeout(
+            scrapeListingPhotos(link, undefined, facts, { sidecarWalletMs: 20_000 }),
+            PHOTO_SCRAPE_TIMEOUT_MS,
+            [] as ScrapedPhoto[],
+            `equivalent photo scrape ${link}`,
+          );
+          const photos = scraped.map((p) => p.url);
+          console.error(`[find-unit] equivalent source ${link} → ${photos.length} photos for ${candidate.sourceUrl}`);
+          if (photos.length >= minPhotos) {
+            return {
+              sourceUrl: link,
+              source,
+              address: displayAddressFromUrl(link, source) || candidate.address,
+              unitNumber: altUnit || unit,
+              photos,
+              facts,
+            };
+          }
+        }
+      }
+      return null;
+    };
+
     // PR #322: track per-candidate verdicts so the failure message
     // can tell the operator EXACTLY why no unit qualified, instead
     // of the opaque "No eligible replacement units found." Every
@@ -17499,7 +17552,7 @@ Return ONLY compact JSON with this exact shape:
         break;
       }
       try {
-        const { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
 
         const platformAddress = source === "vrbo" ? address : communityAddress;
         const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
@@ -17562,7 +17615,7 @@ Return ONLY compact JSON with this exact shape:
           // count is sparse.
           const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
-          const candidateFacts: ListingFacts = {};
+          let candidateFacts: ListingFacts = {};
           try {
             const scraped = await withStepTimeout(
               scrapeListingPhotos(sourceUrl, undefined, candidateFacts, { sidecarWalletMs: 20_000 }),
@@ -17572,6 +17625,19 @@ Return ONLY compact JSON with this exact shape:
             );
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
+          if (expandedSearch && scrapedPhotoUrls.length < MIN_PHOTOS) {
+            const alternate = await findEquivalentPhotoSource({ sourceUrl, source, address, unitNumber, thumbnail }, MIN_PHOTOS);
+            if (alternate) {
+              console.error(`[find-unit] [${source}] using equivalent ${alternate.source} source ${alternate.sourceUrl} for ${sourceUrl}`);
+              sourceUrl = alternate.sourceUrl;
+              source = alternate.source;
+              address = alternate.address;
+              unitNumber = alternate.unitNumber;
+              thumbnail = "";
+              scrapedPhotoUrls = alternate.photos;
+              candidateFacts = alternate.facts;
+            }
+          }
           const actualBedrooms = candidateFacts.bedrooms;
           if (
             typeof requiredBedrooms === "number"
