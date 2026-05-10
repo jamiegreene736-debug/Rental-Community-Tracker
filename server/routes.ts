@@ -16854,6 +16854,7 @@ Return ONLY compact JSON with this exact shape:
       communityName: bodyCommunityName,
       propertyAddress,
       streetAddress,
+      expandedSearch: requestedExpandedSearch = false,
     } = req.body as {
       communityFolder: string;
       requiredBedrooms?: number;
@@ -16863,8 +16864,10 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       propertyAddress?: string;
       streetAddress?: string;
+      expandedSearch?: boolean;
     };
     const strict = requestedStrict === true && !!cleanChannel;
+    const expandedSearch = requestedExpandedSearch === true;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
@@ -16904,13 +16907,13 @@ Return ONLY compact JSON with this exact shape:
     const communityAddress = folderBodyConflict
       ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
       : folderCommunityAddress || normalizedStreetAddress || addressStreet || communityName;
-    console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}`);
+    console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
     const routeStartedAt = Date.now();
-    const ROUTE_BUDGET_MS = 210_000;
-    const APIFY_SUPPLEMENT_BUDGET_MS = 75_000;
+    const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
+    const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 12_000;
     const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
-    const MAX_CANDIDATES_TO_CHECK = 45;
+    const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
     const hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
     const withStepTimeout = async <T,>(
       promise: Promise<T>,
@@ -16960,7 +16963,7 @@ Return ONLY compact JSON with this exact shape:
     // Redfin). The candidate `source` field lets downstream stages
     // log which path produced each lead and helps triage if any
     // single source's photo extraction breaks.
-    type CandidateSource = "zillow" | "realtor" | "redfin";
+    type CandidateSource = "zillow" | "realtor" | "redfin" | "homes";
     interface Candidate {
       sourceUrl: string;
       source: CandidateSource;
@@ -16980,6 +16983,7 @@ Return ONLY compact JSON with this exact shape:
       if (/zillow\.com\/homedetails\//i.test(url)) return "zillow";
       if (/realtor\.com\/realestateandhomes-detail\//i.test(url)) return "realtor";
       if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
+      if (/homes\.com\/property\//i.test(url)) return "homes";
       // PR #338: VRBO explicitly excluded — see header comment.
       return null;
     };
@@ -17052,6 +17056,15 @@ Return ONLY compact JSON with this exact shape:
           }
         }
       }
+      if (source === "homes") {
+        const slug = url.match(/homes\.com\/property\/([^/?]+)/i)?.[1] || "";
+        const parts = slug.split("-");
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (/^[A-Z]?\d{1,4}[A-Z]?$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
+            return parts[i].toUpperCase();
+          }
+        }
+      }
       return "";
     };
 
@@ -17063,6 +17076,8 @@ Return ONLY compact JSON with this exact shape:
         addrSlug = (url.match(/realestateandhomes-detail\/([^/?]+)/)?.[1] || "").split("_")[0];
       } else if (source === "redfin") {
         addrSlug = url.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
+      } else if (source === "homes") {
+        addrSlug = url.match(/homes\.com\/property\/([^/?]+)/i)?.[1] || "";
       }
       return decodeURIComponent(addrSlug)
         .replace(/-/g, " ")
@@ -17152,6 +17167,22 @@ Return ONLY compact JSON with this exact shape:
       `site:redfin.com "${communityName}" "for sale"`,
       `site:redfin.com "${communityName}" condo`,
     ];
+    if (expandedSearch) {
+      const quotedStreet = communityAddress && communityAddress !== communityName ? `"${communityAddress}"` : "";
+      const bedroomTerm = typeof requiredBedrooms === "number" && Number.isFinite(requiredBedrooms)
+        ? `"${requiredBedrooms} bedroom"`
+        : "condo";
+      searchQueries.push(
+        `site:zillow.com ${quotedStreet} ${bedroomTerm}`.trim(),
+        `site:realtor.com ${quotedStreet} ${bedroomTerm}`.trim(),
+        `site:redfin.com ${quotedStreet} ${bedroomTerm}`.trim(),
+        `site:homes.com "${communityName}"`,
+        `site:homes.com ${quotedStreet} ${bedroomTerm}`.trim(),
+        `site:homes.com "${communityName}" condo`,
+        `"${communityName}" "${communityAddress}" "for sale"`,
+        `"${communityName}" "${communityAddress}" condo`,
+      );
+    }
     // PR #338: VRBO query branch removed (operator directive).
     // Replacement photos must come from real-estate sources only —
     // OTA photos create a feedback loop with the photo-listing
@@ -17164,7 +17195,7 @@ Return ONLY compact JSON with this exact shape:
       try {
         console.error(`[find-unit] Searching: ${siteQuery}`);
         const searchResp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=10&api_key=${searchApiKey}`,
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 20 : 10}&api_key=${searchApiKey}`,
           { signal: AbortSignal.timeout(PLATFORM_SEARCH_TIMEOUT_MS) },
         );
         if (!searchResp.ok) {
@@ -17240,7 +17271,7 @@ Return ONLY compact JSON with this exact shape:
     // (mixed rental/sale, more likely to be already on VRBO). The
     // candidate-processing loop's early-return fires on the first
     // viable hit, so for-sale sources get checked first.
-    const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, zillow: 2 };
+    const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, homes: 2, zillow: 3 };
     candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
 
     console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by source priority)`);
@@ -17457,7 +17488,7 @@ Return ONLY compact JSON with this exact shape:
     // Source-friendly display label so logs + return values reflect
     // which site each candidate came from (PR #326).
     const sourceLabel = (s: CandidateSource): string =>
-      s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : s === "redfin" ? "Redfin" : "VRBO";
+      s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : s === "redfin" ? "Redfin" : s === "homes" ? "Homes.com" : "VRBO";
 
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
@@ -17529,7 +17560,7 @@ Return ONLY compact JSON with this exact shape:
           // gallery is still usable if the vision probe sees bedroom
           // or bathroom evidence, and the UI already warns when photo
           // count is sparse.
-          const MIN_PHOTOS = 5;
+          const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
           const candidateFacts: ListingFacts = {};
           try {
@@ -17604,6 +17635,8 @@ Return ONLY compact JSON with this exact shape:
               photoCount,
               sampledCategories,
               platformCheck,
+              expandedSearch,
+              relaxedPhotoFloor: expandedSearch && photoCount < 5,
             },
           });
         }
@@ -17640,7 +17673,7 @@ Return ONLY compact JSON with this exact shape:
     // PR #326: source breakdown shows which sites contributed. Helps
     // the operator see at a glance if one source is failing to surface
     // candidates and where to tweak queries.
-    const sourceBreakdown: Record<CandidateSource, number> = { zillow: 0, realtor: 0, redfin: 0, vrbo: 0 };
+    const sourceBreakdown: Record<CandidateSource | "vrbo", number> = { zillow: 0, realtor: 0, redfin: 0, homes: 0, vrbo: 0 };
     for (const c of candidates) sourceBreakdown[c.source]++;
 
     let diagnostic: string;
@@ -17660,8 +17693,9 @@ Return ONLY compact JSON with this exact shape:
       if (sourceBreakdown.zillow > 0) sourceParts.push(`${sourceBreakdown.zillow} Zillow`);
       if (sourceBreakdown.realtor > 0) sourceParts.push(`${sourceBreakdown.realtor} Realtor.com`);
       if (sourceBreakdown.redfin > 0) sourceParts.push(`${sourceBreakdown.redfin} Redfin`);
+      if (sourceBreakdown.homes > 0) sourceParts.push(`${sourceBreakdown.homes} Homes.com`);
       if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
-      diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")}) — ${parts.join(", ")}.`;
+      diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
     }
 
     return res.json({
@@ -17672,6 +17706,7 @@ Return ONLY compact JSON with this exact shape:
         requiredBedrooms: requiredBedrooms ?? null,
         cleanChannel: cleanChannel ?? null,
         strict,
+        expandedSearch,
         totalCandidates,
         sourceBreakdown,
         breakdown,

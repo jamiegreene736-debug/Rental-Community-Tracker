@@ -73,6 +73,8 @@ export type ReplacementUnitData = {
   // surface the exact number so the user can see they're picking a
   // listing with a rich gallery (e.g. 25 vs 13).
   photoCount?: number;
+  expandedSearch?: boolean;
+  relaxedPhotoFloor?: boolean;
   // Room categories detected by the interior-content probe (Claude
   // Haiku vision on 8 stratified samples). If Bedrooms isn't in here,
   // the server would have already rejected the candidate — we surface
@@ -109,6 +111,7 @@ export function UnitReplacementFlow({
   const [swapError, setSwapError] = useState<string | null>(null);
   const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
   const [progressTick, setProgressTick] = useState(0);
+  const [lastSearchExpanded, setLastSearchExpanded] = useState(false);
   // URLs the user explicitly skipped via "Try another" — fed back into
   // the next find-unit call so we don't surface the same listing again.
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
@@ -122,9 +125,11 @@ export function UnitReplacementFlow({
     return () => window.clearInterval(id);
   }, [isWorking]);
 
-  async function search(opts: { extraSkip?: string } = {}) {
+  async function search(opts: { extraSkip?: string; expanded?: boolean } = {}) {
+    const expanded = opts.expanded === true;
     setResult(null);
     setSwapError(null);
+    setLastSearchExpanded(expanded);
     setSearchStartedAt(Date.now());
     setProgressTick(0);
     setStage("searching");
@@ -138,6 +143,7 @@ export function UnitReplacementFlow({
         propertyAddress,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
+        expandedSearch: expanded,
       });
       const data = await resp.json();
       if (data.error) {
@@ -266,7 +272,11 @@ export function UnitReplacementFlow({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
-                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
+                  {stage === "searching"
+                    ? lastSearchExpanded
+                      ? "Expanded search across Zillow, Realtor, Redfin, and Homes.com…"
+                      : "Searching Zillow, Realtor, and Redfin…"
+                    : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
                 </span>
               </div>
               <div className="space-y-1.5">
@@ -288,7 +298,9 @@ export function UnitReplacementFlow({
                   <span>{Math.round(progressPercent)}% · {elapsedLabel}</span>
                   <span className="text-right">
                     {stage === "searching"
-                      ? "Finding real-estate candidates"
+                      ? lastSearchExpanded
+                        ? "Finding more real-estate candidates"
+                        : "Finding real-estate candidates"
                       : elapsedSeconds > 90
                         ? "Still checking candidates; this can take a few minutes"
                         : "Verifying candidate is not already listed"}
@@ -330,6 +342,10 @@ export function UnitReplacementFlow({
           </p>
           <Button size="sm" variant="outline" onClick={() => { setStage("idle"); setSwapError(null); }} data-testid="button-retry-unit-search">
             Try Again
+          </Button>
+          <Button size="sm" onClick={() => search({ expanded: true })} data-testid="button-expand-unit-search">
+            <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+            Expand Search
           </Button>
         </div>
       )}
@@ -421,7 +437,7 @@ export function UnitReplacementFlow({
                   )}
                 </div>
               </div>
-              {typeof result.photoCount === "number" && (
+                  {typeof result.photoCount === "number" && (
                 <div
                   className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold flex items-center gap-1 ${
                     result.photoCount >= 20
@@ -442,6 +458,11 @@ export function UnitReplacementFlow({
                 </div>
               )}
             </div>
+            {result.relaxedPhotoFloor && (
+              <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                Expanded search accepted this smaller gallery. Review the source photos before confirming.
+              </div>
+            )}
             {result.photos.length > 0 && (
               <div className="grid grid-cols-6 gap-1">
                 {result.photos.map((photo, i) => (
@@ -526,9 +547,10 @@ export function UnitReplacementFlow({
                 // Skip this URL and immediately re-search so the user
                 // doesn't have to click Find again.
                 const skipThis = result.url;
+                const expanded = result.expandedSearch === true;
                 setResult(null);
                 setSwapError(null);
-                search({ extraSkip: skipThis });
+                search({ extraSkip: skipThis, expanded });
               }}
               data-testid="button-try-another-unit"
             >
