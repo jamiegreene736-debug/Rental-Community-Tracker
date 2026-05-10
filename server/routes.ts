@@ -24227,11 +24227,23 @@ Do not include a subject line.`;
           /Total:\s*\d+\s+bedrooms\s+across\s+(?:[2-9]|\d{2,})\s+units/i.test(propertyContext ?? "") ||
           !!distanceFact;
 
-        if (hasMultipleUnits && !/\bseparate units\b/i.test(next)) {
-          const unitSentence = distanceFact
-            ? `Your reservation is set up as two separate units. ${distanceFact}`
-            : "Your reservation is set up as two separate nearby units.";
-          next = insertBeforeSignature(next, unitSentence);
+        if (hasMultipleUnits) {
+          const mentionsMultiUnitSetup =
+            /\b(?:two|2)\s+(?:nearby\s+)?(?:separate\s+)?(?:units|townhomes|townhouses|condos|villas|homes|properties)\b/i.test(next) ||
+            /\bstay includes\s+(?:two|2)\b/i.test(next) ||
+            /\bseparate units\b/i.test(next);
+          const mentionsWalkingDistance =
+            /\b\d+\s*(?:-|–)?\s*minute\s+walk\b/i.test(next) ||
+            /\bwalk apart\b/i.test(next);
+
+          if (!mentionsMultiUnitSetup) {
+            const unitSentence = distanceFact
+              ? `Your reservation is set up as two separate units. ${distanceFact}`
+              : "Your reservation is set up as two separate nearby units.";
+            next = insertBeforeSignature(next, unitSentence);
+          } else if (distanceFact && !mentionsWalkingDistance) {
+            next = insertBeforeSignature(next, distanceFact);
+          }
         }
 
         if (!/\b(example|representative|similar quality|same bedroom count|same bedroom counts)\b/i.test(next)) {

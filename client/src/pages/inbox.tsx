@@ -187,6 +187,7 @@ interface GuestyConversation {
   status?: string;
   module?: GuestyModule;      // channel the conversation is on
   integration?: { platform?: string };
+  conversationChannel?: string;
 }
 
 type GuestyModule = { type?: string; [k: string]: unknown };
@@ -1230,6 +1231,7 @@ function normalizeConversation(c: any): GuestyConversation & {
   lastMessageFromGuest: boolean; // durable reply-owed signal; survives simply opening/reading
   needsPreapprove: boolean;  // Airbnb inquiry not yet pre-approved (host has 24h)
   phase?: "inquiry" | "request" | "booked" | "cancelled" | "other";
+  conversationChannel?: string;
 } {
   const meta = c?.meta ?? {};
   const guest = c?.guest ?? meta.guest ?? {};
@@ -1365,9 +1367,11 @@ function normalizeConversation(c: any): GuestyConversation & {
   // Airbnb-only concept (VRBO/Booking.com handle inquiries differently)
   // so the indicator is gated to airbnb conversations.
   const channelRaw =
-    (mod && (mod as any).type) ??
     c?.integration?.platform ??
     firstReservation?.integration?.platform ??
+    firstReservation?.source ??
+    c?.source ??
+    (mod && (mod as any).type) ??
     "";
   const isAirbnb = String(channelRaw).toLowerCase().includes("airbnb");
 
@@ -1422,6 +1426,7 @@ function normalizeConversation(c: any): GuestyConversation & {
     lastMessageFromGuest: !!lastMessageFromGuest,
     needsPreapprove,
     phase,
+    conversationChannel: String(channelRaw || ""),
     conversationCheckIn,
     conversationCheckOut,
     conversationGuests,
@@ -2622,14 +2627,37 @@ export default function InboxPage() {
     const ctx = selectedConv.listingId
       ? await buildPropertyContextForDraft(selectedConv.listingId)
       : null;
+    const selectedReservation =
+      (reservationFull as any)?.data ??
+      reservationFull ??
+      (selectedConv as any)?.meta?.reservations?.[0] ??
+      null;
     // Channel name (airbnb / vrbo / booking / direct / email / …) so
     // the server can give a channel-correct answer when the guest
     // asks about payment timing — e.g. "Airbnb sets the payment
     // schedule" rather than a generic disclaimer.
     const channel =
-      selectedConv.module?.type ??
+      selectedReservation?.integration?.platform ??
+      selectedReservation?.source ??
+      selectedConv.conversationChannel ??
       (selectedConv as any).integration?.platform ??
+      selectedConv.module?.type ??
       "";
+    const checkInForDraft =
+      selectedReservation?.checkInDateLocalized ??
+      selectedReservation?.checkIn ??
+      (selectedConv as any).conversationCheckIn ??
+      null;
+    const checkOutForDraft =
+      selectedReservation?.checkOutDateLocalized ??
+      selectedReservation?.checkOut ??
+      (selectedConv as any).conversationCheckOut ??
+      null;
+    const guestsForDraft =
+      selectedReservation?.guestsCount ??
+      selectedReservation?.numberOfGuests ??
+      (selectedConv as any).conversationGuests ??
+      null;
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
         guestMessage,
@@ -2647,9 +2675,9 @@ export default function InboxPage() {
         // AI doesn't end every reply with "what dates are you thinking
         // and how many guests?" when the answers are already attached
         // to the conversation.
-        checkIn: (selectedConv as any).conversationCheckIn ?? null,
-        checkOut: (selectedConv as any).conversationCheckOut ?? null,
-        guestsCount: (selectedConv as any).conversationGuests ?? null,
+        checkIn: checkInForDraft,
+        checkOut: checkOutForDraft,
+        guestsCount: guestsForDraft,
         isInitialContact,
         isWelcomeDraft,
       });
