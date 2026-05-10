@@ -102,6 +102,40 @@ function shouldBlockNavigation(rawUrl) {
   return Boolean(host && BLOCKED_NAV_HOST_RE.test(host));
 }
 
+async function minimizeSidecarWindow(targetPage = page) {
+  if (SIDECAR_ALLOW_FOCUS || SIDE_CAR_CHROME_VISIBLE) return;
+  if (!context || !targetPage || targetPage.isClosed?.()) return;
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return;
+  try {
+    const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
+    const windowId = info?.windowId;
+    if (typeof windowId !== "number") return;
+    await withSoftTimeout(
+      session.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "minimized" },
+      }),
+      1_500,
+    );
+  } catch {
+    // Best effort only: the offscreen position still applies if CDP
+    // window management is unavailable for a particular Chrome build.
+  } finally {
+    await withSoftTimeout(session.detach(), 500);
+  }
+}
+
+function scheduleSidecarMinimize(targetPage = page) {
+  if (SIDECAR_ALLOW_FOCUS || SIDE_CAR_CHROME_VISIBLE) return;
+  for (const delay of [0, 150, 500, 1500]) {
+    const timer = setTimeout(() => {
+      void minimizeSidecarWindow(targetPage);
+    }, delay);
+    timer.unref?.();
+  }
+}
+
 async function installContextGuards() {
   if (!context || contextGuardsInstalled) return;
   contextGuardsInstalled = true;
@@ -118,8 +152,10 @@ async function installContextGuards() {
   });
 
   context.on("page", (createdPage) => {
+    scheduleSidecarMinimize(createdPage);
     void (async () => {
       await createdPage.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {});
+      scheduleSidecarMinimize(createdPage);
       const rawUrl = createdPage.url?.() ?? "";
       if (shouldBlockNavigation(rawUrl)) {
         log(`closed blocked popup/tab: ${rawUrl.slice(0, 140)}`);
@@ -547,6 +583,7 @@ async function normalizePageDisplay(targetPage = page) {
   // Chrome profile zoom can persist per-origin. Reset the visible tab
   // so the sidecar window doesn't stay accidentally zoomed out.
   await withSoftTimeout(targetPage.keyboard.press(process.platform === "darwin" ? "Meta+0" : "Control+0"), 1_000);
+  scheduleSidecarMinimize(targetPage);
 }
 
 async function ensureBrowser() {
