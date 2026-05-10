@@ -1926,11 +1926,6 @@ export default function Bookings() {
         includePm = true,
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
         const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
-        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
-        if (!safeForAutoFill) {
-          const detail = data.diagnostics?.summary || "The live scan returned partial results or warnings.";
-          throw new Error(`Auto-fill stopped before attaching buy-ins: ${detail} Open the slot's live search to review the audit results manually.`);
-        }
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
         searchAudits.set(searchedBedrooms, {
           bedrooms: searchedBedrooms,
@@ -1938,6 +1933,15 @@ export default function Bookings() {
           counts: searchSummary,
           candidates: auditCandidatesFor(data),
         });
+        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
+        // If the scan finished but diagnostics say it is not safe for
+        // automatic attachment, keep the audit rows and return no pickable
+        // candidates. Throwing here made a completed no-pick scan look like
+        // "nothing happened" because onSuccess never got a chance to render
+        // the reviewed results.
+        if (!safeForAutoFill) {
+          return { data, searchSummary, candidates: [] };
+        }
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
           .map((unit): LiveCandidate | null => {
             const listing = [...(unit.listings ?? [])]
@@ -2612,9 +2616,8 @@ export default function Bookings() {
                 const rowSidecarOnly = rowAutoFillRunning
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
-                const hasAttachedBuyIns = r.slots.some((slot) => !!slot.buyIn);
-                const comboOptions = hasAttachedBuyIns ? lastAutoFillCombos[r._id] ?? [] : [];
-                const searchAudits = hasAttachedBuyIns ? lastAutoFillAudits[r._id] ?? [] : [];
+                const comboOptions = lastAutoFillCombos[r._id] ?? [];
+                const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
