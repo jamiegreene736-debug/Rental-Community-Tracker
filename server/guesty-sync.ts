@@ -28,7 +28,18 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
     throw new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`);
   }
   if (res.status === 204) return { success: true };
-  return res.json();
+
+  // Guesty action endpoints sometimes return 200 with an empty body
+  // after the action succeeds. Calling res.json() on that response
+  // throws "Unexpected end of JSON input", which made successful
+  // Airbnb pre-approvals look like failures in the inbox.
+  const rawText = await res.text().catch(() => "");
+  if (!rawText.trim()) return { success: true };
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return { success: true, raw: rawText.slice(0, 500) };
+  }
 }
 
 const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {

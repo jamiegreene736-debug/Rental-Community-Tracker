@@ -1383,7 +1383,9 @@ function normalizeConversation(c: any): GuestyConversation & {
   const preApprovedFlag =
     firstReservation?.preApproveState === true ||
     firstReservation?.preApproved === true ||
-    String(firstReservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved";
+    String(firstReservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
+    resStatus.includes("preapproved") ||
+    resStatus === "accepted";
   const needsPreapprove = isAirbnb && phase === "inquiry" && !preApprovedFlag;
 
   // Surface check-in / check-out / guest count at the top level so the
@@ -1926,14 +1928,19 @@ export default function InboxPage() {
 
   const applyLocalReplyOverride = (raw: GuestyConversation) => {
     const normalized = normalizeConversation(raw);
+    const locallyPreapproved =
+      !!normalized.reservationId && airbnbPreapprovedIds.has(normalized.reservationId);
     const localReplyAt = locallyRepliedAtByConversation[normalized._id];
-    if (!localReplyAt) return normalized;
+    const preapprovalPatched = locallyPreapproved
+      ? { ...normalized, needsPreapprove: false }
+      : normalized;
+    if (!localReplyAt) return preapprovalPatched;
     const lastActivityAt = normalized.displayTimestamp
       ? new Date(normalized.displayTimestamp).getTime()
       : 0;
-    if (Number.isFinite(lastActivityAt) && lastActivityAt > localReplyAt) return normalized;
+    if (Number.isFinite(lastActivityAt) && lastActivityAt > localReplyAt) return preapprovalPatched;
     return {
-      ...normalized,
+      ...preapprovalPatched,
       isUnread: false,
       needsReply: false,
       lastMessageFromGuest: false,
@@ -2168,6 +2175,22 @@ export default function InboxPage() {
     },
     staleTime: 60_000,
   });
+
+  useEffect(() => {
+    const res = reservationFull?.data ?? reservationFull ?? null;
+    const id = res?._id ?? reservationId;
+    if (!id) return;
+    const statusRaw = String(res?.status ?? "").toLowerCase();
+    const preApproved =
+      res?.preApproveState === true ||
+      res?.preApproved === true ||
+      String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
+      statusRaw.includes("preapproved") ||
+      statusRaw === "accepted";
+    if (preApproved && !airbnbPreapprovedIds.has(id)) {
+      rememberAirbnbPreapproval(id);
+    }
+  }, [reservationFull, reservationId, airbnbPreapprovedIds]);
 
   const { data: arrivalDetails, isLoading: arrivalDetailsLoading } = useQuery<{ units: ArrivalUnitDetail[] }>({
     queryKey: ["/api/bookings", reservationId, "arrival-details"],
