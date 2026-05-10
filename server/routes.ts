@@ -17023,11 +17023,14 @@ Return ONLY compact JSON with this exact shape:
       if (source === "zillow") {
         // Existing logic: scan slug parts backwards for a 2-4 digit
         // segment that isn't a house number (index 0) or zip (5+).
+        // Pili Mai / Hawaii listings often use alphanumeric building
+        // prefixes like I302, so keep those too.
         const slug = url.match(/homedetails\/([^/]+)\//)?.[1] || "";
         const parts = slug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
-          if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
-            return parts[i];
+          const part = parts[i].toUpperCase();
+          if (/^[A-Z]?\d{1,4}[A-Z]?$/.test(part) && !/^\d{5}$/.test(part)) {
+            return part;
           }
         }
       }
@@ -17474,6 +17477,7 @@ Return ONLY compact JSON with this exact shape:
       minPhotos: number,
     ): Promise<{ sourceUrl: string; source: CandidateSource; address: string; unitNumber: string; photos: string[]; facts: ListingFacts } | null> => {
       const unit = candidate.unitNumber || extractUnitNumberFromText(candidate.address);
+      if (!unit) return null;
       const queryParts = [
         candidate.address ? `"${candidate.address}" Zillow` : "",
         candidate.address ? `site:zillow.com "${candidate.address}"` : "",
@@ -17558,7 +17562,7 @@ Return ONLY compact JSON with this exact shape:
         const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
           ? channelScopedSourceAliases[0]
           : communityName;
-        const platformCheck = await checkAllPlatforms(platformAddress, platformResort, unitNumber, source === "vrbo");
+        let platformCheck = await checkAllPlatforms(platformAddress, platformResort, unitNumber, source === "vrbo");
         console.error(
           `[find-unit] [${source}] ${sourceUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );
@@ -17636,6 +17640,7 @@ Return ONLY compact JSON with this exact shape:
               thumbnail = "";
               scrapedPhotoUrls = alternate.photos;
               candidateFacts = alternate.facts;
+              platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
             }
           }
           const actualBedrooms = candidateFacts.bedrooms;
