@@ -18101,7 +18101,7 @@ Return ONLY compact JSON with this exact shape:
     const swap = await storage.createUnitSwap(parsed.data);
     const photoFolder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
 
-    void hydrateUnitSwapPhotoFolder(swap);
+    await hydrateUnitSwapPhotoFolder(swap);
 
     return res.json({ swap, photoFolder });
   });
@@ -18114,7 +18114,7 @@ Return ONLY compact JSON with this exact shape:
     // for each original unit so stale replacement attempts cannot reapply
     // old photo folders after the operator replaces the same unit again.
     const latestSwaps = latestUnitSwaps(swaps);
-    for (const swap of latestSwaps) void hydrateUnitSwapPhotoFolder(swap);
+    await Promise.all(latestSwaps.map((swap) => hydrateUnitSwapPhotoFolder(swap)));
     return res.json({
       swaps: latestSwaps.map((swap) => ({
         ...swap,
