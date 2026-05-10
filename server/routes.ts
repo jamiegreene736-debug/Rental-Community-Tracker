@@ -58,6 +58,8 @@ import {
   getSeasonForMonth,
   suggestPricingArea,
 } from "@shared/pricing-rates";
+import { verificationTokensForFolder } from "@shared/photo-folder-utils";
+import { extractUnitTokens } from "@shared/folder-unit-map";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -16366,12 +16368,20 @@ Return ONLY compact JSON with this exact shape:
     }> => {
       const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
       const matchedUrls: PhotoMatchedUrls = { airbnb: null, vrbo: null, booking: null };
+      const unverifiedPhotoHits: Record<string, { photoHitCount: number; firstUrl: string | null }> = {
+        airbnb: { photoHitCount: 0, firstUrl: null },
+        vrbo: { photoHitCount: 0, firstUrl: null },
+        booking: { photoHitCount: 0, firstUrl: null },
+      };
       if (!imgbbKey) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       // Empty photoFolder means no local photos available (e.g. a replacement unit) — skip photo check
       if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
       if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
+      const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
+      const unitTokens = extractUnitTokens(unitNumber);
+      const verifyTokens = [...new Set([...folderTokens, ...unitTokens])];
       let matchCount = 0;
       for (const file of files) {
         try {
@@ -16422,26 +16432,50 @@ Return ONLY compact JSON with this exact shape:
                 if (!ll.includes(domain)) return false;
                 return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
               }).slice(0, 3);
+              let sawUnverifiedCandidate = false;
               for (const matchedLink of candidates) {
                 // Cross-validate: confirm the matched page actually
-                // names our unit number. For shared-building addresses
+                // names one of this folder/unit's tokens. For shared-building addresses
                 // the same Lens result set can contain listings for
                 // many units — without this check, the first one
                 // "wins" even if it's the wrong unit (e.g. 3920 Wyllie
                 // Rd unit 2A returned for a unit 9 query). A Google
                 // site: scoped to the listing's path must surface an
                 // explicit unit marker.
-                const verified = await verifyUrlMentionsUnit(matchedLink, unitNumber);
+                const verified = verifyTokens.length > 0
+                  ? await (async () => {
+                      for (const token of verifyTokens) {
+                        if (await verifyUrlMentionsUnit(matchedLink, token)) return true;
+                      }
+                      return false;
+                    })()
+                  : true;
                 if (!verified) continue;
                 signals[cfg.key] = true;
                 matchedUrls[cfg.key] = matchedLink;
                 matchCount++;
                 break;
               }
+              if (!signals[cfg.key] && candidates.length > 0) {
+                sawUnverifiedCandidate = true;
+                if (!unverifiedPhotoHits[cfg.key].firstUrl) {
+                  unverifiedPhotoHits[cfg.key].firstUrl = candidates[0];
+                }
+              }
+              if (sawUnverifiedCandidate) {
+                unverifiedPhotoHits[cfg.key].photoHitCount++;
+              }
             }
           }
         } catch { /* best effort */ }
         await new Promise(r => setTimeout(r, 1000));
+      }
+      for (const cfg of PLATFORM_CONFIGS) {
+        const fallback = unverifiedPhotoHits[cfg.key];
+        if (!signals[cfg.key] && fallback.photoHitCount >= 2 && fallback.firstUrl) {
+          signals[cfg.key] = true;
+          matchedUrls[cfg.key] = fallback.firstUrl;
+        }
       }
       return { signals, matchedUrls, matchCount, totalChecked: files.length };
     };
