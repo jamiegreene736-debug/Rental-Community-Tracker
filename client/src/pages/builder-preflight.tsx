@@ -374,6 +374,7 @@ export default function BuilderPreflight() {
         const restored: Record<string, UnitOverride> = {};
         let allCommitted = true;
         for (const swap of data.swaps) {
+          if (!swap?.oldUnitId || restored[swap.oldUnitId]) continue;
           const photoFolder =
             typeof swap.photoFolder === "string" && swap.photoFolder.trim()
               ? swap.photoFolder

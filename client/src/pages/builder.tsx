@@ -92,6 +92,7 @@ export default function Builder() {
         const next: Record<string, BuilderUnitSwap> = {};
         for (const swap of data?.swaps ?? []) {
           if (!swap?.oldUnitId || swap.committed === false) continue;
+          if (next[swap.oldUnitId]) continue;
           next[swap.oldUnitId] = swap;
         }
         setUnitSwaps(next);

@@ -16893,6 +16893,27 @@ Return ONLY compact JSON with this exact shape:
   // ============================================================
   // Find a replacement unit: Zillow search → Airbnb check → return clean unit
   // ============================================================
+  const unitSwapListingKey = (rawUrl: string | null | undefined): string => {
+    if (!rawUrl) return "";
+    try {
+      const url = new URL(rawUrl);
+      url.hash = "";
+      url.search = "";
+      return `${url.hostname.replace(/^www\./, "").toLowerCase()}${url.pathname.replace(/\/+$/, "").toLowerCase()}`;
+    } catch {
+      return String(rawUrl).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+    }
+  };
+
+  const latestUnitSwaps = <T extends { oldUnitId: string; createdAt?: Date | string | null }>(swaps: T[]): T[] => {
+    const latestByUnit = new Map<string, T>();
+    for (const swap of swaps) {
+      if (!swap?.oldUnitId || latestByUnit.has(swap.oldUnitId)) continue;
+      latestByUnit.set(swap.oldUnitId, swap);
+    }
+    return Array.from(latestByUnit.values());
+  };
+
   app.post("/api/replacement/find-unit", async (req, res) => {
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
@@ -17043,7 +17064,7 @@ Return ONLY compact JSON with this exact shape:
     }
     const candidates: Candidate[] = [];
     const candidateUrlSet = new Set<string>();
-    const skipUrlSet = new Set((skipUrls ?? []).map((u) => String(u).toLowerCase()));
+    const skipUrlSet = new Set((skipUrls ?? []).map((u) => unitSwapListingKey(String(u))).filter(Boolean));
     const harvestRootCounts = new Map<string, number>();
     const parsedRequiredBedrooms = Number(requiredBedrooms);
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
@@ -17206,8 +17227,8 @@ Return ONLY compact JSON with this exact shape:
 
     const addCandidateUrl = (link: string, source: CandidateSource, contextText = "", thumbnail = "", allowedRoots?: Set<string>) => {
       if (!link) return;
-      const lower = link.toLowerCase();
-      if (candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
+      const lower = unitSwapListingKey(link);
+      if (!lower || candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
       if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots)) return;
       const detected = detectSource(link);
       if (detected !== source) return;
@@ -17613,7 +17634,7 @@ Return ONLY compact JSON with this exact shape:
         unit ? `site:redfin.com "${communityAddress}" "${unit}"` : "",
         unit ? `site:homes.com "${communityAddress}" "${unit}"` : "",
       ].filter(Boolean);
-      const seen = new Set<string>([candidate.sourceUrl.toLowerCase()]);
+      const seen = new Set<string>([unitSwapListingKey(candidate.sourceUrl)].filter(Boolean));
       for (const q of queryParts) {
         const hits = await runSearch(q);
         if (!hits) continue;
@@ -17621,8 +17642,8 @@ Return ONLY compact JSON with this exact shape:
           const link = String(hit?.link || "");
           const source = detectSource(link);
           if (!source || source === "realtor") continue;
-          const lower = link.toLowerCase();
-          if (seen.has(lower) || skipUrlSet.has(lower)) continue;
+          const lower = unitSwapListingKey(link);
+          if (!lower || seen.has(lower) || skipUrlSet.has(lower)) continue;
           seen.add(lower);
           if (directRoot && !candidateRootMatches(link, new Set([directRoot]))) continue;
           let altUnit = extractUnitNumber(link, source, `${hit?.title || ""} ${hit?.snippet || ""}`);
@@ -17664,11 +17685,14 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
     const attempts: AttemptRow[] = [];
+
+    const hasFurnishedSleepingEvidence = (categories: string[]): boolean =>
+      categories.some((category) => category === "Bedrooms");
 
     // Source-friendly display label so logs + return values reflect
     // which site each candidate came from (PR #326).
@@ -17751,15 +17775,14 @@ Return ONLY compact JSON with this exact shape:
           //   listings outright; avoids the downstream vision probe.
           //
           //   Stage 2 — interior content check via stratified Claude
-          //   vision labels on 8 samples. Accepts Bedrooms OR Bathrooms
-          //   as positive evidence (bathrooms almost always accompany
-          //   bedrooms, so this cuts false-negatives on single-bedroom
-          //   listings where our samples might miss the sole bedroom
-          //   photo). ~$0.004 per candidate. See probeInteriorCoverage.
+          //   vision labels on 8 samples. Bathrooms alone are not enough
+          //   for replacement units: vacant sale listings often show a
+          //   kitchen/bath but no furnished bedroom, and those should not
+          //   be offered as buy-in-ready replacements.
           //
           // Lower floor for replacement repair: a smaller real-estate
-          // gallery is still usable if the vision probe sees bedroom
-          // or bathroom evidence, and the UI already warns when photo
+          // gallery is still usable if the vision probe sees a furnished
+          // bedroom/sleeping area, and the UI already warns when photo
           // count is sparse.
           const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
@@ -17866,6 +17889,16 @@ Return ONLY compact JSON with this exact shape:
               continue;
             }
             sampledCategories = probe.categories;
+            if (!hasFurnishedSleepingEvidence(sampledCategories)) {
+              console.error(`[find-unit] [${source}] No furnished bedroom/sleeping-room samples found — skipping to next candidate`);
+              attempts.push({
+                sourceUrl, source, address, unit: unitNumber || "?",
+                verdict: "skipped-unfurnished",
+                reason: "Vision probe did not find any bedroom/furnished sleeping-area photos, so this looks like an unfurnished or incomplete listing.",
+                platformCheck,
+              });
+              continue;
+            }
             // "unknown" (no key) or "pass" → fall through to confirm.
           }
 
@@ -17913,9 +17946,10 @@ Return ONLY compact JSON with this exact shape:
 	      "skipped-found": 0,
 	      "skipped-photo-found": 0,
 	      "skipped-unknown-strict": 0,
-	      "skipped-bedroom-mismatch": 0,
+      "skipped-bedroom-mismatch": 0,
       "skipped-too-few-photos": 0,
       "skipped-vision-rejected": 0,
+      "skipped-unfurnished": 0,
       error: 0,
     } as Record<AttemptRow["verdict"], number>;
     for (const a of attempts) breakdown[a.verdict]++;
@@ -17939,6 +17973,7 @@ Return ONLY compact JSON with this exact shape:
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
+      if (breakdown["skipped-unfurnished"] > 0) parts.push(`${breakdown["skipped-unfurnished"]} had no furnished bedroom photos`);
       if (breakdown.error > 0) parts.push(`${breakdown.error} errored`);
       const sourceParts: string[] = [];
       if (sourceBreakdown.zillow > 0) sourceParts.push(`${sourceBreakdown.zillow} Zillow`);
@@ -18050,6 +18085,19 @@ Return ONLY compact JSON with this exact shape:
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
     }
+    const activeSwaps = latestUnitSwaps(await storage.getUnitSwaps(parsed.data.propertyId));
+    const newSourceKey = unitSwapListingKey(parsed.data.newSourceUrl);
+    const duplicateSource = activeSwaps.find((swap) =>
+      swap.oldUnitId !== parsed.data.oldUnitId
+      && newSourceKey
+      && unitSwapListingKey(swap.newSourceUrl) === newSourceKey
+    );
+    if (duplicateSource) {
+      return res.status(409).json({
+        error: "This replacement listing is already assigned to another unit. Choose a different replacement so Unit A and Unit B keep separate photo sets.",
+        duplicateOldUnitId: duplicateSource.oldUnitId,
+      });
+    }
     const swap = await storage.createUnitSwap(parsed.data);
     const photoFolder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
 
@@ -18062,9 +18110,13 @@ Return ONLY compact JSON with this exact shape:
     const propertyId = parseInt(req.params.propertyId);
     if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
     const swaps = await storage.getUnitSwaps(propertyId);
-    for (const swap of swaps) void hydrateUnitSwapPhotoFolder(swap);
+    // storage.getUnitSwaps returns newest first. Keep only the latest row
+    // for each original unit so stale replacement attempts cannot reapply
+    // old photo folders after the operator replaces the same unit again.
+    const latestSwaps = latestUnitSwaps(swaps);
+    for (const swap of latestSwaps) void hydrateUnitSwapPhotoFolder(swap);
     return res.json({
-      swaps: swaps.map((swap) => ({
+      swaps: latestSwaps.map((swap) => ({
         ...swap,
         photoFolder: replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId),
       })),
