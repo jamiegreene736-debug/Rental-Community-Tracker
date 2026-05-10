@@ -16489,9 +16489,7 @@ Return ONLY compact JSON with this exact shape:
                   return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
                 }).slice(0, 3);
               const key = cfg.key as "airbnb" | "vrbo" | "booking";
-              if (candidates.length > 0 && !firstStrongUrls[key]) {
-                firstStrongUrls[key] = candidates[0];
-              }
+              let verifiedCandidate: string | null = null;
               for (const matchedLink of candidates) {
                 // Cross-validate: confirm the matched page actually
                 // names one of this folder/unit's tokens. For shared-building addresses
@@ -16510,10 +16508,14 @@ Return ONLY compact JSON with this exact shape:
                     })()
                   : true;
                 if (!verified) continue;
+                verifiedCandidate = matchedLink;
                 matchedUrls[cfg.key] = matchedLink;
+                if (!firstStrongUrls[key]) {
+                  firstStrongUrls[key] = matchedLink;
+                }
                 break;
               }
-              if (candidates.length > 0) {
+              if (verifiedCandidate) {
                 photoHits[key].add(`/photos/${photoFolder}/${file}`);
                 matchCount++;
               }
@@ -16525,7 +16527,7 @@ Return ONLY compact JSON with this exact shape:
       for (const key of ["airbnb", "vrbo", "booking"] as const) {
         matchCounts[key] = photoHits[key].size;
         signals[key] = matchCounts[key] >= MIN_DISTINCT_STRONG_PHOTO_MATCHES;
-        if (signals[key] && !matchedUrls[key]) {
+        if (signals[key] && !matchedUrls[key] && firstStrongUrls[key]) {
           matchedUrls[key] = firstStrongUrls[key];
         }
       }
@@ -16596,6 +16598,16 @@ Return ONLY compact JSON with this exact shape:
     const isScannerFresh = (row: any | undefined): boolean =>
       !!row && row.checkedAt && (now - new Date(row.checkedAt).getTime() < SCANNER_FRESHNESS_MS);
 
+    const scannerRowAppliesToUnit = (photoFolder: string | undefined, unitNumber: string): boolean => {
+      if (!photoFolder) return false;
+      const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
+      if (folderTokens.length === 0) return true;
+      const unitTokens = extractUnitTokens(unitNumber);
+      if (unitTokens.length === 0) return false;
+      const normalizedUnitTokens = new Set(unitTokens.map((t) => t.toLowerCase().replace(/^0+/, "")));
+      return folderTokens.some((token) => normalizedUnitTokens.has(token.toLowerCase().replace(/^0+/, "")));
+    };
+
     const firstScannerMatchUrl = (row: any, platform: "airbnb" | "vrbo" | "booking"): string | null => {
       const json = platform === "airbnb"
         ? row.airbnbMatches
@@ -16647,7 +16659,9 @@ Return ONLY compact JSON with this exact shape:
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchedUrls, matchCounts, totalChecked } = photoResult;
-        const scannerRow = unit.photoFolder ? folderToScannerRow.get(unit.photoFolder) : undefined;
+        const scannerRow = unit.photoFolder && scannerRowAppliesToUnit(unit.photoFolder, unit.unitNumber)
+          ? folderToScannerRow.get(unit.photoFolder)
+          : undefined;
 
         // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
         const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
