@@ -20856,83 +20856,7 @@ Return ONLY compact JSON with this exact shape:
         sourceFlags.set(br, flags);
         latestChannels.set(br, channels);
       };
-
-      try {
-        let completed = 0;
-        for (const win of monthlyWindows) {
-          assertSidecarRunCurrent();
-          const currentLabel = `${win.yearMonth} ${win.season} rates`;
-          const currentStartedAt = Date.now();
-          setMonthlyProgress({
-            completed,
-            current: completed + 1,
-            currentLabel,
-            currentStartedAt,
-            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
-          });
-          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
-          assertSidecarRunCurrent();
-          absorbScan(scan, win.season);
-          for (const br of wantBedrooms) {
-            ensureBR(br);
-            const result = basisForScan(scan, br);
-            if (result.basis == null || result.basis <= 0) continue;
-            monthlyByBR.get(br)![win.yearMonth] = {
-              medianNightly: result.basis,
-              season: win.season,
-              checkIn: win.checkIn,
-              checkOut: win.checkOut,
-              channelCount: result.channelRates.length,
-              sampleCount: result.channelRates.length > 0 ? result.channelRates.length : result.airbnbSamples,
-              channels: result.channels,
-            };
-            seasonBuckets.get(br)![win.season].push(result.basis);
-            noteSource(br, result.channels, result.channelRates);
-          }
-          completed++;
-          setMonthlyProgress({
-            completed,
-            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
-          });
-        }
-
-        for (const win of holidayWindows) {
-          assertSidecarRunCurrent();
-          const currentLabel = `${win.label} holiday rates`;
-          const currentStartedAt = Date.now();
-          setMonthlyProgress({
-            completed,
-            current: completed + 1,
-            currentLabel,
-            currentStartedAt,
-            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
-          });
-          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
-          assertSidecarRunCurrent();
-          absorbScan(scan, "HOLIDAY");
-          for (const br of wantBedrooms) {
-            ensureBR(br);
-            const result = basisForScan(scan, br);
-            if (result.basis == null || result.basis <= 0) continue;
-            seasonBuckets.get(br)!.HOLIDAY.push(result.basis);
-            noteSource(br, result.channels, result.channelRates);
-          }
-          completed++;
-          setMonthlyProgress({
-            completed,
-            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
-          });
-        }
-
-        setRefreshProgress({
-          propertyId,
-          startedAt,
-          phase: "persisting",
-          percent: 100,
-          label: "Persisting monthly medians",
-          progressDone: totalWindows,
-          progressTotal: totalWindows,
-        });
+      const persistMonthlySnapshot = async (opts: { final: boolean }): Promise<PersistedMonthly[]> => {
         const persisted: PersistedMonthly[] = [];
         for (const br of wantBedrooms) {
           ensureBR(br);
@@ -20943,7 +20867,7 @@ Return ONLY compact JSON with this exact shape:
           const highRaw = median(buckets.HIGH);
           const holidayRaw = median(buckets.HOLIDAY);
           if (lowBasis == null || lowBasis <= 0) {
-            await storage.deletePropertyMarketRate(propertyId, br);
+            if (opts.final) await storage.deletePropertyMarketRate(propertyId, br);
             persisted.push({
               bedrooms: br,
               low: 0,
@@ -21006,6 +20930,88 @@ Return ONLY compact JSON with this exact shape:
             monthlyCount: Object.keys(monthlyRates).length,
           });
         }
+        return persisted;
+      };
+
+      try {
+        let completed = 0;
+        for (const win of monthlyWindows) {
+          assertSidecarRunCurrent();
+          const currentLabel = `${win.yearMonth} ${win.season} rates`;
+          const currentStartedAt = Date.now();
+          setMonthlyProgress({
+            completed,
+            current: completed + 1,
+            currentLabel,
+            currentStartedAt,
+            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
+          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          assertSidecarRunCurrent();
+          absorbScan(scan, win.season);
+          for (const br of wantBedrooms) {
+            ensureBR(br);
+            const result = basisForScan(scan, br);
+            if (result.basis == null || result.basis <= 0) continue;
+            monthlyByBR.get(br)![win.yearMonth] = {
+              medianNightly: result.basis,
+              season: win.season,
+              checkIn: win.checkIn,
+              checkOut: win.checkOut,
+              channelCount: result.channelRates.length,
+              sampleCount: result.channelRates.length > 0 ? result.channelRates.length : result.airbnbSamples,
+              channels: result.channels,
+            };
+            seasonBuckets.get(br)![win.season].push(result.basis);
+            noteSource(br, result.channels, result.channelRates);
+          }
+          completed++;
+          await persistMonthlySnapshot({ final: false });
+          setMonthlyProgress({
+            completed,
+            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
+        }
+
+        for (const win of holidayWindows) {
+          assertSidecarRunCurrent();
+          const currentLabel = `${win.label} holiday rates`;
+          const currentStartedAt = Date.now();
+          setMonthlyProgress({
+            completed,
+            current: completed + 1,
+            currentLabel,
+            currentStartedAt,
+            label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
+          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          assertSidecarRunCurrent();
+          absorbScan(scan, "HOLIDAY");
+          for (const br of wantBedrooms) {
+            ensureBR(br);
+            const result = basisForScan(scan, br);
+            if (result.basis == null || result.basis <= 0) continue;
+            seasonBuckets.get(br)!.HOLIDAY.push(result.basis);
+            noteSource(br, result.channels, result.channelRates);
+          }
+          completed++;
+          await persistMonthlySnapshot({ final: false });
+          setMonthlyProgress({
+            completed,
+            label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+          });
+        }
+
+        setRefreshProgress({
+          propertyId,
+          startedAt,
+          phase: "persisting",
+          percent: 100,
+          label: "Persisting monthly medians",
+          progressDone: totalWindows,
+          progressTotal: totalWindows,
+        });
+        const persisted = await persistMonthlySnapshot({ final: true });
 
         setRefreshProgress({
           propertyId,
@@ -21301,7 +21307,7 @@ Return ONLY compact JSON with this exact shape:
         ...state,
         phase: "error" as const,
         label: "Refresh tracking interrupted",
-        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart or worker interruption. Start a fresh monthly refresh after the sidecar goes quiet.`,
+        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Completed monthly windows are saved as they finish; start a fresh monthly refresh after the sidecar goes quiet.`,
         lastTickAt: state.lastTickAt,
       };
       setRefreshProgress(interrupted);

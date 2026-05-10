@@ -1883,7 +1883,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     error?: string;
   };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
-  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy or server restart. Any already-queued sidecar browser work may keep finishing, but this pricing page can no longer measure that run. Start a fresh monthly refresh after the sidecar goes quiet.";
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Completed monthly windows are saved as they finish, but any already-queued sidecar browser work may keep running without this page being able to measure it. Start a fresh monthly refresh after the sidecar goes quiet.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
   const handledTerminalProgressRef = useRef<string | null>(null);
@@ -1891,6 +1891,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const refreshProgressRef = useRef<MarketRefreshProgress | null>(null);
   const missingProgressPollsRef = useRef(0);
   const lostProgressRecordedRef = useRef(false);
+  const screenWakeLockRef = useRef<any>(null);
   // 1Hz ticker so the elapsed-time display + staleness warning re-
   // render between the 1.5s progress polls. Cheap (no network); keyed
   // off marketRatesRefreshing so it stops when the scan ends.
@@ -1905,6 +1906,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!marketRatesRefreshing) return;
     const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
     return () => window.clearInterval(id);
+  }, [marketRatesRefreshing]);
+  useEffect(() => {
+    if (!marketRatesRefreshing || typeof navigator === "undefined" || typeof document === "undefined") return;
+    let cancelled = false;
+    const requestWakeLock = async () => {
+      try {
+        const wakeLock = (navigator as any).wakeLock;
+        if (!wakeLock?.request || document.visibilityState !== "visible") return;
+        screenWakeLockRef.current = await wakeLock.request("screen");
+      } catch (e: any) {
+        console.info(`[refresh-market-rates] screen wake lock unavailable: ${e?.message ?? e}`);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (!cancelled && document.visibilityState === "visible" && !screenWakeLockRef.current) {
+        void requestWakeLock();
+      }
+    };
+    void requestWakeLock();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      const wakeLock = screenWakeLockRef.current;
+      screenWakeLockRef.current = null;
+      if (wakeLock?.release) {
+        void wakeLock.release().catch(() => undefined);
+      }
+    };
   }, [marketRatesRefreshing]);
   const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
   // AbortController for the in-flight refresh fetch. Lets the operator
