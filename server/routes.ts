@@ -20292,7 +20292,7 @@ Return ONLY compact JSON with this exact shape:
       ? "monthly"
       : "seasonal";
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
-    const { getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
+    const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
@@ -20551,7 +20551,7 @@ Return ONLY compact JSON with this exact shape:
       ? "monthly"
       : "seasonal";
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
-    const { getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
+    const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
     const clearProgressSoon = (propertyKey: number) => {
@@ -20817,6 +20817,7 @@ Return ONLY compact JSON with this exact shape:
             propertyId,
             dateOverride,
             sidecarQueueBudgetMs: 15 * 60_000,
+            warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
             sidecarStopGeneration,
             signal: controller.signal,
           });
@@ -20827,7 +20828,13 @@ Return ONLY compact JSON with this exact shape:
       const heartbeat = setInterval(() => {
         const current = getRefreshProgress(propertyId);
         if (!current || current.phase === "done" || current.phase === "error") return;
-        setRefreshProgress({ ...current, lastTickAt: Date.now() });
+        const hb = getHeartbeat();
+        setRefreshProgress({
+          ...current,
+          lastTickAt: Date.now(),
+          daemonOnline: hb.everSeen ? hb.isOnline : current.daemonOnline,
+          daemonLastPollAgeMs: hb.ageMs ?? current.daemonLastPollAgeMs,
+        });
       }, 15_000);
       const absorbScan = (scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null, season: SeasonLabel) => {
         if (!scan?.warnings) return;

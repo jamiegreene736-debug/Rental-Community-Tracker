@@ -240,6 +240,7 @@ async function fetchPmMarketRatesForBedroom(args: {
   checkIn: string;
   checkOut: string;
   region: RegionKey;
+  sidecarQueueBudgetMs?: number;
   sidecarStopGeneration?: number;
   signal?: AbortSignal;
 }): Promise<{
@@ -334,8 +335,8 @@ async function fetchPmMarketRatesForBedroom(args: {
         bedrooms: br,
         perSiteLimit: 5,
         maxSites: Math.min(18, sites.length),
-        walletBudgetMs: 180_000,
-        queueBudgetMs: 285_000,
+        walletBudgetMs: 240_000,
+        queueBudgetMs: args.sidecarQueueBudgetMs ?? 285_000,
         signal: args.signal,
         stopGeneration: args.sidecarStopGeneration,
       });
@@ -466,6 +467,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // Manual market-rate refreshes run in the background now, so they can
   // tolerate a deeper local Chrome queue than request/response flows.
   sidecarQueueBudgetMs?: number;
+  warningSeason?: ScanWarning["season"];
   // Producer-level stop boundary. Long background scans pass the value
   // captured at scan start so a later operator Stop cancels the whole
   // scan, even if Start Queue is clicked again.
@@ -505,6 +507,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const targetDest = args.searchName ?? args.community;
   const nights = nightsBetween(checkIn, checkOut);
   const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
+  const warningSeason = args.warningSeason ?? "LOW";
   if (!args.skipSidecar) assertSidecarRunCurrent();
 
   // Fan out every website search concurrently. The sidecar daemon still
@@ -714,6 +717,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
       checkIn,
       checkOut,
       region: inferRegion(args.city, args.state),
+      sidecarQueueBudgetMs,
       sidecarStopGeneration,
       signal: args.signal,
     }));
@@ -876,10 +880,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     if (seen.has(key)) continue;
     seen.add(key);
     warnings.push({
-      season: "LOW",  // placeholder; orchestrator rewrites with real season
+      season: warningSeason,
       channel: op.channel,
       kind,
-      message: describeWarning(kind, op.channel, "LOW"),
+      message: describeWarning(kind, op.channel, warningSeason),
       reason: op.reason,
     });
   }
@@ -890,10 +894,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     if (seen.has(key)) continue;
     seen.add(key);
     warnings.push({
-      season: "LOW",
+      season: warningSeason,
       channel: "pm",
       kind,
-      message: describeWarning(kind, "pm", "LOW"),
+      message: describeWarning(kind, "pm", warningSeason),
       reason: pm.reason,
     });
   }
@@ -1243,6 +1247,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
         ...args,
         dateOverride: window,
         sidecarQueueBudgetMs: args.sidecarQueueBudgetMs,
+        warningSeason: season,
         sidecarStopGeneration,
       }),
       season,
