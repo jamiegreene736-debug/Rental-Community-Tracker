@@ -64,6 +64,10 @@ or manually unblock the sidecar browser, restart the daemon with:
 SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/supervisor.mjs
 ```
 
+Hidden mode also suppresses Playwright `bringToFront()` calls during
+VRBO verification challenges. To keep Chrome hidden but allow the
+worker to focus the challenge tab, set `SIDECAR_ALLOW_FOCUS=1`.
+
 ## Local concurrency
 
 Server Chrome fallback is disabled by default. The supervisor starts a

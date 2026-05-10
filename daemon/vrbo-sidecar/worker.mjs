@@ -34,6 +34,7 @@ const CHROME_DATA_DIR = path.join(
 const CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9222;
 const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
+const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1" || SIDE_CAR_CHROME_VISIBLE;
 const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
@@ -482,17 +483,16 @@ async function ensureChromeRunning() {
     `--window-size=${VIEWPORT.width},${VIEWPORT.height + 80}`,
     `--window-position=${SIDE_CAR_CHROME_VISIBLE ? "120,80" : HIDDEN_WINDOW_POSITION}`,
     "--force-device-scale-factor=1",
+    ...(SIDE_CAR_CHROME_VISIBLE ? [] : ["--start-minimized", "--no-startup-window"]),
     "--no-first-run",
     "--no-default-browser-check",
     "about:blank",
   ];
   const launchHiddenOnMac = process.platform === "darwin" && !SIDE_CAR_CHROME_VISIBLE;
-  const command = launchHiddenOnMac ? "/usr/bin/open" : CHROME_BINARY;
-  const args = launchHiddenOnMac
-    ? ["-g", "-j", "-n", "-a", "Google Chrome", "--args", ...chromeArgs]
-    : chromeArgs;
+  const command = CHROME_BINARY;
+  const args = chromeArgs;
   log(
-    `spawning Chrome ${launchHiddenOnMac ? "hidden/offscreen " : ""}(port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`,
+    `spawning Chrome ${launchHiddenOnMac ? "direct hidden/offscreen " : ""}(port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`,
   );
   const proc = spawn(
     command,
@@ -1106,7 +1106,9 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     : await pageLooksLikeVrboHumanChallenge(targetPage);
   if (!hasChallenge) return false;
 
-  await targetPage.bringToFront().catch(() => {});
+  if (SIDECAR_ALLOW_FOCUS) {
+    await targetPage.bringToFront().catch(() => {});
+  }
   await normalizePageDisplay(targetPage).catch(() => {});
   log(`${label} ${id}: VRBO verification challenge detected; trying 2Captcha slider solver before manual fallback`);
   if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {

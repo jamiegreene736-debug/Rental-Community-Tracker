@@ -702,6 +702,7 @@ export class ChromeSidecarManager {
       `--window-size=${this.viewport.width},${this.viewport.height + 80}`,
       `--window-position=${this.localVisible ? "120,80" : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
+      ...(this.localVisible ? [] : ["--start-minimized", "--no-startup-window"]),
       "--no-first-run",
       "--no-default-browser-check",
       "--no-sandbox",
@@ -711,12 +712,10 @@ export class ChromeSidecarManager {
       "about:blank",
     ];
     const launchHiddenOnMac = process.platform === "darwin" && !this.localVisible;
-    const command = launchHiddenOnMac ? "/usr/bin/open" : this.localChromeBinary;
-    const args = launchHiddenOnMac
-      ? ["-g", "-j", "-n", "-a", "Google Chrome", "--args", ...chromeArgs]
-      : chromeArgs;
+    const command = this.localChromeBinary;
+    const args = chromeArgs;
     this.log(
-      `spawning ${instance.label} ${launchHiddenOnMac ? "hidden/offscreen " : ""}(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
+      `spawning ${instance.label} ${launchHiddenOnMac ? "direct hidden/offscreen " : ""}(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
     );
     const proc = spawn(command, args, { detached: true, stdio: "ignore" });
     proc.unref?.();
