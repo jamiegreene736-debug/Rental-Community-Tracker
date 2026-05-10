@@ -16906,7 +16906,7 @@ Return ONLY compact JSON with this exact shape:
 
     const communityAddress = folderBodyConflict
       ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
-      : folderCommunityAddress || normalizedStreetAddress || addressStreet || communityName;
+      : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
     const routeStartedAt = Date.now();
     const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
