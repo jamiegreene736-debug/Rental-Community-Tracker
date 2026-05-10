@@ -11,10 +11,12 @@
 //   - N = 3 hero photos per folder. A full-gallery scan would be more
 //     thorough but ~5x cost; 3 distinctive shots catch the common
 //     case (someone copies bedroom + kitchen + exterior).
-//   - MIN_MATCHES = 2. A single match can be a stock-photo false
-//     positive (generic palm-tree exterior matches thousands of
-//     listings). Two or more of OUR distinct photos hitting the same
-//     host is much harder to explain away.
+//   - MIN_MATCHES = 2, and each Lens hit must be strong (>=80%
+//     confidence by SearchAPI score or top visual-result position). A
+//     single partial/weak match can be a stock-photo false positive
+//     (generic palm-tree exterior matches thousands of listings). Two
+//     or more of OUR distinct private-unit photos hitting the same host
+//     is much harder to explain away.
 //   - Failure of EVERY Lens call → UNKNOWN (never silently "clean").
 //   - URL cross-validation (see verifyUrlMentionsUnit): shared
 //     buildings mean Lens can return a visually-similar listing for
@@ -43,6 +45,7 @@ import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
 import { isScannableFolder, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
+import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
 const PUBLIC_HOST = (() => {
@@ -87,9 +90,16 @@ async function callGoogleLens(imageUrl: string): Promise<any[] | null> {
       return null;
     }
     const data = await resp.json() as any;
-    // SearchAPI returns visual_matches; fall back to organic_results.
-    const matches = data.visual_matches || data.organic_results || [];
-    return Array.isArray(matches) ? matches : [];
+    const rowsFrom = (source: string, rows: any[] | undefined): any[] =>
+      Array.isArray(rows)
+        ? rows.map((row, idx) => ({ ...row, __lensSource: source, __lensPosition: Number(row?.position ?? idx + 1) }))
+        : [];
+    return [
+      ...rowsFrom("visual", data.visual_matches),
+      ...rowsFrom("page", data.pages_with_matching_images),
+      ...rowsFrom("image", data.image_results),
+      ...rowsFrom("organic", data.organic_results),
+    ];
   } catch (e: any) {
     console.error(`[photo-listing-scanner] Lens error for ${imageUrl}: ${e?.message}`);
     return null;
@@ -232,22 +242,25 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
 
   const labels = await storage.getPhotoLabelsByFolder(folder);
   const visible = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
-  // Prefer interior categories for the hero set. "Building Exterior"
-  // and "Views" shots are usually shared resort-amenity images — every
-  // host at the same complex re-uses the pool / lobby / oceanfront
-  // photo, so a Lens match on those is legitimate re-use, not theft.
-  // We only fall back to the first-N-by-filename behavior when the
-  // folder has fewer than N labeled interiors (brand-new folders that
-  // haven't been through the labeler yet, or unit folders whose entire
-  // gallery is exterior shots — rare).
+  // Prefer private/interior categories for the hero set and never fall
+  // back to obvious community/shared amenity photos. Pool, lobby,
+  // grounds, exterior, view, and logo-style images are intentionally
+  // reused across many hosts in the same resort; they are not reliable
+  // duplicate-listing evidence.
   const INTERIOR_CATEGORIES = new Set([
     "Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Dining", "Outdoor & Lanai",
   ]);
   const effectiveCategory = (l: typeof labels[number]) => l.userCategory ?? l.category ?? "";
-  const interior = visible.filter((l) => INTERIOR_CATEGORIES.has(effectiveCategory(l)));
+  const privateUnitPhotos = visible.filter((l) => !isCommunityOrSharedPhotoCandidate({
+    folder,
+    filename: l.filename,
+    category: effectiveCategory(l),
+    label: l.userLabel ?? l.label,
+  }));
+  const interior = privateUnitPhotos.filter((l) => INTERIOR_CATEGORIES.has(effectiveCategory(l)));
   const heros = interior.length >= PHOTOS_PER_FOLDER
     ? interior.slice(0, PHOTOS_PER_FOLDER)
-    : visible.slice(0, PHOTOS_PER_FOLDER);
+    : privateUnitPhotos.slice(0, PHOTOS_PER_FOLDER);
 
   if (heros.length === 0) {
     result.errorMessage = "No visible photos in folder";
@@ -319,6 +332,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
       const hits = matches.filter((m: any) => {
         const link = String(m.link || "").toLowerCase();
         if (!link.includes(host.host)) return false;
+        if (!isStrongLensMatch(m, String(m.__lensSource || ""), Number(m.__lensPosition ?? m.position ?? 999))) return false;
         // Drop OUR own listings right at the filter stage so they
         // never consume a verification budget slot below. A Lens hit
         // on our published Airbnb/VRBO/Booking URL is the expected

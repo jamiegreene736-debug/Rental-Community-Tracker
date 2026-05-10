@@ -72,6 +72,11 @@ import {
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, listScanableFolders } from "./photo-listing-scanner";
+import {
+  MIN_DISTINCT_STRONG_PHOTO_MATCHES,
+  isCommunityOrSharedPhotoCandidate,
+  isStrongLensMatch,
+} from "./photo-match-guardrails";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
@@ -15969,6 +15974,15 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       location?: string;
     };
+    if (isCommunityOrSharedPhotoCandidate({ folder, filename, url: imageUrl })) {
+      return res.json({
+        filename: filename || null,
+        platforms: [],
+        checkedUrl: imageUrl || null,
+        skipped: true,
+        reason: "Community/shared amenity photos are ignored for duplicate listing checks.",
+      });
+    }
 
     // Island detection helpers for location-based filtering
     const ISLAND_KEYWORDS: Record<string, string[]> = {
@@ -16050,19 +16064,25 @@ Return ONLY compact JSON with this exact shape:
 
     const found: { name: string; url: string; title: string; matchLocation: string; confidence: "high" | "medium" | "low" }[] = [];
 
+    const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+      Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
     const allResults = [
-      ...(searchData.visual_matches || []),
-      ...(searchData.organic_results || []),
-      ...(searchData.image_results || []),
-      ...(searchData.inline_images || []),
-      ...(searchData.pages_with_matching_images || []),
+      ...rowsFrom("visual", searchData.visual_matches),
+      ...rowsFrom("page", searchData.pages_with_matching_images),
+      ...rowsFrom("image", searchData.image_results),
+      ...rowsFrom("organic", searchData.organic_results),
+      ...rowsFrom("image", searchData.inline_images),
     ];
 
-    for (const result of allResults) {
+    for (const { source, row: result, idx } of allResults) {
       const url: string = result.link || result.source_url || result.url || result.source?.link || "";
       const title: string = result.title || result.snippet || "";
       const titleLower = title.toLowerCase();
-      const position: number = result.position ?? 999;
+      const position: number = Number(result.position ?? idx + 1);
+      if (!isStrongLensMatch(result, source, Number.isFinite(position) ? position : idx + 1)) {
+        console.log(`[platform-check] Skipping weak reverse-image match pos=${position} source=${source}: "${title}"`);
+        continue;
+      }
 
       // ── 1. Island mismatch filter: discard if matched listing is on a different island ──
       if (ourIsland) {
@@ -16365,29 +16385,57 @@ Return ONLY compact JSON with this exact shape:
     // "Not Found" is based on the whole available unit gallery.
     type PhotoSignals = Record<string, boolean>; // platform key → found
     type PhotoMatchedUrls = Record<string, string | null>; // platform key → URL of the FIRST listing-page hit
+    type PhotoMatchCounts = Record<string, number>; // platform key → distinct strong unit photos matched
+    const selectUnitPhotoFilesForDuplicateCheck = async (folderPath: string, photoFolder: string): Promise<string[]> => {
+      if (isCommunityOrSharedPhotoCandidate({ folder: photoFolder })) return [];
+      const diskFiles = fs.readdirSync(folderPath)
+        .filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f))
+        .sort();
+      const diskSet = new Set(diskFiles);
+      try {
+        const labels = await storage.getPhotoLabelsByFolder(photoFolder);
+        const labeled = labels
+          .filter((l) => !l.hidden && diskSet.has(l.filename))
+          .filter((l) => !isCommunityOrSharedPhotoCandidate({
+            folder: photoFolder,
+            filename: l.filename,
+            category: l.userCategory ?? l.category,
+            label: l.userLabel ?? l.label,
+          }))
+          .sort((a, b) => a.filename.localeCompare(b.filename))
+          .map((l) => l.filename);
+        if (labeled.length > 0) return labeled;
+      } catch {
+        // Fall back to filename heuristics below.
+      }
+      return diskFiles.filter((file) => !isCommunityOrSharedPhotoCandidate({ folder: photoFolder, filename: file }));
+    };
     const photoSearch = async (photoFolder: string, unitNumber: string): Promise<{
       signals: PhotoSignals;
       matchedUrls: PhotoMatchedUrls;
+      matchCounts: PhotoMatchCounts;
       matchCount: number;
       totalChecked: number;
     }> => {
       const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
       const matchedUrls: PhotoMatchedUrls = { airbnb: null, vrbo: null, booking: null };
-      const unverifiedPhotoHits: Record<string, { photoHitCount: number; firstUrl: string | null }> = {
-        airbnb: { photoHitCount: 0, firstUrl: null },
-        vrbo: { photoHitCount: 0, firstUrl: null },
-        booking: { photoHitCount: 0, firstUrl: null },
-      };
-      if (!imgbbKey) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
+      const matchCounts: PhotoMatchCounts = { airbnb: 0, vrbo: 0, booking: 0 };
+      if (!imgbbKey) return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
       // Empty photoFolder means no local photos available (e.g. a replacement unit) — skip photo check
-      if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
+      if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
-      if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
-      const allFiles = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort();
+      if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
+      const allFiles = await selectUnitPhotoFilesForDuplicateCheck(folderPath, photoFolder);
       const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
       const unitTokens = extractUnitTokens(unitNumber);
-      const verifyTokens = [...new Set([...folderTokens, ...unitTokens])];
+      const verifyTokens = Array.from(new Set([...folderTokens, ...unitTokens]));
+      const photoHits: Record<"airbnb" | "vrbo" | "booking", Set<string>> = {
+        airbnb: new Set(),
+        vrbo: new Set(),
+        booking: new Set(),
+      };
+      const firstStrongUrls: PhotoMatchedUrls = { airbnb: null, vrbo: null, booking: null };
       let matchCount = 0;
       for (const file of files) {
         try {
@@ -16410,17 +16458,18 @@ Return ONLY compact JSON with this exact shape:
             // Keep both the lowercased version (for matching) and the
             // original URL (for the user to click). We were previously
             // throwing away the URL — that's the bug the user hit.
-            const sourceLinks = [
-              ...(searchData.visual_matches || []),
-              ...(searchData.organic_results || []),
-              ...(searchData.image_results || []),
-              ...(searchData.pages_with_matching_images || []),
-              ...(searchData.knowledge_graph ? [searchData.knowledge_graph] : []),
-            ].map((r: any) => String(r?.link || r?.url || r?.source || r?.source_url || ""))
-              .filter((l) => l);
+            const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+              Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
+            const sourceRows = [
+              ...rowsFrom("visual", searchData.visual_matches),
+              ...rowsFrom("page", searchData.pages_with_matching_images),
+              ...rowsFrom("image", searchData.image_results),
+              ...rowsFrom("organic", searchData.organic_results),
+              ...(searchData.knowledge_graph ? [{ source: "organic", row: searchData.knowledge_graph, idx: 0 }] : []),
+            ]
+              .filter(({ source, row, idx }) => isStrongLensMatch(row, source, Number(row?.position ?? idx + 1)));
             for (const cfg of PLATFORM_CONFIGS) {
               const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
-              if (signals[cfg.key]) continue;
               // Collect EVERY candidate URL on this platform (not just
               // the first one). The previous `.find()` short-circuited
               // after one URL — if that URL's listing page didn't
@@ -16433,12 +16482,16 @@ Return ONLY compact JSON with this exact shape:
               // match that here so a brand-new property's preflight
               // gets the same detection rate the scanner gets on
               // existing folders.
-              const candidates = sourceLinks.filter((l: string) => {
-                const ll = l.toLowerCase();
-                if (!ll.includes(domain)) return false;
-                return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
-              }).slice(0, 3);
-              let sawUnverifiedCandidate = false;
+              const candidates = sourceRows.map(({ row }) => String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || ""))
+                .filter((l: string) => {
+                  const ll = l.toLowerCase();
+                  if (!ll.includes(domain)) return false;
+                  return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
+                }).slice(0, 3);
+              const key = cfg.key as "airbnb" | "vrbo" | "booking";
+              if (candidates.length > 0 && !firstStrongUrls[key]) {
+                firstStrongUrls[key] = candidates[0];
+              }
               for (const matchedLink of candidates) {
                 // Cross-validate: confirm the matched page actually
                 // names one of this folder/unit's tokens. For shared-building addresses
@@ -16457,33 +16510,26 @@ Return ONLY compact JSON with this exact shape:
                     })()
                   : true;
                 if (!verified) continue;
-                signals[cfg.key] = true;
                 matchedUrls[cfg.key] = matchedLink;
-                matchCount++;
                 break;
               }
-              if (!signals[cfg.key] && candidates.length > 0) {
-                sawUnverifiedCandidate = true;
-                if (!unverifiedPhotoHits[cfg.key].firstUrl) {
-                  unverifiedPhotoHits[cfg.key].firstUrl = candidates[0];
-                }
-              }
-              if (sawUnverifiedCandidate) {
-                unverifiedPhotoHits[cfg.key].photoHitCount++;
+              if (candidates.length > 0) {
+                photoHits[key].add(`/photos/${photoFolder}/${file}`);
+                matchCount++;
               }
             }
           }
         } catch { /* best effort */ }
         await new Promise(r => setTimeout(r, 1000));
       }
-      for (const cfg of PLATFORM_CONFIGS) {
-        const fallback = unverifiedPhotoHits[cfg.key];
-        if (!signals[cfg.key] && fallback.photoHitCount >= 2 && fallback.firstUrl) {
-          signals[cfg.key] = true;
-          matchedUrls[cfg.key] = fallback.firstUrl;
+      for (const key of ["airbnb", "vrbo", "booking"] as const) {
+        matchCounts[key] = photoHits[key].size;
+        signals[key] = matchCounts[key] >= MIN_DISTINCT_STRONG_PHOTO_MATCHES;
+        if (signals[key] && !matchedUrls[key]) {
+          matchedUrls[key] = firstStrongUrls[key];
         }
       }
-      return { signals, matchedUrls, matchCount, totalChecked: files.length };
+      return { signals, matchedUrls, matchCounts, matchCount, totalChecked: files.length };
     };
 
     // ── Combine text + photo signals into a single status per platform ─────────
@@ -16506,7 +16552,7 @@ Return ONLY compact JSON with this exact shape:
         // Photo-only branch — surface the URL where the photo was found
         // so the user can click through and verify the match instead of
         // taking our boolean signal on faith.
-        return { status: "photo-only", url: photoMatchedUrl, detection: `Photos matched (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked) — no text confirmation` };
+        return { status: "photo-only", url: photoMatchedUrl, detection: `${photoMatchCount} strong unit photos matched (${totalPhotos} checked) — no text confirmation` };
       if (text.listed && !text.titleMatch && !photoFound)
         return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
       if (text.listed === null)
@@ -16597,10 +16643,10 @@ Return ONLY compact JSON with this exact shape:
       units.map(async (unit) => {
         const [textResults, photoResult] = await Promise.all([
           Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
-          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCount: 0, totalChecked: 0 }),
+          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, matchCount: 0, totalChecked: 0 }),
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
-        const { signals, matchedUrls, matchCount, totalChecked } = photoResult;
+        const { signals, matchedUrls, matchCounts, totalChecked } = photoResult;
         const scannerRow = unit.photoFolder ? folderToScannerRow.get(unit.photoFolder) : undefined;
 
         // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
@@ -16615,9 +16661,9 @@ Return ONLY compact JSON with this exact shape:
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  signals.airbnb  ? matchCount : 0, totalChecked), scannerRow, "airbnb"),
-            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    signals.vrbo    ? matchCount : 0, totalChecked), scannerRow, "vrbo"),
-            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, signals.booking ? matchCount : 0, totalChecked), scannerRow, "booking"),
+            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  matchCounts.airbnb, totalChecked), scannerRow, "airbnb"),
+            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    matchCounts.vrbo, totalChecked), scannerRow, "vrbo"),
+            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, matchCounts.booking, totalChecked), scannerRow, "booking"),
           },
         };
       }),
@@ -16643,9 +16689,14 @@ Return ONLY compact JSON with this exact shape:
     const results: { folder: string; filename: string; url: string; found: boolean | null; platforms: string[]; error?: string }[] = [];
 
     for (const folder of folders) {
+      if (isCommunityOrSharedPhotoCandidate({ folder })) continue;
       const folderPath = path.join(photosBase, folder);
       if (!fs.existsSync(folderPath)) continue;
-      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
+      const files = fs.readdirSync(folderPath)
+        .filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f))
+        .filter((f: string) => !isCommunityOrSharedPhotoCandidate({ folder, filename: f }))
+        .sort()
+        .slice(0, 5);
 
       for (const file of files) {
         const localPath = path.join(folderPath, file);
@@ -16679,14 +16730,16 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const searchData = await searchResp.json() as any;
+          const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+            Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
           const allResults = [
-            ...(searchData.visual_matches || []),
-            ...(searchData.organic_results || []),
-            ...(searchData.image_results || []),
-            ...(searchData.pages_with_matching_images || []),
-          ];
+            ...rowsFrom("visual", searchData.visual_matches),
+            ...rowsFrom("page", searchData.pages_with_matching_images),
+            ...rowsFrom("image", searchData.image_results),
+            ...rowsFrom("organic", searchData.organic_results),
+          ].filter(({ source, row, idx }) => isStrongLensMatch(row, source, Number(row?.position ?? idx + 1)));
           const foundPlatforms: string[] = [];
-          for (const r of allResults) {
+          for (const { row: r } of allResults) {
             const link: string = r.link || r.url || r.source_url || "";
             for (const p of PLATFORMS) {
               if (link.includes(p) && !foundPlatforms.includes(p)) foundPlatforms.push(p);
@@ -17536,7 +17589,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -17672,6 +17725,30 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
 
+          const photoOtaSearch = await withStepTimeout(
+            runPhotoReverseSearch(searchApiKey, scrapedPhotoUrls),
+            35_000,
+            { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 },
+            `photo OTA duplicate check ${sourceUrl}`,
+          );
+          const photoFoundOn = platformHosts.find((p) => {
+            if (!enforcedKeys.includes(p.key)) return false;
+            const matchKey = p.key === "bookingCom" ? "booking" : p.key;
+            return photoOtaSearch.matches[matchKey as "airbnb" | "vrbo" | "booking"].length > 0;
+          });
+          if (photoFoundOn) {
+            console.error(
+              `[find-unit] [${source}] Unit ${unitNumber} had ${MIN_DISTINCT_STRONG_PHOTO_MATCHES}+ strong photo matches on ${photoFoundOn.host} — skipping`,
+            );
+            attempts.push({
+              sourceUrl, source, address, unit: unitNumber || "?",
+              verdict: "skipped-photo-found",
+              reason: `Two or more private/unit photos matched ${photoFoundOn.host}.`,
+              platformCheck,
+            });
+            continue;
+          }
+
           const anthropicKey = process.env.ANTHROPIC_API_KEY;
           let sampledCategories: string[] = [];
           if (anthropicKey) {
@@ -17731,10 +17808,11 @@ Return ONLY compact JSON with this exact shape:
     // Zillow had no candidates, the platform check was inconclusive,
     // or the photo-count gate kept rejecting.
     const totalCandidates = candidates.length;
-    const breakdown = {
-      "skipped-found": 0,
-      "skipped-unknown-strict": 0,
-      "skipped-bedroom-mismatch": 0,
+	    const breakdown = {
+	      "skipped-found": 0,
+	      "skipped-photo-found": 0,
+	      "skipped-unknown-strict": 0,
+	      "skipped-bedroom-mismatch": 0,
       "skipped-too-few-photos": 0,
       "skipped-vision-rejected": 0,
       error: 0,
@@ -17753,9 +17831,10 @@ Return ONLY compact JSON with this exact shape:
     } else {
       const parts: string[] = [];
       if (budgetStopped) parts.push(`stopped after ${attempts.length}/${totalCandidates} candidates to avoid a stuck request`);
-      if (totalCandidates > MAX_CANDIDATES_TO_CHECK) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
-      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
-      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
+	      if (totalCandidates > MAX_CANDIDATES_TO_CHECK) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
+	      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
+	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had 2+ strong private-photo matches on the enforced channel`);
+	      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
@@ -18117,15 +18196,17 @@ Return ONLY compact JSON with this exact shape:
         return res.status(resp.status).json({ error: `SearchAPI error: ${errText}` });
       }
       const data = await resp.json() as any;
-      const matches: Array<{ platform: string; url: string }> = [];
-      const allLinks = [
-        ...(data.visual_matches || []),
-        ...(data.organic_results || []),
-        ...(data.image_results || []),
-      ] as Array<{ link: string; title?: string; source?: string }>;
+	      const matches: Array<{ platform: string; url: string }> = [];
+	      const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+	        Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
+	      const allLinks = [
+	        ...rowsFrom("visual", data.visual_matches),
+	        ...rowsFrom("image", data.image_results),
+	        ...rowsFrom("organic", data.organic_results),
+	      ].filter(({ source, row, idx }) => isStrongLensMatch(row, source, Number(row?.position ?? idx + 1)));
 
-      for (const r of allLinks) {
-        const link = r.link || "";
+	      for (const { row: r } of allLinks) {
+	        const link = r.link || "";
         if (link.includes("airbnb.com")) matches.push({ platform: "Airbnb", url: link });
         else if (link.includes("vrbo.com")) matches.push({ platform: "VRBO", url: link });
         else if (link.includes("booking.com")) matches.push({ platform: "Booking.com", url: link });
@@ -18260,11 +18341,12 @@ Return ONLY compact JSON with this exact shape:
     };
   }
 
-  // Photo reverse-image search via Google Lens. Caps at 3 photo
+  // Photo reverse-image search via Google Lens. Caps at 3 private-looking photo
   // URLs per call to keep wallet bounded (~3 SearchAPI calls /
   // qualifier check). Zillow CDN URLs (photos.zillowstatic.com)
   // are publicly accessible so we skip ImgBB upload — Lens can
-  // crawl them directly. Returns per-platform match URLs.
+  // crawl them directly. Returns per-platform match URLs only when
+  // at least two distinct source photos produce strong (>=80%) hits.
   async function runPhotoReverseSearch(
     apiKey: string,
     photoUrls: string[],
@@ -18285,8 +18367,15 @@ Return ONLY compact JSON with this exact shape:
       vrbo: new Set<string>(),
       booking: new Set<string>(),
     };
-    const sample = photoUrls.slice(0, 3);
+    const sample = photoUrls
+      .filter((url) => !isCommunityOrSharedPhotoCandidate({ url }))
+      .slice(0, 3);
     let checked = 0;
+    const photoHits = {
+      airbnb: new Set<string>(),
+      vrbo: new Set<string>(),
+      booking: new Set<string>(),
+    };
     for (const photoUrl of sample) {
       try {
         const url = `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(photoUrl)}&api_key=${apiKey}`;
@@ -18294,18 +18383,21 @@ Return ONLY compact JSON with this exact shape:
         if (!resp.ok) continue;
         const data: any = await resp.json();
         checked++;
-        const allLinks: string[] = [
-          ...(data.visual_matches || []),
-          ...(data.organic_results || []),
-          ...(data.image_results || []),
-          ...(data.pages_with_matching_images || []),
-        ]
-          .map((r: any) => String(r?.link || r?.url || r?.source || r?.source_url || ""))
-          .filter((l: string) => l);
-        for (const link of allLinks) {
+        const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
+          Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
+        const allRows = [
+          ...rowsFrom("visual", data.visual_matches),
+          ...rowsFrom("page", data.pages_with_matching_images),
+          ...rowsFrom("image", data.image_results),
+          ...rowsFrom("organic", data.organic_results),
+        ].filter(({ source, row, idx }) => isStrongLensMatch(row, source, Number(row?.position ?? idx + 1)));
+        for (const { row } of allRows) {
+          const link = String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || "");
+          if (!link) continue;
           for (const p of PLATFORM_PATTERNS) {
             if (p.urlPattern.test(link)) {
               matches[p.key].add(link);
+              photoHits[p.key].add(photoUrl);
             }
           }
         }
@@ -18317,9 +18409,9 @@ Return ONLY compact JSON with this exact shape:
     }
     return {
       matches: {
-        airbnb: Array.from(matches.airbnb),
-        vrbo: Array.from(matches.vrbo),
-        booking: Array.from(matches.booking),
+        airbnb: photoHits.airbnb.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.airbnb) : [],
+        vrbo: photoHits.vrbo.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.vrbo) : [],
+        booking: photoHits.booking.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.booking) : [],
       },
       checked,
     };
