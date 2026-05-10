@@ -17037,11 +17037,17 @@ Return ONLY compact JSON with this exact shape:
       address: string;
       unitNumber: string;  // e.g. "122", "339" — best-effort across sources
       thumbnail: string;   // Google-provided thumbnail for the result card
+      contextText: string; // search title/snippet used for light scoring before scraping
+      bedroomHint: number | null;
     }
     const candidates: Candidate[] = [];
     const candidateUrlSet = new Set<string>();
     const skipUrlSet = new Set((skipUrls ?? []).map((u) => String(u).toLowerCase()));
     const harvestRootCounts = new Map<string, number>();
+    const parsedRequiredBedrooms = Number(requiredBedrooms);
+    const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
+      ? Math.round(parsedRequiredBedrooms)
+      : null;
 
     // Detect which source a Google-result URL belongs to. URL must
     // be a per-listing detail page, not a search-results or category
@@ -17073,6 +17079,26 @@ Return ONLY compact JSON with this exact shape:
         return raw;
       }
       return "";
+    };
+
+    const extractBedroomHintFromText = (text: string): number | null => {
+      const haystack = text
+        .replace(/&[#a-z0-9]+;/gi, " ")
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ");
+      const patterns = [
+        /\b(\d{1,2})\s*(?:br|bd|bds|beds?|bedrooms?)\b/i,
+        /\b(\d{1,2})\s*(?:bedroom|bed)\s*(?:condo|unit|apartment|villa|townhome|townhouse)\b/i,
+        /\b(?:br|bd|bds|beds?|bedrooms?)\s*[:#-]?\s*(\d{1,2})\b/i,
+      ];
+      for (const pattern of patterns) {
+        const match = haystack.match(pattern);
+        const raw = match?.[1];
+        if (!raw) continue;
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0 && n <= 10) return Math.round(n);
+      }
+      return null;
     };
 
     // Generalized unit-number extraction across listing sources.
@@ -17197,8 +17223,18 @@ Return ONLY compact JSON with this exact shape:
         }
       }
       const addrDisplay = displayAddressFromUrl(link, source);
+      const candidateContextText = `${contextText || ""} ${link}`.trim();
+      const bedroomHint = extractBedroomHintFromText(candidateContextText);
       candidateUrlSet.add(lower);
-      candidates.push({ sourceUrl: link, source, address: addrDisplay || communityName, unitNumber, thumbnail });
+      candidates.push({
+        sourceUrl: link,
+        source,
+        address: addrDisplay || communityName,
+        unitNumber,
+        thumbnail,
+        contextText: candidateContextText,
+        bedroomHint,
+      });
       rememberCandidateRoot(link, contextText);
     };
 
@@ -17223,7 +17259,23 @@ Return ONLY compact JSON with this exact shape:
     //                            broader geographic matches.
     // Realtor + Redfin biased toward "for sale" since they're
     // primarily real-estate sites; Zillow gets the wider mix.
+    const bedroomQueries = requiredBedroomCount
+      ? [
+          `site:zillow.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
+          `site:zillow.com "${communityAddress}" "${requiredBedroomCount} bd"`,
+          `site:zillow.com "${communityName}" "${requiredBedroomCount} bedroom"`,
+          `site:realtor.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
+          `site:realtor.com "${communityName}" "${requiredBedroomCount} bedroom"`,
+          `site:redfin.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
+          `site:homes.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
+        ]
+      : [];
     const searchQueries: string[] = [
+      // Bedroom-aware probes first. The replacement panel is usually
+      // looking for one physical unit size (for example a 3BR slot),
+      // so spend the first pass on candidates that advertise the
+      // required size before broad resort pages burn the route budget.
+      ...bedroomQueries,
       // Zillow — broad coverage
       `site:zillow.com "${communityAddress}"`,
       `site:zillow.com "${communityName}"`,
@@ -17239,8 +17291,8 @@ Return ONLY compact JSON with this exact shape:
     ];
     if (expandedSearch) {
       const quotedStreet = communityAddress && communityAddress !== communityName ? `"${communityAddress}"` : "";
-      const bedroomTerm = typeof requiredBedrooms === "number" && Number.isFinite(requiredBedrooms)
-        ? `"${requiredBedrooms} bedroom"`
+      const bedroomTerm = requiredBedroomCount
+        ? `"${requiredBedroomCount} bedroom"`
         : "condo";
       searchQueries.push(
         `site:zillow.com ${quotedStreet} ${bedroomTerm}`.trim(),
@@ -17342,9 +17394,17 @@ Return ONLY compact JSON with this exact shape:
     // candidate-processing loop's early-return fires on the first
     // viable hit, so for-sale sources get checked first.
     const sourcePriority: Record<CandidateSource, number> = { realtor: 0, redfin: 1, homes: 2, zillow: 3 };
-    candidates.sort((a, b) => sourcePriority[a.source] - sourcePriority[b.source]);
+    const bedroomPriority = (candidate: Candidate): number => {
+      if (!requiredBedroomCount) return 1;
+      if (typeof candidate.bedroomHint !== "number") return 1;
+      return candidate.bedroomHint >= requiredBedroomCount ? 0 : 2;
+    };
+    candidates.sort((a, b) =>
+      bedroomPriority(a) - bedroomPriority(b)
+      || sourcePriority[a.source] - sourcePriority[b.source],
+    );
 
-    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by source priority)`);
+    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by bedroom/source priority)`);
 
     // Step 2 — Per-candidate platform check across the enforced
     // platform(s): all three for default replacement, or only
@@ -17624,6 +17684,22 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        if (
+          requiredBedroomCount
+          && typeof candidate.bedroomHint === "number"
+          && candidate.bedroomHint < requiredBedroomCount
+        ) {
+          console.error(
+            `[find-unit] [${source}] ${sourceUrl} search result advertises ${candidate.bedroomHint}BR, ` +
+            `need ${requiredBedroomCount}BR — skipping before platform/photo checks`,
+          );
+          attempts.push({
+            sourceUrl, source, address, unit: unitNumber || "?",
+            verdict: "skipped-bedroom-mismatch",
+            reason: `Search result says ${candidate.bedroomHint}BR, but this replacement needs at least ${requiredBedroomCount}BR.`,
+          });
+          continue;
+        }
 
         const platformAddress = source === "vrbo" ? address : communityAddress;
         const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
@@ -17697,7 +17773,15 @@ Return ONLY compact JSON with this exact shape:
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
           if (expandedSearch && scrapedPhotoUrls.length < MIN_PHOTOS) {
-            const alternate = await findEquivalentPhotoSource({ sourceUrl, source, address, unitNumber, thumbnail }, MIN_PHOTOS);
+            const alternate = await findEquivalentPhotoSource({
+              sourceUrl,
+              source,
+              address,
+              unitNumber,
+              thumbnail,
+              contextText: candidate.contextText,
+              bedroomHint: candidate.bedroomHint,
+            }, MIN_PHOTOS);
             if (alternate) {
               console.error(`[find-unit] [${source}] using equivalent ${alternate.source} source ${alternate.sourceUrl} for ${sourceUrl}`);
               sourceUrl = alternate.sourceUrl;
@@ -17710,18 +17794,20 @@ Return ONLY compact JSON with this exact shape:
               platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
             }
           }
-          const actualBedrooms = candidateFacts.bedrooms;
+          let actualBedrooms = candidateFacts.bedrooms;
+          if (actualBedrooms == null && typeof candidate.bedroomHint === "number") {
+            actualBedrooms = candidate.bedroomHint;
+          }
           if (
-            typeof requiredBedrooms === "number"
-            && Number.isFinite(requiredBedrooms)
+            requiredBedroomCount
             && typeof actualBedrooms === "number"
-            && actualBedrooms < requiredBedrooms
+            && actualBedrooms < requiredBedroomCount
           ) {
-            console.error(`[find-unit] [${source}] ${sourceUrl} has ${actualBedrooms}BR, need ${requiredBedrooms}BR — skipping`);
+            console.error(`[find-unit] [${source}] ${sourceUrl} has ${actualBedrooms}BR, need ${requiredBedroomCount}BR — skipping`);
             attempts.push({
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-bedroom-mismatch",
-              reason: `Listing is ${actualBedrooms}BR, but this replacement needs at least ${requiredBedrooms}BR.`,
+              reason: `Listing is ${actualBedrooms}BR, but this replacement needs at least ${requiredBedroomCount}BR.`,
               platformCheck,
             });
             continue;
@@ -17791,7 +17877,7 @@ Return ONLY compact JSON with this exact shape:
               url: sourceUrl,
               address,
               unitLabel: unitNumber ? `Unit #${unitNumber}` : "New unit",
-              bedrooms: actualBedrooms ?? requiredBedrooms ?? null,
+              bedrooms: actualBedrooms ?? requiredBedroomCount ?? null,
               source: sourceLabel(source),
               photos,
               photoCount,
