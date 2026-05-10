@@ -1409,6 +1409,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               shortfall?: number;
               upscaledCount?: number;
               trimmed?: number;
+              maxPhotos?: number;
               // "verify" event fields
               attempt?: number;
               expected?: number;
@@ -1452,9 +1453,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
               const trimmed = event.trimmed ?? 0;
               if (trimmed > 0) {
+                const maxPhotos = event.maxPhotos ?? event.total ?? 50;
                 toast({
-                  title: `Trimmed to 40 photos`,
-                  description: `Kept the first 40 (community + units) and dropped ${trimmed} to stay under Booking.com's 40-photo cap.`,
+                  title: `Trimmed to ${maxPhotos} photos`,
+                  description: `Kept the first ${maxPhotos} photos (community + units) and dropped ${trimmed} lower-priority photos to stay within the Guesty/VRBO photo limit.`,
                   duration: 10000,
                 });
               }
@@ -1467,6 +1469,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
+              if (!guestyError) setGuestyPhotoCount(sc);
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
               if (sc === 0 && tot > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");

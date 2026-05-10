@@ -9988,12 +9988,11 @@ export async function registerRoutes(
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
 
-    // Cap total photos sent to Guesty at 40 so Booking.com (~40 hard
-    // limit) and VRBO (50) don't reject the push. The client already
-    // orders photos as: community-begin → Unit A → Unit B → ... →
-    // community-end, which is the priority we want preserved. Trim
-    // from the end (lowest-priority community-end photos first).
-    const MAX_GUESTY_PHOTOS = 40;
+    // Cap the Guesty master photo set at 50. That matches VRBO's published
+    // max and still gives Airbnb plenty of room. Booking.com's lower cap is
+    // surfaced in the UI/channel-specific tools; enforcing it here would strip
+    // useful photos from the Guesty/Airbnb/VRBO source set.
+    const MAX_GUESTY_PHOTOS = 50;
     const photos = rawPhotos.length > MAX_GUESTY_PHOTOS
       ? rawPhotos.slice(0, MAX_GUESTY_PHOTOS)
       : rawPhotos;
@@ -10181,7 +10180,7 @@ export async function registerRoutes(
         console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}`);
       } catch (e: any) {
         console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
-        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, guestyError: e.message });
+        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, maxPhotos: MAX_GUESTY_PHOTOS, guestyError: e.message });
         res.end();
         return;
       }
@@ -10238,6 +10237,7 @@ export async function registerRoutes(
       upscaledCount,
       total: photos.length,
       trimmed: trimmedCount,
+      maxPhotos: MAX_GUESTY_PHOTOS,
     });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
@@ -22323,7 +22323,7 @@ Return ONLY compact JSON with this exact shape:
       // Order: community folder first, then each unit folder in builder.units
       // order. Filenames sorted lexicographically inside each folder. Captions
       // come from the photoLabels DB (userLabel beats label) with a humanized-
-      // filename fallback. push-photos enforces the 40-photo Booking.com cap
+      // filename fallback. push-photos enforces the 50-photo Guesty/VRBO cap
       // server-side, so we don't trim here.
       const photosRoot = path.join(process.cwd(), "client/public/photos");
       const captionFallback = (filename: string): string =>
