@@ -335,6 +335,8 @@ export default function BuilderPreflight() {
   const [progressTick, setProgressTick] = useState(0);
   const [results, setResults] = useState<ProgressiveResults>({});
   const [platformDone, setPlatformDone] = useState(false);
+  const [fullAuditRunning, setFullAuditRunning] = useState(false);
+  const [lastCheckWasFullAudit, setLastCheckWasFullAudit] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
   const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
   const [swapsCommitted, setSwapsCommitted] = useState(false);
@@ -447,8 +449,14 @@ export default function BuilderPreflight() {
   const city = cityMatch ? cityMatch[1].trim() : property.address;
 
   // ── Check one unit at a time, updating results as each completes ──────────
-  const runPlatformCheck = async (unitsToCheck = effectiveUnits) => {
+  const runPlatformCheck = async (
+    unitsToCheck = effectiveUnits,
+    opts: { fullPhotoAudit?: boolean } = {},
+  ) => {
+    const fullPhotoAudit = opts.fullPhotoAudit === true;
     setPlatformChecking(true);
+    setFullAuditRunning(fullPhotoAudit);
+    setLastCheckWasFullAudit(false);
     setPlatformDone(false);
     setResults({});
     setCompletedCount(0);
@@ -459,23 +467,24 @@ export default function BuilderPreflight() {
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
 
-    const hasPhotos = unitsToCheck.some(u => !(u as any)._isReplaced && (u as any).photoFolder);
+    const hasPhotos = unitsToCheck.some(u => fullPhotoAudit ? !!(u as any).photoFolder : (!(u as any)._isReplaced && (u as any).photoFolder));
     if (hasPhotos) setCheckPhase("text");
 
     await Promise.all(
       unitsToCheck.map(async (unit) => {
         const address = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
-        const hasUnitPhoto = !(unit as any)._isReplaced && (unit as any).photoFolder;
+        const hasUnitPhoto = fullPhotoAudit ? !!(unit as any).photoFolder : (!(unit as any)._isReplaced && (unit as any).photoFolder);
         const unitPayload = [{
           unitId: unit.id,
           unitNumber: unit.unitNumber,
           address,
-          photoFolder: (unit as any)._isReplaced ? "" : unit.photoFolder,
+          photoFolder: hasUnitPhoto ? unit.photoFolder : "",
         }];
         const params = new URLSearchParams({
           name: property.propertyName,
           city,
           units: JSON.stringify(unitPayload),
+          photoMode: fullPhotoAudit ? "full" : "sample",
         });
         if (hasUnitPhoto) setCheckPhase("photo");
         try {
@@ -528,14 +537,22 @@ export default function BuilderPreflight() {
 
     setCheckPhase("done");
     setPlatformChecking(false);
+    setFullAuditRunning(false);
     setCheckStartedAt(null);
     setPlatformDone(true);
+    setLastCheckWasFullAudit(fullPhotoAudit);
   };
 
   const rerunChecks = () => {
     setPlatformDone(false);
     setResults({});
     runPlatformCheck();
+  };
+
+  const runFullUnitAudit = () => {
+    setPlatformDone(false);
+    setResults({});
+    runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
   };
 
   // Undo a saved unit swap — deletes from DB and removes from state
@@ -604,6 +621,7 @@ export default function BuilderPreflight() {
     .filter((unit) => checkingUnitIds.has(unit.id))
     .map((unit) => `Unit ${unit.unitNumber}`)
     .join(", ");
+  const canFullUnitAudit = effectiveUnits.some((unit) => !!(unit as any).photoFolder);
   const targetUnit = replacementTargetId
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
@@ -732,26 +750,41 @@ export default function BuilderPreflight() {
           <div className="flex items-start justify-between gap-4 mb-1">
             <h2 className="text-base font-semibold">Platform Check</h2>
             {!isCheckRunning && (
-              <Button
-                id={platformDone ? "btn-rerun-checks" : "btn-run-checks"}
-                aria-label={platformDone ? "Re-run platform check" : "Run platform check"}
-                variant="ghost"
-                size="sm"
-                onClick={rerunChecks}
-                className="h-7 px-2 text-xs flex-shrink-0"
-              >
-                {platformDone ? (
-                  <>
-                    <RotateCcw className="h-3 w-3 mr-1" />
-                    Re-run
-                  </>
-                ) : (
-                  <>
-                    <Search className="h-3 w-3 mr-1" />
-                    Run check
-                  </>
+              <div className="flex flex-wrap justify-end gap-2">
+                {canFullUnitAudit && (
+                  <Button
+                    id="btn-full-unit-audit"
+                    aria-label="Run full unit photo audit"
+                    variant="outline"
+                    size="sm"
+                    onClick={runFullUnitAudit}
+                    className="h-7 px-2 text-xs flex-shrink-0"
+                  >
+                    <Camera className="h-3 w-3 mr-1" />
+                    Full unit audit
+                  </Button>
                 )}
-              </Button>
+                <Button
+                  id={platformDone ? "btn-rerun-checks" : "btn-run-checks"}
+                  aria-label={platformDone ? "Re-run platform check" : "Run platform check"}
+                  variant="ghost"
+                  size="sm"
+                  onClick={rerunChecks}
+                  className="h-7 px-2 text-xs flex-shrink-0"
+                >
+                  {platformDone ? (
+                    <>
+                      <RotateCcw className="h-3 w-3 mr-1" />
+                      Re-run
+                    </>
+                  ) : (
+                    <>
+                      <Search className="h-3 w-3 mr-1" />
+                      Run check
+                    </>
+                  )}
+                </Button>
+              </div>
             )}
           </div>
           <p className="text-sm text-muted-foreground mb-4">
@@ -759,6 +792,11 @@ export default function BuilderPreflight() {
               ? "Click Run check when you're ready. It searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."
               : "Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."}
           </p>
+          {lastCheckWasFullAudit && hasAnyResults && (
+            <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
+              Full unit audit complete: every available photo in each unit folder was checked against Airbnb, VRBO, and Booking.com.
+            </div>
+          )}
 
           {/* Committed swaps summary — renders every unit (swapped OR original)
               so the user can rescrape any one of them directly. */}
@@ -1030,7 +1068,9 @@ export default function BuilderPreflight() {
               `}</style>
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5 font-medium">
-                  {checkPhase === "photo" ? (
+                  {fullAuditRunning ? (
+                    <><Camera className="h-3.5 w-3.5 animate-pulse text-primary" /> Running full unit photo audit…</>
+                  ) : checkPhase === "photo" ? (
                     <><Camera className="h-3.5 w-3.5 animate-pulse text-primary" /> Running photo reverse-image search…</>
                   ) : checkPhase === "text" ? (
                     <><Search className="h-3.5 w-3.5 animate-pulse text-primary" /> Searching Airbnb, VRBO &amp; Booking.com…</>
@@ -1062,7 +1102,9 @@ export default function BuilderPreflight() {
               </div>
               <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                 <p>
-                  {checkPhase === "photo"
+                  {fullAuditRunning
+                    ? "Checking every available unit photo with Google Lens. This is slower, but gives the strongest photo-overlap answer."
+                    : checkPhase === "photo"
                     ? "Uploading photos to Google Lens and waiting for reverse-image matches."
                     : "Querying search engines for address and unit number matches across all platforms."}
                 </p>

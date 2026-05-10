@@ -16115,6 +16115,8 @@ Return ONLY compact JSON with this exact shape:
     let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string }[] = [];
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
+    const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
+    const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
 
     const PLATFORM_CONFIGS = [
       { key: "airbnb",  pattern: "airbnb.com/rooms/" },
@@ -16357,7 +16359,10 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
-    // ── Helper: photo reverse image search for a unit (caps at 3 photos) ──────
+    // ── Helper: photo reverse image search for a unit.
+    // Default preflight stays quick by sampling the first 5 photos. The
+    // explicit full unit audit scans every local photo in the folder so
+    // "Not Found" is based on the whole available unit gallery.
     type PhotoSignals = Record<string, boolean>; // platform key → found
     type PhotoMatchedUrls = Record<string, string | null>; // platform key → URL of the FIRST listing-page hit
     const photoSearch = async (photoFolder: string, unitNumber: string): Promise<{
@@ -16378,7 +16383,8 @@ Return ONLY compact JSON with this exact shape:
       if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
       if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCount: 0, totalChecked: 0 };
-      const files = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort().slice(0, 5);
+      const allFiles = fs.readdirSync(folderPath).filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f)).sort();
+      const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
       const unitTokens = extractUnitTokens(unitNumber);
       const verifyTokens = [...new Set([...folderTokens, ...unitTokens])];
@@ -16505,7 +16511,13 @@ Return ONLY compact JSON with this exact shape:
         return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
       if (text.listed === null)
         return { status: "error", url: null, detection: "Could not verify" };
-      return { status: "not-listed", url: null, detection: "No signals found" };
+      return {
+        status: "not-listed",
+        url: null,
+        detection: totalPhotos > 0
+          ? `No signals found (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked)`
+          : "No signals found",
+      };
     };
 
     // ── Pre-load scanner data for any photoFolders we'll be checking. ──────────
@@ -16611,7 +16623,7 @@ Return ONLY compact JSON with this exact shape:
       }),
     );
 
-    res.json({ units: resultUnits });
+    res.json({ units: resultUnits, photoMode: fullPhotoAudit ? "full" : "sample" });
   });
 
   // Photo audit: runs reverse image search on each unit photo to detect platform listings
