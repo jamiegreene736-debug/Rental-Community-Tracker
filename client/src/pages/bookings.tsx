@@ -290,6 +290,20 @@ function guestInboxHref(r: GuestyReservation): string {
   return `/inbox?${params.toString()}`;
 }
 
+function groundFloorRequirementHref(r: GuestyReservation, propertyId: number): string {
+  const params = new URLSearchParams();
+  params.set("propertyId", String(propertyId));
+  params.set("totalUnits", String(r.slots.length));
+  if (r.confirmationCode) params.set("confirmationCode", r.confirmationCode);
+  const guestName = r.guest?.fullName ?? r.guest?.firstName;
+  if (guestName) params.set("guestName", guestName);
+  const checkIn = r.checkInDateLocalized ?? r.checkIn;
+  const checkOut = r.checkOutDateLocalized ?? r.checkOut;
+  if (checkIn) params.set("checkIn", checkIn.slice(0, 10));
+  if (checkOut) params.set("checkOut", checkOut.slice(0, 10));
+  return `/api/bookings/${encodeURIComponent(r._id)}/ground-floor-requirement?${params.toString()}`;
+}
+
 async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { credentials: "include", signal });
   if (!res.ok) {
@@ -844,7 +858,7 @@ function GroundFloorRequirementNotice({
   }>({
     queryKey: ["/api/bookings", reservation._id, "ground-floor-requirement", propertyId, reservation.slots.length],
     queryFn: () => apiGetJson(
-      `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${propertyId}&totalUnits=${reservation.slots.length}`,
+      groundFloorRequirementHref(reservation, propertyId),
     ),
     enabled: !!reservation._id,
     staleTime: 60_000,
@@ -1847,7 +1861,7 @@ export default function Bookings() {
 
       const groundFloorRequirement = await apiRequest(
         "GET",
-        `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${selectedPropertyId}&totalUnits=${reservation.slots.length}`,
+        groundFloorRequirementHref(reservation, selectedPropertyId),
       )
         .then((r) => r.json() as Promise<GroundFloorRequirement & { conversationId?: string | null }>)
         .catch((): GroundFloorRequirement => ({
@@ -4387,7 +4401,7 @@ function LiveSearchSection({
   const { data: groundRequirement, isLoading: groundRequirementLoading } = useQuery<GroundFloorRequirement & { conversationId?: string | null }>({
     queryKey: ["/api/bookings", reservation._id, "ground-floor-requirement", propertyId, reservation.slots.length],
     queryFn: () => apiGetJson<GroundFloorRequirement & { conversationId?: string | null }>(
-      `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${propertyId}&totalUnits=${reservation.slots.length}`,
+      groundFloorRequirementHref(reservation, propertyId),
     ),
     enabled: !!reservation._id,
     staleTime: 60_000,

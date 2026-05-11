@@ -4409,6 +4409,24 @@ export async function registerRoutes(
   }
 
   const unwrapGuestyList = (data: any, keys: string[]): any[] => {
+    const seen = new Set<any>();
+    const visit = (node: any, depth: number): any[] | null => {
+      if (Array.isArray(node)) return node;
+      if (!node || typeof node !== "object" || depth > 3 || seen.has(node)) return null;
+      seen.add(node);
+      for (const key of keys) {
+        if (Array.isArray(node[key])) return node[key];
+      }
+      for (const value of Object.values(node)) {
+        if (value && typeof value === "object") {
+          const found = visit(value, depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const nested = visit(data, 0);
+    if (nested) return nested;
     for (const key of keys) {
       const value = data?.[key] ?? data?.data?.[key];
       if (Array.isArray(value)) return value;
@@ -4416,6 +4434,67 @@ export async function registerRoutes(
     if (Array.isArray(data?.data)) return data.data;
     if (Array.isArray(data?.results)) return data.results;
     return [];
+  };
+
+  const normalizeConversationLookupText = (value: unknown): string =>
+    String(value ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+
+  const dateOnlyForLookup = (value: unknown): string => {
+    const raw = String(value ?? "").trim();
+    return /^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(0, 10) : "";
+  };
+
+  const firstConversationReservation = (conversation: any): any => {
+    const meta = conversation?.meta ?? {};
+    if (Array.isArray(meta.reservations) && meta.reservations.length > 0) return meta.reservations[0];
+    return conversation?.reservation ?? meta.reservation ?? null;
+  };
+
+  const conversationReservationId = (conversation: any): string => {
+    const reservation = firstConversationReservation(conversation);
+    return String(conversation?.reservationId ?? reservation?._id ?? reservation?.id ?? "").trim();
+  };
+
+  const conversationConfirmationCode = (conversation: any): string => {
+    const reservation = firstConversationReservation(conversation);
+    return normalizeConversationLookupText(
+      conversation?.confirmationCode ??
+      reservation?.confirmationCode ??
+      reservation?.confirmation?.code,
+    );
+  };
+
+  const conversationGuestName = (conversation: any): string => {
+    const meta = conversation?.meta ?? {};
+    const reservation = firstConversationReservation(conversation);
+    const guest = conversation?.guest ?? meta.guest ?? reservation?.guest ?? {};
+    return normalizeConversationLookupText(
+      conversation?.guestName ??
+      guest?.fullName ??
+      guest?.name ??
+      [guest?.firstName, guest?.lastName].filter(Boolean).join(" "),
+    );
+  };
+
+  const conversationDateRangeKey = (conversation: any): string => {
+    const reservation = firstConversationReservation(conversation);
+    const checkIn = dateOnlyForLookup(
+      conversation?.checkIn ??
+      conversation?.conversationCheckIn ??
+      reservation?.checkInDateLocalized ??
+      reservation?.checkIn,
+    );
+    const checkOut = dateOnlyForLookup(
+      conversation?.checkOut ??
+      conversation?.conversationCheckOut ??
+      reservation?.checkOutDateLocalized ??
+      reservation?.checkOut,
+    );
+    return checkIn && checkOut ? `${checkIn}|${checkOut}` : "";
   };
 
   const postBodyText = (post: any): string => String(
@@ -4449,7 +4528,19 @@ export async function registerRoutes(
       body.startsWith("new guest reservation");
   };
 
-  const findConversationByReservation = async (reservationId: string): Promise<{ id: string; conversation: any } | null> => {
+  const findConversationByReservation = async ({
+    reservationId,
+    confirmationCode,
+    guestName,
+    checkIn,
+    checkOut,
+  }: {
+    reservationId: string;
+    confirmationCode?: string | null;
+    guestName?: string | null;
+    checkIn?: string | null;
+    checkOut?: string | null;
+  }): Promise<{ id: string; conversation: any } | null> => {
     try {
       const data = await guestyRequest("GET", `/communication/conversations?reservationId=${encodeURIComponent(reservationId)}&limit=1&fields=`) as any;
       const rows = unwrapGuestyList(data, ["conversations", "results", "data"]);
@@ -4459,15 +4550,64 @@ export async function registerRoutes(
     } catch (e: any) {
       console.warn(`[ground-floor] conversation lookup failed for reservation ${reservationId}: ${e?.message ?? e}`);
     }
+
+    const targetReservationId = String(reservationId ?? "").trim();
+    const targetConfirmation = normalizeConversationLookupText(confirmationCode);
+    const targetGuest = normalizeConversationLookupText(guestName);
+    const checkInOnly = dateOnlyForLookup(checkIn);
+    const checkOutOnly = dateOnlyForLookup(checkOut);
+    const targetDates = checkInOnly && checkOutOnly ? `${checkInOnly}|${checkOutOnly}` : "";
+
+    try {
+      const data = await guestyRequest("GET", `/communication/conversations?limit=100&fields=`) as any;
+      const rows = unwrapGuestyList(data, ["conversations", "results", "data"]);
+      const withId = rows
+        .map((conversation) => ({ id: conversation?._id ?? conversation?.id, conversation }))
+        .filter((row) => row.id);
+
+      const byReservation = withId.find((row) => conversationReservationId(row.conversation) === targetReservationId);
+      if (byReservation) return byReservation;
+
+      if (targetConfirmation) {
+        const byConfirmation = withId.find((row) => conversationConfirmationCode(row.conversation) === targetConfirmation);
+        if (byConfirmation) return byConfirmation;
+      }
+
+      if (targetGuest) {
+        const guestMatches = withId.filter((row) => {
+          const candidateGuest = conversationGuestName(row.conversation);
+          if (!candidateGuest) return false;
+          const guestMatchesExactly =
+            candidateGuest === targetGuest ||
+            candidateGuest.includes(targetGuest) ||
+            targetGuest.includes(candidateGuest);
+          if (!guestMatchesExactly) return false;
+          if (!targetDates) return true;
+          const candidateDates = conversationDateRangeKey(row.conversation);
+          return !candidateDates || candidateDates === targetDates;
+        });
+        if (guestMatches.length === 1) return guestMatches[0];
+        const dateMatch = guestMatches.find((row) => conversationDateRangeKey(row.conversation) === targetDates);
+        if (dateMatch) return dateMatch;
+      }
+    } catch (e: any) {
+      console.warn(`[ground-floor] conversation list fallback failed for reservation ${reservationId}: ${e?.message ?? e}`);
+    }
     return null;
   };
 
-  const loadGuestMessageTextsForReservation = async (reservationId: string): Promise<{
+  const loadGuestMessageTextsForReservation = async (lookup: {
+    reservationId: string;
+    confirmationCode?: string | null;
+    guestName?: string | null;
+    checkIn?: string | null;
+    checkOut?: string | null;
+  }): Promise<{
     conversationId: string | null;
     messages: string[];
     sourceCounts: { guestyPosts: number; sms: number };
   }> => {
-    const conv = await findConversationByReservation(reservationId);
+    const conv = await findConversationByReservation(lookup);
     if (!conv) return { conversationId: null, messages: [], sourceCounts: { guestyPosts: 0, sms: 0 } };
 
     let guestyPosts: any[] = [];
@@ -8802,8 +8942,18 @@ export async function registerRoutes(
         : propertyId
           ? Math.max(1, getPropertyUnits(propertyId).length || 2)
           : 2;
+      const confirmationCode = String(req.query.confirmationCode ?? "").trim() || null;
+      const guestName = String(req.query.guestName ?? "").trim() || null;
+      const checkIn = String(req.query.checkIn ?? "").trim() || null;
+      const checkOut = String(req.query.checkOut ?? "").trim() || null;
 
-      const loaded = await loadGuestMessageTextsForReservation(reservationId);
+      const loaded = await loadGuestMessageTextsForReservation({
+        reservationId,
+        confirmationCode,
+        guestName,
+        checkIn,
+        checkOut,
+      });
       const requirement = analyzeGroundFloorRequirement(loaded.messages, totalUnits);
       res.json({
         reservationId,
