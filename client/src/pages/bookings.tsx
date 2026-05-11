@@ -142,6 +142,9 @@ type AutoFillSearchSummary = {
   scanned: number;
   priced: number;
   sourceCounts: { airbnb: number; vrbo: number; booking: number; pm: number };
+  kept: number;
+  targetFiltered: number;
+  groundFloorOnly: boolean;
 };
 
 type AutoFillComboOption = {
@@ -888,6 +891,7 @@ function GroundFloorRequirementNotice({
       </div>
     );
   }
+  const targetBedrooms = groundFloorTargetBedrooms(data);
 
   return (
     <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
@@ -898,11 +902,11 @@ function GroundFloorRequirementNotice({
         </p>
         <Badge variant="outline" className="border-amber-300 bg-white text-[10px] text-amber-900">
           {data.requiredUnits} ground-floor {data.requiredUnits === 1 ? "unit" : "units"} required
-          {data.targetBedrooms?.length ? ` · ${data.targetBedrooms.map((b) => `${b}BR`).join(" + ")}` : ""}
+          {targetBedrooms.length ? ` · ${targetBedrooms.map((b) => `${b}BR`).join(" + ")}` : ""}
         </Badge>
       </div>
       <p className="mt-1 text-[11px] leading-snug text-amber-900">
-        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}{data.targetBedrooms?.length ? ` (${data.targetBedrooms.map((b) => `${b}BR`).join(" + ")})` : ""}.
+        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}{targetBedrooms.length ? ` (${targetBedrooms.map((b) => `${b}BR`).join(" + ")})` : ""}.
         {data.scope === "unknown" ? " Scope is unclear, so the tool assumes at least one ground-floor unit until clarified." : ""}
       </p>
       {data.evidence?.[0] && (
@@ -912,6 +916,32 @@ function GroundFloorRequirementNotice({
       )}
     </div>
   );
+}
+
+function groundFloorTargetBedrooms(req?: GroundFloorRequirement | null): number[] {
+  const explicit = (req?.targetBedrooms ?? [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (explicit.length > 0) return Array.from(new Set(explicit)).sort((a, b) => b - a);
+
+  const text = [req?.summary, ...(req?.evidence ?? [])].filter(Boolean).join(" ");
+  if (!text) return [];
+  const targets = new Set<number>();
+  const groundRe = /\b(ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|main[-\s]?floor|downstairs|lower[-\s]?level|street[-\s]?level|no\s+stairs?|stair[-\s]?free|accessible|accessibility|mobility)\b/i;
+  const mandatoryRe = /\b(mandatory|required|require|requires|need|needs|needed|must|have to|has to|can't|cannot|unable|where\s+(?:she|he|they|we|my|our)\b.{0,30}\b(?:stay|staying|sleep|sleeping))\b/i;
+  const optionalRe = /\b(would be nice|nice to have|if available|if you have|optional|prefer|preference|less desirable|not mandatory|not required|doesn't have to|does not have to)\b/i;
+  const bedroomRe = /\b(\d{1,2})\s*[-\s]?(?:br|bd|bdr|bdrm|bed|beds|bedroom|bedrooms)\b/gi;
+  for (const segment of text.split(/(?<=[.!?])\s+|\n+|;\s*/g)) {
+    if (!groundRe.test(segment)) continue;
+    if (optionalRe.test(segment) && !mandatoryRe.test(segment)) continue;
+    bedroomRe.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = bedroomRe.exec(segment)) !== null) {
+      const bedrooms = Number.parseInt(match[1], 10);
+      if (Number.isFinite(bedrooms) && bedrooms > 0 && bedrooms < 20) targets.add(bedrooms);
+    }
+  }
+  return Array.from(targets).sort((a, b) => b - a);
 }
 
 function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
@@ -1023,7 +1053,12 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
           const optimizedCombo = optimizedComboByLabel.get(option.label) ?? null;
           const isOptimizedWinner = optimizedOptionLabel === option.label;
           const isOptimizedOption = !!optimizedCombo;
-          const displayedPicks = optimizedCombo ? optimizedCombo.picks : option.picks;
+          const displayedPicks = optimizedCombo
+            ? optimizedCombo.picks.map((pick, index) => ({
+              ...pick,
+              bedrooms: optimizedCombo.option.bedrooms[index] ?? 0,
+            }))
+            : option.picks;
           const displayedTotal = optimizedCombo ? optimizedCombo.totalCost : option.totalCost;
           return (
           <details
@@ -1216,8 +1251,14 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                 <div>
                   <p className="font-semibold">{audit.bedrooms}BR search</p>
                   <p className="text-[11px] text-muted-foreground">
-                    {audit.counts.scanned} scanned · {audit.counts.priced} priced · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
+                    {audit.counts.scanned} scanned · {audit.counts.priced} priced · {audit.counts.kept} curated · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
+                    {audit.counts.groundFloorOnly ? " · ground-floor required" : ""}
                   </p>
+                  {audit.counts.targetFiltered > 0 && (
+                    <p className="text-[11px] text-amber-700">
+                      {audit.counts.targetFiltered} upstream option{audit.counts.targetFiltered === 1 ? "" : "s"} filtered out before curation because they did not match the target resort/bedroom rules.
+                    </p>
+                  )}
                 </div>
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(audit.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
@@ -1257,7 +1298,12 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                                 )}
                                 {candidate.title}
                                 {candidate.verified && (
-                                  <span className="ml-1 text-muted-foreground">· {candidate.verified}</span>
+                                  <span className="ml-1 text-muted-foreground">· availability {candidate.verified}</span>
+                                )}
+                                {candidate.groundFloorStatus && (
+                                  <Badge variant="outline" className={`ml-1 text-[9px] ${groundFloorBadge(candidate.groundFloorStatus).className}`}>
+                                    {groundFloorBadge(candidate.groundFloorStatus).label}
+                                  </Badge>
                                 )}
                               </span>
                               <span className="text-[11px] font-semibold tabular-nums">
@@ -1878,7 +1924,7 @@ export default function Bookings() {
         groundFloorRequirement.requested ? Math.max(1, groundFloorRequirement.requiredUnits) : 0,
       );
       const requiredGroundFloorBedrooms = new Set(
-        (groundFloorRequirement.targetBedrooms ?? [])
+        groundFloorTargetBedrooms(groundFloorRequirement)
           .map((n) => Number(n))
           .filter((n) => Number.isFinite(n) && n > 0),
       );
@@ -1950,6 +1996,13 @@ export default function Bookings() {
       };
 
       const searchSummaryFor = (data: FindBuyInResponse, searchedBedrooms: number): AutoFillSearchSummary => {
+        const rawCounts = data.debug?.rawCounts ?? {};
+        const rawSourceCounts = {
+          airbnb: Number(rawCounts.airbnbWebsiteSidecar ?? rawCounts.airbnb ?? 0) || 0,
+          vrbo: Number(rawCounts.vrbo ?? 0) || 0,
+          booking: Number(rawCounts.bookingWebsiteSidecar ?? rawCounts.booking ?? 0) || 0,
+          pm: Number(rawCounts.pmFromWebsiteSidecar ?? rawCounts.pmWebsiteSidecarRaw ?? rawCounts.pm ?? 0) || 0,
+        };
         const sourceCounts = {
           airbnb: data.sources?.airbnb?.length ?? 0,
           vrbo: data.sources?.vrbo?.length ?? 0,
@@ -1962,11 +2015,25 @@ export default function Bookings() {
           ...(data.sources?.booking ?? []),
           ...(data.sources?.pm ?? []),
         ];
+        const targetFilter = data.debug?.dropped?.targetFilter ?? {};
+        const targetFiltered = Object.values(targetFilter).reduce((sum, value) => sum + (Number(value) || 0), 0);
+        const scannedSourceCounts = {
+          airbnb: Math.max(sourceCounts.airbnb, rawSourceCounts.airbnb),
+          vrbo: Math.max(sourceCounts.vrbo, rawSourceCounts.vrbo),
+          booking: Math.max(sourceCounts.booking, rawSourceCounts.booking),
+          pm: Math.max(sourceCounts.pm, rawSourceCounts.pm),
+        };
+        const scanned = Object.values(scannedSourceCounts).reduce((sum, value) => sum + value, 0);
         return {
           bedrooms: searchedBedrooms,
-          scanned: allSourceCandidates.length,
-          priced: allSourceCandidates.filter((c) => c.totalPrice > 0).length,
-          sourceCounts,
+          scanned: Math.max(scanned, allSourceCandidates.length),
+          priced: typeof data.totalPricedResults === "number"
+            ? data.totalPricedResults
+            : allSourceCandidates.filter((c) => c.totalPrice > 0).length,
+          sourceCounts: scannedSourceCounts,
+          kept: allSourceCandidates.length,
+          targetFiltered,
+          groundFloorOnly: !!data.groundFloorOnly,
         };
       };
       const auditCandidateFrom = (candidate: LiveCandidate): AutoFillAuditCandidate => ({
@@ -4025,14 +4092,27 @@ type FindBuyInResponse = {
   // teardown — older deploys may not return this field, so the panel
   // falls back to the flat `cheapest` list.
   cheapestUnits?: LiveUnit[];
+  totalPricedResults?: number;
   debug?: {
-    rawCounts?: { airbnb?: number; airbnbEngine?: number; vrbo?: number; booking?: number; pm?: number; photoMatches?: number };
+    rawCounts?: {
+      airbnb?: number;
+      airbnbEngine?: number;
+      airbnbWebsiteSidecar?: number;
+      vrbo?: number;
+      booking?: number;
+      bookingWebsiteSidecar?: number;
+      pm?: number;
+      pmFromWebsiteSidecar?: number;
+      pmWebsiteSidecarRaw?: number;
+      photoMatches?: number;
+    };
     dropped?: {
       airbnb?: { noResort: number; wrongBedrooms: number };
       vrbo?: { noResort: number; wrongBedrooms: number };
       booking?: { noResort: number; wrongBedrooms: number };
       photoMatchBedroomMismatch?: number;
       photoMatchLanding?: number;
+      targetFilter?: { airbnb?: number; vrbo?: number; booking?: number; pm?: number };
     };
     verification?: {
       attempted: number;
@@ -4109,8 +4189,9 @@ function groundFloorBadge(status?: GroundFloorStatus | null) {
 
 function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): string {
   if (!req?.requested) return "No ground-floor request found";
-  if (req.targetBedrooms?.length) {
-    return `Ground-floor needed: ${req.targetBedrooms.map((b) => `${b}BR`).join(" + ")} unit${req.targetBedrooms.length === 1 ? "" : "s"}`;
+  const targetBedrooms = groundFloorTargetBedrooms(req);
+  if (targetBedrooms.length) {
+    return `Ground-floor needed: ${targetBedrooms.map((b) => `${b}BR`).join(" + ")} unit${targetBedrooms.length === 1 ? "" : "s"}`;
   }
   if (req.scope === "both") return "Ground-floor needed: both units";
   if (req.scope === "one") return "Ground-floor needed: at least one unit";
@@ -4446,7 +4527,7 @@ function LiveSearchSection({
     staleTime: 60_000,
   });
   const confirmedGroundFloorSlots = reservation.slots.filter((s) => s.buyIn?.groundFloorStatus === "confirmed").length;
-  const targetGroundFloorBedrooms = new Set((groundRequirement?.targetBedrooms ?? []).map((n) => Number(n)));
+  const targetGroundFloorBedrooms = new Set(groundFloorTargetBedrooms(groundRequirement).map((n) => Number(n)));
   const groundFloorNeededForThisSlot = !!groundRequirement?.requested
     && (targetGroundFloorBedrooms.size > 0
       ? targetGroundFloorBedrooms.has(slot.bedrooms) && slot.buyIn?.groundFloorStatus !== "confirmed"

@@ -5598,7 +5598,7 @@ export async function registerRoutes(
     };
 
     const websiteSearchTerm = resortName || community;
-    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut}`);
+    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
 
     const scanStartedAt = Date.now();
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
