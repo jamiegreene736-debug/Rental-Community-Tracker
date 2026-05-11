@@ -24563,7 +24563,7 @@ CONSTRAINTS
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return res.status(503).json({ error: "AI drafting unavailable (no ANTHROPIC_API_KEY configured)" });
 
-    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel, isInitialContact, isWelcomeDraft } = req.body as {
+    const { guestMessage, propertyName, guestName, checkIn, checkOut, guestsCount, propertyContext, isHawaii, channel, conversationHistory, reservationStatus, conversationPhase, isInitialContact, isWelcomeDraft } = req.body as {
       guestMessage?: string;
       propertyName?: string;
       guestName?: string;
@@ -24594,6 +24594,13 @@ CONSTRAINTS
       // empty string falls back to a generic "the booking platform"
       // phrasing.
       channel?: string;
+      // Recent visible conversation turns, oldest -> newest. The
+      // latest guest message is still sent separately as guestMessage;
+      // this is context only so follow-up replies don't answer the
+      // original inquiry again.
+      conversationHistory?: string | null;
+      reservationStatus?: string | null;
+      conversationPhase?: string | null;
       // True when the current conversation has no prior host reply.
       // The closer is added deterministically after humanization so
       // first-contact drafts always end with the approved hospitality line.
@@ -24606,6 +24613,10 @@ CONSTRAINTS
     };
 
     const guestMessageText = String(guestMessage ?? "").trim();
+    const conversationHistoryText = String(conversationHistory ?? "").trim().slice(0, 6000);
+    const reservationStatusText = String(reservationStatus ?? "").trim();
+    const conversationPhaseText = String(conversationPhase ?? "").trim();
+    const bookedOrConfirmedConversation = /\b(booked|confirmed|reserved|accepted|checked[_\s-]?in|completed)\b/i.test(`${reservationStatusText} ${conversationPhaseText}`);
     const welcomeDraft = !!isWelcomeDraft || (!guestMessageText && !!isInitialContact);
     if (!guestMessageText && !welcomeDraft) return res.status(400).json({ error: "guestMessage is required" });
 
@@ -24801,8 +24812,21 @@ ${propertyContext}
     if (typeof guestsCount === "number" && guestsCount > 0) {
       knownLines.push(`- Guests on the inquiry: ${guestsCount}`);
     }
+    if (reservationStatusText) knownLines.push(`- Reservation status: ${reservationStatusText}`);
+    if (conversationPhaseText) knownLines.push(`- Conversation phase: ${conversationPhaseText}`);
+    if (bookedOrConfirmedConversation) {
+      knownLines.push("- This booking is already confirmed/booked. Do NOT write as if the guest still needs to book, be accepted, or have the booking locked in.");
+    }
     const knownBlock = knownLines.length > 0
       ? `ALREADY KNOWN ABOUT THIS BOOKING (do NOT ask the guest for these — they're already attached to the inquiry):\n${knownLines.join("\n")}\n\n`
+      : "";
+    const conversationHistoryBlock = conversationHistoryText
+      ? `RECENT THREAD CONTEXT (oldest → newest, for context only):
+${conversationHistoryText}
+
+CRITICAL FOLLOW-UP RULE: Reply to the LATEST GUEST MESSAGE below, not the first/original inquiry. Use earlier thread turns only to understand what was already discussed, and do not re-answer older guest questions unless the latest message asks you to clarify them.
+
+`
       : "";
 
     // Detect accessibility / floor-plan / mobility concerns in the
@@ -24826,6 +24850,8 @@ Source priority for the answer (use the FIRST one that applies):
 1. If the property facts include a FLOOR PLAN / ACCESSIBILITY block, paraphrase it accurately. That note is authoritative — it captures complex-specific variation (e.g. mix of single-level and multi-level units) the propertyType alone doesn't.
 
    COMMITMENT — when the FLOOR PLAN / ACCESSIBILITY block says we WILL accommodate by assigning a specific unit type (single-level / ground-floor / Moana plan / etc.), state the commitment FIRMLY in the reply: "We'll ensure the unit needed for accessibility is [unit-type the note names]" — NOT softer hedges like "we'll prioritize", "we'll try", "we'll request if available", "after you book", "once your booking is confirmed", or "we'll do our best." The operator already authorized the commitment in the note — pass it through as a firm guarantee. Never ask the guest to book first before we solve the accessibility need.
+
+   PRIORITY / TRADEOFFS — if the latest guest message says one unit's ground-floor access is mandatory but the other is optional, nice-to-have, or depends on quality/distance, preserve that distinction. Commit to the mandatory need only, then say you will prioritize the optional second unit when it does not create a worse overall setup. Do NOT answer as if both units are equally mandatory.
 
    TRANSITION TONE — open the accessibility paragraph with a warm, conversational acknowledgment, NOT a clinical or commanding one. If the note authorizes a guarantee, a "here's the good news" framing is fine. If the note says the assigned unit must be confirmed first, be honest and calm: "The condos are single-level inside, but I don't want to promise ground-floor access until we confirm the assigned units."
 
@@ -24869,10 +24895,10 @@ Hard rules:
 Length target: 5-8 sentences of body text (excluding greeting + signature). Keep it natural and guest-facing.
 
 Do not include a subject line.`
-      : `${accessibilityMandate}${contextBlock}${knownBlock}Guest name: ${guestName || "Guest"}
+      : `${accessibilityMandate}${contextBlock}${knownBlock}${conversationHistoryBlock}Guest name: ${guestName || "Guest"}
 Property: ${propertyName || "our property"}
 
-Guest message:
+LATEST GUEST MESSAGE TO ANSWER:
 "${guestMessageText}"
 
 Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational fluff.
@@ -24888,6 +24914,8 @@ Hard rules — every one of these has been a real failure mode:
 - Do NOT add filler — "plenty of space", "perfect for your group", "a great fit", "spacious", "beautiful", "lovely". These add words without adding facts.
 - Do NOT use transition phrases like "Here's what you're working with:", "Let me break this down for you:", "Here's the rundown:". Just answer.
 - Do NOT use internal process wording like "flag this with our team", "request this with our team", "escalate internally", or "when we confirm your reservation." The guest should hear the answer, not the back-office workflow.
+- If the booking is already confirmed/booked, do NOT say "before we lock in your booking", "once your booking is confirmed", "before we accept the booking", or any similar pre-booking phrasing. Talk about confirming or finalizing the unit assignment/details instead.
+- If the latest guest message changes or narrows the question from an earlier message, answer that narrowed follow-up. Do not repeat the prior answer unless it is needed to make the follow-up clear.
 - Do NOT end with "If you have any specific questions…", "Is there anything else…", "Feel free to reach out", "Don't hesitate to ask", "Looking forward to hosting you". Stop after the last answer.
 
 Length target: 3-7 sentences of body text (excluding greeting + signature). Multi-part questions can go to 6-9 sentences ONLY IF every sentence is answering a distinct question. If you find yourself padding, cut.
@@ -25048,7 +25076,12 @@ Do not include a subject line.`;
         const propType = typeMatch?.[1];
         if (accessibilityNote && groundFloorPromiseAuthorized) {
           const bothRequested = /\bboth\b/i.test(guestMessageText);
-          return `Yes, we can make this work. We'll ensure the condo used by the guest who needs bottom-floor access is a ground-floor, single-level condo. The condos themselves are single-level inside with no internal stairs.${bothRequested ? " If you need both condos on the ground floor, I can confirm that before we accept the booking." : ""}`;
+          const optionalSecondUnit = /\b(?:2|two)[-\s]?(?:bdr|bed|bedroom).*?\b(?:nice|prefer|if available|would be nice|optional|less desirable|farther|other way)\b/i.test(guestMessageText) ||
+            /\b(?:nice|prefer|if available|would be nice|optional|less desirable|farther|other way)\b.*?\b(?:2|two)[-\s]?(?:bdr|bed|bedroom)\b/i.test(guestMessageText);
+          if (optionalSecondUnit) {
+            return "Yes, we can make this work. We'll ensure the 3-bedroom condo is a ground-floor, single-level condo. For the 2-bedroom, we'll prioritize ground-floor access too, as long as that does not mean putting you in a much farther or less desirable unit.";
+          }
+          return `Yes, we can make this work. We'll ensure the condo used by the guest who needs bottom-floor access is a ground-floor, single-level condo. The condos themselves are single-level inside with no internal stairs.${bothRequested ? " If you need both condos on the ground floor, I can confirm that as part of the unit assignment." : ""}`;
         }
         if (propType === "Condominium") {
           return "The condos are single-level inside with no internal stairs, but that does not automatically mean both are on the ground floor. Since a bottom-floor setup is important, I would want to confirm the assigned units before promising that.";
@@ -25155,7 +25188,17 @@ Do not include a subject line.`;
         return next.replace(/\n{3,}/g, "\n\n").trim();
       })();
 
-      const finalDraft = addInitialContactCloser(ensureWelcomeDraftRequirements(priceSafeDraft), !!isInitialContact && !priceRequestRaised);
+      const bookingStageSafeDraft = bookedOrConfirmedConversation
+        ? priceSafeDraft
+            .replace(/\bbefore we lock in your booking\b/gi, "as part of the unit assignment")
+            .replace(/\bbefore locking in your booking\b/gi, "as part of the unit assignment")
+            .replace(/\bonce your booking is confirmed\b/gi, "now that your booking is confirmed")
+            .replace(/\bbefore we accept the booking\b/gi, "as part of the unit assignment")
+            .replace(/\bbefore accepting the booking\b/gi, "as part of the unit assignment")
+            .replace(/\bbefore you book\b/gi, "as part of the unit assignment")
+            .replace(/\bafter you book\b/gi, "after we finalize the unit assignment")
+        : priceSafeDraft;
+      const finalDraft = addInitialContactCloser(ensureWelcomeDraftRequirements(bookingStageSafeDraft), !!isInitialContact && !priceRequestRaised);
       res.json({ draft: finalDraft });
     } catch (err: any) {
       console.error(`[ai-draft] exception: ${err.message}`);

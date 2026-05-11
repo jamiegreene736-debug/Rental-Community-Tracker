@@ -196,8 +196,10 @@ interface GuestyPost {
   _id: string;
   body?: string;
   text?: string;
+  message?: string;
   sentAt?: string;
   postedAt?: string;
+  createdAt?: string;
   authorType?: string;
   authorRole?: string;
   sentBy?: string;
@@ -2628,19 +2630,34 @@ export default function InboxPage() {
     // Mirror the rendering's isHost detection (line ~1079) so a host
     // post tagged with `direction: "outbound"` or `senderType: "host"`
     // — but no `authorType`/`authorRole` — is correctly excluded.
-    const sortedAsc = [...threadPosts].sort((a: any, b: any) => {
-      const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
-      const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
-      return ta - tb;
-    });
-    const conversationalPosts = sortedAsc.filter((p: any) => !isGuestySystemPost(p));
+    const postTime = (p: any) => {
+      const t = new Date(p.sentAt ?? p.postedAt ?? p.createdAt ?? 0).getTime();
+      return Number.isFinite(t) ? t : 0;
+    };
+    const postBody = (p: any) => cleanMessageBody(String(p?.body ?? p?.text ?? p?.message ?? "")).trim();
+    const sortedAsc = [...threadPosts].sort((a: any, b: any) => postTime(a) - postTime(b));
+    const conversationalPosts = sortedAsc.filter((p: any) => !isGuestySystemPost(p) && postBody(p));
     const isInitialContact = !conversationalPosts.some(isHostPost);
-    const lastGuestPost = [...sortedAsc].reverse().find((p: any) => {
-      if (isGuestySystemPost(p)) return false;
-      return !isHostPost(p);
-    });
-    const guestMessage = String(lastGuestPost?.body ?? lastGuestPost?.text ?? "").trim();
+    const lastGuestPost = [...conversationalPosts].reverse().find((p: any) => !isHostPost(p));
+    const guestMessage = postBody(lastGuestPost);
     const isWelcomeDraft = isInitialContact && !guestMessage;
+    const conversationHistory = conversationalPosts
+      .slice(-10)
+      .map((p: any) => {
+        const role = isHostPost(p) ? "Host" : "Guest";
+        const timestamp = postTime(p);
+        const when = timestamp
+          ? new Date(timestamp).toLocaleString("en-US", {
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+            })
+          : "";
+        const body = postBody(p).replace(/\s+/g, " ").slice(0, 1200);
+        return `${role}${when ? ` ${when}` : ""}: ${body}`;
+      })
+      .join("\n");
     // Build property-specific context so the AI can answer "how many
     // bedrooms per unit?" / "how far apart are the units?" / "is
     // parking free?" with facts instead of hand-waves. Non-blocking:
@@ -2681,6 +2698,10 @@ export default function InboxPage() {
       selectedReservation?.numberOfGuests ??
       (selectedConv as any).conversationGuests ??
       null;
+    const reservationStatusForDraft =
+      selectedReservation?.status ??
+      (selectedConv as any).status ??
+      null;
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
         guestMessage,
@@ -2701,6 +2722,9 @@ export default function InboxPage() {
         checkIn: checkInForDraft,
         checkOut: checkOutForDraft,
         guestsCount: guestsForDraft,
+        conversationHistory,
+        reservationStatus: reservationStatusForDraft,
+        conversationPhase: (selectedConv as any).phase ?? null,
         isInitialContact,
         isWelcomeDraft,
       });
