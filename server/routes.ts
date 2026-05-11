@@ -5547,6 +5547,11 @@ export async function registerRoutes(
       const n = norm(haystack);
       return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
     };
+    const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
+      if (normalizedResortName !== "kaha lani") return false;
+      const n = norm(haystack);
+      return /\b(lae nani|pono kai|kauai kailani|kailani|plantation hale|waipouli|islander on the beach|kapaa sands|kapa a sands|wailua bay view|kauai beach villas?)\b/.test(n);
+    };
     // True if the haystack mentions every significant token of the resort name
     const mentionsResort = (haystack: string): boolean => {
       if (!resortName || resortTokens.length === 0) return true; // no filter
@@ -5597,7 +5602,10 @@ export async function registerRoutes(
       return b >= bedrooms;
     };
 
-    const websiteSearchTerm = resortName || community;
+    const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName;
+    const websiteSearchTerm = community === "Kapaa Beachfront"
+      ? communitySearchName || resortName || community
+      : resortName || communitySearchName || community;
     console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
 
     const scanStartedAt = Date.now();
@@ -5802,6 +5810,10 @@ export async function registerRoutes(
     };
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
       if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
+      if (normalizedResortName === "kaha lani") {
+        const n = norm(haystack);
+        return /\b(kaha lani|wailua|lihue|kapaa|kapa a|lydgate|nehe)\b/.test(n);
+      }
       return mentionsResortLoose(haystack);
     };
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
@@ -5851,6 +5863,7 @@ export async function registerRoutes(
     ): boolean => {
       const hay = candidateHaystack(c);
       if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
+      if (mentionsKnownNonKahaLaniComplex(hay)) return false;
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
       const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
@@ -9072,7 +9085,7 @@ export async function registerRoutes(
     "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
     "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
     "Princeville": "Princeville, Kauai, Hawaii",
-    "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
+    "Kapaa Beachfront": "Kaha Lani Resort, Wailua, Kauai, Hawaii",
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
