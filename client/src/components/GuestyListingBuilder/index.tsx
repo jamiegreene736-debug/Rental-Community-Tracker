@@ -1883,7 +1883,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     error?: string;
   };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
-  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Completed monthly windows are saved as they finish, but any already-queued sidecar browser work may keep running without this page being able to measure it. Start a fresh monthly refresh after the sidecar goes quiet.";
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh seasonal refresh after the sidecar goes quiet.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
   const handledTerminalProgressRef = useRef<string | null>(null);
@@ -1975,7 +1975,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: parsed.status,
           finishedAt: parsed.finishedAt,
           startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
-          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Monthly market-rate scan finished",
+          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Seasonal market-rate scan finished",
           error: typeof parsed.error === "string" ? parsed.error : undefined,
         });
       } else {
@@ -2124,8 +2124,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             finishedAt: Date.now(),
             startedAt: p.startedAt,
             label: p.phase === "error"
-              ? (p.label || "Monthly market-rate scan failed")
-              : "Monthly market-rate scan finished",
+              ? (p.label || "Seasonal market-rate scan failed")
+              : "Seasonal market-rate scan finished",
             error: p.error,
           });
           if (p.phase === "done") {
@@ -2155,7 +2155,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setMarketRatesRefreshing(true);
     setRefreshNotice(null);
     setRefreshStartedAt(startedAt);
-    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing monthly scan…", startedAt });
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing seasonal scan…", startedAt });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -2192,7 +2192,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             status: "done",
             finishedAt: Date.now(),
             startedAt: p.startedAt ?? startedAt,
-            label: "Monthly market-rate scan finished",
+            label: "Seasonal market-rate scan finished",
           });
           return;
         }
@@ -2208,7 +2208,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ? `/api/community/${-propertyId}/refresh-pricing`
         : `/api/property/${propertyId}/refresh-market-rates`;
       const path = propertyId > 0
-        ? `${basePath}?background=1&mode=monthly`
+        ? `${basePath}?background=1&mode=seasonal`
         : `${basePath}?background=1`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
@@ -2221,7 +2221,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Monthly market-rate scan failed",
+          label: "Seasonal market-rate scan failed",
           error: message,
         });
         toast({ title: "Refresh failed", description: message, variant: "destructive" });
@@ -2236,7 +2236,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "done",
           finishedAt: Date.now(),
           startedAt,
-          label: "Monthly market-rate scan finished",
+          label: "Seasonal market-rate scan finished",
         });
         toast({
           duration: Infinity,
@@ -2257,7 +2257,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              Monthly market-rate basis updated
+              Seasonal market-rate basis updated
             </span>
           ),
         });
@@ -2308,7 +2308,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         status: "done",
         finishedAt: Date.now(),
         startedAt,
-        label: "Monthly market-rate scan finished",
+        label: "Seasonal market-rate scan finished",
       });
       // Persistent green-check confirmation — only goes away when the
       // user clicks the X (PR #305). Default Radix duration auto-
@@ -2335,7 +2335,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             >
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            Monthly market-rate basis updated
+            Seasonal market-rate basis updated
           </span>
         ),
       });
@@ -2350,7 +2350,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Monthly market-rate scan failed",
+          label: "Seasonal market-rate scan failed",
           error: e?.message,
         });
         toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
@@ -3853,13 +3853,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. The monthly refresh scans one 7-night sample for each visible month, plus holiday sample windows. Rates are collected through the local Chrome sidecar; PM/direct websites are discovered by API search and then searched through the sidecar. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. The refresh scans one 7-night sample for LOW, one for HIGH, and one for HOLIDAY. Rates are collected through the local Chrome sidecar; PM/direct websites are discovered by API search and then searched through the sidecar. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
                                     return (
-                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh monthly market rates' to fetch."
+                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh seasonal market rates' to fetch."
                                         style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
                                         {bedrooms}BR fallback
                                       </span>
@@ -3905,22 +3905,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Monthly multi-channel scan. Pulls one 7-night sample for each visible month, plus holiday sample windows, by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (monthly basis × 1.20) ÷ (1 − channelFee). Daemon serializes sidecar work through one Chrome instance, so wall time can be long. Cancellable mid-flight; completed monthly samples persist. Auto-refreshes monthly via the scheduler."
+                                  title="Seasonal multi-channel scan. Pulls one 7-night sample for LOW, one for HIGH, and one for HOLIDAY by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (seasonal basis × 1.20) ÷ (1 − channelFee). Auto-refreshes monthly via the scheduler."
                                 >
-                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh monthly market rates"}
+                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh seasonal market rates"}
                                 </button>
                               </div>
                             )}
                             {/* Inline progress bar — visible while a
-                                refresh is in flight. Monthly refreshes
-                                use exact work-unit counters from the
-                                server: completed 7-night windows /
-                                total monthly + holiday windows. The
-                                lighter segment shows the current window
-                                being worked; the solid segment shows
-                                windows already finished. Cancel calls
-                                AbortController.abort() — server scan
-                                continues in the background. */}
+                                refresh is in flight. Seasonal refreshes
+                                scan LOW, HIGH, and HOLIDAY 7-night
+                                samples. Cancel calls AbortController.abort()
+                                — server scan continues in the background. */}
                             {marketRatesRefreshing && refreshProgress && (() => {
                               // Computed values for freeze detection.
                               // nowTick is unused-but-referenced so React
@@ -3974,7 +3969,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                    <span style={{ fontWeight: 500 }}>Scanning monthly market-rate basis…</span>
+                                    <span style={{ fontWeight: 500 }}>Scanning seasonal market-rate basis…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
                                     <button
@@ -4043,7 +4038,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isStale && (
                                     <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
-                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry, or wait; partial results from completed monthly windows are kept after this scan finishes.
+                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry after the sidecar goes quiet.
                                     </div>
                                   )}
                                   {/* Per-window / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. */}
@@ -4064,7 +4059,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Monthly multi-channel scan; the daemon serializes through one Chrome instance, so this can take a while. Progress advances after each completed month or holiday window.
+                                    Seasonal multi-channel scan; the daemon serializes through one Chrome instance, so this can take a while. Progress advances as LOW, HIGH, and HOLIDAY samples complete.
                                   </div>
                                 </div>
                               );
@@ -4092,8 +4087,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   <div style={{ marginTop: 2, opacity: 0.82 }}>
                                     {refreshNotice.status === "done"
-                                      ? "Monthly market-rate basis has been saved. This notice stays here until you dismiss it."
-                                      : (refreshNotice.error || refreshNotice.label || "The monthly market-rate refresh did not complete.")}
+                                      ? "Seasonal market-rate basis has been saved. This notice stays here until you dismiss it."
+                                      : (refreshNotice.error || refreshNotice.label || "The seasonal market-rate refresh did not complete.")}
                                   </div>
                                 </div>
                                 <button
@@ -4129,14 +4124,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Monthly buy-in basis
+                                    Seasonal buy-in basis
                                     {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Monthly rows use their own 7-night month sample when available. LOW/HIGH/HOLIDAY chips summarize the persisted month and holiday samples.">
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Rows use the persisted LOW/HIGH/HOLIDAY 7-night seasonal samples.">
                                     Auto-refresh every 30 days · click ↻ to scan now
                                   </span>
                                 </div>

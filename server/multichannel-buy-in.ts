@@ -1206,6 +1206,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   propertyId: number; // for progress tracking
   sidecarQueueBudgetMs?: number;
   seasonDeadlineMs?: number;
+  reuseSharedOtaSearch?: boolean;
   sidecarStopGeneration?: number;
 }): Promise<MultiSeasonBuyInResult> {
   const startedAt = Date.now();

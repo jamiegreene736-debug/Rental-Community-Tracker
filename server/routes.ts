@@ -20288,9 +20288,6 @@ Return ONLY compact JSON with this exact shape:
       });
     }
 
-    const refreshMode = String(req.query.mode ?? "") === "monthly" || String(req.query.deep ?? "") === "1"
-      ? "monthly"
-      : "seasonal";
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
@@ -20465,6 +20462,7 @@ Return ONLY compact JSON with this exact shape:
         medianNightly: String(lowResult.basis),
         medianNightlyHigh: highBasis != null ? String(highBasis) : null,
         medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
+        monthlyRates: {},
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.samples,
@@ -20547,9 +20545,14 @@ Return ONLY compact JSON with this exact shape:
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
-    const refreshMode = String(req.query.mode ?? "") === "monthly" || String(req.query.deep ?? "") === "1"
-      ? "monthly"
-      : "seasonal";
+    const requestedDeepRefresh =
+      String(req.query.mode ?? "") === "monthly" || String(req.query.deep ?? "") === "1";
+    const refreshMode = "seasonal" as "seasonal" | "monthly";
+    if (requestedDeepRefresh) {
+      console.log(
+        `[refresh-market-rates] property ${propertyId}: monthly/deep refresh requested; running seasonal 7-night sample scan instead`,
+      );
+    }
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
     const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
@@ -20559,10 +20562,10 @@ Return ONLY compact JSON with this exact shape:
     };
     if (runBackground && !isBackgroundWorker) {
       const startedAt = Date.now();
-      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: refreshMode === "monthly" ? "Queued monthly market-rate refresh" : "Queued market-rate refresh" });
+      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued seasonal market-rate refresh" });
       const port = process.env.PORT || "5000";
       setTimeout(() => {
-        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=${refreshMode}`, { method: "POST" })
+        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=seasonal`, { method: "POST" })
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
@@ -20622,7 +20625,7 @@ Return ONLY compact JSON with this exact shape:
         throw err;
       }
     };
-    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: refreshMode === "monthly" ? "Initializing monthly scan" : "Initializing scan" });
+    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Initializing seasonal scan" });
 
     if (refreshMode === "monthly") {
       const { getSeasonForMonth, getCommunityRegion } = await import("@shared/pricing-rates");
@@ -21062,7 +21065,7 @@ Return ONLY compact JSON with this exact shape:
           startedAt,
           phase: "error",
           percent: 100,
-          label: cancelled ? "Monthly market-rate scan cancelled" : "Monthly market-rate scan failed",
+          label: cancelled ? "Seasonal market-rate scan cancelled" : "Seasonal market-rate scan failed",
           error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
         });
         if (isBackgroundWorker) clearProgressSoon(propertyId);
@@ -21071,7 +21074,7 @@ Return ONLY compact JSON with this exact shape:
           e?.message ?? e,
         );
         return res.status(cancelled ? 409 : 500).json({
-          error: cancelled ? "Monthly market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
+          error: cancelled ? "Seasonal market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
           cancelled,
         });
       } finally {
@@ -21103,6 +21106,7 @@ Return ONLY compact JSON with this exact shape:
         propertyId,
         sidecarQueueBudgetMs: 15 * 60_000,
         seasonDeadlineMs: 25 * 60_000,
+        reuseSharedOtaSearch: true,
         sidecarStopGeneration,
       });
       assertSidecarRunCurrent();
@@ -21245,6 +21249,7 @@ Return ONLY compact JSON with this exact shape:
         medianNightly: String(lowResult.basis),
         medianNightlyHigh: highBasis != null ? String(highBasis) : null,
         medianNightlyHoliday: holidayBasis != null ? String(holidayBasis) : null,
+        monthlyRates: {},
         lowNightly: String(lowRangeMin ?? lowResult.basis),
         highNightly: String(lowRangeMax ?? lowResult.basis),
         sampleCount: lowResult.channelRates.length > 0 ? lowResult.channelRates.length : lowResult.airbnbSamples,
@@ -21315,7 +21320,7 @@ Return ONLY compact JSON with this exact shape:
         ...state,
         phase: "error" as const,
         label: "Refresh tracking interrupted",
-        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Completed monthly windows are saved as they finish; start a fresh monthly refresh after the sidecar goes quiet.`,
+        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh seasonal refresh after the sidecar goes quiet.`,
         lastTickAt: state.lastTickAt,
       };
       setRefreshProgress(interrupted);
@@ -21353,7 +21358,7 @@ Return ONLY compact JSON with this exact shape:
 
     for (const id of staticIds) {
       try {
-        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=monthly`, { method: "POST" });
+        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=seasonal`, { method: "POST" });
         const data = (await r.json().catch(() => ({}))) as any;
         results.push({ id, kind: "static", ok: r.ok, error: r.ok ? undefined : data?.error });
       } catch (e: any) {
