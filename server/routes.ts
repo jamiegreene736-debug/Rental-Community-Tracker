@@ -24765,7 +24765,7 @@ Never mention that units are "combined" or that this is a portfolio listing. Tre
     // discounts or payment timing. Don't pre-emptively volunteer them.
     const policyPrompt = `POLICIES (apply only when the guest's message asks about them):
 
-DISCOUNTS / SPECIAL OFFERS: Do not offer a discount, special offer, reduced rate, coupon, price match, or any percentage off. The price is the price. If the guest asks for a lower price, reply warmly and briefly that the quoted rate is the best available rate for those dates, then pivot back to the value of the stay or answer their other questions. Do not say "I can offer", "we can do", "I can make", "one-time accommodation", "special offer", "5% off", or any similar discount language.
+DISCOUNTS / SPECIAL OFFERS: Do not offer a discount, special offer, reduced rate, coupon, price match, or any percentage off. The price is the price. If the guest asks for a lower price, reply warmly and briefly that the quoted rate is the best available rate for those dates. Do not pitch the value of the property, list amenities, say the stay is "worth it", or try to convince them after holding the price. If the rate does not work for them, wish them well finding a place that works for their trip. Do not say "I can offer", "we can do", "I can make", "one-time accommodation", "special offer", "5% off", or any similar discount language.
 
 PAYMENT TIMING: If the guest asks for a smaller deposit, to pay later, to split payments differently, or any change to the payment schedule, explain that ${platformName} controls the payment schedule for this booking and we are not able to adjust it on our end. Apologize briefly that this isn't something you can change. Do not offer to "ask ${platformName}" or "look into it" — there is no workaround on our side. Keep the explanation short and warm; don't dwell on it.`;
 
@@ -25123,27 +25123,39 @@ Do not include a subject line.`;
         return insertBeforeSignature(humanized, fallback);
       })();
 
-      const priceRequestRaised = /\b(discount|special\s+(?:offer|rate)|lower\s+(?:price|rate)|reduce(?:d)?\s+(?:price|rate)|cheaper|price\s*match|best\s+price|deal)\b/i.test(guestMessageText);
+      const priceRequestRaised =
+        /\b(discount|special\s+(?:offer|rate)|lower\s+(?:price|rate)|reduce(?:d)?\s+(?:price|rate)|cheaper|price\s*match|best\s+price|deal|budget|range|win[-\s]?win)\b/i.test(guestMessageText) ||
+        (/\$\s*\d[\d,]*/.test(guestMessageText) && /\b(?:range|budget|consider|possible|work|win[-\s]?win|open|available)\b/i.test(guestMessageText));
       const discountOfferLanguage = /\b(?:\d+\s*%\s*off|discount|special\s+(?:offer|rate)|reduced\s+rate|lower\s+(?:price|rate)|price\s*match|one-time accommodation|I can offer|we can offer|I can do|we can do|I can make|we can make)\b/i;
+      const priceSalesPitchLanguage = /\b(?:worth (?:it|the price)|value of the stay|you(?:'re| are) getting|direct beach access|steps from the water|steps from|breathing room|full kitchens?|free parking|wi[-\s]?fi|air conditioning|\bAC\b|oceanfront condos?|oceanfront|king master|queen sleeper|bedrooms total|sleeps \d+|unit [AB] sleeps|amenit(?:y|ies)|beautiful|spacious|great fit|perfect for|look(?:ing)? forward to hosting|we look forward|would love to host|we'd love to host|hope to host)\b/i;
       const holdRateLine = "The quoted rate is the best available rate for those dates.";
+      const priceCloseLine = "If that does not fit what you are looking for, we completely understand and hope you find a place that works well for your trip.";
       const priceSafeDraft = (() => {
-        if (!priceRequestRaised || !discountOfferLanguage.test(draft)) return draft;
+        if (!priceRequestRaised) return draft;
         const scrubbed = draft
           .split(/\n{2,}/)
           .map((paragraph) => paragraph
             .split(/(?<=[.!?])\s+/)
-            .filter((sentence) => !discountOfferLanguage.test(sentence))
+            .filter((sentence) => !discountOfferLanguage.test(sentence) && !priceSalesPitchLanguage.test(sentence))
             .join(" ")
             .trim())
           .filter(Boolean)
           .join("\n\n")
+          .replace(/\s*,?\s*that'?s what we'?re holding at\.?/gi, ".")
+          .replace(/\bThe quoted rate is the best available(?: rate)?(?: for those dates)?\.?/i, holdRateLine)
           .replace(/\n{3,}/g, "\n\n")
           .trim();
-        if (/\bbest available rate\b/i.test(scrubbed)) return scrubbed;
-        return insertBeforeSignature(scrubbed || draft, holdRateLine);
+        let next = scrubbed || draft;
+        if (!/\bbest available(?: rate)?\b/i.test(next)) {
+          next = insertBeforeSignature(next, holdRateLine);
+        }
+        if (!/\bhope you find\b|\bfind a place that works\b|\bcompletely understand\b/i.test(next)) {
+          next = insertBeforeSignature(next, priceCloseLine);
+        }
+        return next.replace(/\n{3,}/g, "\n\n").trim();
       })();
 
-      const finalDraft = addInitialContactCloser(ensureWelcomeDraftRequirements(priceSafeDraft), !!isInitialContact);
+      const finalDraft = addInitialContactCloser(ensureWelcomeDraftRequirements(priceSafeDraft), !!isInitialContact && !priceRequestRaised);
       res.json({ draft: finalDraft });
     } catch (err: any) {
       console.error(`[ai-draft] exception: ${err.message}`);
