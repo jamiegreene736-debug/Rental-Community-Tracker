@@ -475,6 +475,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // availability scans do not skip sidecar: LOW/HIGH/HOLIDAY all use
   // Airbnb + VRBO + Booking + PM website searches.
   skipSidecar?: boolean;
+  // Pricing refreshes can split the full market-rate check into
+  // reusable stages: PM/direct once per season type and OTA checks per
+  // season date band. Default behavior still runs every channel.
+  skipOta?: boolean;
+  skipPm?: boolean;
   // Manual market-rate refreshes run in the background now, so they can
   // tolerate a deeper local Chrome queue than request/response flows.
   sidecarQueueBudgetMs?: number;
@@ -577,7 +582,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
     : args.bedroomCounts;
   const progressTotal = args.skipSidecar
     ? 0
-    : (otaSearchBedroomCounts.length * 3) + args.bedroomCounts.length;
+    : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 3) +
+      (args.skipPm ? 0 : args.bedroomCounts.length);
   let progressCompleted = 0;
   const emitProgress = (
     label: string,
@@ -644,7 +650,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // map but browser-backed entries stay null. Normal pricing refreshes
   // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
   // Booking + PM website searches now.
-  if (!args.skipSidecar) for (const br of otaSearchBedroomCounts) {
+  if (!args.skipSidecar && !args.skipOta) for (const br of otaSearchBedroomCounts) {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
         const progressLabel = `Airbnb ${br}+BR`;
@@ -833,7 +839,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
       })(),
     );
   }
-  if (!args.skipSidecar) for (const br of args.bedroomCounts) {
+  if (!args.skipSidecar && !args.skipPm) for (const br of args.bedroomCounts) {
     pmOps.push((async () => {
       const progressLabel = `PM/direct sites ${br}BR`;
       try {

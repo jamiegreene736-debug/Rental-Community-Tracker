@@ -3871,7 +3871,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. The refresh scans one 7-night sample for LOW, one for HIGH, and one for HOLIDAY. Rates are collected through the local Chrome sidecar; PM/direct websites are discovered by API search and then searched through the sidecar. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. OTA rates are scanned for each contiguous season date band. PM/direct websites are sampled once for LOW, HIGH, and HOLIDAY, then reused across matching bands. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
@@ -3925,7 +3925,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Season-band multi-channel scan. Pulls one 7-night sample for each contiguous LOW/HIGH band in the 24-month calendar, plus each holiday band, by searching Airbnb, VRBO, Booking.com, and PM rental-search pages through the local Chrome sidecar. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (band basis × 1.20) ÷ (1 − channelFee). Auto-refreshes monthly via the scheduler."
+                                  title="Season-band multi-channel scan. Pulls one 7-night OTA sample for each contiguous LOW/HIGH band in the 24-month calendar, plus each holiday band. PM/direct sites are sampled once per LOW/HIGH/HOLIDAY type and reused across matching bands. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (band basis × 1.20) ÷ (1 − channelFee). Auto-refreshes monthly via the scheduler."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh season-band market rates"}
                                 </button>
@@ -4067,7 +4067,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The bar advances as each channel finishes. Remaining checks may still be queued in Chrome; PM/direct is capped for this pricing refresh so one slow site cannot hold a window for several minutes.
+                                      The bar advances as channel stages finish. PM/direct is sampled once per LOW/HIGH/HOLIDAY season type and reused; Airbnb, VRBO, and Booking.com still run for each date band.
                                     </div>
                                   )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}

@@ -20597,11 +20597,11 @@ Return ONLY compact JSON with this exact shape:
 
     // Season-band multi-channel scan.
     //
-    // Pulls one 7-night sample per contiguous LOW/HIGH date band
-    // across the 24-month horizon, plus explicit holiday windows. Each
-    // sample uses Airbnb + VRBO + Booking.com website searches, plus PM
-    // website searches. SearchAPI is used only to discover PM company domains;
-    // Chrome sidecar then drives those PM rental-search pages.
+    // Pulls one 7-night OTA sample per contiguous LOW/HIGH date band
+    // across the 24-month horizon, plus explicit holiday windows. PM
+    // website searches are sampled once per LOW/HIGH/HOLIDAY season type
+    // and reused across matching bands. SearchAPI is used only to discover
+    // PM company domains; Chrome sidecar then drives those PM rental-search pages.
     // Total wall can run several minutes because the daemon serializes
     // browser work through the operator's Chrome.
     //
@@ -20662,9 +20662,19 @@ Return ONLY compact JSON with this exact shape:
         const sorted = values.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
         return sorted.length > 0 ? medianOfSorted(sorted) : null;
       };
-      const basisForScan = (scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null, br: number) => {
+      const basisForScan = (
+        scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null,
+        br: number,
+        reusablePmRate?: number | null,
+      ) => {
         if (!scan) return { basis: null as number | null, channelRates: [] as number[], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } as ChannelSnapshot };
-        const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+        const rawChannels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+        const channels: ChannelSnapshot = {
+          ...rawChannels,
+          pm: typeof reusablePmRate === "number" && Number.isFinite(reusablePmRate) && reusablePmRate > 0
+            ? Math.round(reusablePmRate)
+            : rawChannels.pm,
+        };
         const samples = scan.ratesByBR[br] ?? [];
         const channelRates = [channels.airbnb, channels.vrbo, channels.booking, channels.pm]
           .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0)
@@ -20805,11 +20815,26 @@ Return ONLY compact JSON with this exact shape:
       }
       holidayWindows.sort((a, b) => a.checkIn.localeCompare(b.checkIn));
 
-      const totalWindows = bandWindows.length + holidayWindows.length;
+      const pmSampleWindows: Array<{ label: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
+      const addPmSampleWindow = (season: SeasonLabel, source: { checkIn: string; checkOut: string } | undefined) => {
+        if (!source) return;
+        pmSampleWindows.push({
+          label: `${season} reusable PM/direct rates`,
+          season,
+          checkIn: source.checkIn,
+          checkOut: source.checkOut,
+        });
+      };
+      addPmSampleWindow("LOW", bandWindows.find((win) => win.season === "LOW"));
+      addPmSampleWindow("HIGH", bandWindows.find((win) => win.season === "HIGH"));
+      addPmSampleWindow("HOLIDAY", holidayWindows[0]);
+
+      const totalWindows = pmSampleWindows.length + bandWindows.length + holidayWindows.length;
       const monthlyByBR = new Map<number, Record<string, MonthlyRatePayload>>();
       const seasonBuckets = new Map<number, Record<SeasonLabel, number[]>>();
       const sourceFlags = new Map<number, { hasAnyChannel: boolean; hasNonAirbnb: boolean; channelCount: number }>();
       const latestChannels = new Map<number, ChannelSnapshot>();
+      const reusablePmBySeason = new Map<SeasonLabel, Map<number, number | null>>();
       const accumulatedWarnings: Array<{
         season: SeasonLabel;
         channel: "airbnb" | "vrbo" | "booking" | "pm" | "engine";
@@ -20865,7 +20890,8 @@ Return ONLY compact JSON with this exact shape:
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
         });
       };
-      const BAND_WINDOW_BUDGET_MS = 9 * 60_000;
+      const OTA_BAND_WINDOW_BUDGET_MS = 5 * 60_000;
+      const PM_SAMPLE_WINDOW_BUDGET_MS = 10 * 60_000;
       const runBandWindowScan = async (
         label: string,
         dateOverride: { checkIn: string; checkOut: string },
@@ -20874,8 +20900,8 @@ Return ONLY compact JSON with this exact shape:
       ) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => {
-          controller.abort(new Error(`${label} exceeded the ${Math.round(BAND_WINDOW_BUDGET_MS / 60_000)} minute per-window budget`));
-        }, BAND_WINDOW_BUDGET_MS);
+          controller.abort(new Error(`${label} exceeded the ${Math.round(OTA_BAND_WINDOW_BUDGET_MS / 60_000)} minute OTA-window budget`));
+        }, OTA_BAND_WINDOW_BUDGET_MS);
         try {
           return await fetchMultiChannelBuyInByBR({
             community: loc.searchName,
@@ -20890,6 +20916,7 @@ Return ONLY compact JSON with this exact shape:
             sidecarQueueBudgetMs: 15 * 60_000,
             warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
             reuseSharedOtaSearch: true,
+            skipPm: true,
             pmPerSiteLimit: 3,
             pmMaxSites: 5,
             pmWalletBudgetMs: 90_000,
@@ -20911,6 +20938,62 @@ Return ONLY compact JSON with this exact shape:
               });
             },
           });
+        } finally {
+          clearTimeout(timeout);
+        }
+      };
+      const runPmSeasonSample = async (
+        sample: { label: string; season: SeasonLabel; checkIn: string; checkOut: string },
+        currentIndex: number,
+        completedWindows: number,
+      ) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => {
+          controller.abort(new Error(`${sample.label} exceeded the ${Math.round(PM_SAMPLE_WINDOW_BUDGET_MS / 60_000)} minute PM/direct budget`));
+        }, PM_SAMPLE_WINDOW_BUDGET_MS);
+        try {
+          const scan = await fetchMultiChannelBuyInByBR({
+            community: loc.searchName,
+            city: loc.city,
+            state: loc.state,
+            streetAddress: loc.streetAddress,
+            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
+            searchName: loc.searchName,
+            bedroomCounts: wantBedrooms,
+            propertyId,
+            dateOverride: { checkIn: sample.checkIn, checkOut: sample.checkOut },
+            sidecarQueueBudgetMs: 15 * 60_000,
+            warningSeason: sample.season,
+            skipOta: true,
+            skipPm: false,
+            pmPerSiteLimit: 4,
+            pmMaxSites: 8,
+            pmWalletBudgetMs: 150_000,
+            sidecarStopGeneration,
+            signal: controller.signal,
+            onProgress: (event) => {
+              const subLabel = `${event.label} complete (${event.completed}/${event.total} PM checks)`;
+              setBandProgress({
+                completed: completedWindows,
+                current: currentIndex,
+                currentLabel: sample.label,
+                label: `Sampling reusable ${sample.season} PM/direct rates — latest completed: ${subLabel}`,
+                subDone: event.completed,
+                subTotal: event.total,
+                subLabel: event.label,
+                subChannel: event.channel,
+                subBedrooms: event.bedrooms,
+                subStartedAt: event.startedAt,
+              });
+            },
+          });
+          const pmRates = new Map<number, number | null>();
+          for (const br of wantBedrooms) {
+            const pm = scan.channelCheapestByBR[br]?.pm;
+            pmRates.set(br, typeof pm === "number" && Number.isFinite(pm) && pm > 0 ? Math.round(pm) : null);
+          }
+          reusablePmBySeason.set(sample.season, pmRates);
+          return scan;
         } finally {
           clearTimeout(timeout);
         }
@@ -21032,6 +21115,33 @@ Return ONLY compact JSON with this exact shape:
 
       try {
         let completed = 0;
+        for (const sample of pmSampleWindows) {
+          assertSidecarRunCurrent();
+          const currentStartedAt = Date.now();
+          setBandProgress({
+            completed,
+            current: completed + 1,
+            currentLabel: sample.label,
+            currentStartedAt,
+            label: `Sampling reusable ${sample.season} PM/direct rates (${completed}/${totalWindows} complete)`,
+            subDone: 0,
+            subTotal: undefined,
+            subLabel: undefined,
+            subStartedAt: currentStartedAt,
+          });
+          const scan = await runPmSeasonSample(sample, completed + 1, completed);
+          assertSidecarRunCurrent();
+          absorbScan(scan, sample.season);
+          completed++;
+          setBandProgress({
+            completed,
+            label: `Completed ${sample.label} (${completed}/${totalWindows} complete)`,
+            subDone: undefined,
+            subTotal: undefined,
+            subLabel: undefined,
+          });
+        }
+
         for (const win of bandWindows) {
           assertSidecarRunCurrent();
           const currentLabel = win.label;
@@ -21052,7 +21162,7 @@ Return ONLY compact JSON with this exact shape:
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
             ensureBR(br);
-            const result = basisForScan(scan, br);
+            const result = basisForScan(scan, br, reusablePmBySeason.get(win.season)?.get(br) ?? null);
             if (result.basis == null || result.basis <= 0) continue;
             for (const yearMonth of win.yearMonths) {
               monthlyByBR.get(br)![yearMonth] = {
@@ -21099,7 +21209,7 @@ Return ONLY compact JSON with this exact shape:
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {
             ensureBR(br);
-            const result = basisForScan(scan, br);
+            const result = basisForScan(scan, br, reusablePmBySeason.get("HOLIDAY")?.get(br) ?? null);
             if (result.basis == null || result.basis <= 0) continue;
             seasonBuckets.get(br)!.HOLIDAY.push(result.basis);
             noteSource(br, result.channels, result.channelRates);
