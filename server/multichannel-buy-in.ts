@@ -27,6 +27,14 @@ import type { SidecarPmSearchSite } from "./vrbo-sidecar-queue";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking" | "pm";
 export type RegionKey = "hawaii" | "florida";
+export type MultiChannelProgressEvent = {
+  label: string;
+  channel: ChannelKey;
+  bedrooms: number;
+  completed: number;
+  total: number;
+  startedAt: number;
+};
 
 // Surfaced to the loading bar via RefreshProgressState.warnings.
 // Lets the operator see "CAPTCHA on VRBO sidecar at HIGH season"
@@ -478,6 +486,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // scan, even if Start Queue is clicked again.
   sidecarStopGeneration?: number;
   signal?: AbortSignal;
+  onProgress?: (event: MultiChannelProgressEvent) => void;
 }): Promise<MultiChannelBuyInResult> {
   const startedAt = Date.now();
   const sidecarStopGeneration = args.sidecarStopGeneration ?? getSidecarStopGeneration();
@@ -555,6 +564,31 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const otaSearchBedroomCounts = reuseSharedOtaSearch
     ? [sharedOtaBedroomCount]
     : args.bedroomCounts;
+  const progressTotal = args.skipSidecar
+    ? 0
+    : (otaSearchBedroomCounts.length * 3) + args.bedroomCounts.length;
+  let progressCompleted = 0;
+  const emitProgress = (
+    label: string,
+    channel: ChannelKey,
+    bedrooms: number,
+    completed = progressCompleted,
+  ) => {
+    if (!args.onProgress || progressTotal <= 0) return;
+    args.onProgress({
+      label,
+      channel,
+      bedrooms,
+      completed: Math.max(0, Math.min(progressTotal, completed)),
+      total: progressTotal,
+      startedAt: Date.now(),
+    });
+  };
+  const markProgressDone = (label: string, channel: ChannelKey, bedrooms: number) => {
+    if (progressTotal <= 0) return;
+    progressCompleted = Math.max(0, Math.min(progressTotal, progressCompleted + 1));
+    emitProgress(label, channel, bedrooms, progressCompleted);
+  };
 
   const targetBrsForSearch = (searchBedrooms: number): number[] =>
     reuseSharedOtaSearch && searchBedrooms === sharedOtaBedroomCount
@@ -602,6 +636,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
   if (!args.skipSidecar) for (const br of otaSearchBedroomCounts) {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
+        const progressLabel = `Airbnb ${br}+BR`;
+        emitProgress(progressLabel, "airbnb", br);
         try {
           assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -652,11 +688,15 @@ export async function fetchMultiChannelBuyInByBR(args: {
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
           return sidecarFailureOps(br, "airbnb", e?.message ?? String(e));
+        } finally {
+          markProgressDone(progressLabel, "airbnb", br);
         }
       })(),
     );
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
+        const progressLabel = `VRBO ${br}+BR`;
+        emitProgress(progressLabel, "vrbo", br);
         try {
           assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -718,11 +758,15 @@ export async function fetchMultiChannelBuyInByBR(args: {
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
           return sidecarFailureOps(br, "vrbo", e?.message ?? String(e));
+        } finally {
+          markProgressDone(progressLabel, "vrbo", br);
         }
       })(),
     );
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
+        const progressLabel = `Booking.com ${br}+BR`;
+        emitProgress(progressLabel, "booking", br);
         try {
           assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -775,24 +819,34 @@ export async function fetchMultiChannelBuyInByBR(args: {
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
           return sidecarFailureOps(br, "booking", e?.message ?? String(e));
+        } finally {
+          markProgressDone(progressLabel, "booking", br);
         }
       })(),
     );
   }
   if (!args.skipSidecar) for (const br of args.bedroomCounts) {
-    pmOps.push(fetchPmMarketRatesForBedroom({
-      community: args.community,
-      city: args.city,
-      state: args.state,
-      searchName: args.searchName,
-      bedrooms: br,
-      checkIn,
-      checkOut,
-      region: inferRegion(args.city, args.state),
-      sidecarQueueBudgetMs,
-      sidecarStopGeneration,
-      signal: args.signal,
-    }));
+    pmOps.push((async () => {
+      const progressLabel = `PM/direct sites ${br}BR`;
+      emitProgress(progressLabel, "pm", br);
+      try {
+        return await fetchPmMarketRatesForBedroom({
+          community: args.community,
+          city: args.city,
+          state: args.state,
+          searchName: args.searchName,
+          bedrooms: br,
+          checkIn,
+          checkOut,
+          region: inferRegion(args.city, args.state),
+          sidecarQueueBudgetMs,
+          sidecarStopGeneration,
+          signal: args.signal,
+        });
+      } finally {
+        markProgressDone(progressLabel, "pm", br);
+      }
+    })());
   }
   const [airbnbFallbackResult, sidecarResults, pmResults] = await Promise.all([
     airbnbFallbackPromise,
@@ -1127,6 +1181,12 @@ export type RefreshProgressState = {
   progressCurrent?: number;
   progressWindowLabel?: string;
   progressWindowStartedAt?: number;
+  progressSubDone?: number;
+  progressSubTotal?: number;
+  progressSubLabel?: string;
+  progressSubChannel?: ChannelKey;
+  progressSubBedrooms?: number;
+  progressSubStartedAt?: number;
   // Freeze-detection fields (PR #311). lastTickAt is updated by a
   // 15-second heartbeat AND every setPhase call — so the client can
   // tell the scan is still alive even when no phase boundary has

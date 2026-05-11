@@ -20824,10 +20824,25 @@ Return ONLY compact JSON with this exact shape:
         current?: number;
         currentLabel?: string;
         currentStartedAt?: number;
+        subDone?: number;
+        subTotal?: number;
+        subLabel?: string;
+        subChannel?: "airbnb" | "vrbo" | "booking" | "pm";
+        subBedrooms?: number;
+        subStartedAt?: number;
       }) => {
         const current = getRefreshProgress(propertyId);
         const done = Math.max(0, Math.min(totalWindows, args.completed));
-        const percent = totalWindows > 0 ? Math.round((done / totalWindows) * 100) : 0;
+        const hasSubProgress =
+          typeof args.subDone === "number" &&
+          typeof args.subTotal === "number" &&
+          args.subTotal > 0;
+        const currentWindowFraction = hasSubProgress
+          ? Math.max(0, Math.min(1, args.subDone! / args.subTotal!))
+          : 0;
+        const percent = totalWindows > 0
+          ? Math.round(((done + currentWindowFraction) / totalWindows) * 100)
+          : 0;
         setRefreshProgress({
           propertyId,
           startedAt,
@@ -20839,6 +20854,12 @@ Return ONLY compact JSON with this exact shape:
           progressCurrent: typeof args.current === "number" ? Math.max(1, Math.min(totalWindows, args.current)) : undefined,
           progressWindowLabel: args.currentLabel,
           progressWindowStartedAt: args.currentStartedAt ?? current?.progressWindowStartedAt,
+          progressSubDone: hasSubProgress ? args.subDone : undefined,
+          progressSubTotal: hasSubProgress ? args.subTotal : undefined,
+          progressSubLabel: args.subLabel,
+          progressSubChannel: args.subChannel,
+          progressSubBedrooms: args.subBedrooms,
+          progressSubStartedAt: args.subStartedAt ?? current?.progressSubStartedAt,
           daemonOnline: current?.daemonOnline,
           daemonLastPollAgeMs: current?.daemonLastPollAgeMs,
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
@@ -20848,6 +20869,8 @@ Return ONLY compact JSON with this exact shape:
       const runBandWindowScan = async (
         label: string,
         dateOverride: { checkIn: string; checkOut: string },
+        currentIndex: number,
+        completedWindows: number,
       ) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => {
@@ -20869,6 +20892,21 @@ Return ONLY compact JSON with this exact shape:
             reuseSharedOtaSearch: true,
             sidecarStopGeneration,
             signal: controller.signal,
+            onProgress: (event) => {
+              const subLabel = `${event.label} (${event.completed}/${event.total} channel checks complete)`;
+              setBandProgress({
+                completed: completedWindows,
+                current: currentIndex,
+                currentLabel: label,
+                label: `Scanning ${label} — ${subLabel}`,
+                subDone: event.completed,
+                subTotal: event.total,
+                subLabel: event.label,
+                subChannel: event.channel,
+                subBedrooms: event.bedrooms,
+                subStartedAt: event.startedAt,
+              });
+            },
           });
         } finally {
           clearTimeout(timeout);
@@ -21001,8 +21039,12 @@ Return ONLY compact JSON with this exact shape:
             currentLabel,
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+            subDone: 0,
+            subTotal: undefined,
+            subLabel: undefined,
+            subStartedAt: currentStartedAt,
           });
-          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut }, completed + 1, completed);
           assertSidecarRunCurrent();
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
@@ -21028,6 +21070,9 @@ Return ONLY compact JSON with this exact shape:
           setBandProgress({
             completed,
             label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+            subDone: undefined,
+            subTotal: undefined,
+            subLabel: undefined,
           });
         }
 
@@ -21041,8 +21086,12 @@ Return ONLY compact JSON with this exact shape:
             currentLabel,
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
+            subDone: 0,
+            subTotal: undefined,
+            subLabel: undefined,
+            subStartedAt: currentStartedAt,
           });
-          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut }, completed + 1, completed);
           assertSidecarRunCurrent();
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {
@@ -21057,6 +21106,9 @@ Return ONLY compact JSON with this exact shape:
           setBandProgress({
             completed,
             label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
+            subDone: undefined,
+            subTotal: undefined,
+            subLabel: undefined,
           });
         }
 

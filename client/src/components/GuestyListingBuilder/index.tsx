@@ -1869,6 +1869,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     progressCurrent?: number;
     progressWindowLabel?: string;
     progressWindowStartedAt?: number;
+    progressSubDone?: number;
+    progressSubTotal?: number;
+    progressSubLabel?: string;
+    progressSubChannel?: "airbnb" | "vrbo" | "booking" | "pm";
+    progressSubBedrooms?: number;
+    progressSubStartedAt?: number;
     lastTickAt?: number;
     daemonOnline?: boolean;
     daemonLastPollAgeMs?: number | null;
@@ -2033,6 +2039,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       progressCurrent: previous?.progressCurrent,
       progressWindowLabel: previous?.progressWindowLabel,
       progressWindowStartedAt: previous?.progressWindowStartedAt,
+      progressSubDone: previous?.progressSubDone,
+      progressSubTotal: previous?.progressSubTotal,
+      progressSubLabel: previous?.progressSubLabel,
+      progressSubChannel: previous?.progressSubChannel,
+      progressSubBedrooms: previous?.progressSubBedrooms,
+      progressSubStartedAt: previous?.progressSubStartedAt,
       lastTickAt: previous?.lastTickAt,
       daemonOnline: previous?.daemonOnline,
       daemonLastPollAgeMs: previous?.daemonLastPollAgeMs,
@@ -2083,6 +2095,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       progressCurrent: typeof p.progressCurrent === "number" ? p.progressCurrent : undefined,
       progressWindowLabel: typeof p.progressWindowLabel === "string" ? p.progressWindowLabel : undefined,
       progressWindowStartedAt: typeof p.progressWindowStartedAt === "number" ? p.progressWindowStartedAt : undefined,
+      progressSubDone: typeof p.progressSubDone === "number" ? p.progressSubDone : undefined,
+      progressSubTotal: typeof p.progressSubTotal === "number" ? p.progressSubTotal : undefined,
+      progressSubLabel: typeof p.progressSubLabel === "string" ? p.progressSubLabel : undefined,
+      progressSubChannel: p.progressSubChannel === "airbnb" || p.progressSubChannel === "vrbo" || p.progressSubChannel === "booking" || p.progressSubChannel === "pm" ? p.progressSubChannel : undefined,
+      progressSubBedrooms: typeof p.progressSubBedrooms === "number" ? p.progressSubBedrooms : undefined,
+      progressSubStartedAt: typeof p.progressSubStartedAt === "number" ? p.progressSubStartedAt : undefined,
       lastTickAt: typeof p.lastTickAt === "number" ? p.lastTickAt : undefined,
       daemonOnline: typeof p.daemonOnline === "boolean" ? p.daemonOnline : undefined,
       daemonLastPollAgeMs: typeof p.daemonLastPollAgeMs === "number" ? p.daemonLastPollAgeMs : null,
@@ -3953,11 +3971,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const currentWindow = hasWindowProgress && typeof refreshProgress.progressCurrent === "number"
                                 ? Math.max(1, Math.min(totalWindows, refreshProgress.progressCurrent))
                                 : null;
+                              const hasSubProgress =
+                                typeof refreshProgress.progressSubDone === "number" &&
+                                typeof refreshProgress.progressSubTotal === "number" &&
+                                refreshProgress.progressSubTotal > 0;
+                              const completedSubChecks = hasSubProgress
+                                ? Math.max(0, Math.min(refreshProgress.progressSubTotal!, refreshProgress.progressSubDone!))
+                                : 0;
+                              const totalSubChecks = hasSubProgress ? refreshProgress.progressSubTotal! : 0;
+                              const subWindowFraction = hasSubProgress
+                                ? Math.max(0, Math.min(1, completedSubChecks / totalSubChecks))
+                                : 0;
                               const completedPercent = hasWindowProgress
-                                ? Math.round((completedWindows / totalWindows) * 100)
+                                ? Math.round(((completedWindows + subWindowFraction) / totalWindows) * 100)
                                 : Math.max(0, Math.min(100, refreshProgress.percent));
                               const activeWindowPercent = hasWindowProgress && currentWindow != null
-                                ? Math.round((currentWindow / totalWindows) * 100)
+                                ? Math.round(((Math.max(0, currentWindow - 1) + Math.max(subWindowFraction, 0.05)) / totalWindows) * 100)
                                 : completedPercent;
                               const currentWindowElapsedMs = refreshProgress.progressWindowStartedAt
                                 ? Math.max(0, now - refreshProgress.progressWindowStartedAt)
@@ -3965,8 +3994,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const currentWindowElapsedMin = Math.floor(currentWindowElapsedMs / 60000);
                               const currentWindowElapsedSec = Math.floor((currentWindowElapsedMs % 60000) / 1000);
                               const currentWindowElapsedStr = `${currentWindowElapsedMin}:${String(currentWindowElapsedSec).padStart(2, "0")}`;
+                              const subElapsedMs = refreshProgress.progressSubStartedAt
+                                ? Math.max(0, now - refreshProgress.progressSubStartedAt)
+                                : 0;
+                              const subElapsedMin = Math.floor(subElapsedMs / 60000);
+                              const subElapsedSec = Math.floor((subElapsedMs % 60000) / 1000);
+                              const subElapsedStr = `${subElapsedMin}:${String(subElapsedSec).padStart(2, "0")}`;
                               const progressText = hasWindowProgress
-                                ? `${completedWindows}/${totalWindows} windows · ${completedPercent}%`
+                                ? `${completedWindows}/${totalWindows} windows${hasSubProgress ? ` · ${completedSubChecks}/${totalSubChecks} checks` : ""} · ${completedPercent}%`
                                 : `${Math.max(0, Math.min(100, refreshProgress.percent))}%`;
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
@@ -4024,9 +4059,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       {refreshProgress.progressWindowStartedAt && ` · ${currentWindowElapsedStr} on this window`}
                                     </div>
                                   )}
+                                  {hasSubProgress && refreshProgress.progressSubLabel && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      Current channel stage: {refreshProgress.progressSubLabel}
+                                      {refreshProgress.progressSubStartedAt && ` · ${subElapsedStr} since this update`}
+                                    </div>
+                                  )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The percent advances after each 7-night window finishes; one slow channel can hold this number until the current window completes or times out.
+                                      The bar advances as Airbnb, VRBO, Booking.com, and PM/direct checks finish inside each date-band window.
                                     </div>
                                   )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
@@ -4061,7 +4102,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Season-band multi-channel scan; the daemon serializes through one Chrome instance, so this can take a while. Progress advances as each contiguous LOW/HIGH band or holiday band completes.
+                                    Season-band multi-channel scan; the daemon serializes through one Chrome instance, so a slow PM/direct site can hold the current channel stage even while the heartbeat stays alive.
                                   </div>
                                 </div>
                               );
