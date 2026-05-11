@@ -898,10 +898,11 @@ function GroundFloorRequirementNotice({
         </p>
         <Badge variant="outline" className="border-amber-300 bg-white text-[10px] text-amber-900">
           {data.requiredUnits} ground-floor {data.requiredUnits === 1 ? "unit" : "units"} required
+          {data.targetBedrooms?.length ? ` · ${data.targetBedrooms.map((b) => `${b}BR`).join(" + ")}` : ""}
         </Badge>
       </div>
       <p className="mt-1 text-[11px] leading-snug text-amber-900">
-        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}.
+        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}{data.targetBedrooms?.length ? ` (${data.targetBedrooms.map((b) => `${b}BR`).join(" + ")})` : ""}.
         {data.scope === "unknown" ? " Scope is unclear, so the tool assumes at least one ground-floor unit until clarified." : ""}
       </p>
       {data.evidence?.[0] && (
@@ -1876,6 +1877,16 @@ export default function Bookings() {
         emptySlots.length,
         groundFloorRequirement.requested ? Math.max(1, groundFloorRequirement.requiredUnits) : 0,
       );
+      const requiredGroundFloorBedrooms = new Set(
+        (groundFloorRequirement.targetBedrooms ?? [])
+          .map((n) => Number(n))
+          .filter((n) => Number.isFinite(n) && n > 0),
+      );
+      const requiresGroundFloorForBedrooms = (bedrooms: number): boolean => {
+        if (requiredGroundFloorUnits <= 0) return false;
+        if (requiredGroundFloorBedrooms.size > 0) return requiredGroundFloorBedrooms.has(bedrooms);
+        return requiredGroundFloorUnits >= emptySlots.length && emptySlots.length > 0;
+      };
 
       // Deduplicate find-buy-in calls. When a reservation has multiple
       // empty slots with the SAME bedrooms (Amy Vanbuskirk's 2x 3BR
@@ -1896,7 +1907,8 @@ export default function Bookings() {
         opts: { includePm?: boolean } = {},
       ): Promise<FindBuyInResponse> => {
         const includePm = opts.includePm !== false;
-        const key = `${bedrooms}|${includePm ? "pm" : "ota"}`;
+        const requireGroundFloor = requiresGroundFloorForBedrooms(bedrooms);
+        const key = `${bedrooms}|${includePm ? "pm" : "ota"}|${requireGroundFloor ? "ground" : "any-floor"}`;
         const existing = findBuyInCache.get(key);
         if (existing) return existing;
         const params = new URLSearchParams({
@@ -1906,7 +1918,7 @@ export default function Bookings() {
           checkOut: co,
         });
         if (!includePm) params.set("includePm", "0");
-        if (requiredGroundFloorUnits >= emptySlots.length && emptySlots.length > 0) {
+        if (requireGroundFloor) {
           params.set("groundFloor", "required");
         }
         const url = `/api/operations/find-buy-in?${params.toString()}`;
@@ -2114,6 +2126,7 @@ export default function Bookings() {
         pools: Array<{ slot?: typeof emptySlots[number]; bedrooms: number; candidates: LiveCandidate[]; searchSummary?: AutoFillSearchSummary }>,
         requiredCount: number,
         usedSeed: Set<string>,
+        requiredIndexes?: Set<number>,
       ): { picks: Array<LiveCandidate | null>; reason?: string } => {
         const used = new Set(usedSeed);
         const picks = pools.map((pool) => {
@@ -2121,13 +2134,20 @@ export default function Bookings() {
           if (pick) addUsedListingIdentity(used, pick);
           return pick;
         });
-        if (requiredCount <= 0 || picks.filter(isGroundFloorPick).length >= requiredCount) {
+        const requirementMet = () => {
+          if (requiredIndexes?.size) {
+            return Array.from(requiredIndexes).every((index) => isGroundFloorPick(picks[index]));
+          }
+          return picks.filter(isGroundFloorPick).length >= requiredCount;
+        };
+        if (requiredCount <= 0 || requirementMet()) {
           return { picks };
         }
 
-        for (let guard = 0; guard < pools.length && picks.filter(isGroundFloorPick).length < requiredCount; guard++) {
+        for (let guard = 0; guard < pools.length && !requirementMet(); guard++) {
           let bestSwap: { index: number; candidate: LiveCandidate; delta: number } | null = null;
           for (let i = 0; i < pools.length; i++) {
+            if (requiredIndexes?.size && !requiredIndexes.has(i)) continue;
             if (isGroundFloorPick(picks[i])) continue;
             const otherUsed = new Set(usedSeed);
             picks.forEach((existing, index) => {
@@ -2143,11 +2163,16 @@ export default function Bookings() {
           picks[bestSwap.index] = bestSwap.candidate;
         }
 
-        const found = picks.filter(isGroundFloorPick).length;
-        if (found < requiredCount) {
+        const found = requiredIndexes?.size
+          ? Array.from(requiredIndexes).filter((index) => isGroundFloorPick(picks[index])).length
+          : picks.filter(isGroundFloorPick).length;
+        if (!requirementMet()) {
+          const targetLabel = requiredIndexes?.size
+            ? ` for the required ${Array.from(requiredIndexes).map((index) => `${pools[index]?.bedrooms ?? "?"}BR`).join(" + ")} slot${requiredIndexes.size === 1 ? "" : "s"}`
+            : "";
           return {
             picks,
-            reason: `Only ${found} confirmed ground-floor option${found === 1 ? "" : "s"} found; ${requiredCount} required by guest messages`,
+            reason: `Only ${found} confirmed ground-floor option${found === 1 ? "" : "s"} found${targetLabel}; ${requiredCount} required by guest messages`,
           };
         }
         return { picks };
@@ -2325,12 +2350,17 @@ export default function Bookings() {
             pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
             summaries.push(pool.searchSummary);
           }
-          const requiredForCombo = requiredGroundFloorUnits >= combo.bedrooms.length
-            ? combo.bedrooms.length
-            : requiredGroundFloorUnits > 0
-              ? 1
-              : 0;
-          const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used);
+          const targetIndexes = requiredGroundFloorBedrooms.size > 0
+            ? new Set(combo.bedrooms.map((bedrooms, index) => requiredGroundFloorBedrooms.has(bedrooms) ? index : -1).filter((index) => index >= 0))
+            : undefined;
+          const requiredForCombo = targetIndexes?.size
+            ? Math.min(requiredGroundFloorUnits, targetIndexes.size)
+            : requiredGroundFloorUnits >= combo.bedrooms.length
+              ? combo.bedrooms.length
+              : requiredGroundFloorUnits > 0
+                ? 1
+                : 0;
+          const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used, targetIndexes);
           if (planned.reason) unavailableReason = planned.reason;
           for (let i = 0; i < planned.picks.length; i++) {
             const pick = planned.picks[i];
@@ -2401,7 +2431,13 @@ export default function Bookings() {
         const pool = await getCandidatePool(slot.bedrooms, false);
         fallbackPools.push({ slot, bedrooms: slot.bedrooms, candidates: pool.candidates, searchSummary: pool.searchSummary });
       }
-      const fallbackPlan = pickCheapestSetWithGroundFloor(fallbackPools, requiredGroundFloorUnits, pickedIdentities);
+      const fallbackTargetIndexes = requiredGroundFloorBedrooms.size > 0
+        ? new Set(fallbackPools.map((pool, index) => requiredGroundFloorBedrooms.has(pool.bedrooms) ? index : -1).filter((index) => index >= 0))
+        : undefined;
+      const fallbackRequiredCount = fallbackTargetIndexes?.size
+        ? Math.min(requiredGroundFloorUnits, fallbackTargetIndexes.size)
+        : requiredGroundFloorUnits;
+      const fallbackPlan = pickCheapestSetWithGroundFloor(fallbackPools, fallbackRequiredCount, pickedIdentities, fallbackTargetIndexes);
       for (let i = 0; i < fallbackPools.length; i++) {
         plannedPicks.push({
           slot: fallbackPools[i].slot,
@@ -4073,6 +4109,9 @@ function groundFloorBadge(status?: GroundFloorStatus | null) {
 
 function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): string {
   if (!req?.requested) return "No ground-floor request found";
+  if (req.targetBedrooms?.length) {
+    return `Ground-floor needed: ${req.targetBedrooms.map((b) => `${b}BR`).join(" + ")} unit${req.targetBedrooms.length === 1 ? "" : "s"}`;
+  }
   if (req.scope === "both") return "Ground-floor needed: both units";
   if (req.scope === "one") return "Ground-floor needed: at least one unit";
   return "Ground-floor/accessibility need found: clarify scope";
@@ -4407,8 +4446,11 @@ function LiveSearchSection({
     staleTime: 60_000,
   });
   const confirmedGroundFloorSlots = reservation.slots.filter((s) => s.buyIn?.groundFloorStatus === "confirmed").length;
+  const targetGroundFloorBedrooms = new Set((groundRequirement?.targetBedrooms ?? []).map((n) => Number(n)));
   const groundFloorNeededForThisSlot = !!groundRequirement?.requested
-    && confirmedGroundFloorSlots < Math.min(reservation.slots.length, Math.max(1, groundRequirement.requiredUnits));
+    && (targetGroundFloorBedrooms.size > 0
+      ? targetGroundFloorBedrooms.has(slot.bedrooms) && slot.buyIn?.groundFloorStatus !== "confirmed"
+      : confirmedGroundFloorSlots < Math.min(reservation.slots.length, Math.max(1, groundRequirement.requiredUnits)));
   useEffect(() => {
     if (!slot.buyIn) return;
     setSearchEnabled(false);

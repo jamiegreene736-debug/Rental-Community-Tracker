@@ -4,6 +4,7 @@ export type GroundFloorRequirement = {
   requested: boolean;
   scope: GroundFloorScope;
   requiredUnits: number;
+  targetBedrooms?: number[];
   confidence: "none" | "low" | "medium" | "high";
   evidence: string[];
   summary: string;
@@ -22,6 +23,9 @@ const FLOOR_ONLY_RE = /\b(ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|m
 const BOTH_UNITS_RE = /\b(both|all|each|every|two|2)\s+(?:of\s+the\s+)?(?:units?|condos?|townhomes?|townhouses?|villas?|homes?|properties|places)\b|\b(?:units?|condos?|townhomes?|townhouses?|villas?|homes?|properties|places)\s+(?:both|all|each|every)\b|\b(?:everyone|entire group|whole group|all of us)\b/i;
 const ONE_UNIT_RE = /\b(?:one|1|single|at least one|just one|only one)\s+(?:of\s+the\s+)?(?:units?|condos?|townhomes?|townhouses?|villas?|homes?|properties|places)\b|\b(?:my|our)\s+(?:mom|mother|dad|father|parent|parents|grandma|grandmother|grandpa|grandfather|grandparents|elderly|senior|guest|friend)\b/i;
 const NEGATED_RE = /\b(?:do(?:es)?\s+not|don't|doesn't|not|no)\s+(?:need|require|have to have|care about|matter).{0,50}\b(ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|downstairs|stairs?)\b/i;
+const BEDROOM_UNIT_RE = /\b(\d{1,2})\s*[-\s]?(?:br|bd|bdr|bdrm|bed|beds|bedroom|bedrooms)\b/gi;
+const MANDATORY_RE = /\b(mandatory|required|require|requires|need|needs|needed|must|have to|has to|can't|cannot|unable|where\s+(?:she|he|they|we|my|our)\b.{0,30}\b(?:stay|staying|sleep|sleeping))\b/i;
+const OPTIONAL_RE = /\b(would be nice|nice to have|if available|if you have|optional|prefer|preference|less desirable|farther|further|not mandatory|not required|doesn't have to|does not have to)\b/i;
 
 const CONFIRMED_LISTING_RE = /\b(ground[-\s]?floor|bottom[-\s]?floor|first[-\s]?floor|main[-\s]?floor|downstairs|lower[-\s]?level|street[-\s]?level|walk[-\s]?out|step[-\s]?free|no\s+steps?|no\s+stairs?|stair[-\s]?free|single[-\s]?level)\b/i;
 const CONFLICT_LISTING_RE = /\b(second|third|fourth|upper|upstairs|top)\s+(?:floor|level)\b|\bwalk[-\s]?up\b|\b(?:must|need(?:s)?|requires?)\s+(?:to\s+)?(?:climb|use)\s+stairs?\b|\bstairs?\s+(?:required|to\s+enter|to\s+access)\b|\bno\s+elevator\b/i;
@@ -38,11 +42,30 @@ function evidenceSnippet(text: string, match: RegExpMatchArray | null): string |
   return text.slice(start, end).trim();
 }
 
+function messageSegments(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|\n+|;\s*/g)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function bedroomMentions(text: string): number[] {
+  const values = new Set<number>();
+  for (const match of text.matchAll(BEDROOM_UNIT_RE)) {
+    const bedrooms = Number.parseInt(match[1], 10);
+    if (Number.isFinite(bedrooms) && bedrooms > 0 && bedrooms < 20) {
+      values.add(bedrooms);
+    }
+  }
+  return Array.from(values).sort((a, b) => a - b);
+}
+
 export function analyzeGroundFloorRequirement(
   messages: Array<string | null | undefined>,
   totalUnits = 2,
 ): GroundFloorRequirement {
   const evidence: string[] = [];
+  const targetBedroomSet = new Set<number>();
   let sawGroundFloor = false;
   let sawFloorSpecific = false;
   let sawBoth = false;
@@ -59,6 +82,16 @@ export function analyzeGroundFloorRequirement(
     sawOne ||= ONE_UNIT_RE.test(text);
     const snippet = evidenceSnippet(text, groundMatch);
     if (snippet) evidence.push(snippet);
+
+    for (const segment of messageSegments(text)) {
+      if (!GROUND_FLOOR_RE.test(segment) || NEGATED_RE.test(segment)) continue;
+      const bedrooms = bedroomMentions(segment);
+      if (bedrooms.length === 0) continue;
+      const mandatory = MANDATORY_RE.test(segment);
+      const optional = OPTIONAL_RE.test(segment);
+      if (optional && !mandatory) continue;
+      bedrooms.forEach((bedroomCount) => targetBedroomSet.add(bedroomCount));
+    }
   }
 
   if (!sawGroundFloor) {
@@ -66,6 +99,7 @@ export function analyzeGroundFloorRequirement(
       requested: false,
       scope: "none",
       requiredUnits: 0,
+      targetBedrooms: [],
       confidence: "none",
       evidence: [],
       summary: "No ground-floor request found in guest messages.",
@@ -73,11 +107,14 @@ export function analyzeGroundFloorRequirement(
   }
 
   const cappedTotal = Math.max(1, totalUnits);
+  const targetBedrooms = Array.from(targetBedroomSet).sort((a, b) => b - a);
   const scope: GroundFloorScope = sawBoth ? "both" : sawOne || sawFloorSpecific ? "one" : "unknown";
-  const requiredUnits = scope === "both" ? cappedTotal : 1;
+  const requiredUnits = scope === "both" ? cappedTotal : Math.max(1, Math.min(targetBedrooms.length || 1, cappedTotal));
   const confidence = sawBoth || sawFloorSpecific ? "high" : sawOne ? "medium" : "low";
   const summary = scope === "both"
     ? `Guest requested ground-floor access for both units.`
+    : targetBedrooms.length > 0
+      ? `Guest requested ground-floor access for the ${targetBedrooms.map((b) => `${b}BR`).join(" and ")} unit${targetBedrooms.length === 1 ? "" : "s"}.`
     : scope === "one"
       ? `Guest requested ground-floor access for at least one unit.`
       : `Guest mentioned accessibility/ground-floor needs; assume at least one ground-floor unit until clarified.`;
@@ -86,6 +123,7 @@ export function analyzeGroundFloorRequirement(
     requested: true,
     scope,
     requiredUnits,
+    targetBedrooms,
     confidence,
     evidence: evidence.slice(0, 4),
     summary,
