@@ -20545,12 +20545,12 @@ Return ONLY compact JSON with this exact shape:
     const loc = COMMUNITY_LOCATION_BY_KEY[config.community];
     if (!loc) return res.status(500).json({ error: `No city/state mapping for community "${config.community}"` });
 
-    const requestedDeepRefresh =
+    const requestedMonthlyRefresh =
       String(req.query.mode ?? "") === "monthly" || String(req.query.deep ?? "") === "1";
-    const refreshMode = "seasonal" as "seasonal" | "monthly";
-    if (requestedDeepRefresh) {
+    const refreshMode = "banded" as "banded" | "seasonal";
+    if (requestedMonthlyRefresh) {
       console.log(
-        `[refresh-market-rates] property ${propertyId}: monthly/deep refresh requested; running seasonal 7-night sample scan instead`,
+        `[refresh-market-rates] property ${propertyId}: monthly/deep refresh requested; running season-band 7-night sample scan instead`,
       );
     }
     const { fetchMultiChannelBuyInBySeason, fetchMultiChannelBuyInByBR, setRefreshProgress, getRefreshProgress, clearRefreshProgress } = await import("./multichannel-buy-in");
@@ -20562,10 +20562,10 @@ Return ONLY compact JSON with this exact shape:
     };
     if (runBackground && !isBackgroundWorker) {
       const startedAt = Date.now();
-      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued seasonal market-rate refresh" });
+      setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued season-band market-rate refresh" });
       const port = process.env.PORT || "5000";
       setTimeout(() => {
-        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=seasonal`, { method: "POST" })
+        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=banded`, { method: "POST" })
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
@@ -20595,11 +20595,12 @@ Return ONLY compact JSON with this exact shape:
       return res.status(202).json({ ok: true, accepted: true, propertyId });
     }
 
-    // Multi-season multi-channel scan (PR #282).
+    // Season-band multi-channel scan.
     //
-    // Pulls per-season basis: LOW + HIGH + HOLIDAY. Each season uses
-    // Airbnb + VRBO + Booking.com website searches, plus PM website
-    // searches. SearchAPI is used only to discover PM company domains;
+    // Pulls one 7-night sample per contiguous LOW/HIGH date band
+    // across the 24-month horizon, plus explicit holiday windows. Each
+    // sample uses Airbnb + VRBO + Booking.com website searches, plus PM
+    // website searches. SearchAPI is used only to discover PM company domains;
     // Chrome sidecar then drives those PM rental-search pages.
     // Total wall can run several minutes because the daemon serializes
     // browser work through the operator's Chrome.
@@ -20611,10 +20612,9 @@ Return ONLY compact JSON with this exact shape:
     //   - HIGH basis    → medianNightlyHigh    (new nullable col)
     //   - HOLIDAY basis → medianNightlyHoliday (new nullable col)
     //
-    // The Pricing tab's seasonal table reads per-season basis when
-    // populated; falls back to LOW × multiplier for any season that
-    // didn't get scanned (e.g. HOLIDAY pickSeasonWindow returned
-    // null).
+    // The Pricing tab's table uses the band sample for every month in
+    // that same contiguous band; falls back to LOW × multiplier for any
+    // season that didn't get scanned.
     const wantBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
     const startedAt = Date.now();
     const sidecarStopGeneration = getSidecarStopGeneration();
@@ -20625,9 +20625,9 @@ Return ONLY compact JSON with this exact shape:
         throw err;
       }
     };
-    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Initializing seasonal scan" });
+    setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Initializing season-band scan" });
 
-    if (refreshMode === "monthly") {
+    if (refreshMode === "banded") {
       const { getSeasonForMonth, getCommunityRegion } = await import("@shared/pricing-rates");
       type SeasonLabel = "LOW" | "HIGH" | "HOLIDAY";
       type ChannelSnapshot = { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
@@ -20645,10 +20645,10 @@ Return ONLY compact JSON with this exact shape:
         low: number;
         high: number | null;
         holiday: number | null;
-        basisSource: "monthly-multichannel-median" | "airbnb" | "none";
+        basisSource: "season-band-multichannel-median" | "airbnb" | "none";
         channels: ChannelSnapshot;
         channelCount: number;
-        monthlyCount: number;
+        monthsCovered: number;
       };
 
       const medianOfSorted = (sorted: number[]): number => {
@@ -20687,13 +20687,13 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowBasis * multiplier);
       };
-      const monthlyOutlierBand = 0.30;
-      const clampMonthlyBasisToSeason = (monthlyBasis: number, seasonBasis: number | null): number => {
-        if (!Number.isFinite(monthlyBasis) || monthlyBasis <= 0) return seasonBasis ?? 0;
-        if (seasonBasis == null || !Number.isFinite(seasonBasis) || seasonBasis <= 0) return Math.round(monthlyBasis);
-        const low = Math.round(seasonBasis * (1 - monthlyOutlierBand));
-        const high = Math.round(seasonBasis * (1 + monthlyOutlierBand));
-        return Math.max(low, Math.min(high, Math.round(monthlyBasis)));
+      const seasonBandOutlierBand = 0.30;
+      const clampBandBasisToSeason = (bandBasis: number, seasonBasis: number | null): number => {
+        if (!Number.isFinite(bandBasis) || bandBasis <= 0) return seasonBasis ?? 0;
+        if (seasonBasis == null || !Number.isFinite(seasonBasis) || seasonBasis <= 0) return Math.round(bandBasis);
+        const low = Math.round(seasonBasis * (1 - seasonBandOutlierBand));
+        const high = Math.round(seasonBasis * (1 + seasonBandOutlierBand));
+        return Math.max(low, Math.min(high, Math.round(bandBasis)));
       };
       const ymd = (d: Date) => d.toISOString().slice(0, 10);
       const today = new Date();
@@ -20720,30 +20720,75 @@ Return ONLY compact JSON with this exact shape:
         }
         return false;
       };
-      const chooseMonthlyWindow = (monthDate: Date) => {
-        for (const day of [15, 8, 22]) {
-          const checkIn = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), day));
-          if (checkIn <= today) checkIn.setUTCDate(today.getUTCDate() + 2);
+      const chooseBandWindow = (bandStart: Date, bandEnd: Date) => {
+        const bandStartMs = bandStart.getTime();
+        const bandEndMs = bandEnd.getTime();
+        const spanDays = Math.max(7, Math.floor((bandEndMs - bandStartMs) / 86_400_000));
+        const candidates = [
+          Math.floor(spanDays / 2) - 3,
+          7,
+          Math.max(0, spanDays - 14),
+          0,
+        ];
+        for (const offsetDays of candidates) {
+          const checkIn = new Date(bandStart);
+          checkIn.setUTCDate(checkIn.getUTCDate() + Math.max(0, offsetDays));
+          if (checkIn <= today) {
+            checkIn.setTime(today.getTime());
+            checkIn.setUTCDate(checkIn.getUTCDate() + 2);
+          }
           const checkOut = new Date(checkIn);
           checkOut.setUTCDate(checkOut.getUTCDate() + 7);
-          if (!overlapsHoliday(checkIn, checkOut)) return { checkIn, checkOut };
+          if (checkOut <= bandEnd && !overlapsHoliday(checkIn, checkOut)) return { checkIn, checkOut };
         }
-        const checkIn = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 15));
-        if (checkIn <= today) checkIn.setUTCDate(today.getUTCDate() + 2);
+        const checkIn = new Date(bandStart);
+        if (checkIn <= today) {
+          checkIn.setTime(today.getTime());
+          checkIn.setUTCDate(checkIn.getUTCDate() + 2);
+        }
         const checkOut = new Date(checkIn);
         checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+        if (checkOut > bandEnd) return null;
         return { checkIn, checkOut };
       };
-      const monthlyWindows: Array<{ yearMonth: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
+      const monthRows: Array<{ yearMonth: string; season: Exclude<SeasonLabel, "HOLIDAY">; monthStart: Date; monthEnd: Date }> = [];
       for (let i = 0; i < 24; i++) {
         const monthDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i, 1));
         const yearMonth = `${monthDate.getUTCFullYear()}-${String(monthDate.getUTCMonth() + 1).padStart(2, "0")}`;
-        const { checkIn, checkOut } = chooseMonthlyWindow(monthDate);
-        monthlyWindows.push({
+        const monthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i + 1, 1));
+        monthRows.push({
           yearMonth,
-          season: getSeasonForMonth(yearMonth, pricingRegion) as SeasonLabel,
-          checkIn: ymd(checkIn),
-          checkOut: ymd(checkOut),
+          season: getSeasonForMonth(yearMonth, pricingRegion) as Exclude<SeasonLabel, "HOLIDAY">,
+          monthStart: monthDate,
+          monthEnd,
+        });
+      }
+      const bandWindows: Array<{
+        label: string;
+        season: Exclude<SeasonLabel, "HOLIDAY">;
+        checkIn: string;
+        checkOut: string;
+        yearMonths: string[];
+        bandStart: string;
+        bandEnd: string;
+      }> = [];
+      for (let i = 0; i < monthRows.length;) {
+        const season = monthRows[i].season;
+        const startIdx = i;
+        while (i < monthRows.length && monthRows[i].season === season) i++;
+        const rows = monthRows.slice(startIdx, i);
+        const bandStart = rows[0].monthStart;
+        const bandEnd = rows[rows.length - 1].monthEnd;
+        const window = chooseBandWindow(bandStart, bandEnd);
+        if (!window) continue;
+        bandWindows.push({
+          label: `${ymd(bandStart)} to ${ymd(bandEnd)} ${season} rates`,
+          season,
+          checkIn: ymd(window.checkIn),
+          checkOut: ymd(window.checkOut),
+          yearMonths: rows.map((r) => r.yearMonth),
+          bandStart: ymd(bandStart),
+          bandEnd: ymd(bandEnd),
         });
       }
 
@@ -20760,7 +20805,7 @@ Return ONLY compact JSON with this exact shape:
       }
       holidayWindows.sort((a, b) => a.checkIn.localeCompare(b.checkIn));
 
-      const totalWindows = monthlyWindows.length + holidayWindows.length;
+      const totalWindows = bandWindows.length + holidayWindows.length;
       const monthlyByBR = new Map<number, Record<string, MonthlyRatePayload>>();
       const seasonBuckets = new Map<number, Record<SeasonLabel, number[]>>();
       const sourceFlags = new Map<number, { hasAnyChannel: boolean; hasNonAirbnb: boolean; channelCount: number }>();
@@ -20773,7 +20818,7 @@ Return ONLY compact JSON with this exact shape:
         reason?: string;
       }> = [];
 
-      const setMonthlyProgress = (args: {
+      const setBandProgress = (args: {
         completed: number;
         label: string;
         current?: number;
@@ -20786,7 +20831,7 @@ Return ONLY compact JSON with this exact shape:
         setRefreshProgress({
           propertyId,
           startedAt,
-          phase: "monthly",
+          phase: "banded",
           percent: Math.max(0, Math.min(100, percent)),
           label: args.label,
           progressDone: done,
@@ -20799,15 +20844,15 @@ Return ONLY compact JSON with this exact shape:
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
         });
       };
-      const MONTHLY_WINDOW_BUDGET_MS = 12 * 60_000;
-      const runMonthlyWindowScan = async (
+      const BAND_WINDOW_BUDGET_MS = 12 * 60_000;
+      const runBandWindowScan = async (
         label: string,
         dateOverride: { checkIn: string; checkOut: string },
       ) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => {
-          controller.abort(new Error(`${label} exceeded the ${Math.round(MONTHLY_WINDOW_BUDGET_MS / 60_000)} minute per-window budget`));
-        }, MONTHLY_WINDOW_BUDGET_MS);
+          controller.abort(new Error(`${label} exceeded the ${Math.round(BAND_WINDOW_BUDGET_MS / 60_000)} minute per-window budget`));
+        }, BAND_WINDOW_BUDGET_MS);
         try {
           return await fetchMultiChannelBuyInByBR({
             community: loc.searchName,
@@ -20867,7 +20912,7 @@ Return ONLY compact JSON with this exact shape:
         sourceFlags.set(br, flags);
         latestChannels.set(br, channels);
       };
-      const persistMonthlySnapshot = async (opts: { final: boolean }): Promise<PersistedMonthly[]> => {
+      const persistBandSnapshot = async (opts: { final: boolean }): Promise<PersistedMonthly[]> => {
         const persisted: PersistedMonthly[] = [];
         for (const br of wantBedrooms) {
           ensureBR(br);
@@ -20887,7 +20932,7 @@ Return ONLY compact JSON with this exact shape:
               basisSource: "none",
               channels: latestChannels.get(br) ?? { airbnb: null, vrbo: null, booking: null, pm: null },
               channelCount: 0,
-              monthlyCount: 0,
+              monthsCovered: 0,
             });
             continue;
           }
@@ -20909,14 +20954,14 @@ Return ONLY compact JSON with this exact shape:
                 : lowBasis;
             clampedMonthlyRates[yearMonth] = {
               ...payload,
-              medianNightly: clampMonthlyBasisToSeason(payload.medianNightly, seasonBasis),
+              medianNightly: clampBandBasisToSeason(payload.medianNightly, seasonBasis),
             };
           }
           const clampedMonthlyValues = Object.values(clampedMonthlyRates).map((r) => r.medianNightly);
           const allBasisValues = [...clampedMonthlyValues, highBasis, holidayBasis].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
           const flags = sourceFlags.get(br) ?? { hasAnyChannel: false, hasNonAirbnb: false, channelCount: 0 };
           const source: PersistedMonthly["basisSource"] = flags.hasNonAirbnb || (flags.hasAnyChannel && flags.channelCount > 1)
-            ? "monthly-multichannel-median"
+            ? "season-band-multichannel-median"
             : "airbnb";
           await storage.upsertPropertyMarketRate({
             propertyId,
@@ -20938,7 +20983,7 @@ Return ONLY compact JSON with this exact shape:
             basisSource: source,
             channels: latestChannels.get(br) ?? { airbnb: null, vrbo: null, booking: null, pm: null },
             channelCount: flags.channelCount,
-            monthlyCount: Object.keys(monthlyRates).length,
+            monthsCovered: Object.keys(monthlyRates).length,
           });
         }
         return persisted;
@@ -20946,39 +20991,41 @@ Return ONLY compact JSON with this exact shape:
 
       try {
         let completed = 0;
-        for (const win of monthlyWindows) {
+        for (const win of bandWindows) {
           assertSidecarRunCurrent();
-          const currentLabel = `${win.yearMonth} ${win.season} rates`;
+          const currentLabel = win.label;
           const currentStartedAt = Date.now();
-          setMonthlyProgress({
+          setBandProgress({
             completed,
             current: completed + 1,
             currentLabel,
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
-          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
           assertSidecarRunCurrent();
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
             ensureBR(br);
             const result = basisForScan(scan, br);
             if (result.basis == null || result.basis <= 0) continue;
-            monthlyByBR.get(br)![win.yearMonth] = {
-              medianNightly: result.basis,
-              season: win.season,
-              checkIn: win.checkIn,
-              checkOut: win.checkOut,
-              channelCount: result.channelRates.length,
-              sampleCount: result.channelRates.length > 0 ? result.channelRates.length : result.airbnbSamples,
-              channels: result.channels,
-            };
+            for (const yearMonth of win.yearMonths) {
+              monthlyByBR.get(br)![yearMonth] = {
+                medianNightly: result.basis,
+                season: win.season,
+                checkIn: win.checkIn,
+                checkOut: win.checkOut,
+                channelCount: result.channelRates.length,
+                sampleCount: result.channelRates.length > 0 ? result.channelRates.length : result.airbnbSamples,
+                channels: result.channels,
+              };
+            }
             seasonBuckets.get(br)![win.season].push(result.basis);
             noteSource(br, result.channels, result.channelRates);
           }
           completed++;
-          await persistMonthlySnapshot({ final: false });
-          setMonthlyProgress({
+          await persistBandSnapshot({ final: false });
+          setBandProgress({
             completed,
             label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
@@ -20988,14 +21035,14 @@ Return ONLY compact JSON with this exact shape:
           assertSidecarRunCurrent();
           const currentLabel = `${win.label} holiday rates`;
           const currentStartedAt = Date.now();
-          setMonthlyProgress({
+          setBandProgress({
             completed,
             current: completed + 1,
             currentLabel,
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
-          const scan = await runMonthlyWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
+          const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut });
           assertSidecarRunCurrent();
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {
@@ -21006,8 +21053,8 @@ Return ONLY compact JSON with this exact shape:
             noteSource(br, result.channels, result.channelRates);
           }
           completed++;
-          await persistMonthlySnapshot({ final: false });
-          setMonthlyProgress({
+          await persistBandSnapshot({ final: false });
+          setBandProgress({
             completed,
             label: `Completed ${currentLabel} (${completed}/${totalWindows} complete)`,
           });
@@ -21018,11 +21065,11 @@ Return ONLY compact JSON with this exact shape:
           startedAt,
           phase: "persisting",
           percent: 100,
-          label: "Persisting monthly medians",
+          label: "Persisting season-band medians",
           progressDone: totalWindows,
           progressTotal: totalWindows,
         });
-        const persisted = await persistMonthlySnapshot({ final: true });
+        const persisted = await persistBandSnapshot({ final: true });
 
         setRefreshProgress({
           propertyId,
@@ -21037,21 +21084,21 @@ Return ONLY compact JSON with this exact shape:
         else clearRefreshProgress(propertyId);
 
         console.log(
-          `[refresh-market-rates] monthly property ${propertyId} (${config.community}) ${Date.now() - startedAt}ms: ` +
+          `[refresh-market-rates] season-band property ${propertyId} (${config.community}) ${Date.now() - startedAt}ms: ` +
           persisted.map((p) =>
-            `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.monthlyCount}mo HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
+            `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.monthsCovered}mo HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
           ).join(", "),
         );
         return res.json({
           ok: true,
           propertyId,
           community: config.community,
-          mode: "monthly",
+          mode: "banded",
           persisted,
           snapshot: {
             seasons: {
-              LOW: monthlyWindows.find((w) => w.season === "LOW") ?? null,
-              HIGH: monthlyWindows.find((w) => w.season === "HIGH") ?? null,
+              LOW: bandWindows.find((w) => w.season === "LOW") ?? null,
+              HIGH: bandWindows.find((w) => w.season === "HIGH") ?? null,
               HOLIDAY: holidayWindows[0] ? { checkIn: holidayWindows[0].checkIn, checkOut: holidayWindows[0].checkOut, daemonOnline: true } : null,
             },
             region: pricingRegion,
@@ -21065,16 +21112,16 @@ Return ONLY compact JSON with this exact shape:
           startedAt,
           phase: "error",
           percent: 100,
-          label: cancelled ? "Seasonal market-rate scan cancelled" : "Seasonal market-rate scan failed",
+          label: cancelled ? "Season-band market-rate scan cancelled" : "Season-band market-rate scan failed",
           error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
         });
         if (isBackgroundWorker) clearProgressSoon(propertyId);
         console.warn(
-          `[refresh-market-rates] monthly property ${propertyId} ${cancelled ? "cancelled" : "failed"}:`,
+          `[refresh-market-rates] season-band property ${propertyId} ${cancelled ? "cancelled" : "failed"}:`,
           e?.message ?? e,
         );
         return res.status(cancelled ? 409 : 500).json({
-          error: cancelled ? "Seasonal market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
+          error: cancelled ? "Season-band market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
           cancelled,
         });
       } finally {
@@ -21320,7 +21367,7 @@ Return ONLY compact JSON with this exact shape:
         ...state,
         phase: "error" as const,
         label: "Refresh tracking interrupted",
-        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh seasonal refresh after the sidecar goes quiet.`,
+        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh season-band refresh after the sidecar goes quiet.`,
         lastTickAt: state.lastTickAt,
       };
       setRefreshProgress(interrupted);
@@ -21358,7 +21405,7 @@ Return ONLY compact JSON with this exact shape:
 
     for (const id of staticIds) {
       try {
-        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=seasonal`, { method: "POST" });
+        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=banded`, { method: "POST" });
         const data = (await r.json().catch(() => ({}))) as any;
         results.push({ id, kind: "static", ok: r.ok, error: r.ok ? undefined : data?.error });
       } catch (e: any) {

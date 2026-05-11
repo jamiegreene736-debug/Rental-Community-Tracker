@@ -1103,7 +1103,7 @@ function pickSeasonWindow(
 //   done | error
 //
 // Each season queues Airbnb / VRBO / Booking.com / PM website work
-// through the daemon's single Chrome. Monthly pricing refreshes also
+// through the daemon's single Chrome. Season-band pricing refreshes also
 // include exact window counters so the UI can show completed 7-night
 // samples instead of relying on a rough phase estimate.
 export type RefreshProgressState = {
@@ -1111,14 +1111,14 @@ export type RefreshProgressState = {
   startedAt: number;
   phase:
     | "starting"
-    | "monthly"
+    | "monthly" | "banded"
     | "airbnb-low" | "airbnb-high" | "airbnb-holiday"
     | "sidecar-low" | "sidecar-high" | "sidecar-holiday"
     | "persisting" | "done" | "error";
   percent: number;
   label: string;
   error?: string;
-  // Optional exact work-unit counters for long monthly market-rate
+  // Optional exact work-unit counters for long season-band market-rate
   // scans. `percent` remains the generic fallback, but the Pricing tab
   // prefers these when present so the bar reflects real windows
   // completed instead of a rough phase estimate.
