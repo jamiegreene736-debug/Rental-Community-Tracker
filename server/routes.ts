@@ -82,6 +82,7 @@ import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimit
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
+import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import { unitBuilderData, getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import {
   aliasPrefixForGuest,
@@ -3427,6 +3428,7 @@ export async function registerRoutes(
         "airbnbConfirmation", "airbnbListingUrl",
         "unitAddress", "accessCode", "wifiName", "wifiPassword", "parkingInfo",
         "managementCompany", "managementContact", "arrivalNotes",
+        "groundFloorStatus", "groundFloorEvidence",
         "notes", "status",
       ];
       const filtered: Record<string, any> = {};
@@ -4406,6 +4408,107 @@ export async function registerRoutes(
     for (const k of expired) buyInListingSitesCache.delete(k);
   }
 
+  const unwrapGuestyList = (data: any, keys: string[]): any[] => {
+    for (const key of keys) {
+      const value = data?.[key] ?? data?.data?.[key];
+      if (Array.isArray(value)) return value;
+    }
+    if (Array.isArray(data?.data)) return data.data;
+    if (Array.isArray(data?.results)) return data.results;
+    return [];
+  };
+
+  const postBodyText = (post: any): string => String(
+    post?.body ??
+    post?.text ??
+    post?.message ??
+    post?.content ??
+    post?.state?.body ??
+    "",
+  ).trim();
+
+  const isHostConversationPost = (post: any): boolean => (
+    post?.authorType === "host" ||
+    post?.authorRole === "host" ||
+    post?.senderType === "host" ||
+    post?.sentBy === "host" ||
+    post?.direction === "outbound" ||
+    post?.direction === "out" ||
+    post?.direction === "outgoing" ||
+    post?.isIncoming === false
+  );
+
+  const isSystemConversationPost = (post: any): boolean => {
+    if (post?.sentBy === "log") return true;
+    const moduleType = String(post?.module?.type ?? post?.type ?? "").toLowerCase();
+    if (["log", "system", "internal", "note"].includes(moduleType)) return true;
+    const body = postBodyText(post).toLowerCase();
+    return body === "new guest inquiry" ||
+      body === "new inquiry" ||
+      body === "new reservation request" ||
+      body.startsWith("new guest reservation");
+  };
+
+  const findConversationByReservation = async (reservationId: string): Promise<{ id: string; conversation: any } | null> => {
+    try {
+      const data = await guestyRequest("GET", `/communication/conversations?reservationId=${encodeURIComponent(reservationId)}&limit=1&fields=`) as any;
+      const rows = unwrapGuestyList(data, ["conversations", "results", "data"]);
+      const conversation = rows[0];
+      const id = conversation?._id ?? conversation?.id;
+      if (id) return { id, conversation };
+    } catch (e: any) {
+      console.warn(`[ground-floor] conversation lookup failed for reservation ${reservationId}: ${e?.message ?? e}`);
+    }
+    return null;
+  };
+
+  const loadGuestMessageTextsForReservation = async (reservationId: string): Promise<{
+    conversationId: string | null;
+    messages: string[];
+    sourceCounts: { guestyPosts: number; sms: number };
+  }> => {
+    const conv = await findConversationByReservation(reservationId);
+    if (!conv) return { conversationId: null, messages: [], sourceCounts: { guestyPosts: 0, sms: 0 } };
+
+    let guestyPosts: any[] = [];
+    try {
+      const postsData = await guestyRequest("GET", `/communication/conversations/${encodeURIComponent(conv.id)}/posts?limit=100`) as any;
+      guestyPosts = unwrapGuestyList(postsData, ["posts", "results", "messages"]);
+    } catch (e: any) {
+      console.warn(`[ground-floor] posts lookup failed for conversation ${conv.id}: ${e?.message ?? e}`);
+    }
+
+    const guestPostTexts = guestyPosts
+      .filter((post) => !isSystemConversationPost(post) && !isHostConversationPost(post))
+      .map(postBodyText)
+      .filter(Boolean);
+    if (guestPostTexts.length === 0) {
+      const fallbackPosts = [
+        conv.conversation?.lastPost,
+        conv.conversation?.meta?.lastPost,
+        conv.conversation?.meta?.lastMessage,
+        conv.conversation?.state?.lastMessage,
+      ].filter(Boolean);
+      for (const post of fallbackPosts) {
+        if (isSystemConversationPost(post) || isHostConversationPost(post)) continue;
+        const body = postBodyText(post);
+        if (body) guestPostTexts.push(body);
+      }
+    }
+
+    const smsRows = await storage.getQuoSmsMessagesByConversation(conv.id, 100).catch(() => []);
+    const smsTexts = smsRows
+      .filter((row) => row.direction === "inbound")
+      .map((row) => String(row.body ?? "").trim())
+      .filter(Boolean);
+
+    return {
+      conversationId: conv.id,
+      messages: [...guestPostTexts, ...smsTexts],
+      sourceCounts: { guestyPosts: guestPostTexts.length, sms: smsTexts.length },
+    };
+  };
+
   const normalizeListingSurfaceKey = (rawUrl: string | null | undefined): string => {
     if (!rawUrl) return "";
     try {
@@ -5174,7 +5277,8 @@ export async function registerRoutes(
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
     const includePm = req.query.includePm !== "0" && req.query.pm !== "0";
-    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}`;
+    const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
+    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}|${groundFloorOnly ? "ground" : "any-floor"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -5434,6 +5538,8 @@ export async function registerRoutes(
       verifiedNightlyPrice?: number | null;
       verifiedReason?: string;
       bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
+      groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
+      groundFloorEvidence?: string | null;
     };
 
     const asNum = (v: unknown): number => {
@@ -7215,6 +7321,19 @@ export async function registerRoutes(
     const vrboTarget = filterTargetCandidates(vrbo, "vrbo");
     const bookingTarget = filterTargetCandidates(booking, "booking");
     const pmTarget = filterTargetCandidates(pmAugmented, "pm");
+    const annotateGroundFloor = (candidate: Candidate): Candidate => {
+      const inferred = inferGroundFloorFromText([
+        candidate.title,
+        candidate.snippet,
+        candidate.url,
+        candidate.verifiedReason,
+        ...(candidate.photoMatches ?? []).map((m) => `${m.title} ${m.domain} ${m.url}`),
+      ]);
+      candidate.groundFloorStatus = inferred.status;
+      candidate.groundFloorEvidence = inferred.evidence;
+      return candidate;
+    };
+    [...airbnbTarget, ...vrboTarget, ...bookingTarget, ...pmTarget].forEach(annotateGroundFloor);
 
     // Combined priced pool across all bookable sources.
     //
@@ -7240,6 +7359,7 @@ export async function registerRoutes(
     // PM — verified via the sidecar batch-verify pass above.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
+      .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
     // ── Pre-verify top-N priced PM candidates ──────────────────────────────
@@ -7337,11 +7457,15 @@ export async function registerRoutes(
       bedrooms?: number;
       verified?: "yes" | "no" | "unclear" | "skipped";
       verifiedReason?: string;
+      groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
+      groundFloorEvidence?: string | null;
     };
     type CheapestUnit = {
       unitTitle: string;
       bedrooms?: number;
       image?: string;
+      groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
+      groundFloorEvidence?: string | null;
       minNightlyPrice: number;
       // Best click-through URL for one-click auto-fill — the lowest-
       // priced verified=yes listing in the cluster.
@@ -7358,6 +7482,8 @@ export async function registerRoutes(
       bedrooms: c.bedrooms,
       verified: c.verified,
       verifiedReason: c.verifiedReason,
+      groundFloorStatus: c.groundFloorStatus ?? "unknown",
+      groundFloorEvidence: c.groundFloorEvidence ?? null,
     });
     // anchorKey → cluster builder. The anchor key is the Airbnb anchor
     // URL when the candidate is part of a photo-match cluster, else the
@@ -7414,10 +7540,17 @@ export async function registerRoutes(
       const verifiedYes = listingChannels.filter((l: ListingChannel) => l.verified === "yes" && l.nightlyPrice > 0);
       if (verifiedYes.length === 0) continue; // skip un-buyable clusters
       const cheapestVerified = verifiedYes[0];
+      const floorEvidenceListing =
+        listingChannels.find((l) => l.groundFloorStatus === "confirmed") ??
+        listingChannels.find((l) => l.groundFloorStatus === "conflict") ??
+        listingChannels.find((l) => l.groundFloorStatus === "unknown") ??
+        listingChannels.find((l) => l.groundFloorStatus === "not_confirmed");
       units.push({
         unitTitle: anchor.title,
         bedrooms: anchor.bedrooms,
         image: anchor.image,
+        groundFloorStatus: floorEvidenceListing?.groundFloorStatus ?? anchor.groundFloorStatus ?? "unknown",
+        groundFloorEvidence: floorEvidenceListing?.groundFloorEvidence ?? anchor.groundFloorEvidence ?? null,
         minNightlyPrice: cheapestVerified.nightlyPrice,
         primaryUrl: cheapestVerified.url,
         primaryChannel: cheapestVerified.channel,
@@ -7425,7 +7558,9 @@ export async function registerRoutes(
       });
     }
     units.sort((a, b) => a.minNightlyPrice - b.minNightlyPrice);
-    const cheapestUnits = units.slice(0, 20);
+    const cheapestUnits = units
+      .filter((u) => !groundFloorOnly || u.listings.some((l) => l.verified === "yes" && l.groundFloorStatus === "confirmed"))
+      .slice(0, 20);
     const scanElapsedMs = Date.now() - scanStartedAt;
     const sidecarReasonSummary = formatSidecarReasonSummary();
 
@@ -7575,7 +7710,7 @@ export async function registerRoutes(
     const diagnosticsReport = [
       "Find buy-in diagnostic report",
       `Generated: ${new Date().toISOString()}`,
-      `Request: propertyId=${propertyId}; community=${community}; resort=${resortName ?? "unknown"}; bedrooms=${bedrooms}; checkIn=${checkIn}; checkOut=${checkOut}; nights=${nights}`,
+      `Request: propertyId=${propertyId}; community=${community}; resort=${resortName ?? "unknown"}; bedrooms=${bedrooms}; checkIn=${checkIn}; checkOut=${checkOut}; nights=${nights}; groundFloorOnly=${groundFloorOnly}`,
       `Elapsed: ${scanElapsedMs}ms`,
       `Severity: ${diagnosticsSeverity}`,
       `Summary: ${diagnosticsSummary}`,
@@ -7617,7 +7752,7 @@ export async function registerRoutes(
       summary: diagnosticsSummary,
       generatedAt: new Date().toISOString(),
       elapsedMs: scanElapsedMs,
-      request: { propertyId, community, resortName, bedrooms, checkIn, checkOut, nights },
+      request: { propertyId, community, resortName, bedrooms, checkIn, checkOut, nights, groundFloorOnly },
       pricePlausibility: {
         expectedNightly: expectedNightlyForPlausibility,
         minPlausibleNightly,
@@ -7649,6 +7784,7 @@ export async function registerRoutes(
       nights,
       checkIn,
       checkOut,
+      groundFloorOnly,
       sources: {
         airbnb: airbnbTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         vrbo: vrboTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
@@ -8653,6 +8789,30 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch bookings", message: err.message });
+    }
+  });
+
+  app.get("/api/bookings/:reservationId/ground-floor-requirement", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const propertyId = parseInt((req.query.propertyId as string) ?? "", 10);
+      const totalUnitsRaw = parseInt((req.query.totalUnits as string) ?? "", 10);
+      const totalUnits = Number.isFinite(totalUnitsRaw) && totalUnitsRaw > 0
+        ? totalUnitsRaw
+        : propertyId
+          ? Math.max(1, getPropertyUnits(propertyId).length || 2)
+          : 2;
+
+      const loaded = await loadGuestMessageTextsForReservation(reservationId);
+      const requirement = analyzeGroundFloorRequirement(loaded.messages, totalUnits);
+      res.json({
+        reservationId,
+        conversationId: loaded.conversationId,
+        ...requirement,
+        sourceCounts: loaded.sourceCounts,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to scan guest messages", message: err.message });
     }
   });
 

@@ -36,6 +36,8 @@ export const buyIns = pgTable("buy_ins", {
   managementCompany: text("management_company"),
   managementContact: text("management_contact"),
   arrivalNotes: text("arrival_notes"),
+  groundFloorStatus: text("ground_floor_status").notNull().default("unknown"),
+  groundFloorEvidence: text("ground_floor_evidence"),
   notes: text("notes"),
   status: text("status").notNull().default("active"),
   guestyReservationId: text("guesty_reservation_id"),

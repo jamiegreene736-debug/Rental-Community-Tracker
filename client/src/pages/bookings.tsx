@@ -32,6 +32,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import type { UnitConfig } from "@shared/property-units";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
+import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -155,6 +156,8 @@ type AutoFillComboOption = {
     title: string;
     totalPrice: number;
     url: string;
+    groundFloorStatus?: GroundFloorStatus;
+    groundFloorEvidence?: string | null;
   }>;
   pools?: Array<{
     bedrooms: number;
@@ -166,6 +169,8 @@ type AutoFillComboOption = {
       nightlyPrice: number;
       url: string;
       image?: string;
+      groundFloorStatus?: GroundFloorStatus;
+      groundFloorEvidence?: string | null;
     }>;
   }>;
 };
@@ -180,6 +185,8 @@ type AutoFillAuditCandidate = {
   image?: string;
   verified?: "yes" | "no" | "unclear" | "skipped";
   verifiedReason?: string;
+  groundFloorStatus?: GroundFloorStatus;
+  groundFloorEvidence?: string | null;
 };
 
 type AutoFillSearchAudit = {
@@ -820,6 +827,74 @@ function AutoFillProgress({
         </span>
       </div>
       <Progress value={value} className="h-1.5" />
+    </div>
+  );
+}
+
+function GroundFloorRequirementNotice({
+  reservation,
+  propertyId,
+}: {
+  reservation: GuestyReservation;
+  propertyId: number;
+}) {
+  const { data, isLoading, isError } = useQuery<GroundFloorRequirement & {
+    conversationId?: string | null;
+    sourceCounts?: { guestyPosts: number; sms: number };
+  }>({
+    queryKey: ["/api/bookings", reservation._id, "ground-floor-requirement", propertyId, reservation.slots.length],
+    queryFn: () => apiGetJson(
+      `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${propertyId}&totalUnits=${reservation.slots.length}`,
+    ),
+    enabled: !!reservation._id,
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-muted-foreground">
+        <RefreshCw className="mr-1 inline h-3 w-3 animate-spin" />
+        Scanning guest messages for ground-floor requests...
+      </div>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <AlertCircle className="mr-1 inline h-3 w-3" />
+        Could not scan guest messages for ground-floor requests.
+      </div>
+    );
+  }
+  if (!data.requested) {
+    return (
+      <div className="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-muted-foreground">
+        <CheckCircle2 className="mr-1 inline h-3 w-3 text-slate-500" />
+        No ground-floor request found in the linked guest conversation.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold">
+          <AlertCircle className="mr-1 inline h-3.5 w-3.5" />
+          {groundFloorRequirementLabel(data)}
+        </p>
+        <Badge variant="outline" className="border-amber-300 bg-white text-[10px] text-amber-900">
+          {data.requiredUnits} ground-floor {data.requiredUnits === 1 ? "unit" : "units"} required
+        </Badge>
+      </div>
+      <p className="mt-1 text-[11px] leading-snug text-amber-900">
+        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}.
+        {data.scope === "unknown" ? " Scope is unclear, so the tool assumes at least one ground-floor unit until clarified." : ""}
+      </p>
+      {data.evidence?.[0] && (
+        <p className="mt-1 truncate text-[11px] italic text-amber-800" title={data.evidence[0]}>
+          Evidence: "{data.evidence[0]}"
+        </p>
+      )}
     </div>
   );
 }
@@ -1770,6 +1845,24 @@ export default function Bookings() {
         throw new Error("Auto-fill needs valid check-in/check-out dates before it can search.");
       }
 
+      const groundFloorRequirement = await apiRequest(
+        "GET",
+        `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${selectedPropertyId}&totalUnits=${reservation.slots.length}`,
+      )
+        .then((r) => r.json() as Promise<GroundFloorRequirement & { conversationId?: string | null }>)
+        .catch((): GroundFloorRequirement => ({
+          requested: false,
+          scope: "none",
+          requiredUnits: 0,
+          confidence: "none",
+          evidence: [],
+          summary: "Ground-floor scan unavailable.",
+        }));
+      const requiredGroundFloorUnits = Math.min(
+        emptySlots.length,
+        groundFloorRequirement.requested ? Math.max(1, groundFloorRequirement.requiredUnits) : 0,
+      );
+
       // Deduplicate find-buy-in calls. When a reservation has multiple
       // empty slots with the SAME bedrooms (Amy Vanbuskirk's 2x 3BR
       // case), each slot was previously firing its own find-buy-in
@@ -1799,6 +1892,9 @@ export default function Bookings() {
           checkOut: co,
         });
         if (!includePm) params.set("includePm", "0");
+        if (requiredGroundFloorUnits >= emptySlots.length && emptySlots.length > 0) {
+          params.set("groundFloor", "required");
+        }
         const url = `/api/operations/find-buy-in?${params.toString()}`;
         const promise = fetchFindBuyInWithRetry(url);
         findBuyInCache.set(key, promise);
@@ -1857,6 +1953,8 @@ export default function Bookings() {
         image: candidate.image,
         verified: candidate.verified,
         verifiedReason: candidate.verifiedReason,
+        groundFloorStatus: candidate.groundFloorStatus,
+        groundFloorEvidence: candidate.groundFloorEvidence,
       });
       const auditCandidatesFor = (data: FindBuyInResponse): AutoFillAuditCandidate[] => {
         const flatCandidates = [
@@ -1876,6 +1974,8 @@ export default function Bookings() {
             image: unit.image,
             verified: listing.verified,
             verifiedReason: listing.verifiedReason,
+            groundFloorStatus: listing.groundFloorStatus ?? unit.groundFloorStatus,
+            groundFloorEvidence: listing.groundFloorEvidence ?? unit.groundFloorEvidence,
           })),
         );
         const rows = groupedCandidates.length > 0 ? groupedCandidates : flatCandidates.map(auditCandidateFrom);
@@ -1960,6 +2060,7 @@ export default function Bookings() {
               image: unit.image,
               alternateUrls,
             });
+            const listingFloorConfirmed = listing.groundFloorStatus === "confirmed";
             return {
               source: listing.channel,
               sourceLabel: listing.channelLabel,
@@ -1973,6 +2074,8 @@ export default function Bookings() {
               identityKeys,
               verified: listing.verified,
               verifiedReason: listing.verifiedReason,
+              groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (unit.groundFloorStatus ?? listing.groundFloorStatus),
+              groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (unit.groundFloorEvidence ?? listing.groundFloorEvidence),
             };
           })
           .filter((c): c is LiveCandidate => c !== null);
@@ -1988,6 +2091,52 @@ export default function Bookings() {
             }),
         );
         return { data, searchSummary, candidates };
+      };
+
+      const isGroundFloorPick = (candidate: LiveCandidate | null | undefined): boolean =>
+        candidate?.groundFloorStatus === "confirmed";
+
+      const pickCheapestSetWithGroundFloor = (
+        pools: Array<{ slot?: typeof emptySlots[number]; bedrooms: number; candidates: LiveCandidate[]; searchSummary?: AutoFillSearchSummary }>,
+        requiredCount: number,
+        usedSeed: Set<string>,
+      ): { picks: Array<LiveCandidate | null>; reason?: string } => {
+        const used = new Set(usedSeed);
+        const picks = pools.map((pool) => {
+          const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c)) ?? null;
+          if (pick) addUsedListingIdentity(used, pick);
+          return pick;
+        });
+        if (requiredCount <= 0 || picks.filter(isGroundFloorPick).length >= requiredCount) {
+          return { picks };
+        }
+
+        for (let guard = 0; guard < pools.length && picks.filter(isGroundFloorPick).length < requiredCount; guard++) {
+          let bestSwap: { index: number; candidate: LiveCandidate; delta: number } | null = null;
+          for (let i = 0; i < pools.length; i++) {
+            if (isGroundFloorPick(picks[i])) continue;
+            const otherUsed = new Set(usedSeed);
+            picks.forEach((existing, index) => {
+              if (existing && index !== i) addUsedListingIdentity(otherUsed, existing);
+            });
+            const candidate = pools[i].candidates.find((c) => c.groundFloorStatus === "confirmed" && !hasUsedListingIdentity(otherUsed, c));
+            if (!candidate) continue;
+            const currentTotal = picks[i]?.totalPrice ?? 0;
+            const delta = candidate.totalPrice - currentTotal;
+            if (!bestSwap || delta < bestSwap.delta) bestSwap = { index: i, candidate, delta };
+          }
+          if (!bestSwap) break;
+          picks[bestSwap.index] = bestSwap.candidate;
+        }
+
+        const found = picks.filter(isGroundFloorPick).length;
+        if (found < requiredCount) {
+          return {
+            picks,
+            reason: `Only ${found} confirmed ground-floor option${found === 1 ? "" : "s"} found; ${requiredCount} required by guest messages`,
+          };
+        }
+        return { picks };
       };
 
       const createAndAttachPick = async (
@@ -2027,6 +2176,11 @@ export default function Bookings() {
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
           ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
           : "";
+        const groundFloorSuffix = pick.groundFloorStatus === "confirmed"
+          ? ` · Ground-floor: confirmed${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
+          : pick.groundFloorStatus
+            ? ` · Ground-floor: ${pick.groundFloorStatus.replace("_", " ")}${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
+            : "";
         const sameUnitEvidenceUrls = Array.from(new Set([
           ...(pick.alternateUrls ?? []),
           pick.airbnbAnchorUrl,
@@ -2047,7 +2201,9 @@ export default function Bookings() {
             costPaid: finalCost.toFixed(2),
             airbnbConfirmation: null,
             airbnbListingUrl: pick.url,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${identitySuffix}`,
+            groundFloorStatus: pick.groundFloorStatus ?? "unknown",
+            groundFloorEvidence: pick.groundFloorEvidence ?? null,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${groundFloorSuffix}${identitySuffix}`,
             status: "active",
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -2108,6 +2264,8 @@ export default function Bookings() {
           title: pick.title,
           totalPrice: pick.totalPrice,
           url: pick.url,
+          groundFloorStatus: pick.groundFloorStatus,
+          groundFloorEvidence: pick.groundFloorEvidence,
         })),
         pools: evaluated.pools.map((pool) => ({
           bedrooms: pool.bedrooms,
@@ -2119,6 +2277,8 @@ export default function Bookings() {
             nightlyPrice: candidate.nightlyPrice,
             url: candidate.url,
             image: candidate.image,
+            groundFloorStatus: candidate.groundFloorStatus,
+            groundFloorEvidence: candidate.groundFloorEvidence,
           })),
         })),
       });
@@ -2150,15 +2310,23 @@ export default function Bookings() {
             const pool = await poolFor(bedroomCount);
             pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
             summaries.push(pool.searchSummary);
-            const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c));
+          }
+          const requiredForCombo = requiredGroundFloorUnits >= combo.bedrooms.length
+            ? combo.bedrooms.length
+            : requiredGroundFloorUnits > 0
+              ? 1
+              : 0;
+          const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used);
+          if (planned.reason) unavailableReason = planned.reason;
+          for (let i = 0; i < planned.picks.length; i++) {
+            const pick = planned.picks[i];
             if (!pick) {
-              unavailableReason = `No unused verified ${bedroomCount}BR option`;
+              unavailableReason ||= `No unused verified ${combo.bedrooms[i]}BR option`;
               break;
             }
-            addUsedListingIdentity(used, pick);
             picks.push(pick);
           }
-          const totalCost = picks.length === combo.bedrooms.length
+          const totalCost = !planned.reason && picks.length === combo.bedrooms.length
             ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
             : null;
           const evaluated: EvaluatedCombo = {
@@ -2209,12 +2377,23 @@ export default function Bookings() {
         pick: LiveCandidate | null;
         searchSummary: AutoFillSearchSummary;
       }> = [];
-      const plannedIdentities = new Set(pickedIdentities);
+      const fallbackPools: Array<{
+        slot: typeof emptySlots[number];
+        bedrooms: number;
+        candidates: LiveCandidate[];
+        searchSummary: AutoFillSearchSummary;
+      }> = [];
       for (const slot of emptySlots) {
         const pool = await getCandidatePool(slot.bedrooms, false);
-        const pick = pool.candidates.find((c) => !hasUsedListingIdentity(plannedIdentities, c)) ?? null;
-        if (pick) addUsedListingIdentity(plannedIdentities, pick);
-        plannedPicks.push({ slot, pick, searchSummary: pool.searchSummary });
+        fallbackPools.push({ slot, bedrooms: slot.bedrooms, candidates: pool.candidates, searchSummary: pool.searchSummary });
+      }
+      const fallbackPlan = pickCheapestSetWithGroundFloor(fallbackPools, requiredGroundFloorUnits, pickedIdentities);
+      for (let i = 0; i < fallbackPools.length; i++) {
+        plannedPicks.push({
+          slot: fallbackPools[i].slot,
+          pick: fallbackPlan.reason ? null : fallbackPlan.picks[i],
+          searchSummary: fallbackPools[i].searchSummary,
+        });
       }
       for (const planned of plannedPicks) {
         const slotResult = planned.pick
@@ -2223,7 +2402,7 @@ export default function Bookings() {
               slot: planned.slot,
               picked: null,
               created: null,
-              skippedReasons: ["find-buy-in returned no unused cheapest candidates"],
+              skippedReasons: [fallbackPlan.reason ?? "find-buy-in returned no unused cheapest candidates"],
               airbnbPick: false,
               searchSummary: planned.searchSummary,
             };
@@ -2738,6 +2917,9 @@ export default function Bookings() {
                     {/* Expanded: per-unit-slot detail */}
                     {isOpen && (
                       <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
+                        {selectedPropertyId && (
+                          <GroundFloorRequirementNotice reservation={r} propertyId={selectedPropertyId} />
+                        )}
                         {/* Auto-fill: one click to search + attach cheapest
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (
@@ -2807,7 +2989,15 @@ export default function Bookings() {
                                       {" · "}
                                       {fmtDate(slot.buyIn.checkIn)} → {fmtDate(slot.buyIn.checkOut)}
                                     </p>
-                                    <p className="text-[10px] text-muted-foreground truncate">
+                                    <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                                      {(() => {
+                                        const badge = groundFloorBadge(slot.buyIn.groundFloorStatus as GroundFloorStatus | undefined);
+                                        return (
+                                          <Badge variant="outline" className={`text-[9px] ${badge.className}`} title={slot.buyIn.groundFloorEvidence ?? undefined}>
+                                            {badge.label}
+                                          </Badge>
+                                        );
+                                      })()}
                                       {slot.buyIn.airbnbConfirmation && (
                                         <span className="font-mono">#{slot.buyIn.airbnbConfirmation}</span>
                                       )}
@@ -2834,7 +3024,7 @@ export default function Bookings() {
                                           </span>
                                         );
                                       })()}
-                                    </p>
+                                    </div>
                                   </div>
                                 </div>
                               ) : (
@@ -3673,6 +3863,8 @@ type LiveCandidate = {
   verified?: "yes" | "no" | "unclear" | "skipped";
   verifiedNightlyPrice?: number | null;
   verifiedReason?: string;
+  groundFloorStatus?: GroundFloorStatus;
+  groundFloorEvidence?: string | null;
 };
 
 // Single channel inside a clustered unit (one row inside a UnitRow).
@@ -3686,12 +3878,16 @@ type LiveUnitListing = {
   bedrooms?: number;
   verified?: "yes" | "no" | "unclear" | "skipped";
   verifiedReason?: string;
+  groundFloorStatus?: GroundFloorStatus;
+  groundFloorEvidence?: string | null;
 };
 
 type LiveUnit = {
   unitTitle: string;
   bedrooms?: number;
   image?: string;
+  groundFloorStatus?: GroundFloorStatus;
+  groundFloorEvidence?: string | null;
   minNightlyPrice: number;
   primaryUrl: string;
   primaryChannel: "airbnb" | "vrbo" | "booking" | "pm";
@@ -3754,6 +3950,7 @@ type FindBuyInResponse = {
   listingTitle?: string | null;
   bedrooms: number;
   nights: number;
+  groundFloorOnly?: boolean;
   fromCache?: boolean;
   cacheAgeSec?: number;
   // Server-side `cheapest` is the source of truth for Auto-fill. It is
@@ -3845,6 +4042,26 @@ function sourceBadgeClass(src: string) {
     case "pm":      return "bg-slate-600 text-white";
     default:        return "bg-muted";
   }
+}
+
+function groundFloorBadge(status?: GroundFloorStatus | null) {
+  switch (status) {
+    case "confirmed":
+      return { label: "Ground floor", className: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+    case "conflict":
+      return { label: "Upper-floor conflict", className: "bg-red-100 text-red-800 border-red-300" };
+    case "not_confirmed":
+      return { label: "Ground floor not shown", className: "bg-amber-100 text-amber-800 border-amber-300" };
+    default:
+      return { label: "Floor unknown", className: "bg-slate-100 text-slate-700 border-slate-300" };
+  }
+}
+
+function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): string {
+  if (!req?.requested) return "No ground-floor request found";
+  if (req.scope === "both") return "Ground-floor needed: both units";
+  if (req.scope === "one") return "Ground-floor needed: at least one unit";
+  return "Ground-floor/accessibility need found: clarify scope";
 }
 
 // Local-Mac sidecar status indicator + manual stop/start controls.
@@ -4167,6 +4384,17 @@ function LiveSearchSection({
   };
   const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+  const { data: groundRequirement, isLoading: groundRequirementLoading } = useQuery<GroundFloorRequirement & { conversationId?: string | null }>({
+    queryKey: ["/api/bookings", reservation._id, "ground-floor-requirement", propertyId, reservation.slots.length],
+    queryFn: () => apiGetJson<GroundFloorRequirement & { conversationId?: string | null }>(
+      `/api/bookings/${reservation._id}/ground-floor-requirement?propertyId=${propertyId}&totalUnits=${reservation.slots.length}`,
+    ),
+    enabled: !!reservation._id,
+    staleTime: 60_000,
+  });
+  const confirmedGroundFloorSlots = reservation.slots.filter((s) => s.buyIn?.groundFloorStatus === "confirmed").length;
+  const groundFloorNeededForThisSlot = !!groundRequirement?.requested
+    && confirmedGroundFloorSlots < Math.min(reservation.slots.length, Math.max(1, groundRequirement.requiredUnits));
   useEffect(() => {
     if (!slot.buyIn) return;
     setSearchEnabled(false);
@@ -4177,15 +4405,16 @@ function LiveSearchSection({
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
-    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, refreshNonce],
+    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, refreshNonce],
     queryFn: ({ signal }) => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
+      const groundFloorParam = groundFloorNeededForThisSlot ? "&groundFloor=required" : "";
       return apiGetJson<FindBuyInResponse>(
-        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${noCache}`,
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${noCache}`,
         signal,
       );
     },
-    enabled: searchEnabled && !!checkInYmd && !!checkOutYmd,
+    enabled: searchEnabled && !!checkInYmd && !!checkOutYmd && !groundRequirementLoading,
     staleTime: 0,
     refetchOnMount: "always",
     placeholderData: (previousData) => previousData,
@@ -4426,6 +4655,7 @@ function LiveSearchSection({
   // pass channel-specific listings instead, but until then the dialog
   // reads from a single LiveCandidate.
   const unitToCandidate = (u: LiveUnit, listing: LiveUnitListing): LiveCandidate => {
+    const listingFloorConfirmed = listing.groundFloorStatus === "confirmed";
     return {
       source: listing.channel,
       sourceLabel: listing.channelLabel,
@@ -4437,6 +4667,8 @@ function LiveSearchSection({
       image: u.image,
       verified: listing.verified,
       verifiedReason: listing.verifiedReason,
+      groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (u.groundFloorStatus ?? listing.groundFloorStatus),
+      groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (u.groundFloorEvidence ?? listing.groundFloorEvidence),
     };
   };
 
@@ -4457,6 +4689,8 @@ function LiveSearchSection({
     verified: "yes",
     verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
     verifiedReason: "Direct PM listing found by the listing-site scan. Airbnb supplied the date-specific availability/rate proxy, so confirm the PM site before purchase.",
+    groundFloorStatus: airbnbCandidate.groundFloorStatus,
+    groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
   });
 
   const runDirectBookingScan = async () => {
@@ -5750,6 +5984,11 @@ function UnitRow({
             from <span className="font-semibold text-emerald-700">{fmtMoney(unit.minNightlyPrice)}/night</span>
             {" "}across {unit.listings.length} {unit.listings.length === 1 ? "listing" : "listings"}
           </p>
+          {unit.groundFloorStatus && (
+            <Badge variant="outline" className={`mt-1 text-[9px] ${groundFloorBadge(unit.groundFloorStatus).className}`} title={unit.groundFloorEvidence ?? undefined}>
+              {groundFloorBadge(unit.groundFloorStatus).label}
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -5792,6 +6031,11 @@ function UnitRow({
                 -
               </Badge>
             ) : null}
+            {l.groundFloorStatus && (
+              <Badge variant="outline" className={`text-[9px] shrink-0 ${groundFloorBadge(l.groundFloorStatus).className}`} title={l.groundFloorEvidence ?? undefined}>
+                {groundFloorBadge(l.groundFloorStatus).label}
+              </Badge>
+            )}
             <div className="grow min-w-0">
               {l.nightlyPrice > 0 ? (
                 <p className="text-[12px]">
@@ -5875,6 +6119,11 @@ function LiveRow({
                 {c.bedrooms}BR
               </Badge>
             ) : null}
+            {c.groundFloorStatus && (
+              <Badge variant="outline" className={`text-[9px] ${groundFloorBadge(c.groundFloorStatus).className}`} title={c.groundFloorEvidence ?? undefined}>
+                {groundFloorBadge(c.groundFloorStatus).label}
+              </Badge>
+            )}
             <p className="font-medium text-sm truncate">{c.title}</p>
           </div>
           {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
@@ -6294,6 +6543,8 @@ function RecordBuyInDialog({
         costPaid: Number(costPaid).toFixed(2),
         airbnbConfirmation: confirmation || null,
         airbnbListingUrl: listingUrl || null,
+        groundFloorStatus: candidate.groundFloorStatus ?? "unknown",
+        groundFloorEvidence: candidate.groundFloorEvidence ?? null,
         notes: notes || defaultNotes,
         status: "active",
       };

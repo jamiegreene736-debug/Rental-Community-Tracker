@@ -13,9 +13,11 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS parking_info text,
       ADD COLUMN IF NOT EXISTS management_company text,
       ADD COLUMN IF NOT EXISTS management_contact text,
-      ADD COLUMN IF NOT EXISTS arrival_notes text
+      ADD COLUMN IF NOT EXISTS arrival_notes text,
+      ADD COLUMN IF NOT EXISTS ground_floor_status text NOT NULL DEFAULT 'unknown',
+      ADD COLUMN IF NOT EXISTS ground_floor_evidence text
   `);
-  console.log("[schema] ensured buy_ins arrival detail columns");
+  console.log("[schema] ensured buy_ins arrival detail + ground-floor columns");
 
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS reservation_aliases (
