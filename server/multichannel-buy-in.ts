@@ -249,6 +249,9 @@ async function fetchPmMarketRatesForBedroom(args: {
   checkOut: string;
   region: RegionKey;
   sidecarQueueBudgetMs?: number;
+  pmPerSiteLimit?: number;
+  pmMaxSites?: number;
+  pmWalletBudgetMs?: number;
   sidecarStopGeneration?: number;
   signal?: AbortSignal;
 }): Promise<{
@@ -341,9 +344,9 @@ async function fetchPmMarketRatesForBedroom(args: {
         checkIn: args.checkIn,
         checkOut: args.checkOut,
         bedrooms: br,
-        perSiteLimit: 5,
-        maxSites: Math.min(18, sites.length),
-        walletBudgetMs: 240_000,
+        perSiteLimit: args.pmPerSiteLimit ?? 5,
+        maxSites: Math.min(args.pmMaxSites ?? 18, sites.length),
+        walletBudgetMs: args.pmWalletBudgetMs ?? 240_000,
         queueBudgetMs: args.sidecarQueueBudgetMs ?? 285_000,
         signal: args.signal,
         stopGeneration: args.sidecarStopGeneration,
@@ -481,6 +484,14 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // bedrooms" filters for Airbnb/VRBO/Booking and returns parsed BR counts
   // per card. PM/direct searches stay per-BR because site filters vary.
   reuseSharedOtaSearch?: boolean;
+  // Pricing refreshes sample PM/direct as a market signal, not as a
+  // full property-manager coverage crawl. Keep these configurable so
+  // long background scans do not spend several minutes per bedroom on
+  // slow PM sites while buy-in/detail workflows can still run the
+  // deeper search.
+  pmPerSiteLimit?: number;
+  pmMaxSites?: number;
+  pmWalletBudgetMs?: number;
   // Producer-level stop boundary. Long background scans pass the value
   // captured at scan start so a later operator Stop cancels the whole
   // scan, even if Start Queue is clicked again.
@@ -637,7 +648,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
         const progressLabel = `Airbnb ${br}+BR`;
-        emitProgress(progressLabel, "airbnb", br);
         try {
           assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -696,7 +706,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
         const progressLabel = `VRBO ${br}+BR`;
-        emitProgress(progressLabel, "vrbo", br);
         try {
           assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -766,7 +775,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
         const progressLabel = `Booking.com ${br}+BR`;
-        emitProgress(progressLabel, "booking", br);
         try {
           assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -828,7 +836,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
   if (!args.skipSidecar) for (const br of args.bedroomCounts) {
     pmOps.push((async () => {
       const progressLabel = `PM/direct sites ${br}BR`;
-      emitProgress(progressLabel, "pm", br);
       try {
         return await fetchPmMarketRatesForBedroom({
           community: args.community,
@@ -840,6 +847,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
           checkOut,
           region: inferRegion(args.city, args.state),
           sidecarQueueBudgetMs,
+          pmPerSiteLimit: args.pmPerSiteLimit,
+          pmMaxSites: args.pmMaxSites,
+          pmWalletBudgetMs: args.pmWalletBudgetMs,
           sidecarStopGeneration,
           signal: args.signal,
         });

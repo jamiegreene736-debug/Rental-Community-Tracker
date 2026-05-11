@@ -4061,13 +4061,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                   {hasSubProgress && refreshProgress.progressSubLabel && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      Current channel stage: {refreshProgress.progressSubLabel}
+                                      Latest completed check: {refreshProgress.progressSubLabel}
                                       {refreshProgress.progressSubStartedAt && ` · ${subElapsedStr} since this update`}
                                     </div>
                                   )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The bar advances as Airbnb, VRBO, Booking.com, and PM/direct checks finish inside each date-band window.
+                                      The bar advances as each channel finishes. Remaining checks may still be queued in Chrome; PM/direct is capped for this pricing refresh so one slow site cannot hold a window for several minutes.
                                     </div>
                                   )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
@@ -4102,7 +4102,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Season-band multi-channel scan; the daemon serializes through one Chrome instance, so a slow PM/direct site can hold the current channel stage even while the heartbeat stays alive.
+                                    Season-band multi-channel scan; the daemon serializes through one Chrome instance, so the latest completed check can stay unchanged while the next queued check is running.
                                   </div>
                                 </div>
                               );

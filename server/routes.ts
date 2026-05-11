@@ -20865,7 +20865,7 @@ Return ONLY compact JSON with this exact shape:
           warnings: accumulatedWarnings.length > 0 ? [...accumulatedWarnings] : undefined,
         });
       };
-      const BAND_WINDOW_BUDGET_MS = 12 * 60_000;
+      const BAND_WINDOW_BUDGET_MS = 9 * 60_000;
       const runBandWindowScan = async (
         label: string,
         dateOverride: { checkIn: string; checkOut: string },
@@ -20890,15 +20890,18 @@ Return ONLY compact JSON with this exact shape:
             sidecarQueueBudgetMs: 15 * 60_000,
             warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
             reuseSharedOtaSearch: true,
+            pmPerSiteLimit: 3,
+            pmMaxSites: 5,
+            pmWalletBudgetMs: 90_000,
             sidecarStopGeneration,
             signal: controller.signal,
             onProgress: (event) => {
-              const subLabel = `${event.label} (${event.completed}/${event.total} channel checks complete)`;
+              const subLabel = `${event.label} complete (${event.completed}/${event.total} checks)`;
               setBandProgress({
                 completed: completedWindows,
                 current: currentIndex,
                 currentLabel: label,
-                label: `Scanning ${label} — ${subLabel}`,
+                label: `Scanning ${label} — latest completed: ${subLabel}`,
                 subDone: event.completed,
                 subTotal: event.total,
                 subLabel: event.label,
