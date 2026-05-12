@@ -17436,9 +17436,19 @@ Return ONLY compact JSON with this exact shape:
       });
     }
 
-    const communityAddress = folderBodyConflict
+    const knownCommunityPrimaryAddress = (): string | null => {
+      if (/na\s+hale\s+o\s+keauhou/i.test(communityName)) {
+        return "78-6833 Alii Dr";
+      }
+      return null;
+    };
+    const rawCommunityAddress = folderBodyConflict
       ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
       : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName;
+    const primaryCommunityAddress = knownCommunityPrimaryAddress();
+    const communityAddress = primaryCommunityAddress && !streetRootFromListingAddress(rawCommunityAddress)
+      ? primaryCommunityAddress
+      : rawCommunityAddress;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
     const routeStartedAt = Date.now();
     const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
@@ -17684,9 +17694,7 @@ Return ONLY compact JSON with this exact shape:
       // Royal Sea Cliff (75-6040 Alii Dr). Keep replacement candidates
       // pinned to Na Hale's actual address family so "clean" but wrong-
       // resort units cannot be suggested.
-      if (/na\s+hale\s+o\s+keauhou/i.test(communityName)) {
-        add("78-6833 Alii Dr");
-      }
+      add(primaryCommunityAddress);
       return roots;
     };
 
@@ -17746,6 +17754,10 @@ Return ONLY compact JSON with this exact shape:
     //                            broader geographic matches.
     // Realtor + Redfin biased toward "for sale" since they're
     // primarily real-estate sites; Zillow gets the wider mix.
+    const communityLocForQueries = resolveCommunityLocation();
+    const citySearchQuery = communityLocForQueries?.city
+      ? [`site:zillow.com "${communityName}" "${communityLocForQueries.city}"`]
+      : [];
     const bedroomQueries = requiredBedroomCount
       ? [
           `site:zillow.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
@@ -17768,7 +17780,7 @@ Return ONLY compact JSON with this exact shape:
       `site:zillow.com "${communityName}"`,
       `site:zillow.com "${communityName}" "for sale"`,
       `site:zillow.com "${communityName}" condo`,
-      `site:zillow.com "${communityName}" Koloa`,
+      ...citySearchQuery,
       // Realtor.com — for-sale, low VRBO overlap
       `site:realtor.com "${communityName}" "for sale"`,
       `site:realtor.com "${communityName}" condo`,
@@ -17853,7 +17865,7 @@ Return ONLY compact JSON with this exact shape:
     // surface detail URLs Google misses. We only add Apify results
     // when they match the selected resort's known/discovered street
     // roots so broad city inventory cannot leak into this community.
-    const communityLoc = resolveCommunityLocation();
+    const communityLoc = communityLocForQueries;
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
     for (const root of communityAddressRoots) allowedRoots.add(root);
