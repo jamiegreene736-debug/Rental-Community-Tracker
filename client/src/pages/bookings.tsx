@@ -1371,6 +1371,17 @@ function startOfLocalDay(date: Date): Date {
   return d;
 }
 
+function monthInputValue(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabel(value: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  const d = new Date(Number(match[1]), Number(match[2]) - 1, 1);
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 type DepositStatus = "airbnb_expected" | "collected" | "scheduled" | "partial" | "not_collected" | "unknown";
 type PaymentSourceKind = "airbnb" | "guesty_card" | "booking_vcc" | "booking_payout" | "not_visible" | "unknown";
 type DepositTriggerSource = "airbnb_arrival" | "payment" | "schedule" | "reservation" | "unknown";
@@ -1676,6 +1687,7 @@ export default function Bookings() {
   const { toast } = useToast();
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(null);
   const [includePast, setIncludePast] = useState(false);
+  const [reportMonth, setReportMonth] = useState(() => monthInputValue(new Date()));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [picker, setPicker] = useState<
     | { reservation: GuestyReservation; slot: SlotInfo }
@@ -2784,6 +2796,70 @@ export default function Bookings() {
     };
   }, [reservations]);
 
+  const monthlyReport = useMemo(() => {
+    if (!isGlobalView) return null;
+    const match = /^(\d{4})-(\d{2})$/.exec(reportMonth);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const monthIndex = Number(match[2]) - 1;
+    const monthStart = new Date(year, monthIndex, 1);
+    const nextMonthStart = new Date(year, monthIndex + 1, 1);
+
+    const rows = reservations
+      .map((reservation) => {
+        const checkInDate = parseLocalDate(checkInOf(reservation));
+        const meta = reservationPropertyMeta.get(reservation._id);
+        const revenue = reservation.money?.hostPayout ?? 0;
+        const buyInCost = getBuyInCost(reservation);
+        const openSlots = Math.max(0, reservation.slotsTotal - reservation.slotsFilled);
+        return {
+          reservation,
+          checkInDate,
+          propertyName: meta?.propertyName ?? "Property",
+          propertyId: meta?.propertyId ?? null,
+          revenue,
+          buyInCost,
+          profit: revenue - buyInCost,
+          openSlots,
+        };
+      })
+      .filter((row): row is {
+        reservation: GuestyReservation;
+        checkInDate: Date;
+        propertyName: string;
+        propertyId: number | null;
+        revenue: number;
+        buyInCost: number;
+        profit: number;
+        openSlots: number;
+      } => !!row.checkInDate
+        && row.checkInDate.getTime() >= monthStart.getTime()
+        && row.checkInDate.getTime() < nextMonthStart.getTime())
+      .sort((a, b) => a.checkInDate.getTime() - b.checkInDate.getTime());
+
+    const bookingCount = rows.length;
+    const totalRevenue = rows.reduce((sum, row) => sum + row.revenue, 0);
+    const totalBuyInCost = rows.reduce((sum, row) => sum + row.buyInCost, 0);
+    const totalProfit = totalRevenue - totalBuyInCost;
+    const fullyLinked = rows.filter((row) => row.reservation.fullyLinked).length;
+    const openSlots = rows.reduce((sum, row) => sum + row.openSlots, 0);
+    const notFullyBoughtIn = rows.filter((row) => !row.reservation.fullyLinked).length;
+    const monthIsPast = nextMonthStart.getTime() <= new Date().setHours(0, 0, 0, 0);
+
+    return {
+      label: monthLabel(reportMonth),
+      rows,
+      bookingCount,
+      totalRevenue,
+      totalBuyInCost,
+      totalProfit,
+      fullyLinked,
+      openSlots,
+      notFullyBoughtIn,
+      monthIsPast,
+    };
+  }, [isGlobalView, reportMonth, reservationPropertyMeta, reservations]);
+
   const depositRows = useMemo(() => {
     return reservations.flatMap((r) => {
       const guestPaid = asMoneyNumber(r.money?.totalPaid);
@@ -3139,6 +3215,166 @@ export default function Bookings() {
               <p className="text-sm text-muted-foreground">
                 Try enabling past stays or select an individual property to inspect it.
               </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {isGlobalView && stats && monthlyReport && (
+          <Card data-testid="card-global-monthly-report">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <WalletCards className="h-4 w-4" /> Monthly buy-in report
+                  </CardTitle>
+                  <CardDescription>
+                    Arrival-month view across all properties. Profit uses currently attached buy-ins.
+                  </CardDescription>
+                </div>
+                <div className="w-full sm:w-48">
+                  <Label htmlFor="global-report-month" className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Report month
+                  </Label>
+                  <Input
+                    id="global-report-month"
+                    type="month"
+                    value={reportMonth}
+                    onChange={(e) => setReportMonth(e.target.value)}
+                    className="mt-1"
+                    data-testid="input-global-report-month"
+                  />
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Profit for {monthlyReport.label}</p>
+                  <p className={`text-2xl font-semibold mt-1 ${monthlyReport.totalProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                    {fmtMoney(monthlyReport.totalProfit)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Revenue minus attached buy-ins
+                  </p>
+                </div>
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Buy-in cost</p>
+                  <p className="text-2xl font-semibold mt-1">{fmtMoney(monthlyReport.totalBuyInCost)}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Attached for this month's arrivals
+                  </p>
+                </div>
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Guest revenue</p>
+                  <p className="text-2xl font-semibold mt-1">{fmtMoney(monthlyReport.totalRevenue)}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Guesty host payout total
+                  </p>
+                </div>
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Bookings</p>
+                  <p className="text-2xl font-semibold mt-1">{monthlyReport.bookingCount}</p>
+                  <p className={`text-xs ${monthlyReport.openSlots > 0 ? "text-amber-700" : "text-muted-foreground"}`}>
+                    {monthlyReport.fullyLinked} fully bought in · {monthlyReport.openSlots} open slots
+                  </p>
+                </div>
+              </div>
+
+              {monthlyReport.monthIsPast && !includePast && (
+                <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Turn on "Include past stays" to include completed bookings for older months.
+                </div>
+              )}
+
+              {monthlyReport.rows.length > 0 ? (
+                <div className="overflow-x-auto rounded border">
+                  <div className="min-w-[900px]">
+                    <div className="grid grid-cols-[110px_1.35fr_1.5fr_.8fr_.9fr_.9fr_.9fr_.75fr] gap-3 border-b bg-muted/40 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                      <div>Arrival</div>
+                      <div>Guest</div>
+                      <div>Property</div>
+                      <div>Status</div>
+                      <div className="text-right">Revenue</div>
+                      <div className="text-right">Buy-in</div>
+                      <div className="text-right">Profit</div>
+                      <div className="text-right">Action</div>
+                    </div>
+                    <div className="divide-y">
+                      {monthlyReport.rows.map((row) => {
+                        const channel = row.reservation.integration?.platform ?? row.reservation.source ?? "direct";
+                        return (
+                          <div
+                            key={`monthly-report-${row.reservation._id}`}
+                            className="grid grid-cols-[110px_1.35fr_1.5fr_.8fr_.9fr_.9fr_.9fr_.75fr] gap-3 px-3 py-2.5 text-sm items-center"
+                          >
+                            <div>
+                              <p className="font-medium">{fmtDate(checkInOf(row.reservation))}</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {row.reservation.nightsCount ?? nightsBetween(checkInOf(row.reservation), checkOutOf(row.reservation))} nights
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-medium truncate">
+                                {row.reservation.guest?.fullName ?? row.reservation.guest?.firstName ?? "Guest"}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground truncate">
+                                {row.reservation.confirmationCode ?? row.reservation._id}
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate">{row.propertyName}</p>
+                              <p className="text-[10px] text-muted-foreground capitalize">{channel}</p>
+                            </div>
+                            <div>
+                              <Badge
+                                variant={row.reservation.fullyLinked ? "default" : "outline"}
+                                className={`text-[10px] ${
+                                  row.reservation.fullyLinked
+                                    ? "bg-green-600 text-white"
+                                    : "border-amber-300 text-amber-700"
+                                }`}
+                              >
+                                {row.reservation.fullyLinked
+                                  ? "Bought in"
+                                  : `${row.reservation.slotsFilled}/${row.reservation.slotsTotal}`}
+                              </Badge>
+                            </div>
+                            <p className="text-right font-medium">{fmtMoney(row.revenue)}</p>
+                            <p className="text-right font-medium">{fmtMoney(row.buyInCost)}</p>
+                            <p className={`text-right font-medium ${row.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                              {fmtMoney(row.profit)}
+                            </p>
+                            <div className="text-right">
+                              {row.propertyId ? (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => {
+                                    setSelectedPropertyId(row.propertyId);
+                                    setExpanded({ [row.reservation._id]: true });
+                                  }}
+                                >
+                                  Open
+                                </Button>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded border bg-muted/20 px-4 py-6 text-center">
+                  <p className="font-medium">No arrivals found for {monthlyReport.label}</p>
+                  <p className="text-sm text-muted-foreground">
+                    Choose another month or turn on past stays if you are reporting on a completed month.
+                  </p>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
