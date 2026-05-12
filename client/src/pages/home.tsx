@@ -95,6 +95,9 @@ type Property = {
   bathrooms: number;
   lowPrice: number | null;
   highPrice: number | null;
+  minimumStayNights?: number | null;
+  minimumStayEvidence?: string | null;
+  minimumStaySourceUrl?: string | null;
   multiUnit: boolean;
   unitDetails: string;
   url: string;
@@ -279,7 +282,7 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality" | "baseRate";
+type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality" | "baseRate" | "minimumStay";
 
 // Total nightly buy-in cost across all units (sum of per-unit rates from
 // shared/pricing-rates). Multi-unit properties get parsed from unitDetails
@@ -293,6 +296,38 @@ function computeBaseRate(property: Property): number {
     return brs.reduce((sum, br) => sum + getBuyInRate(property.pricingArea, br, property.id), 0);
   }
   return getBuyInRate(property.pricingArea, property.bedrooms, property.id);
+}
+
+function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "minimumStayEvidence" | "minimumStaySourceUrl">): {
+  label: string;
+  tone: "ok" | "warn" | "unknown";
+  details: string;
+} {
+  const evidence = property.minimumStayEvidence?.trim();
+  const source = property.minimumStaySourceUrl?.trim();
+  if (typeof property.minimumStayNights === "number" && property.minimumStayNights > 0) {
+    return {
+      label: `${property.minimumStayNights} night${property.minimumStayNights === 1 ? "" : "s"}`,
+      tone: "warn",
+      details: evidence || "Research found a likely published community-wide minimum stay rule.",
+    };
+  }
+  if (property.minimumStayNights === 0) {
+    return {
+      label: "No min found",
+      tone: "ok",
+      details: evidence || "Research found a reliable source indicating no community-wide minimum stay.",
+    };
+  }
+  return {
+    label: "Unknown",
+    tone: "unknown",
+    details: [
+      "No reliable community-wide minimum stay evidence is saved yet.",
+      "We do not infer this from a single Airbnb, VRBO, or Booking.com listing.",
+      source ? `Source checked: ${source}` : "",
+    ].filter(Boolean).join(" "),
+  };
 }
 type SortDir = "asc" | "desc";
 
@@ -374,6 +409,9 @@ export default function Home() {
         bathrooms: totalBath,
         lowPrice: d.estimatedLowRate ?? d.suggestedRate ?? null,
         highPrice: d.estimatedHighRate ?? null,
+        minimumStayNights: d.minimumStayNights ?? null,
+        minimumStayEvidence: d.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: d.minimumStaySourceUrl ?? null,
         multiUnit: !isSingle,
         unitDetails,
         url: d.sourceUrl ?? "",
@@ -465,6 +503,11 @@ export default function Home() {
         const aRate = baseRates.get(a.id) ?? 0;
         const bRate = baseRates.get(b.id) ?? 0;
         return sortDir === "asc" ? aRate - bRate : bRate - aRate;
+      }
+      if (sortField === "minimumStay") {
+        const aStay = typeof a.minimumStayNights === "number" ? a.minimumStayNights : Infinity;
+        const bStay = typeof b.minimumStayNights === "number" ? b.minimumStayNights : Infinity;
+        return sortDir === "asc" ? aStay - bStay : bStay - aStay;
       }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
@@ -966,6 +1009,19 @@ export default function Home() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
+                <TableHead className="w-[100px] px-2" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
+                  <Button
+                    variant="ghost"
+                    className="font-medium px-1"
+                    onClick={() => handleSort("minimumStay")}
+                    data-testid="button-sort-minimum-stay"
+                    id="button-sort-minimum-stay"
+                    aria-label="Sort by minimum stay"
+                  >
+                    Min Stay
+                    <SortIcon field="minimumStay" />
+                  </Button>
+                </TableHead>
                 <TableHead className="text-right w-[95px] px-2">
                   <Button
                     variant="ghost"
@@ -1049,6 +1105,7 @@ export default function Home() {
                 const isDraft = property.draftId !== undefined;
                 const isPublishedDraft = isDraft && property.draftStatus === "published";
                 const isResearchDraft = isDraft && !isPublishedDraft;
+                const minStay = minimumStayDisplay(property);
                 return (
                 <TableRow
                   key={property.id}
@@ -1296,6 +1353,32 @@ export default function Home() {
                       {property.community}
                     </Badge>
                   </TableCell>
+                  <TableCell className="px-2">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge
+                            variant="outline"
+                            className={
+                              minStay.tone === "warn" ? "bg-amber-50 border-amber-200 text-amber-800 cursor-help"
+                              : minStay.tone === "ok" ? "bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
+                              : "bg-muted/40 text-muted-foreground cursor-help"
+                            }
+                            data-testid={`badge-minimum-stay-${property.id}`}
+                          >
+                            <CalendarSearch className="h-3 w-3 mr-1" />
+                            {minStay.label}
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
+                          <p>{minStay.details}</p>
+                          {property.minimumStaySourceUrl && (
+                            <p className="mt-1 text-muted-foreground break-all">{property.minimumStaySourceUrl}</p>
+                          )}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </TableCell>
                   <TableCell className="text-right px-2 tabular-nums text-sm" data-testid={`text-base-rate-${property.id}`}>
                     ${(baseRates.get(property.id) ?? 0).toLocaleString()}
                   </TableCell>
@@ -1386,7 +1469,7 @@ export default function Home() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={12} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={13} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>

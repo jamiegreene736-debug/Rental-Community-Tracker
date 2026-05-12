@@ -27,6 +27,7 @@ import {
   ShieldCheck,
   ShieldX,
   TrendingUp,
+  CalendarDays,
 } from "lucide-react";
 import {
   Tooltip,
@@ -70,6 +71,9 @@ type CommunityResult = {
   availableBedrooms?: number[];
   estimatedTotalUnits?: number;
   estimatedBedroomUnitCounts?: Record<string, number>;
+  minimumStayNights?: number | null;
+  minimumStayEvidence?: string | null;
+  minimumStaySourceUrl?: string | null;
 };
 
 type UnitResult = {
@@ -135,6 +139,30 @@ function formatResortUnitMix(community: CommunityResult): string | null {
     .join(" / ");
 
   return bedroomMix ? `Bedroom mix: ${bedroomMix}` : null;
+}
+
+function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
+  const nights = community.minimumStayNights;
+  const evidence = community.minimumStayEvidence?.trim() || undefined;
+  if (typeof nights === "number" && nights > 0) {
+    return {
+      label: `Likely ${nights}-night minimum`,
+      tone: "warn",
+      evidence,
+    };
+  }
+  if (nights === 0) {
+    return {
+      label: "No published minimum found",
+      tone: "ok",
+      evidence,
+    };
+  }
+  return {
+    label: "Minimum stay unknown",
+    tone: "unknown",
+    evidence: "Needs a bookable-channel sample or a published HOA/PM rule before relying on it.",
+  };
 }
 
 export default function AddCommunity() {
@@ -744,6 +772,9 @@ export default function AddCommunity() {
         confidenceScore: selectedCommunity.confidenceScore,
         researchSummary: selectedCommunity.researchSummary,
         sourceUrl: selectedCommunity.sourceUrl,
+        minimumStayNights: selectedCommunity.minimumStayNights ?? null,
+        minimumStayEvidence: selectedCommunity.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: selectedCommunity.minimumStaySourceUrl ?? null,
         unit1Url: selectedUnit1?.url || unit1PhotoSourceUrl || null,
         unit1Bedrooms: selectedUnit1?.bedrooms ?? null,
         // Per-unit structured fields. Each is nullable on the
@@ -1226,6 +1257,7 @@ export default function AddCommunity() {
                 });
                 const typeCheck = checkCommunityType(c.unitTypes, c.researchSummary);
                 const resortUnitMix = formatResortUnitMix(c);
+                const minimumStay = formatMinimumStay(c);
                 return (
                 <Card
                   key={i}
@@ -1350,6 +1382,22 @@ export default function AddCommunity() {
                           <span><span className="font-medium text-foreground">Resort size:</span> {resortUnitMix}</span>
                         </p>
                       )}
+                      <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1.5">
+                        <CalendarDays className="h-3.5 w-3.5 text-primary shrink-0" />
+                        <span>
+                          <span className="font-medium text-foreground">Min stay:</span>{" "}
+                          <span
+                            className={
+                              minimumStay.tone === "warn" ? "text-amber-700 font-medium"
+                              : minimumStay.tone === "ok" ? "text-emerald-700 font-medium"
+                              : "text-muted-foreground"
+                            }
+                          >
+                            {minimumStay.label}
+                          </span>
+                          {minimumStay.evidence ? ` · ${minimumStay.evidence}` : ""}
+                        </span>
+                      </p>
                       <p className="text-sm">{c.researchSummary}</p>
                       {(c.estimatedLowRate || c.estimatedHighRate) && (
                         <p className="text-sm font-medium text-green-600 mt-1">

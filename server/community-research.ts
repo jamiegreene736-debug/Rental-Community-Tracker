@@ -37,6 +37,13 @@ export type ResearchedCommunity = {
   // Optional rough per-bedroom inventory, keyed by bedroom count:
   // {"2": 45, "3": 30}. This is display-only context for cards.
   estimatedBedroomUnitCounts?: Record<string, number>;
+  // Community-wide minimum-night rule from published resort/HOA/PM
+  // evidence. Null/undefined means unknown; 0 means a reliable
+  // source says no published community minimum; positive means a
+  // likely minimum imposed at the community level.
+  minimumStayNights?: number | null;
+  minimumStayEvidence?: string;
+  minimumStaySourceUrl?: string;
 };
 
 type KnownSingleListingCommunityFact = {
@@ -331,6 +338,15 @@ function normalizeBedroomUnitCounts(value: unknown): Record<string, number> | un
     }
   }
   return Object.keys(counts).length > 0 ? counts : undefined;
+}
+
+function normalizeMinimumStayNights(value: unknown): number | null | undefined {
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim().toLowerCase() === "null") return null;
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return null;
+  if (n < 0 || n > 60) return null;
+  return n;
 }
 
 function applyKnownSingleListingFacts(
@@ -846,11 +862,18 @@ ALSO CRITICAL: For each resort, return estimatedTotalUnits — your best estimat
   - Edgewater Beach Resort (Panama City Beach): ~520 units
 A rough order-of-magnitude estimate is much better than null. Use 0 only when you have NO idea about the resort's size.
 
+MINIMUM-STAY POLICY:
+  Return minimumStayNights ONLY when you have reliable published evidence of a community/resort/HOA/property-manager minimum-night rule. Use:
+  - positive integer: a likely community-wide minimum stay, e.g. 7
+  - 0: a reliable source explicitly says there is no community minimum / one-night stays are allowed
+  - null: unknown, or only individual OTA listings mention a minimum
+  Do NOT infer a community minimum from one Airbnb/VRBO/Booking listing, unavailable dates, seasonal pricing, or generic destination rules. If the rule is seasonal, return the lowest published community-wide minimum and explain the seasonal condition in minimumStayEvidence.
+
 SEARCH RESULTS for "${city}, ${state}":
 ${unique.length > 0 ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n") : "(no organic results — rely on world knowledge)"}
 
 Output JSON array. Each element:
-{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
+{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false}
 
 Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
       : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
@@ -899,13 +922,20 @@ RESORT SIZE CONTEXT:
   - estimatedBedroomUnitCounts: rough per-bedroom inventory when known, e.g. {"2":45,"3":77}. Use {} when unknown.
   Rough counts are useful, but do not invent fake precision. If you only know the total, provide estimatedTotalUnits and leave estimatedBedroomUnitCounts as {}.
 
+MINIMUM-STAY POLICY:
+  Return minimumStayNights ONLY when you have reliable published evidence of a community/resort/HOA/property-manager minimum-night rule. Use:
+  - positive integer: a likely community-wide minimum stay, e.g. 7
+  - 0: a reliable source explicitly says there is no community minimum / one-night stays are allowed
+  - null: unknown, or only individual OTA listings mention a minimum
+  Do NOT infer a community minimum from one Airbnb/VRBO/Booking listing, unavailable dates, seasonal pricing, or generic destination rules. If the rule is seasonal, return the lowest published community-wide minimum and explain the seasonal condition in minimumStayEvidence.
+
 SEARCH RESULTS for "${city}, ${state}":
 ${unique.length
   ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")
   : "(No organic results returned. Use only well-known local candidates you can classify with high confidence.)"}
 
 Output JSON array. Each element:
-{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"estimatedBedroomUnitCounts":{"2":N,"3":N},"combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
+{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"estimatedBedroomUnitCounts":{"2":N,"3":N},"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
 
 Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max 10 results. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
 
@@ -971,6 +1001,7 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
             }
             const normalizedBedrooms = normalizeBedroomList(s.availableBedrooms);
             const normalizedBedroomUnitCounts = normalizeBedroomUnitCounts(s.estimatedBedroomUnitCounts);
+            const normalizedMinimumStayNights = normalizeMinimumStayNights(s.minimumStayNights);
             const normalizedUnitsFromCounts = normalizedBedroomUnitCounts
               ? Object.values(normalizedBedroomUnitCounts).reduce((sum, count) => sum + count, 0)
               : undefined;
@@ -1009,6 +1040,9 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               // sort. 0 = Claude doesn't know.
               estimatedTotalUnits: normalized.estimatedTotalUnits,
               estimatedBedroomUnitCounts: normalizedBedroomUnitCounts,
+              minimumStayNights: normalizedMinimumStayNights,
+              minimumStayEvidence: typeof s.minimumStayEvidence === "string" ? s.minimumStayEvidence.trim().slice(0, 240) : "",
+              minimumStaySourceUrl: typeof s.minimumStaySourceUrl === "string" ? s.minimumStaySourceUrl.trim() : "",
             });
           }
         }

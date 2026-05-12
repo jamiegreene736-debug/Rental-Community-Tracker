@@ -252,6 +252,14 @@ export const communityDrafts = pgTable("community_drafts", {
   confidenceScore: integer("confidence_score"),
   researchSummary: text("research_summary"),
   sourceUrl: text("source_url"),
+  // Community/resort-level minimum stay signal captured during
+  // research. Null = unknown / not enough reliable evidence. 0 =
+  // reliable source says there is no published community-wide
+  // minimum. Positive integer = likely minimum nights imposed by
+  // the resort/HOA/PM rule, not just one OTA listing's settings.
+  minimumStayNights: integer("minimum_stay_nights"),
+  minimumStayEvidence: text("minimum_stay_evidence"),
+  minimumStaySourceUrl: text("minimum_stay_source_url"),
   status: text("status").notNull().default("researching"),
   unit1Url: text("unit1_url"),
   unit1Bedrooms: integer("unit1_bedrooms"),

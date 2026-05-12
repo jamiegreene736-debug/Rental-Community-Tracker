@@ -50,6 +50,7 @@ import {
   ShieldX,
   ExternalLink,
   Star,
+  CalendarDays,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -87,6 +88,9 @@ type CommunityResult = {
   // biggest communities per city. Optional — falls back to 0
   // for sort key when missing.
   estimatedTotalUnits?: number;
+  minimumStayNights?: number | null;
+  minimumStayEvidence?: string | null;
+  minimumStaySourceUrl?: string | null;
 };
 
 type QualifierPlatformResult = {
@@ -141,6 +145,22 @@ type ListingDraft = {
   strPermitSample?: string;
   warning?: string;
 };
+
+function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
+  const nights = community.minimumStayNights;
+  const evidence = community.minimumStayEvidence?.trim() || undefined;
+  if (typeof nights === "number" && nights > 0) {
+    return { label: `Likely ${nights}-night minimum`, tone: "warn", evidence };
+  }
+  if (nights === 0) {
+    return { label: "No published minimum found", tone: "ok", evidence };
+  }
+  return {
+    label: "Minimum stay unknown",
+    tone: "unknown",
+    evidence: "Needs a published community rule or a bookable-channel sample before relying on it.",
+  };
+}
 
 function communityResearchStage(progress: number): { label: string; detail: string } {
   if (progress < 25) {
@@ -1103,6 +1123,9 @@ export default function AddSingleListing() {
         // case for this business.
         unitTypes: editedPropertyType?.toLowerCase().includes("townhouse") ? "townhouse" : "condominium",
         sourceUrl: zillowSourceUrl || null,
+        minimumStayNights: selectedCommunity?.minimumStayNights ?? null,
+        minimumStayEvidence: selectedCommunity?.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: selectedCommunity?.minimumStaySourceUrl ?? null,
         unit1Url: zillowSourceUrl || null,
         unit1Bedrooms: bedrooms || null,
         unit1Bathrooms: editedUnitA?.bathrooms ?? (zillowFacts.bathrooms ? String(zillowFacts.bathrooms) : null),
@@ -1169,7 +1192,7 @@ export default function AddSingleListing() {
     } finally {
       setSaving(false);
     }
-  }, [propertyName, streetAddress, pickedCity, editedPropertyType, zillowSourceUrl, bedrooms, zillowFacts, editedUnitA, suggestedRate, editedTitle, editedBookingTitle, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, strPermit, unit1Photos, queryClient, toast, navigate]);
+  }, [propertyName, streetAddress, pickedCity, selectedCommunity, editedPropertyType, zillowSourceUrl, bedrooms, zillowFacts, editedUnitA, suggestedRate, editedTitle, editedBookingTitle, editedPricingArea, editedDescription, editedNeighborhood, editedTransit, strPermit, unit1Photos, queryClient, toast, navigate]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -1404,6 +1427,7 @@ export default function AddSingleListing() {
                 <div className="space-y-2 max-h-96 overflow-auto pr-1">
                   {communities.map((c, i) => {
                     const isSelected = selectedCommunity?.name === c.name && selectedCommunity?.city === c.city;
+                    const minimumStay = formatMinimumStay(c);
                     return (
                       <Card
                         key={`${c.name}-${i}`}
@@ -1438,6 +1462,22 @@ export default function AddSingleListing() {
                             {c.unitTypes && (
                               <p className="text-xs text-muted-foreground mt-1 italic">{c.unitTypes}</p>
                             )}
+                            <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+                              <CalendarDays className="h-3.5 w-3.5 text-primary shrink-0" />
+                              <span>
+                                <span className="font-medium text-foreground">Min stay:</span>{" "}
+                                <span
+                                  className={
+                                    minimumStay.tone === "warn" ? "text-amber-700 font-medium"
+                                    : minimumStay.tone === "ok" ? "text-emerald-700 font-medium"
+                                    : "text-muted-foreground"
+                                  }
+                                >
+                                  {minimumStay.label}
+                                </span>
+                                {minimumStay.evidence ? ` · ${minimumStay.evidence}` : ""}
+                              </span>
+                            </p>
                             {c.researchSummary && (
                               <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{c.researchSummary}</p>
                             )}
