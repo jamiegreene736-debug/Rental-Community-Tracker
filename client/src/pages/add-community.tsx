@@ -164,6 +164,8 @@ export default function AddCommunity() {
     city: string;
     state: string;
     tag?: string;
+    estimatedComboLow?: number;
+    estimatedComboHigh?: number;
     status: "pending" | "running" | "done" | "error";
     count?: number;
     communities?: CommunityResult[];
@@ -180,9 +182,15 @@ export default function AddCommunity() {
   // markets the moment the user clicks the button.
   type SweepPhase = "setup" | "running";
   const [sweepPhase, setSweepPhase] = useState<SweepPhase>("setup");
-  const [seedMarkets, setSeedMarkets] = useState<Array<{ city: string; state: string; tag: string }> | null>(null);
+  type SeedMarket = { city: string; state: string; tag: string; estimatedComboLow?: number; estimatedComboHigh?: number };
+  const [seedMarkets, setSeedMarkets] = useState<SeedMarket[] | null>(null);
   const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
   const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
+  const formatComboRange = (low?: number | null, high?: number | null) => {
+    if (!low && !high) return "Range TBD";
+    if (low && high) return `$${low.toLocaleString()}-${high.toLocaleString()}/night`;
+    return `$${(low ?? high)!.toLocaleString()}/night`;
+  };
 
   // Step 3
   const [unitSearchResults, setUnitSearchResults] = useState<{ units: UnitResult[]; grouped: Record<string, UnitResult[]> } | null>(null);
@@ -308,8 +316,8 @@ export default function AddCommunity() {
       try {
         const resp = await fetch("/api/community/top-markets/seeds");
         const data = await resp.json() as {
-          seeds?: Array<{ city: string; state: string; tag: string }>;
-          markets?: Array<{ city: string; state: string; tag: string }>;
+          seeds?: SeedMarket[];
+          markets?: SeedMarket[];
         };
         const list = data.seeds ?? data.markets ?? [];
         setSeedMarkets(list);
@@ -349,7 +357,14 @@ export default function AddCommunity() {
     setSweepPhase("running");
     setSweepRunning(true);
     setSweepDone(false);
-    setSweepMarkets(picked.map((m) => ({ city: m.city, state: m.state, tag: m.tag, status: "pending" })));
+    setSweepMarkets(picked.map((m) => ({
+      city: m.city,
+      state: m.state,
+      tag: m.tag,
+      estimatedComboLow: m.estimatedComboLow,
+      estimatedComboHigh: m.estimatedComboHigh,
+      status: "pending",
+    })));
 
     const controller = new AbortController();
     sweepAbortRef.current = controller;
@@ -383,7 +398,12 @@ export default function AddCommunity() {
 
           if (evt.type === "start") {
             setSweepMarkets((evt.markets as any[]).map((m) => ({
-              city: m.city, state: m.state, tag: m.tag, status: "pending",
+              city: m.city,
+              state: m.state,
+              tag: m.tag,
+              estimatedComboLow: m.estimatedComboLow,
+              estimatedComboHigh: m.estimatedComboHigh,
+              status: "pending",
             })));
           } else if (evt.type === "market-start") {
             setSweepMarkets((prev) => prev.map((m) =>
@@ -392,13 +412,26 @@ export default function AddCommunity() {
           } else if (evt.type === "market-done") {
             setSweepMarkets((prev) => prev.map((m) =>
               m.city === evt.city && m.state === evt.state
-                ? { ...m, status: "done", count: evt.count, communities: evt.communities }
+                ? {
+                    ...m,
+                    status: "done",
+                    count: evt.count,
+                    communities: evt.communities,
+                    estimatedComboLow: evt.estimatedComboLow ?? m.estimatedComboLow,
+                    estimatedComboHigh: evt.estimatedComboHigh ?? m.estimatedComboHigh,
+                  }
                 : m
             ));
           } else if (evt.type === "market-error") {
             setSweepMarkets((prev) => prev.map((m) =>
               m.city === evt.city && m.state === evt.state
-                ? { ...m, status: "error", error: evt.error }
+                ? {
+                    ...m,
+                    status: "error",
+                    error: evt.error,
+                    estimatedComboLow: evt.estimatedComboLow ?? m.estimatedComboLow,
+                    estimatedComboHigh: evt.estimatedComboHigh ?? m.estimatedComboHigh,
+                  }
                 : m
             ));
           } else if (evt.type === "all-done") {
@@ -996,7 +1029,7 @@ export default function AddCommunity() {
                                     return (
                                       <label
                                         key={k}
-                                        className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer text-sm transition-colors ${
+                                        className={`flex items-start gap-2 px-3 py-2 rounded border cursor-pointer text-sm transition-colors ${
                                           checked ? "border-primary bg-primary/5" : "hover:border-muted-foreground/40"
                                         }`}
                                       >
@@ -1004,10 +1037,14 @@ export default function AddCommunity() {
                                           type="checkbox"
                                           checked={checked}
                                           onChange={() => toggleMarket(m)}
-                                          className="accent-primary"
+                                          className="accent-primary mt-1"
                                         />
-                                        <span>
-                                          {m.city}, {m.state}
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block font-medium leading-snug">{m.city}, {m.state}</span>
+                                          <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
+                                            <DollarSign className="h-3 w-3" />
+                                            Est. combo rental {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
+                                          </span>
                                         </span>
                                       </label>
                                     );
@@ -1063,6 +1100,10 @@ export default function AddCommunity() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-semibold text-sm">{m.city}, {m.state}</p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
+                            <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
+                              <DollarSign className="h-3 w-3 mr-1" />
+                              {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
+                            </Badge>
                             {m.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />}
                             {m.status === "done" && (
                               <Badge className={(m.count ?? 0) > 0 ? "bg-green-600 text-white" : "bg-gray-400 text-white"}>
@@ -1077,6 +1118,11 @@ export default function AddCommunity() {
                               {best.bedroomMix && <span className="italic ml-1">({best.bedroomMix})</span>}
                               {typeof best.combinabilityScore === "number" && (
                                 <span className="ml-1.5">· combinability {best.combinabilityScore}</span>
+                              )}
+                              {(best.estimatedLowRate || best.estimatedHighRate) && (
+                                <span className="ml-1.5">
+                                  · resort est. {formatComboRange(best.estimatedLowRate, best.estimatedHighRate)}
+                                </span>
                               )}
                               <span className="ml-1.5">· score {bestScore}</span>
                             </div>

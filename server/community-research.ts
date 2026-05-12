@@ -1044,33 +1044,41 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
 //   - Known condo/townhome inventory (not just SFRs)
 //   - Geographically diverse (coast, ski, desert, mountain)
 
-export const TOP_MARKET_SEEDS: Array<{ city: string; state: string; tag: string }> = [
+export type TopMarketSeed = {
+  city: string;
+  state: string;
+  tag: string;
+  estimatedComboLow: number;
+  estimatedComboHigh: number;
+};
+
+export const TOP_MARKET_SEEDS: TopMarketSeed[] = [
   // Gulf Coast Florida — classic condo country
-  { city: "Fort Myers Beach",    state: "Florida",        tag: "Gulf Coast" },
-  { city: "Destin",              state: "Florida",        tag: "Gulf Coast" },
-  { city: "Panama City Beach",   state: "Florida",        tag: "Gulf Coast" },
-  { city: "Santa Rosa Beach",    state: "Florida",        tag: "30A" },
-  { city: "Naples",              state: "Florida",        tag: "Gulf Coast" },
+  { city: "Fort Myers Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850 },
+  { city: "Destin",              state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950 },
+  { city: "Panama City Beach",   state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 375, estimatedComboHigh: 750 },
+  { city: "Santa Rosa Beach",    state: "Florida",        tag: "30A",        estimatedComboLow: 650, estimatedComboHigh: 1200 },
+  { city: "Naples",              state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950 },
   // Atlantic Florida + Southeast
-  { city: "Clearwater Beach",    state: "Florida",        tag: "Gulf Coast" },
-  { city: "Hilton Head",         state: "South Carolina", tag: "Atlantic" },
-  { city: "Myrtle Beach",        state: "South Carolina", tag: "Atlantic" },
+  { city: "Clearwater Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850 },
+  { city: "Hilton Head",         state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 500, estimatedComboHigh: 1000 },
+  { city: "Myrtle Beach",        state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 300, estimatedComboHigh: 650 },
   // Gulf Alabama
-  { city: "Gulf Shores",         state: "Alabama",        tag: "Gulf Coast" },
-  { city: "Orange Beach",        state: "Alabama",        tag: "Gulf Coast" },
+  { city: "Gulf Shores",         state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 350, estimatedComboHigh: 700 },
+  { city: "Orange Beach",        state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 425, estimatedComboHigh: 850 },
   // Tennessee Smokies — condo/cabin mix
-  { city: "Gatlinburg",          state: "Tennessee",      tag: "Smokies" },
-  { city: "Pigeon Forge",        state: "Tennessee",      tag: "Smokies" },
+  { city: "Gatlinburg",          state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900 },
+  { city: "Pigeon Forge",        state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900 },
   // Mountain West — ski condos
-  { city: "Breckenridge",        state: "Colorado",       tag: "Ski" },
-  { city: "Park City",           state: "Utah",           tag: "Ski" },
-  { city: "Mammoth Lakes",       state: "California",     tag: "Ski" },
+  { city: "Breckenridge",        state: "Colorado",       tag: "Ski",        estimatedComboLow: 700, estimatedComboHigh: 1400 },
+  { city: "Park City",           state: "Utah",           tag: "Ski",        estimatedComboLow: 750, estimatedComboHigh: 1500 },
+  { city: "Mammoth Lakes",       state: "California",     tag: "Ski",        estimatedComboLow: 650, estimatedComboHigh: 1300 },
   // Desert / SoCal
-  { city: "Palm Springs",        state: "California",     tag: "Desert" },
+  { city: "Palm Springs",        state: "California",     tag: "Desert",     estimatedComboLow: 550, estimatedComboHigh: 1100 },
   // Texas coast
-  { city: "South Padre Island",  state: "Texas",          tag: "Gulf Coast" },
-  { city: "Galveston",           state: "Texas",          tag: "Gulf Coast" },
+  { city: "South Padre Island",  state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 300, estimatedComboHigh: 650 },
+  { city: "Galveston",           state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 325, estimatedComboHigh: 700 },
   // Hawaii (your home market, for completeness)
-  { city: "Kihei",               state: "Hawaii",         tag: "Hawaii" },
-  { city: "Kailua-Kona",         state: "Hawaii",         tag: "Hawaii" },
+  { city: "Kihei",               state: "Hawaii",         tag: "Hawaii",     estimatedComboLow: 850, estimatedComboHigh: 1700 },
+  { city: "Kailua-Kona",         state: "Hawaii",         tag: "Hawaii",     estimatedComboLow: 750, estimatedComboHigh: 1500 },
 ];

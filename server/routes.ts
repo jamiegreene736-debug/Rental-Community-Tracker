@@ -22233,7 +22233,7 @@ Return ONLY compact JSON with this exact shape:
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const body = (req.body ?? {}) as {
-      markets?: Array<{ city: string; state: string; tag?: string }>;
+      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>;
       maxMarkets?: number;
     };
 
@@ -22254,8 +22254,14 @@ Return ONLY compact JSON with this exact shape:
     let topCommunity: { score: number; data: any } | null = null;
 
     for (let i = 0; i < markets.length; i++) {
-      const { city, state, tag } = markets[i] as { city: string; state: string; tag?: string };
-      emit({ type: "market-start", city, state, tag, index: i + 1, total: markets.length });
+      const { city, state, tag, estimatedComboLow, estimatedComboHigh } = markets[i] as {
+        city: string;
+        state: string;
+        tag?: string;
+        estimatedComboLow?: number;
+        estimatedComboHigh?: number;
+      };
+      emit({ type: "market-start", city, state, tag, estimatedComboLow, estimatedComboHigh, index: i + 1, total: markets.length });
       try {
         const communities = await researchCommunitiesForCity(city, state);
         totalCommunities += communities.length;
@@ -22265,11 +22271,11 @@ Return ONLY compact JSON with this exact shape:
             topCommunity = { score, data: { ...c, tag } };
           }
         }
-        emit({ type: "market-done", city, state, tag, count: communities.length, communities });
+        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, count: communities.length, communities });
         console.log(`[scan-top-markets] ${city}, ${state}: ${communities.length} qualifying`);
       } catch (e: any) {
         console.error(`[scan-top-markets] ${city}, ${state} error:`, e.message);
-        emit({ type: "market-error", city, state, tag, error: e.message });
+        emit({ type: "market-error", city, state, tag, estimatedComboLow, estimatedComboHigh, error: e.message });
       }
     }
 
