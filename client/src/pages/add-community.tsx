@@ -67,6 +67,9 @@ type CommunityResult = {
   combinedBedroomsTypical?: number;
   combinabilityScore?: number;
   fromWorldKnowledge?: boolean;
+  availableBedrooms?: number[];
+  estimatedTotalUnits?: number;
+  estimatedBedroomUnitCounts?: Record<string, number>;
 };
 
 type UnitResult = {
@@ -99,6 +102,40 @@ type CommunityProfile = {
 type PhotoItem = { url: string; label: string };
 
 type PhotoCheckResult = { clean: boolean; matches: Array<{ platform: string; url: string }> };
+
+function formatResortUnitMix(community: CommunityResult): string | null {
+  const bedroomCounts = Object.entries(community.estimatedBedroomUnitCounts ?? {})
+    .map(([bedrooms, count]) => ({
+      bedrooms: Math.round(Number(String(bedrooms).replace(/[^\d.]/g, ""))),
+      count: Math.round(Number(count)),
+    }))
+    .filter(({ bedrooms, count }) => Number.isFinite(bedrooms) && bedrooms > 0 && Number.isFinite(count) && count > 0)
+    .sort((a, b) => a.bedrooms - b.bedrooms);
+
+  const totalFromBreakout = bedroomCounts.reduce((sum, item) => sum + item.count, 0);
+  const total = typeof community.estimatedTotalUnits === "number" && community.estimatedTotalUnits > 0
+    ? Math.round(community.estimatedTotalUnits)
+    : totalFromBreakout > 0
+      ? totalFromBreakout
+      : null;
+
+  if (bedroomCounts.length > 0 && total) {
+    const parts = bedroomCounts.map(({ bedrooms, count }) => `~${count.toLocaleString()} ${bedrooms}BR`);
+    return `${parts.join(" + ")} = ~${total.toLocaleString()} total condos`;
+  }
+
+  if (total) {
+    return `~${total.toLocaleString()} total condos`;
+  }
+
+  const bedroomMix = (community.availableBedrooms ?? [])
+    .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
+    .sort((a, b) => a - b)
+    .map((bedrooms) => `${bedrooms}BR`)
+    .join(" / ");
+
+  return bedroomMix ? `Bedroom mix: ${bedroomMix}` : null;
+}
 
 export default function AddCommunity() {
   const [, navigate] = useLocation();
@@ -1188,6 +1225,7 @@ export default function AddCommunity() {
                   confidenceScore: c.confidenceScore,
                 });
                 const typeCheck = checkCommunityType(c.unitTypes, c.researchSummary);
+                const resortUnitMix = formatResortUnitMix(c);
                 return (
                 <Card
                   key={i}
@@ -1306,6 +1344,12 @@ export default function AddCommunity() {
                         <MapPin className="h-3.5 w-3.5 inline mr-1" />{c.city}, {c.state} · {c.unitTypes}
                         {c.bedroomMix && <span className="ml-1 italic">({c.bedroomMix})</span>}
                       </p>
+                      {resortUnitMix && (
+                        <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1.5">
+                          <Building2 className="h-3.5 w-3.5 text-primary shrink-0" />
+                          <span><span className="font-medium text-foreground">Resort size:</span> {resortUnitMix}</span>
+                        </p>
+                      )}
                       <p className="text-sm">{c.researchSummary}</p>
                       {(c.estimatedLowRate || c.estimatedHighRate) && (
                         <p className="text-sm font-medium text-green-600 mt-1">

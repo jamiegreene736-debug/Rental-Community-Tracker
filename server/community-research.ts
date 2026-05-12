@@ -22,17 +22,21 @@ export type ResearchedCommunity = {
   // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
   // Single-mode research returns the actual bedroom counts a
   // community offers (e.g. Santa Maria Resort = [2, 3]) so the
-  // single-listing wizard can render only valid bedroom buttons
-  // instead of a generic 1-5BR picker. Combo flow ignores this
-  // field. Empty array means "Claude doesn't know" — wizard falls
-  // back to common condo sizes plus the Any escape hatch.
+  // single-listing wizard can render only valid bedroom buttons.
+  // Combo mode also uses it as display context on research cards.
+  // Empty array means "Claude doesn't know" — wizard falls back to
+  // common condo sizes plus the Any escape hatch.
   availableBedrooms?: number[];
   // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
   // Single-mode research returns Claude's rough estimate of the
   // resort's total unit count (e.g. Reunion ~2000, Santa Maria
   // ~75). Wizard sorts by this descending and slices to the top
-  // 10 biggest. Combo flow ignores. 0 means Claude doesn't know.
+  // 10 biggest. Combo mode shows it as resort-size context. 0 means
+  // Claude doesn't know.
   estimatedTotalUnits?: number;
+  // Optional rough per-bedroom inventory, keyed by bedroom count:
+  // {"2": 45, "3": 30}. This is display-only context for cards.
+  estimatedBedroomUnitCounts?: Record<string, number>;
 };
 
 type KnownSingleListingCommunityFact = {
@@ -61,6 +65,9 @@ type KnownComboCommunitySeed = {
   name: string;
   unitTypes: string;
   bedroomMix: string;
+  availableBedrooms?: number[];
+  estimatedTotalUnits?: number;
+  estimatedBedroomUnitCounts?: Record<string, number>;
   combinedBedroomsTypical: number;
   confidenceScore: number;
   combinabilityScore: number;
@@ -284,6 +291,9 @@ function knownComboSeedsForCity(city: string, state: string): ResearchedCommunit
       researchSummary: seed.researchSummary,
       sourceUrl: seed.sourceUrl,
       bedroomMix: seed.bedroomMix,
+      availableBedrooms: seed.availableBedrooms,
+      estimatedTotalUnits: seed.estimatedTotalUnits,
+      estimatedBedroomUnitCounts: seed.estimatedBedroomUnitCounts,
       combinedBedroomsTypical: seed.combinedBedroomsTypical,
       combinabilityScore: seed.combinabilityScore,
       fromWorldKnowledge: true,
@@ -301,6 +311,26 @@ function normalizeBedroomList(value: unknown): number[] | undefined {
       .map((n: unknown) => typeof n === "number" ? Math.round(n) : null)
       .filter((n: number | null): n is number => n != null && n >= 1 && n <= 12),
   )).sort((a, b) => a - b);
+}
+
+function normalizeBedroomUnitCounts(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const counts: Record<string, number> = {};
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const bedroomCount = Math.round(Number(String(rawKey).replace(/[^\d.]/g, "")));
+    const unitCount = Math.round(Number(rawValue));
+    if (
+      Number.isFinite(bedroomCount) &&
+      bedroomCount >= 1 &&
+      bedroomCount <= 12 &&
+      Number.isFinite(unitCount) &&
+      unitCount > 0 &&
+      unitCount <= 50000
+    ) {
+      counts[String(bedroomCount)] = unitCount;
+    }
+  }
+  return Object.keys(counts).length > 0 ? counts : undefined;
 }
 
 function applyKnownSingleListingFacts(
@@ -862,13 +892,20 @@ ${knownComboSeeds.length
   ? knownComboSeeds.map((seed) => `- ${seed.name}: ${seed.unitTypes}; ${seed.bedroomMix}; ${seed.researchSummary}`).join("\n")
   : "- none"}
 
+RESORT SIZE CONTEXT:
+  For each resort, include the best approximate unit count you can find or infer from trustworthy public resort, HOA, property-management, or real-estate sources.
+  - availableBedrooms: integer bedroom counts offered by the resort, e.g. [2,3].
+  - estimatedTotalUnits: rough total condos/townhomes in the resort, e.g. 122.
+  - estimatedBedroomUnitCounts: rough per-bedroom inventory when known, e.g. {"2":45,"3":77}. Use {} when unknown.
+  Rough counts are useful, but do not invent fake precision. If you only know the total, provide estimatedTotalUnits and leave estimatedBedroomUnitCounts as {}.
+
 SEARCH RESULTS for "${city}, ${state}":
 ${unique.length
   ? unique.map((r, i) => `[${i}] TITLE: ${r.title}\nURL: ${r.link}\nSNIPPET: ${r.snippet}`).join("\n\n")
   : "(No organic results returned. Use only well-known local candidates you can classify with high confidence.)"}
 
 Output JSON array. Each element:
-{"communityName":"...","bedroomMix":"...","combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
+{"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"estimatedBedroomUnitCounts":{"2":N,"3":N},"combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
 
 Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max 10 results. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
 
@@ -933,12 +970,16 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               continue;
             }
             const normalizedBedrooms = normalizeBedroomList(s.availableBedrooms);
+            const normalizedBedroomUnitCounts = normalizeBedroomUnitCounts(s.estimatedBedroomUnitCounts);
+            const normalizedUnitsFromCounts = normalizedBedroomUnitCounts
+              ? Object.values(normalizedBedroomUnitCounts).reduce((sum, count) => sum + count, 0)
+              : undefined;
             const normalizedUnits = typeof s.estimatedTotalUnits === "number" && s.estimatedTotalUnits >= 0 && s.estimatedTotalUnits <= 50000
               ? Math.round(s.estimatedTotalUnits)
-              : undefined;
+              : normalizedUnitsFromCounts;
             const normalized = mode === "single"
               ? applyKnownSingleListingFacts(String(s.communityName ?? ""), city, state, normalizedBedrooms, normalizedUnits)
-              : { name: String(s.communityName ?? ""), availableBedrooms: undefined, estimatedTotalUnits: undefined };
+              : { name: String(s.communityName ?? ""), availableBedrooms: normalizedBedrooms, estimatedTotalUnits: normalizedUnits };
             const rates = await spotCheckRate(normalized.name);
             results.push({
               name: normalized.name,
@@ -957,9 +998,9 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               // as the default when undefined, which is fine.
               combinabilityScore: typeof s.combinabilityScore === "number" ? s.combinabilityScore : undefined,
               fromWorldKnowledge: s.fromWorldKnowledge === true,
-              // CODEX NOTE: availableBedrooms only meaningful in
-              // single mode. Filter to integers in [1,12] and
-              // dedupe; combo mode leaves it undefined.
+              // Filter to integers in [1,12] and dedupe. Single
+              // mode uses this to render bedroom buttons; combo
+              // mode uses it as display context on research cards.
               availableBedrooms: normalized.availableBedrooms,
               // CODEX NOTE (2026-05-05, claude/biggest-resorts-first):
               // estimatedTotalUnits comes back as a plain integer
@@ -967,6 +1008,7 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               // misformatted response from breaking the wizard's
               // sort. 0 = Claude doesn't know.
               estimatedTotalUnits: normalized.estimatedTotalUnits,
+              estimatedBedroomUnitCounts: normalizedBedroomUnitCounts,
             });
           }
         }
