@@ -997,11 +997,20 @@ function streetRootFromListingAddress(address: string | null): string | null {
     place: "pl",
     terrace: "ter",
   };
-  const streetName = m[2]
+  let streetName = m[2]
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[.'’‘-]/g, "")
     .replace(/^(?:n|s|e|w|north|south|east|west)\s+/i, "");
+  const streetTokens = streetName.split(/\s+/).filter(Boolean);
+  // Homes.com sometimes emits Hawaii hyphenated addresses as
+  // "78-6833-6833-Alii-Dr" for a real "78-6833 Alii Dr" unit.
+  // Collapse the duplicated street-number token so community root
+  // checks do not reject otherwise valid Na Hale O Keauhou candidates.
+  if (/^\d+$/.test(m[1]) && streetTokens.length >= 3 && streetTokens[0] === streetTokens[1]) {
+    streetTokens.splice(1, 1);
+    streetName = streetTokens.join(" ");
+  }
   const streetType = typeMap[m[3]] ?? m[3];
   return `${m[1]} ${streetName} ${streetType}`;
 }
@@ -17659,6 +17668,28 @@ Return ONLY compact JSON with this exact shape:
       return !!root && allowedRoots.has(root);
     };
 
+    const communityKnownAddressRoots = (): Set<string> => {
+      const roots = new Set<string>();
+      const add = (value: string | null | undefined) => {
+        const root = streetRootFromListingAddress(value ?? null);
+        if (root) roots.add(root);
+      };
+      add(folderCommunityAddress);
+      add(normalizedStreetAddress);
+      add(addressStreet);
+      add(communityAddress);
+
+      // Na Hale O Keauhou is on Alii Drive in Keauhou. A city-wide
+      // Kailua-Kona search can surface nearby Alii Drive resorts such as
+      // Royal Sea Cliff (75-6040 Alii Dr). Keep replacement candidates
+      // pinned to Na Hale's actual address family so "clean" but wrong-
+      // resort units cannot be suggested.
+      if (/na\s+hale\s+o\s+keauhou/i.test(communityName)) {
+        add("78-6833 Alii Dr");
+      }
+      return roots;
+    };
+
     const addCandidateUrl = (link: string, source: CandidateSource, contextText = "", thumbnail = "", allowedRoots?: Set<string>) => {
       if (!link) return;
       const lower = unitSwapListingKey(link);
@@ -17767,7 +17798,15 @@ Return ONLY compact JSON with this exact shape:
     // scanner.
 
     const directRoot = streetRootFromListingAddress(communityAddress);
-    const directAllowedRoots = directRoot ? new Set([directRoot]) : undefined;
+    const communityAddressRoots = communityKnownAddressRoots();
+    const directAllowedRoots = communityAddressRoots.size > 0
+      ? communityAddressRoots
+      : directRoot
+      ? new Set([directRoot])
+      : undefined;
+    if (directAllowedRoots?.size) {
+      console.error(`[find-unit] Community address roots: ${Array.from(directAllowedRoots).join(", ")}`);
+    }
 
     for (const siteQuery of searchQueries) {
       try {
@@ -17817,6 +17856,7 @@ Return ONLY compact JSON with this exact shape:
     const communityLoc = resolveCommunityLocation();
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
+    for (const root of communityAddressRoots) allowedRoots.add(root);
     if (communityLoc && allowedRoots.size > 0) {
       const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
         Promise.all([
@@ -18079,7 +18119,12 @@ Return ONLY compact JSON with this exact shape:
           const lower = unitSwapListingKey(link);
           if (!lower || seen.has(lower) || skipUrlSet.has(lower)) continue;
           seen.add(lower);
-          if (directRoot && !candidateRootMatches(link, new Set([directRoot]))) continue;
+          const equivalentAllowedRoots = communityAddressRoots.size > 0
+            ? communityAddressRoots
+            : directRoot
+            ? new Set([directRoot])
+            : null;
+          if (equivalentAllowedRoots?.size && !candidateRootMatches(link, equivalentAllowedRoots)) continue;
           let altUnit = extractUnitNumber(link, source, `${hit?.title || ""} ${hit?.snippet || ""}`);
           if (!altUnit) altUnit = unit;
           if (unit && altUnit && normalizeSearchText(unit).replace(/\s+/g, "") !== normalizeSearchText(altUnit).replace(/\s+/g, "")) {
