@@ -2860,10 +2860,10 @@ export default function Bookings() {
       (sum, row) => sum + Math.max(0, row.reservation.slotsTotal - row.reservation.slotsFilled),
       0,
     );
-    const upcomingBuyInCost = upcoming.reduce((sum, row) => sum + row.attachedBuyInCost, 0);
-    const upcomingRemainingBuyInCost = upcoming.reduce((sum, row) => sum + row.remainingBuyInCost, 0);
     const thisMonthMissing = thisMonth.filter((row) => !row.reservation.fullyLinked).length;
     const nextArrival = upcoming[0] ?? null;
+    const nextArrivalBuyInCost = nextArrival?.totalExpectedBuyInCost ?? 0;
+    const nextArrivalRemainingBuyInCost = nextArrival?.remainingBuyInCost ?? 0;
 
     return {
       nextArrival,
@@ -2871,8 +2871,8 @@ export default function Bookings() {
       upcomingCount: upcoming.length,
       missingBuyInReservations: missingBuyInReservations.length,
       missingSlots,
-      upcomingBuyInCost,
-      upcomingRemainingBuyInCost,
+      nextArrivalBuyInCost,
+      nextArrivalRemainingBuyInCost,
       thisMonthCount: thisMonth.length,
       thisMonthMissing,
       laterMissingBuyInReservations,
@@ -3225,14 +3225,18 @@ export default function Bookings() {
                 </div>
 
                 <div className="rounded border bg-muted/20 px-3 py-2.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Upcoming buy-in cost</p>
-                  <p className="text-2xl font-semibold mt-1">{fmtMoney(arrivalStats.upcomingBuyInCost)}</p>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Next arrival buy-in cost</p>
+                  <p className="text-2xl font-semibold mt-1">{fmtMoney(arrivalStats.nextArrivalBuyInCost)}</p>
                   <p className="text-xs text-muted-foreground">
-                    Attached future buy-ins
+                    {arrivalStats.nextArrival
+                      ? `${arrivalStats.nextArrival.reservation.guest?.fullName
+                        ?? arrivalStats.nextArrival.reservation.guest?.firstName
+                        ?? "Next guest"}'s booking`
+                      : "No upcoming arrival"}
                   </p>
-                  {arrivalStats.upcomingRemainingBuyInCost > 0 && (
+                  {arrivalStats.nextArrivalRemainingBuyInCost > 0 && (
                     <p className="text-xs text-amber-700">
-                      Est. remaining: {fmtMoney(arrivalStats.upcomingRemainingBuyInCost)}
+                      Est. remaining: {fmtMoney(arrivalStats.nextArrivalRemainingBuyInCost)}
                     </p>
                   )}
                 </div>
