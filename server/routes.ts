@@ -20556,8 +20556,36 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  const normalizeCommunityDraftNumericFields = (body: unknown): unknown => {
+    if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+    const next = { ...(body as Record<string, unknown>) };
+    const integerFields = [
+      "estimatedLowRate",
+      "estimatedHighRate",
+      "confidenceScore",
+      "unit1Bedrooms",
+      "unit1MaxGuests",
+      "unit2Bedrooms",
+      "unit2MaxGuests",
+      "combinedBedrooms",
+      "suggestedRate",
+    ];
+    for (const field of integerFields) {
+      const value = next[field];
+      if (value === "" || value == null) {
+        next[field] = null;
+        continue;
+      }
+      if (typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) next[field] = Math.trunc(parsed);
+      }
+    }
+    return next;
+  };
+
   app.post("/api/community/save", async (req, res) => {
-    const result = insertCommunityDraftSchema.safeParse(req.body);
+    const result = insertCommunityDraftSchema.safeParse(normalizeCommunityDraftNumericFields(req.body));
     if (!result.success) return res.status(400).json({ error: result.error.flatten() });
     // CODEX NOTE (2026-05-04, claude/single-listing): community-type
     // check applies to BOTH combo and single-listing drafts. A
@@ -20623,7 +20651,7 @@ Return ONLY compact JSON with this exact shape:
   app.patch("/api/community/:id", async (req, res) => {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
-    const draft = await storage.updateCommunityDraft(id, req.body);
+    const draft = await storage.updateCommunityDraft(id, normalizeCommunityDraftNumericFields(req.body) as any);
     if (!draft) return res.status(404).json({ error: "Not found" });
     res.json(draft);
   });
