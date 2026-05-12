@@ -981,6 +981,11 @@ function streetRootFromListingAddress(address: string | null): string | null {
     .toLowerCase()
     .replace(/&[#a-z0-9]+;/gi, " ")
     .replace(/[^a-z0-9.'#\s-]+/g, " ")
+    // Hawaii street numbers often use a district prefix, e.g.
+    // "78-6833 Alii Dr". Treat that as one canonical street number
+    // family ("78 6833 ...") so direct resort addresses and listing
+    // URL slugs compare to the same root.
+    .replace(/\b(\d{1,2})-(\d{3,5})(?=[\s-]+[a-z0-9])/gi, "$1 $2")
     .replace(/\s+/g, " ")
     .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
   if (!m) return null;
