@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Link } from "wouter";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -1761,14 +1761,26 @@ export default function Bookings() {
     return map;
   }, [guestyListings]);
 
+  const sortedPropertyMap = useMemo(() => {
+    return propertyMap
+      .slice()
+      .sort((a, b) => {
+        const na = listingNameById.get(a.guestyListingId) ?? `~${a.propertyId}`;
+        const nb = listingNameById.get(b.guestyListingId) ?? `~${b.propertyId}`;
+        return na.localeCompare(nb);
+      });
+  }, [listingNameById, propertyMap]);
+
   const selectedMapping = propertyMap.find((m) => m.propertyId === selectedPropertyId);
   const selectedListingId = selectedMapping?.guestyListingId ?? null;
+  const isGlobalView = selectedPropertyId == null;
 
   const {
     data: bookingsData,
-    isLoading: bookingsLoading,
-    isError: bookingsError,
-    error: bookingsErr,
+    isLoading: selectedBookingsLoading,
+    isFetching: selectedBookingsFetching,
+    isError: selectedBookingsError,
+    error: selectedBookingsErr,
     refetch: refetchBookings,
   } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
     queryKey: ["/api/bookings/listing", selectedListingId, selectedPropertyId, { includePast }],
@@ -1783,8 +1795,65 @@ export default function Bookings() {
     refetchInterval: 120_000,
   });
 
-  const rawReservations = bookingsData?.reservations ?? [];
-  const unitSlots = bookingsData?.unitSlots ?? [];
+  const globalBookingQueries = useQueries({
+    queries: sortedPropertyMap.map((mapping) => ({
+      queryKey: ["/api/bookings/listing", mapping.guestyListingId, mapping.propertyId, { includePast, scope: "all-properties" }],
+      queryFn: async () => {
+        const url = `/api/bookings/listing/${encodeURIComponent(mapping.guestyListingId)}?propertyId=${mapping.propertyId}&includePast=${includePast}`;
+        return apiRequest("GET", url).then((r) => r.json()) as Promise<{
+          reservations: GuestyReservation[];
+          total: number;
+          unitSlots: UnitConfig[];
+        }>;
+      },
+      enabled: isGlobalView && sortedPropertyMap.length > 0,
+      staleTime: 60_000,
+      refetchInterval: 120_000,
+    })),
+  });
+
+  const globalReservations = useMemo(() => {
+    if (!isGlobalView) return [];
+    return globalBookingQueries.flatMap((query) => query.data?.reservations ?? []);
+  }, [globalBookingQueries, isGlobalView]);
+
+  const reservationPropertyMeta = useMemo(() => {
+    const map = new Map<string, { propertyId: number; propertyName: string }>();
+    if (isGlobalView) {
+      globalBookingQueries.forEach((query, index) => {
+        const mapping = sortedPropertyMap[index];
+        if (!mapping) return;
+        const propertyName = listingNameById.get(mapping.guestyListingId) ?? `Property ${mapping.propertyId}`;
+        for (const reservation of query.data?.reservations ?? []) {
+          map.set(reservation._id, {
+            propertyId: mapping.propertyId,
+            propertyName,
+          });
+        }
+      });
+      return map;
+    }
+    if (selectedMapping) {
+      const propertyName = listingNameById.get(selectedMapping.guestyListingId) ?? `Property ${selectedMapping.propertyId}`;
+      for (const reservation of bookingsData?.reservations ?? []) {
+        map.set(reservation._id, {
+          propertyId: selectedMapping.propertyId,
+          propertyName,
+        });
+      }
+    }
+    return map;
+  }, [bookingsData?.reservations, globalBookingQueries, isGlobalView, listingNameById, selectedMapping, sortedPropertyMap]);
+
+  const globalBookingsLoading = isGlobalView && globalBookingQueries.some((query) => query.isLoading || query.isFetching);
+  const globalBookingsError = isGlobalView && globalBookingQueries.some((query) => query.isError);
+  const globalBookingsErr = globalBookingQueries.find((query) => query.isError)?.error;
+  const bookingsLoading = isGlobalView ? globalBookingsLoading : (selectedBookingsLoading || selectedBookingsFetching);
+  const bookingsError = isGlobalView ? globalBookingsError : selectedBookingsError;
+  const bookingsErr = isGlobalView ? globalBookingsErr : selectedBookingsErr;
+
+  const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
+  const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
 
   // Apply the current sort to the reservations before we render. Memoized so
   // a click on an attach button doesn't re-sort the entire list.
@@ -2705,6 +2774,7 @@ export default function Bookings() {
 
     return {
       nextArrival,
+      attentionRows: missingBuyInReservations.slice(0, 6),
       upcomingCount: upcoming.length,
       missingBuyInReservations: missingBuyInReservations.length,
       missingSlots,
@@ -2758,6 +2828,14 @@ export default function Bookings() {
   const propertyLabel = selectedPropertyId
     ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
     : "";
+  const globalLabel = `${sortedPropertyMap.length} linked ${sortedPropertyMap.length === 1 ? "property" : "properties"}`;
+  const refreshVisibleBookings = () => {
+    if (isGlobalView) {
+      void Promise.all(globalBookingQueries.map((query) => query.refetch()));
+      return;
+    }
+    void refetchBookings();
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -2780,7 +2858,7 @@ export default function Bookings() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => refetchBookings()}
+            onClick={refreshVisibleBookings}
             disabled={bookingsLoading}
             data-testid="button-refresh-bookings"
           >
@@ -2797,24 +2875,23 @@ export default function Bookings() {
               <div className="grow min-w-0 sm:min-w-[260px]">
                 <Label className="text-xs mb-1.5 block">Property</Label>
                 <Select
-                  value={selectedPropertyId?.toString() ?? ""}
+                  value={selectedPropertyId?.toString() ?? "all"}
                   onValueChange={(v) => {
-                    setSelectedPropertyId(v ? parseInt(v, 10) : null);
+                    setSelectedPropertyId(v === "all" ? null : parseInt(v, 10));
                     setExpanded({});
                   }}
                 >
                   <SelectTrigger data-testid="select-property">
-                    <SelectValue placeholder="Select a property..." />
+                    <SelectValue placeholder="All properties" />
                   </SelectTrigger>
                   <SelectContent>
-                    {propertyMap
-                      .slice()
-                      .sort((a, b) => {
-                        // Sort by Guesty nickname if we have it, fall back to propertyId
-                        const na = listingNameById.get(a.guestyListingId) ?? `~${a.propertyId}`;
-                        const nb = listingNameById.get(b.guestyListingId) ?? `~${b.propertyId}`;
-                        return na.localeCompare(nb);
-                      })
+                    <SelectItem value="all">
+                      All properties
+                      <span className="text-muted-foreground text-xs ml-1.5">
+                        · global summary
+                      </span>
+                    </SelectItem>
+                    {sortedPropertyMap
                       .map((m) => {
                         const name = listingNameById.get(m.guestyListingId);
                         return (
@@ -2846,23 +2923,29 @@ export default function Bookings() {
                   {propertyLabel}
                 </div>
               )}
+              {isGlobalView && (
+                <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
+                  <Building2 className="h-3.5 w-3.5 inline mr-1 opacity-60" />
+                  All properties · {globalLabel}
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
 
-        {!selectedPropertyId && (
+        {isGlobalView && sortedPropertyMap.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
-              <p className="font-medium mb-1">Select a property to view bookings</p>
+              <p className="font-medium mb-1">No linked properties yet</p>
               <p className="text-sm text-muted-foreground">
-                Bookings are pulled live from Guesty.
+                Link properties to Guesty listings before the global Operations summary can load.
               </p>
             </CardContent>
           </Card>
         )}
 
-        {selectedPropertyId && bookingsError && (
+        {bookingsError && (
           <Card className="border-destructive">
             <CardContent className="py-6">
               <p className="text-sm text-destructive font-medium">
@@ -2874,11 +2957,11 @@ export default function Bookings() {
           </Card>
         )}
 
-        {selectedPropertyId && stats && (
+        {stats && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <Card>
               <CardContent className="py-4">
-                <p className="text-xs text-muted-foreground">Bookings</p>
+                <p className="text-xs text-muted-foreground">{isGlobalView ? "Bookings across properties" : "Bookings"}</p>
                 <p className="text-2xl font-semibold mt-1">{stats.total}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {stats.fully} fully linked · {stats.partial} partial
@@ -2909,14 +2992,16 @@ export default function Bookings() {
           </div>
         )}
 
-        {selectedPropertyId && stats && arrivalStats && (
+        {stats && arrivalStats && (
           <Card data-testid="card-upcoming-arrivals">
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">
-                <Clock3 className="h-4 w-4" /> Upcoming arrivals
+                <Clock3 className="h-4 w-4" /> {isGlobalView ? "Global upcoming arrivals" : "Upcoming arrivals"}
               </CardTitle>
               <CardDescription>
-                Buy-in readiness for future check-ins on this property.
+                {isGlobalView
+                  ? "Buy-in readiness for future check-ins across all linked properties."
+                  : "Buy-in readiness for future check-ins on this property."}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -2933,6 +3018,11 @@ export default function Bookings() {
                           ?? arrivalStats.nextArrival.reservation.guest?.firstName
                           ?? "Guest"}
                       </p>
+                      {isGlobalView && (
+                        <p className="text-[10px] text-muted-foreground truncate">
+                          {reservationPropertyMeta.get(arrivalStats.nextArrival.reservation._id)?.propertyName ?? "Property"}
+                        </p>
+                      )}
                       <Badge
                         variant={arrivalStats.nextArrival.reservation.fullyLinked ? "default" : "outline"}
                         className={`mt-2 text-[10px] ${
@@ -2978,6 +3068,94 @@ export default function Bookings() {
                     {arrivalStats.thisMonthMissing} still need buy-in attention
                   </p>
                 </div>
+              </div>
+              {isGlobalView && arrivalStats.attentionRows.length > 0 && (
+                <div className="mt-4 rounded border bg-amber-50/60">
+                  <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+                    <p className="text-xs font-semibold text-amber-900">Next arrivals needing buy-in attention</p>
+                    <Badge variant="outline" className="border-amber-300 text-amber-800">
+                      {arrivalStats.missingBuyInReservations} open
+                    </Badge>
+                  </div>
+                  <div className="divide-y">
+                    {arrivalStats.attentionRows.map((row) => {
+                      const meta = reservationPropertyMeta.get(row.reservation._id);
+                      return (
+                        <button
+                          key={row.reservation._id}
+                          type="button"
+                          className="w-full px-3 py-2 text-left hover:bg-amber-100/50"
+                          onClick={() => {
+                            if (meta?.propertyId) {
+                              setSelectedPropertyId(meta.propertyId);
+                              setExpanded({ [row.reservation._id]: true });
+                            }
+                          }}
+                        >
+                          <div className="grid grid-cols-1 gap-1 sm:grid-cols-[120px_1fr_110px_120px] sm:items-center">
+                            <p className="text-xs font-semibold">{fmtDate(checkInOf(row.reservation))}</p>
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium truncate">
+                                {row.reservation.guest?.fullName ?? row.reservation.guest?.firstName ?? "Guest"}
+                              </p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {meta?.propertyName ?? "Property"}
+                              </p>
+                            </div>
+                            <p className="text-xs text-amber-800">
+                              {row.reservation.slotsFilled}/{row.reservation.slotsTotal} bought in
+                            </p>
+                            <p className="text-xs font-medium sm:text-right">
+                              {fmtMoney(getBuyInCost(row.reservation))}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {isGlobalView && bookingsLoading && !stats && (
+          <Card>
+            <CardContent className="py-10 text-center">
+              <RefreshCw className="h-8 w-8 mx-auto mb-3 animate-spin opacity-40" />
+              <p className="font-medium">Loading global booking summary</p>
+              <p className="text-sm text-muted-foreground">
+                Pulling live reservations from each linked Guesty listing.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {isGlobalView && !bookingsLoading && !bookingsError && !stats && sortedPropertyMap.length > 0 && (
+          <Card>
+            <CardContent className="py-10 text-center">
+              <Calendar className="h-8 w-8 mx-auto mb-3 opacity-30" />
+              <p className="font-medium">No bookings found across linked properties</p>
+              <p className="text-sm text-muted-foreground">
+                Try enabling past stays or select an individual property to inspect it.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {isGlobalView && stats && (
+          <Card>
+            <CardContent className="py-5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="font-medium">Select a property to manage individual buy-ins</p>
+                  <p className="text-sm text-muted-foreground">
+                    The global view is read-only so attachments, searches, and expected deposits stay tied to one property at a time.
+                  </p>
+                </div>
+                <Badge variant="outline" className="w-fit">
+                  {globalLabel}
+                </Badge>
               </div>
             </CardContent>
           </Card>
