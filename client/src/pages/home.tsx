@@ -597,6 +597,8 @@ export default function Home() {
   type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number }; hasScannableFolders: boolean };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
+    const draftsByPropertyId = new Map<number, CommunityDraft>();
+    for (const d of communityDraftsDataForRows ?? []) draftsByPropertyId.set(-d.id, d);
     const worst = (a: PhotoAggStatus, b: PhotoStatus): PhotoAggStatus => {
       const rank = (s: PhotoAggStatus) => s === "found" ? 3 : s === "unknown" ? 2 : s === "clean" ? 1 : 0;
       return rank(b) > rank(a) ? b : a;
@@ -604,6 +606,9 @@ export default function Home() {
     for (const p of properties) {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
+      const addFolder = (folder?: string | null) => {
+        if (folder && isScannableFolder(folder)) folderSet.add(folder);
+      };
       if (builder) {
         // Unit folders only. communityPhotoFolder is excluded (shared
         // amenities, no unit signal). isScannableFolder consults the
@@ -614,8 +619,13 @@ export default function Home() {
         // here too, keeping the dashboard aggregation in lockstep
         // with what was scanned.
         for (const u of builder.units) {
-          if (u.photoFolder && isScannableFolder(u.photoFolder)) folderSet.add(u.photoFolder);
+          addFolder(u.photoFolder);
         }
+      }
+      const draft = draftsByPropertyId.get(p.id);
+      if (draft) {
+        addFolder(draft.unit1PhotoFolder);
+        if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder);
       }
       const folders = Array.from(folderSet);
       let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, hasScannableFolders: folders.length > 0 };
@@ -635,7 +645,7 @@ export default function Home() {
       out.set(p.id, agg);
     }
     return out;
-  }, [photoCheckByFolder]);
+  }, [communityDraftsDataForRows, photoCheckByFolder, properties]);
 
   const { toast } = useToast();
 
@@ -1165,7 +1175,7 @@ export default function Home() {
                       // be misleading — render grey + clarify in the
                       // tooltip that the unit folder name needs a
                       // real unit number to enable scanning.
-                      const noFolders = agg ? !agg.hasScannableFolders : false;
+                      const noFolders = !agg || !agg.hasScannableFolders;
                       const toneOf = (s: PhotoAggStatus): Tone => {
                         if (noFolders) return "na";
                         if (s === "clean") return "ok";

@@ -6,6 +6,25 @@
 
 import { tokensForFolder } from "./folder-unit-map";
 
+export type DynamicPhotoFolderRef = { propertyId: number; oldUnitId: string };
+
+export function draftPhotoFolderRef(folder: string): DynamicPhotoFolderRef | null {
+  const m = folder.match(/^draft-(\d+)-unit-([a-z0-9_-]+)$/i);
+  if (!m) return null;
+  return { propertyId: -Number(m[1]), oldUnitId: `draft${m[1]}-unit-${m[2]}` };
+}
+
+export function replacementPhotoFolderRef(folder: string): DynamicPhotoFolderRef | null {
+  const m = folder.match(/^replacement-p(.+)-u(.+)$/i);
+  if (!m) return null;
+  const propSlug = m[1];
+  const unitSlug = m[2];
+  const draft = propSlug.match(/^draft-(\d+)$/i);
+  const propertyId = draft ? -Number(draft[1]) : Number(propSlug);
+  if (!Number.isFinite(propertyId)) return null;
+  return { propertyId, oldUnitId: unitSlug };
+}
+
 // Pull a unit-number hint from a folder name so we can cross-validate
 // Lens results against the candidate listing's page. Returns null when
 // no real unit identifier is present — placeholder names ("a", "b",
@@ -41,15 +60,20 @@ export function unitHintFromFolder(folder: string): string | null {
 // and the dashboard use to decide whether a folder belongs in the
 // scan universe at all.
 export function isScannableFolder(folder: string): boolean {
-  return tokensForFolder(folder) !== null || unitHintFromFolder(folder) !== null;
+  return (
+    tokensForFolder(folder) !== null ||
+    unitHintFromFolder(folder) !== null ||
+    draftPhotoFolderRef(folder) !== null ||
+    replacementPhotoFolderRef(folder) !== null
+  );
 }
 
 // Returns the list of unit-number tokens the scanner should verify
 // against when checking Lens hits for this folder. Prefers the
 // hand-maintained FOLDER_UNIT_TOKENS map (the canonical claim) and
 // falls back to the folder-name hint for folders the map doesn't
-// cover yet. Returns null only when neither source produces a hint —
-// i.e. when `isScannableFolder(folder)` is also false.
+// cover yet. Dynamic draft/replacement folders can still be scannable;
+// the server resolves those tokens from the latest unit-swap row.
 export function verificationTokensForFolder(folder: string): string[] | null {
   const mapped = tokensForFolder(folder);
   if (mapped && mapped.length > 0) return mapped;

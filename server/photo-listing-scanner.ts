@@ -43,7 +43,16 @@
 
 import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
-import { isScannableFolder, verificationTokensForFolder } from "@shared/photo-folder-utils";
+import fs from "fs";
+import path from "path";
+import { extractUnitTokens } from "@shared/folder-unit-map";
+import {
+  draftPhotoFolderRef,
+  isScannableFolder,
+  replacementPhotoFolderRef,
+  verificationTokensForFolder,
+} from "@shared/photo-folder-utils";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
 
@@ -62,9 +71,18 @@ const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
 
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
+const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 
 export type PlatformStatus = "clean" | "found" | "unknown";
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
+type PhotoCandidate = {
+  filename: string;
+  hidden?: boolean | null;
+  label?: string | null;
+  userLabel?: string | null;
+  category?: string | null;
+  userCategory?: string | null;
+};
 
 export type ScanResult = {
   folder: string;
@@ -78,6 +96,41 @@ export type ScanResult = {
   lensCalls: number;
   errorMessage?: string;
 };
+
+function publicPhotoDir(folder: string): string {
+  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  return path.resolve(process.cwd(), "client/public/photos", safe);
+}
+
+async function listDiskPhotoCandidates(folder: string): Promise<PhotoCandidate[]> {
+  try {
+    const files = await fs.promises.readdir(publicPhotoDir(folder));
+    return files
+      .filter((f) => IMAGE_EXT.test(f) && !f.startsWith(".") && !f.startsWith("_"))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((filename) => ({ filename, label: filename, category: "Living Areas" }));
+  } catch {
+    return [];
+  }
+}
+
+async function folderHasDiskPhotos(folder: string): Promise<boolean> {
+  const photos = await listDiskPhotoCandidates(folder);
+  return photos.length > 0;
+}
+
+async function dynamicVerificationTokensForFolder(folder: string): Promise<string[] | null> {
+  const mapped = verificationTokensForFolder(folder);
+  if (mapped && mapped.length > 0) return mapped;
+
+  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
+  if (!ref) return null;
+  const swap = await storage.getLatestUnitSwap(ref.propertyId, ref.oldUnitId);
+  if (!swap) return null;
+
+  const tokens = extractUnitTokens(`${swap.newUnitLabel ?? ""} ${swap.newAddress ?? ""}`);
+  return tokens.length > 0 ? Array.from(new Set(tokens)) : null;
+}
 
 async function callGoogleLens(imageUrl: string): Promise<any[] | null> {
   if (!SEARCHAPI_KEY) return null;
@@ -203,8 +256,10 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   //   kekaha-main, keauhou-estate (no digit in name)
   // Once these folders are renamed to include a real unit number
   // (e.g. pili-mai-12c), they'll start scanning automatically.
-  if (!isScannableFolder(folder)) {
+  const verifyTokens = await dynamicVerificationTokensForFolder(folder);
+  if (!verifyTokens || verifyTokens.length === 0) {
     result.errorMessage = "Folder has no unit-number identifier — verification disabled, scan skipped to avoid false positives";
+    await persist(result);
     return result;
   }
 
@@ -241,7 +296,10 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   }
 
   const labels = await storage.getPhotoLabelsByFolder(folder);
-  const visible = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
+  let visible: PhotoCandidate[] = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
+  if (visible.length === 0) {
+    visible = await listDiskPhotoCandidates(folder);
+  }
   // Prefer private/interior categories for the hero set and never fall
   // back to obvious community/shared amenity photos. Pool, lobby,
   // grounds, exterior, view, and logo-style images are intentionally
@@ -250,7 +308,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   const INTERIOR_CATEGORIES = new Set([
     "Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Dining", "Outdoor & Lanai",
   ]);
-  const effectiveCategory = (l: typeof labels[number]) => l.userCategory ?? l.category ?? "";
+  const effectiveCategory = (l: PhotoCandidate) => l.userCategory ?? l.category ?? "";
   const privateUnitPhotos = visible.filter((l) => !isCommunityOrSharedPhotoCandidate({
     folder,
     filename: l.filename,
@@ -278,15 +336,11 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   };
   let anyLensSucceeded = false;
 
-  // Verification tokens come from `verificationTokensForFolder`,
-  // which prefers the hand-maintained FOLDER_UNIT_TOKENS map (the
-  // canonical claim per shared/folder-unit-map.ts) and falls back
-  // to the folder-name hint for folders not in the map. A Lens hit
-  // is accepted when the matched listing's page mentions ANY of
-  // these tokens — this lets shared folders (one folder claimed by
-  // multiple units) and folders whose name has drifted from the
-  // unit number both produce real signals instead of being skipped.
-  const verifyTokens = verificationTokensForFolder(folder);
+  // Verification tokens prefer the hand-maintained FOLDER_UNIT_TOKENS
+  // map, then the folder-name hint, then the latest replacement-unit
+  // swap. The dynamic swap path lets promoted draft folders like
+  // draft-2-unit-a verify against Unit A5 without hardcoding every
+  // temporary draft folder in the static map.
   // "Our own" listings — Guesty-authorized URLs for every property we
   // manage. A Lens hit that resolves to one of these is us, not a
   // thief, and gets suppressed before the tally. Cached across runs
@@ -396,19 +450,38 @@ async function persist(r: ScanResult): Promise<PhotoListingCheck> {
   });
 }
 
-// Returns the list of folders that have any labeled photos in the DB
-// AND can be meaningfully cross-validated. The latter excludes
-// community-* (shared amenity shots that every host uses) and any
-// folder whose unit identifier is a placeholder ("a", "b", "main",
-// "estate", "cottage") — both produce nothing but false positives,
-// because we can't ask Google "does this URL mention Unit a" and get
-// a useful answer. See `isScannableFolder` in shared/photo-folder-
-// utils.ts for the exact rule.
+// Returns folders that have photos (label rows or files on disk) AND
+// can be meaningfully cross-validated. Replacement/draft folders get
+// their verification unit from the latest unit-swap row, so promoted
+// drafts can be checked without adding temporary folder names to the
+// static FOLDER_UNIT_TOKENS map.
 export async function listScanableFolders(): Promise<string[]> {
   const rows = await storage.getAllPhotoLabels();
   const set = new Set<string>();
-  for (const r of rows) if (isScannableFolder(r.folder)) set.add(r.folder);
-  return Array.from(set).sort();
+  const foldersWithLabels = new Set<string>();
+  for (const r of rows) {
+    foldersWithLabels.add(r.folder);
+    if (isScannableFolder(r.folder)) set.add(r.folder);
+  }
+
+  const swaps = await storage.getAllUnitSwaps();
+  const seenSwaps = new Set<string>();
+  for (const swap of swaps) {
+    const key = `${swap.propertyId}:${swap.oldUnitId}`;
+    if (seenSwaps.has(key)) continue;
+    seenSwaps.add(key);
+    set.add(replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId));
+    const draft = String(swap.oldUnitId).match(/^draft(\d+)-unit-([a-z0-9_-]+)$/i);
+    if (draft) set.add(`draft-${draft[1]}-unit-${draft[2]}`);
+  }
+
+  const out: string[] = [];
+  for (const folder of set) {
+    const tokens = await dynamicVerificationTokensForFolder(folder);
+    if (!tokens || tokens.length === 0) continue;
+    if (foldersWithLabels.has(folder) || await folderHasDiskPhotos(folder)) out.push(folder);
+  }
+  return out.sort();
 }
 
 // Run one folder at a time, pausing between to avoid SearchAPI rate

@@ -160,6 +160,7 @@ export interface IStorage {
   deleteLodgifyPropertyId(propertyId: number): Promise<boolean>;
 
   createUnitSwap(swap: InsertUnitSwap): Promise<UnitSwap>;
+  getAllUnitSwaps(): Promise<UnitSwap[]>;
   getUnitSwaps(propertyId: number): Promise<UnitSwap[]>;
   getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
   deleteUnitSwap(id: number): Promise<boolean>;
@@ -551,6 +552,10 @@ export class DatabaseStorage implements IStorage {
   async createUnitSwap(swap: InsertUnitSwap): Promise<UnitSwap> {
     const [result] = await db.insert(unitSwaps).values(swap).returning();
     return result;
+  }
+
+  async getAllUnitSwaps(): Promise<UnitSwap[]> {
+    return db.select().from(unitSwaps).orderBy(desc(unitSwaps.createdAt));
   }
 
   async getUnitSwaps(propertyId: number): Promise<UnitSwap[]> {
