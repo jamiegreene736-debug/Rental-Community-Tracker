@@ -1358,6 +1358,19 @@ function parseDateCandidate(value: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+function parseLocalDate(value: string | undefined | null): Date | null {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value;
+  const d = new Date(normalized);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function startOfLocalDay(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 type DepositStatus = "airbnb_expected" | "collected" | "scheduled" | "partial" | "not_collected" | "unknown";
 type PaymentSourceKind = "airbnb" | "guesty_card" | "booking_vcc" | "booking_payout" | "not_visible" | "unknown";
 type DepositTriggerSource = "airbnb_arrival" | "payment" | "schedule" | "reservation" | "unknown";
@@ -2660,6 +2673,47 @@ export default function Bookings() {
     };
   }, [reservations]);
 
+  const arrivalStats = useMemo(() => {
+    const today = startOfLocalDay(new Date());
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const nextMonthStart = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+
+    const dated = reservations
+      .map((reservation) => ({
+        reservation,
+        checkInDate: parseLocalDate(checkInOf(reservation)),
+      }))
+      .filter((row): row is { reservation: GuestyReservation; checkInDate: Date } => !!row.checkInDate);
+
+    const upcoming = dated
+      .filter((row) => startOfLocalDay(row.checkInDate).getTime() >= today.getTime())
+      .sort((a, b) => a.checkInDate.getTime() - b.checkInDate.getTime());
+
+    const thisMonth = upcoming.filter((row) => (
+      row.checkInDate.getTime() >= monthStart.getTime()
+      && row.checkInDate.getTime() < nextMonthStart.getTime()
+    ));
+
+    const missingBuyInReservations = upcoming.filter((row) => !row.reservation.fullyLinked);
+    const missingSlots = upcoming.reduce(
+      (sum, row) => sum + Math.max(0, row.reservation.slotsTotal - row.reservation.slotsFilled),
+      0,
+    );
+    const upcomingBuyInCost = upcoming.reduce((sum, row) => sum + getBuyInCost(row.reservation), 0);
+    const thisMonthMissing = thisMonth.filter((row) => !row.reservation.fullyLinked).length;
+    const nextArrival = upcoming[0] ?? null;
+
+    return {
+      nextArrival,
+      upcomingCount: upcoming.length,
+      missingBuyInReservations: missingBuyInReservations.length,
+      missingSlots,
+      upcomingBuyInCost,
+      thisMonthCount: thisMonth.length,
+      thisMonthMissing,
+    };
+  }, [reservations]);
+
   const depositRows = useMemo(() => {
     return reservations.flatMap((r) => {
       const guestPaid = asMoneyNumber(r.money?.totalPaid);
@@ -2853,6 +2907,80 @@ export default function Bookings() {
               </CardContent>
             </Card>
           </div>
+        )}
+
+        {selectedPropertyId && stats && arrivalStats && (
+          <Card data-testid="card-upcoming-arrivals">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Clock3 className="h-4 w-4" /> Upcoming arrivals
+              </CardTitle>
+              <CardDescription>
+                Buy-in readiness for future check-ins on this property.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Next arrival</p>
+                  {arrivalStats.nextArrival ? (
+                    <>
+                      <p className="text-sm font-semibold mt-1">
+                        {fmtDate(checkInOf(arrivalStats.nextArrival.reservation))}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {arrivalStats.nextArrival.reservation.guest?.fullName
+                          ?? arrivalStats.nextArrival.reservation.guest?.firstName
+                          ?? "Guest"}
+                      </p>
+                      <Badge
+                        variant={arrivalStats.nextArrival.reservation.fullyLinked ? "default" : "outline"}
+                        className={`mt-2 text-[10px] ${
+                          arrivalStats.nextArrival.reservation.fullyLinked
+                            ? "bg-green-600 text-white"
+                            : "border-amber-300 text-amber-700"
+                        }`}
+                      >
+                        {arrivalStats.nextArrival.reservation.fullyLinked
+                          ? "Bought in"
+                          : `${arrivalStats.nextArrival.reservation.slotsFilled}/${arrivalStats.nextArrival.reservation.slotsTotal} bought in`}
+                      </Badge>
+                    </>
+                  ) : (
+                    <p className="text-sm font-medium mt-1 text-muted-foreground">No upcoming arrivals</p>
+                  )}
+                </div>
+
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Not bought in</p>
+                  <p className={`text-2xl font-semibold mt-1 ${
+                    arrivalStats.missingBuyInReservations > 0 ? "text-amber-700" : "text-green-700"
+                  }`}>
+                    {arrivalStats.missingBuyInReservations}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {arrivalStats.missingSlots} open unit slot{arrivalStats.missingSlots === 1 ? "" : "s"}
+                  </p>
+                </div>
+
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Upcoming buy-in cost</p>
+                  <p className="text-2xl font-semibold mt-1">{fmtMoney(arrivalStats.upcomingBuyInCost)}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Attached future buy-ins
+                  </p>
+                </div>
+
+                <div className="rounded border bg-muted/20 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Arrivals this month</p>
+                  <p className="text-2xl font-semibold mt-1">{arrivalStats.thisMonthCount}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {arrivalStats.thisMonthMissing} still need buy-in attention
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {selectedPropertyId && !bookingsError && (
