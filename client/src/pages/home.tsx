@@ -44,6 +44,7 @@ import {
   TrendingUp,
   MessageSquare,
   Home as HomeIcon,
+  RefreshCw,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -594,7 +595,7 @@ export default function Home() {
   // the worst across that property's folders (priority: found > unknown > clean).
   // `null` = no data yet for any of this property's folders (never scanned).
   type PhotoAggStatus = PhotoStatus | null;
-  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number }; hasScannableFolders: boolean };
+  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number }; hasScannableFolders: boolean; folders: string[] };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
     const draftsByPropertyId = new Map<number, CommunityDraft>();
@@ -627,8 +628,12 @@ export default function Home() {
         addFolder(draft.unit1PhotoFolder);
         if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder);
       }
+      if (p.draftId !== undefined) {
+        addFolder(`draft-${p.draftId}-unit-a`);
+        if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`);
+      }
       const folders = Array.from(folderSet);
-      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, hasScannableFolders: folders.length > 0 };
+      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, hasScannableFolders: folders.length > 0, folders };
       for (const f of folders) {
         const row = photoCheckByFolder.get(f);
         if (!row) continue;
@@ -680,6 +685,28 @@ export default function Home() {
       toast({ title: "Promoted to active", description: "Row now appears as a regular property." });
     },
     onError: (e: any) => toast({ title: "Promote failed", description: e.message, variant: "destructive" }),
+  });
+
+  const photoScanMutation = useMutation({
+    mutationFn: async (folders?: string[]) => {
+      const body = folders && folders.length > 0 ? { folders } : {};
+      const r = await apiRequest("POST", "/api/photo-listing-check/run", body);
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json() as Promise<{ started: boolean; folders: string[] }>;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] }), 45_000);
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] }), 90_000);
+      toast({
+        title: "Photo scan started",
+        description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued. The badges will refresh as Lens finishes.`,
+      });
+    },
+    onError: (e: any) => toast({ title: "Photo scan failed", description: e.message, variant: "destructive" }),
   });
 
   // Highlight south-shore (Poipu) properties with the primary badge tone.
@@ -895,7 +922,24 @@ export default function Home() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[84px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, amber = not yet checked / Lens error">Photo Match</TableHead>
+                <TableHead className="w-[96px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, amber = not yet checked / Lens error">
+                  <div className="flex items-center justify-center gap-1">
+                    <span>Photo Match</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      title="Run photo match scan for all scannable listings"
+                      aria-label="Run photo match scan"
+                      disabled={photoScanMutation.isPending}
+                      onClick={() => photoScanMutation.mutate(undefined)}
+                      data-testid="button-run-photo-match-scan"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                </TableHead>
                 <TableHead className="w-[180px] max-w-[180px] px-2">
                   <Button
                     variant="ghost"
@@ -1193,6 +1237,7 @@ export default function Home() {
                         { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0 },
                         { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0 },
                       ];
+                      const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
                       return (
                         <div className="flex gap-0.5 justify-center items-center" data-testid={`photo-match-${property.id}`}>
@@ -1217,6 +1262,21 @@ export default function Home() {
                               </span>
                             );
                           })}
+                          {folders.length > 0 && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="ml-1 h-[18px] w-[18px] rounded"
+                              title={`Run photo match scan for ${property.name}`}
+                              aria-label={`Run photo match scan for ${property.name}`}
+                              disabled={photoScanMutation.isPending}
+                              onClick={() => photoScanMutation.mutate(folders)}
+                              data-testid={`button-run-photo-match-scan-${property.id}`}
+                            >
+                              <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
+                            </Button>
+                          )}
                         </div>
                       );
                     })()}
