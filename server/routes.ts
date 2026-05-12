@@ -10325,11 +10325,11 @@ export async function registerRoutes(
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
 
-    // Cap the Guesty master photo set at 50. That matches VRBO's published
-    // max and still gives Airbnb plenty of room. Booking.com's lower cap is
-    // surfaced in the UI/channel-specific tools; enforcing it here would strip
-    // useful photos from the Guesty/Airbnb/VRBO source set.
-    const MAX_GUESTY_PHOTOS = 50;
+    // Keep the Guesty master/Airbnb source set up to Airbnb's published
+    // 100-photo cap. VRBO (50) and Booking.com (30) are channel caps, not
+    // Guesty-master caps; the Photos tab surfaces those warnings separately
+    // so the operator can decide whether to curate before publishing there.
+    const MAX_GUESTY_PHOTOS = 100;
     const photos = rawPhotos.length > MAX_GUESTY_PHOTOS
       ? rawPhotos.slice(0, MAX_GUESTY_PHOTOS)
       : rawPhotos;

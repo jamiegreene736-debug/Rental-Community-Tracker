@@ -1456,7 +1456,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 const maxPhotos = event.maxPhotos ?? event.total ?? 50;
                 toast({
                   title: `Trimmed to ${maxPhotos} photos`,
-                  description: `Kept the first ${maxPhotos} photos (community + units) and dropped ${trimmed} lower-priority photos to stay within the Guesty/VRBO photo limit.`,
+                  description: `Kept the first ${maxPhotos} photos (community + units) and dropped ${trimmed} lower-priority photos to stay within the Guesty master photo limit.`,
                   duration: 10000,
                 });
               }
