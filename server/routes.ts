@@ -21955,19 +21955,62 @@ Return ONLY compact JSON with this exact shape:
     if (!state) return res.status(404).json({ error: "no active refresh" });
     const isTerminal = state.phase === "done" || state.phase === "error";
     const heartbeatAgeMs = Date.now() - state.lastTickAt;
+    const softHeartbeatAfterMs = 60_000;
     const staleAfterMs = 2 * 60_000;
-    if (!isTerminal && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs > staleAfterMs) {
-      const interrupted = {
-        ...state,
-        phase: "error" as const,
-        label: "Refresh tracking interrupted",
-        error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh season-band refresh after the sidecar goes quiet.`,
-        lastTickAt: state.lastTickAt,
-      };
-      setRefreshProgress(interrupted);
-      clearRefreshProgress(propertyId);
-      res.setHeader("Cache-Control", "no-store");
-      return res.json(interrupted);
+    const chromeBackedGraceMs = 12 * 60_000;
+    const activeSidecarGraceMs = 20 * 60_000;
+    if (!isTerminal && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs > softHeartbeatAfterMs) {
+      let sidecarOnline: boolean | undefined;
+      let sidecarLastPollAgeMs: number | null | undefined;
+      let hasActiveSidecarWork = false;
+      try {
+        const { getHeartbeat, getStatus } = await import("./vrbo-sidecar-queue");
+        const heartbeat = getHeartbeat();
+        const queueStatus = getStatus();
+        sidecarOnline = heartbeat.everSeen ? heartbeat.isOnline : state.daemonOnline;
+        sidecarLastPollAgeMs = heartbeat.ageMs ?? state.daemonLastPollAgeMs;
+        hasActiveSidecarWork =
+          Boolean(heartbeat.activeJob) ||
+          queueStatus.pending > 0 ||
+          queueStatus.inProgress > 0;
+      } catch {
+        sidecarOnline = state.daemonOnline;
+        sidecarLastPollAgeMs = state.daemonLastPollAgeMs;
+      }
+      const isChromeBackedRefresh =
+        state.phase === "banded" ||
+        state.phase.startsWith("sidecar-") ||
+        state.progressSubChannel === "airbnb" ||
+        state.progressSubChannel === "vrbo" ||
+        state.progressSubChannel === "booking" ||
+        state.progressSubChannel === "pm";
+      if (
+        (hasActiveSidecarWork && heartbeatAgeMs <= activeSidecarGraceMs) ||
+        (isChromeBackedRefresh && heartbeatAgeMs <= chromeBackedGraceMs)
+      ) {
+        const keptAlive = {
+          ...state,
+          lastTickAt: Date.now(),
+          daemonOnline: sidecarOnline,
+          daemonLastPollAgeMs: sidecarLastPollAgeMs,
+        };
+        setRefreshProgress(keptAlive);
+        res.setHeader("Cache-Control", "no-store");
+        return res.json(keptAlive);
+      }
+      if (heartbeatAgeMs > staleAfterMs) {
+        const interrupted = {
+          ...state,
+          phase: "error" as const,
+          label: "Refresh tracking interrupted",
+          error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh season-band refresh after the sidecar goes quiet.`,
+          lastTickAt: state.lastTickAt,
+        };
+        setRefreshProgress(interrupted);
+        clearRefreshProgress(propertyId);
+        res.setHeader("Cache-Control", "no-store");
+        return res.json(interrupted);
+      }
     }
     res.setHeader("Cache-Control", "no-store");
     return res.json(state);
