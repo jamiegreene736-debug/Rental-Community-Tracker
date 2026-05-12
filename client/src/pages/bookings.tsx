@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
-import type { UnitConfig } from "@shared/property-units";
+import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 
@@ -1783,7 +1783,14 @@ export default function Bookings() {
       });
   }, [listingNameById, propertyMap]);
 
-  const selectedMapping = propertyMap.find((m) => m.propertyId === selectedPropertyId);
+  const operationalPropertyMap = useMemo(() => {
+    return sortedPropertyMap.filter((mapping) => {
+      return (PROPERTY_UNIT_CONFIGS[mapping.propertyId]?.units?.length ?? 0) > 0;
+    });
+  }, [sortedPropertyMap]);
+  const skippedMappedPropertyCount = sortedPropertyMap.length - operationalPropertyMap.length;
+
+  const selectedMapping = operationalPropertyMap.find((m) => m.propertyId === selectedPropertyId);
   const selectedListingId = selectedMapping?.guestyListingId ?? null;
   const isGlobalView = selectedPropertyId == null;
 
@@ -1808,7 +1815,7 @@ export default function Bookings() {
   });
 
   const globalBookingQueries = useQueries({
-    queries: sortedPropertyMap.map((mapping) => ({
+    queries: operationalPropertyMap.map((mapping) => ({
       queryKey: ["/api/bookings/listing", mapping.guestyListingId, mapping.propertyId, { includePast, scope: "all-properties" }],
       queryFn: async () => {
         const url = `/api/bookings/listing/${encodeURIComponent(mapping.guestyListingId)}?propertyId=${mapping.propertyId}&includePast=${includePast}`;
@@ -1818,7 +1825,7 @@ export default function Bookings() {
           unitSlots: UnitConfig[];
         }>;
       },
-      enabled: isGlobalView && sortedPropertyMap.length > 0,
+      enabled: isGlobalView && operationalPropertyMap.length > 0,
       staleTime: 60_000,
       refetchInterval: 120_000,
     })),
@@ -1833,7 +1840,7 @@ export default function Bookings() {
     const map = new Map<string, { propertyId: number; propertyName: string }>();
     if (isGlobalView) {
       globalBookingQueries.forEach((query, index) => {
-        const mapping = sortedPropertyMap[index];
+        const mapping = operationalPropertyMap[index];
         if (!mapping) return;
         const propertyName = listingNameById.get(mapping.guestyListingId) ?? `Property ${mapping.propertyId}`;
         for (const reservation of query.data?.reservations ?? []) {
@@ -1855,7 +1862,7 @@ export default function Bookings() {
       }
     }
     return map;
-  }, [bookingsData?.reservations, globalBookingQueries, isGlobalView, listingNameById, selectedMapping, sortedPropertyMap]);
+  }, [bookingsData?.reservations, globalBookingQueries, isGlobalView, listingNameById, operationalPropertyMap, selectedMapping]);
 
   const globalBookingsLoading = isGlobalView && globalBookingQueries.some((query) => query.isLoading || query.isFetching);
   const globalBookingsError = isGlobalView && globalBookingQueries.some((query) => query.isError);
@@ -2904,7 +2911,10 @@ export default function Bookings() {
   const propertyLabel = selectedPropertyId
     ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
     : "";
-  const globalLabel = `${sortedPropertyMap.length} linked ${sortedPropertyMap.length === 1 ? "property" : "properties"}`;
+  const globalLabel = `${operationalPropertyMap.length} configured buy-in ${operationalPropertyMap.length === 1 ? "property" : "properties"}`;
+  const skippedMappedLabel = skippedMappedPropertyCount > 0
+    ? `${skippedMappedPropertyCount} mapped ${skippedMappedPropertyCount === 1 ? "listing" : "listings"} skipped: no buy-in unit setup`
+    : "";
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
       void Promise.all(globalBookingQueries.map((query) => query.refetch()));
@@ -2967,7 +2977,7 @@ export default function Bookings() {
                         · global summary
                       </span>
                     </SelectItem>
-                    {sortedPropertyMap
+                    {operationalPropertyMap
                       .map((m) => {
                         const name = listingNameById.get(m.guestyListingId);
                         return (
@@ -3003,13 +3013,18 @@ export default function Bookings() {
                 <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
                   <Building2 className="h-3.5 w-3.5 inline mr-1 opacity-60" />
                   All properties · {globalLabel}
+                  {skippedMappedLabel && (
+                    <span className="block sm:inline sm:ml-1 text-amber-700">
+                      {skippedMappedLabel}
+                    </span>
+                  )}
                 </div>
               )}
             </div>
           </CardContent>
         </Card>
 
-        {isGlobalView && sortedPropertyMap.length === 0 && (
+        {isGlobalView && operationalPropertyMap.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
@@ -3207,7 +3222,7 @@ export default function Bookings() {
           </Card>
         )}
 
-        {isGlobalView && !bookingsLoading && !bookingsError && !stats && sortedPropertyMap.length > 0 && (
+        {isGlobalView && !bookingsLoading && !bookingsError && !stats && operationalPropertyMap.length > 0 && (
           <Card>
             <CardContent className="py-10 text-center">
               <Calendar className="h-8 w-8 mx-auto mb-3 opacity-30" />
