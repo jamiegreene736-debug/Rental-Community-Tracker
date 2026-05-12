@@ -604,7 +604,7 @@ export default function Home() {
       const rank = (s: PhotoAggStatus) => s === "found" ? 3 : s === "unknown" ? 2 : s === "clean" ? 1 : 0;
       return rank(b) > rank(a) ? b : a;
     };
-    for (const p of properties) {
+    for (const p of allProperties) {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
       const addFolder = (folder?: string | null) => {
@@ -650,7 +650,7 @@ export default function Home() {
       out.set(p.id, agg);
     }
     return out;
-  }, [communityDraftsDataForRows, photoCheckByFolder, properties]);
+  }, [allProperties, communityDraftsDataForRows, photoCheckByFolder]);
 
   const { toast } = useToast();
 
@@ -1262,21 +1262,19 @@ export default function Home() {
                               </span>
                             );
                           })}
-                          {folders.length > 0 && (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="ml-1 h-[18px] w-[18px] rounded"
-                              title={`Run photo match scan for ${property.name}`}
-                              aria-label={`Run photo match scan for ${property.name}`}
-                              disabled={photoScanMutation.isPending}
-                              onClick={() => photoScanMutation.mutate(folders)}
-                              data-testid={`button-run-photo-match-scan-${property.id}`}
-                            >
-                              <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
-                            </Button>
-                          )}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="ml-1 h-[18px] w-[18px] rounded"
+                            title={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
+                            aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
+                            disabled={photoScanMutation.isPending}
+                            onClick={() => photoScanMutation.mutate(folders.length > 0 ? folders : undefined)}
+                            data-testid={`button-run-photo-match-scan-${property.id}`}
+                          >
+                            <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
+                          </Button>
                         </div>
                       );
                     })()}
