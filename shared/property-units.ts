@@ -22,6 +22,7 @@ export type PropertyUnitConfig = {
 // 21, 26, 28, 31, 36 (all villa or single-family; business model pivot).
 export const PROPERTY_UNIT_CONFIGS: Record<number, PropertyUnitConfig> = {
   1:  { community: "Poipu Kai",         units: [{ unitId: "924",   unitLabel: "Unit 924",        bedrooms: 3 }, { unitId: "114",   unitLabel: "Unit 114",        bedrooms: 2 }, { unitId: "911", unitLabel: "Unit 911", bedrooms: 2 }] },
+  2:  { community: "Keauhou",           units: [{ unitId: "main",  unitLabel: "Main Townhome",   bedrooms: 4 }] },
   4:  { community: "Poipu Kai",         units: [{ unitId: "721",   unitLabel: "Unit 721",        bedrooms: 3 }, { unitId: "812",   unitLabel: "Unit 812",        bedrooms: 3 }] },
   8:  { community: "Poipu Kai",         units: [{ unitId: "A",     unitLabel: "Unit A",          bedrooms: 3 }, { unitId: "B",     unitLabel: "Unit B",          bedrooms: 3 }] },
   9:  { community: "Poipu Kai",         units: [{ unitId: "A",     unitLabel: "Unit A",          bedrooms: 3 }, { unitId: "B",     unitLabel: "Unit B",          bedrooms: 2 }] },

@@ -31,6 +31,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
 import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
+import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 
@@ -1463,8 +1464,24 @@ function getBuyInCost(r: GuestyReservation): number {
   return r.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
 }
 
+function getGrossRevenue(r: GuestyReservation): number {
+  return asMoneyNumber(r.money?.fareAccommodation) || asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.totalPaid);
+}
+
+function getNetRevenue(r: GuestyReservation): number {
+  return asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.netIncome) || getGrossRevenue(r);
+}
+
+function getFundsLeftToCollect(r: GuestyReservation): number {
+  return Math.max(0, asMoneyNumber(r.money?.balanceDue));
+}
+
+function getReservationNights(r: GuestyReservation): number {
+  return r.nightsCount || nightsBetween(checkInOf(r), checkOutOf(r));
+}
+
 function getDepositAmount(r: GuestyReservation): number {
-  return asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.netIncome) || asMoneyNumber(r.money?.totalPaid);
+  return getNetRevenue(r);
 }
 
 function depositStatusOf(r: GuestyReservation): DepositStatus {
@@ -1788,7 +1805,6 @@ export default function Bookings() {
       return (PROPERTY_UNIT_CONFIGS[mapping.propertyId]?.units?.length ?? 0) > 0;
     });
   }, [sortedPropertyMap]);
-  const skippedMappedPropertyCount = sortedPropertyMap.length - operationalPropertyMap.length;
 
   const selectedMapping = operationalPropertyMap.find((m) => m.propertyId === selectedPropertyId);
   const selectedListingId = selectedMapping?.guestyListingId ?? null;
@@ -1873,6 +1889,18 @@ export default function Bookings() {
 
   const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
   const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
+  const estimateRemainingBuyInCost = (reservation: GuestyReservation, propertyId: number | null | undefined): number => {
+    if (!propertyId) return 0;
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) return 0;
+    const openSlots = reservation.slots
+      .filter((slot) => !slot.buyIn)
+      .map((slot) => ({ bedrooms: slot.bedrooms }));
+    if (openSlots.length === 0) return 0;
+    const checkInDate = parseLocalDate(checkInOf(reservation));
+    const yearMonth = checkInDate ? monthInputValue(checkInDate) : monthInputValue(new Date());
+    return totalNightlyBuyInForMonth(config.community, openSlots, yearMonth, propertyId) * getReservationNights(reservation);
+  };
 
   // Apply the current sort to the reservations before we render. Memoized so
   // a click on an attach button doesn't re-sort the entire list.
@@ -2743,14 +2771,14 @@ export default function Bookings() {
   const stats = useMemo(() => {
     if (!reservations.length) return null;
     const fully = reservations.filter((r) => r.fullyLinked).length;
-    const totalRevenue = reservations.reduce((s, r) => s + (r.money?.hostPayout ?? 0), 0);
+    const totalRevenue = reservations.reduce((s, r) => s + getNetRevenue(r), 0);
     // Only count fully-linked bookings' buy-in costs to keep profit math honest
     const linkedCost = reservations
       .filter((r) => r.fullyLinked)
       .reduce((s, r) => s + r.slots.reduce((ss, sl) => ss + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0), 0);
     const linkedRevenue = reservations
       .filter((r) => r.fullyLinked)
-      .reduce((s, r) => s + (r.money?.hostPayout ?? 0), 0);
+      .reduce((s, r) => s + getNetRevenue(r), 0);
     return {
       total: reservations.length,
       fully,
@@ -2761,19 +2789,58 @@ export default function Bookings() {
     };
   }, [reservations]);
 
+  const financialRows = useMemo(() => {
+    return reservations
+      .map((reservation) => {
+        const checkInDate = parseLocalDate(checkInOf(reservation));
+        const meta = reservationPropertyMeta.get(reservation._id);
+        const propertyId = meta?.propertyId ?? selectedPropertyId ?? null;
+        const attachedBuyInCost = getBuyInCost(reservation);
+        const remainingBuyInCost = estimateRemainingBuyInCost(reservation, propertyId);
+        const grossRevenue = getGrossRevenue(reservation);
+        const netRevenue = getNetRevenue(reservation);
+        const fundsLeftToCollect = getFundsLeftToCollect(reservation);
+        const openSlots = Math.max(0, reservation.slotsTotal - reservation.slotsFilled);
+        return {
+          reservation,
+          checkInDate,
+          propertyName: meta?.propertyName ?? (selectedMapping
+            ? listingNameById.get(selectedMapping.guestyListingId) ?? `Property ${selectedMapping.propertyId}`
+            : "Property"),
+          propertyId,
+          grossRevenue,
+          netRevenue,
+          attachedBuyInCost,
+          remainingBuyInCost,
+          totalExpectedBuyInCost: attachedBuyInCost + remainingBuyInCost,
+          fundsLeftToCollect,
+          expectedProfit: netRevenue - attachedBuyInCost - remainingBuyInCost,
+          openSlots,
+        };
+      })
+      .filter((row): row is {
+        reservation: GuestyReservation;
+        checkInDate: Date;
+        propertyName: string;
+        propertyId: number | null;
+        grossRevenue: number;
+        netRevenue: number;
+        attachedBuyInCost: number;
+        remainingBuyInCost: number;
+        totalExpectedBuyInCost: number;
+        fundsLeftToCollect: number;
+        expectedProfit: number;
+        openSlots: number;
+      } => !!row.checkInDate);
+  }, [listingNameById, reservationPropertyMeta, reservations, selectedMapping, selectedPropertyId]);
+
   const arrivalStats = useMemo(() => {
     const today = startOfLocalDay(new Date());
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
     const nextMonthStart = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    const threeMonthEnd = new Date(today.getFullYear(), today.getMonth() + 3, 1);
 
-    const dated = reservations
-      .map((reservation) => ({
-        reservation,
-        checkInDate: parseLocalDate(checkInOf(reservation)),
-      }))
-      .filter((row): row is { reservation: GuestyReservation; checkInDate: Date } => !!row.checkInDate);
-
-    const upcoming = dated
+    const upcoming = financialRows
       .filter((row) => startOfLocalDay(row.checkInDate).getTime() >= today.getTime())
       .sort((a, b) => a.checkInDate.getTime() - b.checkInDate.getTime());
 
@@ -2782,12 +2849,19 @@ export default function Bookings() {
       && row.checkInDate.getTime() < nextMonthStart.getTime()
     ));
 
-    const missingBuyInReservations = upcoming.filter((row) => !row.reservation.fullyLinked);
+    const attentionHorizon = isGlobalView
+      ? upcoming.filter((row) => row.checkInDate.getTime() < threeMonthEnd.getTime())
+      : upcoming;
+    const missingBuyInReservations = attentionHorizon.filter((row) => !row.reservation.fullyLinked);
+    const laterMissingBuyInReservations = isGlobalView
+      ? upcoming.filter((row) => !row.reservation.fullyLinked && row.checkInDate.getTime() >= threeMonthEnd.getTime()).length
+      : 0;
     const missingSlots = upcoming.reduce(
       (sum, row) => sum + Math.max(0, row.reservation.slotsTotal - row.reservation.slotsFilled),
       0,
     );
-    const upcomingBuyInCost = upcoming.reduce((sum, row) => sum + getBuyInCost(row.reservation), 0);
+    const upcomingBuyInCost = upcoming.reduce((sum, row) => sum + row.attachedBuyInCost, 0);
+    const upcomingRemainingBuyInCost = upcoming.reduce((sum, row) => sum + row.remainingBuyInCost, 0);
     const thisMonthMissing = thisMonth.filter((row) => !row.reservation.fullyLinked).length;
     const nextArrival = upcoming[0] ?? null;
 
@@ -2798,10 +2872,12 @@ export default function Bookings() {
       missingBuyInReservations: missingBuyInReservations.length,
       missingSlots,
       upcomingBuyInCost,
+      upcomingRemainingBuyInCost,
       thisMonthCount: thisMonth.length,
       thisMonthMissing,
+      laterMissingBuyInReservations,
     };
-  }, [reservations]);
+  }, [financialRows, isGlobalView]);
 
   const monthlyReport = useMemo(() => {
     if (!isGlobalView) return null;
@@ -2812,42 +2888,18 @@ export default function Bookings() {
     const monthStart = new Date(year, monthIndex, 1);
     const nextMonthStart = new Date(year, monthIndex + 1, 1);
 
-    const rows = reservations
-      .map((reservation) => {
-        const checkInDate = parseLocalDate(checkInOf(reservation));
-        const meta = reservationPropertyMeta.get(reservation._id);
-        const revenue = reservation.money?.hostPayout ?? 0;
-        const buyInCost = getBuyInCost(reservation);
-        const openSlots = Math.max(0, reservation.slotsTotal - reservation.slotsFilled);
-        return {
-          reservation,
-          checkInDate,
-          propertyName: meta?.propertyName ?? "Property",
-          propertyId: meta?.propertyId ?? null,
-          revenue,
-          buyInCost,
-          profit: revenue - buyInCost,
-          openSlots,
-        };
-      })
-      .filter((row): row is {
-        reservation: GuestyReservation;
-        checkInDate: Date;
-        propertyName: string;
-        propertyId: number | null;
-        revenue: number;
-        buyInCost: number;
-        profit: number;
-        openSlots: number;
-      } => !!row.checkInDate
-        && row.checkInDate.getTime() >= monthStart.getTime()
+    const rows = financialRows
+      .filter((row) => row.checkInDate.getTime() >= monthStart.getTime()
         && row.checkInDate.getTime() < nextMonthStart.getTime())
       .sort((a, b) => a.checkInDate.getTime() - b.checkInDate.getTime());
 
     const bookingCount = rows.length;
-    const totalRevenue = rows.reduce((sum, row) => sum + row.revenue, 0);
-    const totalBuyInCost = rows.reduce((sum, row) => sum + row.buyInCost, 0);
-    const totalProfit = totalRevenue - totalBuyInCost;
+    const totalRevenue = rows.reduce((sum, row) => sum + row.netRevenue, 0);
+    const totalGrossRevenue = rows.reduce((sum, row) => sum + row.grossRevenue, 0);
+    const totalBuyInCost = rows.reduce((sum, row) => sum + row.attachedBuyInCost, 0);
+    const totalRemainingBuyInCost = rows.reduce((sum, row) => sum + row.remainingBuyInCost, 0);
+    const totalFundsLeftToCollect = rows.reduce((sum, row) => sum + row.fundsLeftToCollect, 0);
+    const totalProfit = rows.reduce((sum, row) => sum + row.expectedProfit, 0);
     const fullyLinked = rows.filter((row) => row.reservation.fullyLinked).length;
     const openSlots = rows.reduce((sum, row) => sum + row.openSlots, 0);
     const notFullyBoughtIn = rows.filter((row) => !row.reservation.fullyLinked).length;
@@ -2858,14 +2910,44 @@ export default function Bookings() {
       rows,
       bookingCount,
       totalRevenue,
+      totalGrossRevenue,
       totalBuyInCost,
+      totalRemainingBuyInCost,
+      totalFundsLeftToCollect,
       totalProfit,
       fullyLinked,
       openSlots,
       notFullyBoughtIn,
       monthIsPast,
     };
-  }, [isGlobalView, reportMonth, reservationPropertyMeta, reservations]);
+  }, [financialRows, isGlobalView, reportMonth]);
+
+  const nextThreeMonthReports = useMemo(() => {
+    if (!isGlobalView) return [];
+    const today = new Date();
+    return Array.from({ length: 3 }, (_, index) => {
+      const monthStart = new Date(today.getFullYear(), today.getMonth() + index, 1);
+      const nextMonthStart = new Date(today.getFullYear(), today.getMonth() + index + 1, 1);
+      const monthKey = monthInputValue(monthStart);
+      const rows = financialRows
+        .filter((row) => row.checkInDate.getTime() >= monthStart.getTime()
+          && row.checkInDate.getTime() < nextMonthStart.getTime())
+        .sort((a, b) => a.checkInDate.getTime() - b.checkInDate.getTime());
+      return {
+        key: monthKey,
+        label: monthLabel(monthKey),
+        rows,
+        bookingCount: rows.length,
+        attachedBuyInCost: rows.reduce((sum, row) => sum + row.attachedBuyInCost, 0),
+        remainingBuyInCost: rows.reduce((sum, row) => sum + row.remainingBuyInCost, 0),
+        grossRevenue: rows.reduce((sum, row) => sum + row.grossRevenue, 0),
+        netRevenue: rows.reduce((sum, row) => sum + row.netRevenue, 0),
+        fundsLeftToCollect: rows.reduce((sum, row) => sum + row.fundsLeftToCollect, 0),
+        expectedProfit: rows.reduce((sum, row) => sum + row.expectedProfit, 0),
+        openSlots: rows.reduce((sum, row) => sum + row.openSlots, 0),
+      };
+    });
+  }, [financialRows, isGlobalView]);
 
   const depositRows = useMemo(() => {
     return reservations.flatMap((r) => {
@@ -2912,9 +2994,6 @@ export default function Bookings() {
     ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
     : "";
   const globalLabel = `${operationalPropertyMap.length} configured buy-in ${operationalPropertyMap.length === 1 ? "property" : "properties"}`;
-  const skippedMappedLabel = skippedMappedPropertyCount > 0
-    ? `${skippedMappedPropertyCount} mapped ${skippedMappedPropertyCount === 1 ? "listing" : "listings"} skipped: no buy-in unit setup`
-    : "";
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
       void Promise.all(globalBookingQueries.map((query) => query.refetch()));
@@ -3013,11 +3092,6 @@ export default function Bookings() {
                 <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
                   <Building2 className="h-3.5 w-3.5 inline mr-1 opacity-60" />
                   All properties · {globalLabel}
-                  {skippedMappedLabel && (
-                    <span className="block sm:inline sm:ml-1 text-amber-700">
-                      {skippedMappedLabel}
-                    </span>
-                  )}
                 </div>
               )}
             </div>
@@ -3111,9 +3185,15 @@ export default function Bookings() {
                       </p>
                       {isGlobalView && (
                         <p className="text-[10px] text-muted-foreground truncate">
-                          {reservationPropertyMeta.get(arrivalStats.nextArrival.reservation._id)?.propertyName ?? "Property"}
+                          {arrivalStats.nextArrival.propertyName}
                         </p>
                       )}
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        Buy-in cost: {fmtMoney(arrivalStats.nextArrival.attachedBuyInCost)}
+                        {arrivalStats.nextArrival.remainingBuyInCost > 0
+                          ? ` · est. remaining ${fmtMoney(arrivalStats.nextArrival.remainingBuyInCost)}`
+                          : ""}
+                      </p>
                       <Badge
                         variant={arrivalStats.nextArrival.reservation.fullyLinked ? "default" : "outline"}
                         className={`mt-2 text-[10px] ${
@@ -3150,6 +3230,11 @@ export default function Bookings() {
                   <p className="text-xs text-muted-foreground">
                     Attached future buy-ins
                   </p>
+                  {arrivalStats.upcomingRemainingBuyInCost > 0 && (
+                    <p className="text-xs text-amber-700">
+                      Est. remaining: {fmtMoney(arrivalStats.upcomingRemainingBuyInCost)}
+                    </p>
+                  )}
                 </div>
 
                 <div className="rounded border bg-muted/20 px-3 py-2.5">
@@ -3160,10 +3245,67 @@ export default function Bookings() {
                   </p>
                 </div>
               </div>
+              {isGlobalView && nextThreeMonthReports.length > 0 && (
+                <div className="mt-4">
+                  <div className="mb-2 flex flex-col gap-0.5 sm:flex-row sm:items-end sm:justify-between">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Next 3 arrival months
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Profit uses Guesty host payout minus attached and estimated remaining buy-ins.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                    {nextThreeMonthReports.map((month) => (
+                      <div key={month.key} className="rounded border bg-muted/10 p-3">
+                        <div className="mb-2 flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-semibold">{month.label}</p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {month.bookingCount} arrival{month.bookingCount === 1 ? "" : "s"} · {month.openSlots} open slot{month.openSlots === 1 ? "" : "s"}
+                            </p>
+                          </div>
+                          <p className={`text-sm font-semibold ${month.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                            {fmtMoney(month.expectedProfit)}
+                          </p>
+                        </div>
+                        <div className="space-y-1.5 text-xs">
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">Buy-in cost</span>
+                            <span className="font-medium">{fmtMoney(month.attachedBuyInCost)}</span>
+                          </div>
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">Remaining buy-in est.</span>
+                            <span className={`font-medium ${month.remainingBuyInCost > 0 ? "text-amber-700" : ""}`}>
+                              {fmtMoney(month.remainingBuyInCost)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">Gross revenue</span>
+                            <span className="font-medium">{fmtMoney(month.grossRevenue)}</span>
+                          </div>
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">Funds left to collect</span>
+                            <span className={`font-medium ${month.fundsLeftToCollect > 0 ? "text-amber-700" : ""}`}>
+                              {fmtMoney(month.fundsLeftToCollect)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-3 border-t pt-1.5">
+                            <span className="text-muted-foreground">Expected profit</span>
+                            <span className={`font-semibold ${month.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                              {fmtMoney(month.expectedProfit)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {isGlobalView && arrivalStats.attentionRows.length > 0 && (
                 <div className="mt-4 rounded border bg-amber-50/60">
                   <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
-                    <p className="text-xs font-semibold text-amber-900">Next arrivals needing buy-in attention</p>
+                    <p className="text-xs font-semibold text-amber-900">Next 3 months needing buy-in attention</p>
                     <Badge variant="outline" className="border-amber-300 text-amber-800">
                       {arrivalStats.missingBuyInReservations} open
                     </Badge>
@@ -3197,13 +3339,23 @@ export default function Bookings() {
                               {row.reservation.slotsFilled}/{row.reservation.slotsTotal} bought in
                             </p>
                             <p className="text-xs font-medium sm:text-right">
-                              {fmtMoney(getBuyInCost(row.reservation))}
+                              {fmtMoney(row.attachedBuyInCost)}
+                              {row.remainingBuyInCost > 0 && (
+                                <span className="block text-[10px] text-amber-700">
+                                  + {fmtMoney(row.remainingBuyInCost)} est.
+                                </span>
+                              )}
                             </p>
                           </div>
                         </button>
                       );
                     })}
                   </div>
+                </div>
+              )}
+              {isGlobalView && arrivalStats.attentionRows.length === 0 && arrivalStats.laterMissingBuyInReservations > 0 && (
+                <div className="mt-4 rounded border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  No open buy-ins in the next 3 months. {arrivalStats.laterMissingBuyInReservations} later reservation{arrivalStats.laterMissingBuyInReservations === 1 ? " has" : "s have"} open slots after this window.
                 </div>
               )}
             </CardContent>
@@ -3269,21 +3421,21 @@ export default function Bookings() {
                     {fmtMoney(monthlyReport.totalProfit)}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Revenue minus attached buy-ins
+                    Net revenue minus attached + estimated remaining buy-ins
                   </p>
                 </div>
                 <div className="rounded border bg-muted/20 px-3 py-2.5">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Buy-in cost</p>
                   <p className="text-2xl font-semibold mt-1">{fmtMoney(monthlyReport.totalBuyInCost)}</p>
                   <p className="text-xs text-muted-foreground">
-                    Attached for this month's arrivals
+                    Remaining est. {fmtMoney(monthlyReport.totalRemainingBuyInCost)}
                   </p>
                 </div>
                 <div className="rounded border bg-muted/20 px-3 py-2.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Guest revenue</p>
-                  <p className="text-2xl font-semibold mt-1">{fmtMoney(monthlyReport.totalRevenue)}</p>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Gross revenue</p>
+                  <p className="text-2xl font-semibold mt-1">{fmtMoney(monthlyReport.totalGrossRevenue)}</p>
                   <p className="text-xs text-muted-foreground">
-                    Guesty host payout total
+                    Funds left: {fmtMoney(monthlyReport.totalFundsLeftToCollect)}
                   </p>
                 </div>
                 <div className="rounded border bg-muted/20 px-3 py-2.5">
@@ -3354,10 +3506,29 @@ export default function Bookings() {
                                   : `${row.reservation.slotsFilled}/${row.reservation.slotsTotal}`}
                               </Badge>
                             </div>
-                            <p className="text-right font-medium">{fmtMoney(row.revenue)}</p>
-                            <p className="text-right font-medium">{fmtMoney(row.buyInCost)}</p>
-                            <p className={`text-right font-medium ${row.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
-                              {fmtMoney(row.profit)}
+                            <div className="text-right">
+                              <p className="font-medium">{fmtMoney(row.grossRevenue)}</p>
+                              {row.netRevenue !== row.grossRevenue && (
+                                <p className="text-[10px] text-muted-foreground">
+                                  net {fmtMoney(row.netRevenue)}
+                                </p>
+                              )}
+                              {row.fundsLeftToCollect > 0 && (
+                                <p className="text-[10px] text-amber-700">
+                                  {fmtMoney(row.fundsLeftToCollect)} left
+                                </p>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <p className="font-medium">{fmtMoney(row.attachedBuyInCost)}</p>
+                              {row.remainingBuyInCost > 0 && (
+                                <p className="text-[10px] text-amber-700">
+                                  + {fmtMoney(row.remainingBuyInCost)} est.
+                                </p>
+                              )}
+                            </div>
+                            <p className={`text-right font-medium ${row.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                              {fmtMoney(row.expectedProfit)}
                             </p>
                             <div className="text-right">
                               {row.propertyId ? (
