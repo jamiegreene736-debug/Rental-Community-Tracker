@@ -59,7 +59,11 @@ import {
   suggestPricingArea,
 } from "@shared/pricing-rates";
 import { verificationTokensForFolder } from "@shared/photo-folder-utils";
-import { extractUnitTokens } from "@shared/folder-unit-map";
+import {
+  isCompoundUnitClaim,
+  normalizeUnitClaim,
+  unitVerificationClaims,
+} from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
@@ -497,6 +501,7 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-kaiulani": "Kaiulani of Princeville",
   "community-poipu-oceanfront": "Poipu Brenneckes Oceanfront",
   "community-pili-mai": "Pili Mai",
+  "community-menehune-shores": "Menehune Shores",
 };
 
 // Street address fragment for each community — used to find individual
@@ -514,6 +519,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-kaiulani": "4100 Queen Emma's Dr",             // Kaiulani of Princeville
   "community-poipu-oceanfront": "2350 Ho'one Rd",           // Poipu Brenneckes Oceanfront
   "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
+  "community-menehune-shores": "760 S Kihei Rd",            // Menehune Shores
 };
 
 interface ScrapedPhoto {
@@ -9169,6 +9175,7 @@ export async function registerRoutes(
     "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
+    "Menehune Shores":   { searchName: "Menehune Shores",             city: "Kihei",       state: "Hawaii", streetAddress: "760 S Kihei Rd",               lat: 20.7638, lng: -156.4594 },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
@@ -16625,6 +16632,18 @@ Return ONLY compact JSON with this exact shape:
     const resultText = (r: any): string =>
       `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
 
+    const escapeUnitRegex = (value: string): string =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    const unitClaimVariants = (claim: string): string[] => {
+      const normalized = normalizeUnitClaim(claim);
+      return Array.from(new Set([
+        normalized,
+        normalized.replace(/\s+/g, "-"),
+        normalized.replace(/[\s-]+/g, ""),
+      ].filter((v) => v && (v === normalized || v.length >= 3))));
+    };
+
     // ── Helper: is this a "short" unit number (1-2 digits) whose bare
     // appearance in a snippet is too ambiguous to trust? Short numeric
     // IDs like "9" collide with review scores (9.2), counts ("9 guests"),
@@ -16632,15 +16651,22 @@ Return ONLY compact JSON with this exact shape:
     // For these, we require an explicit unit marker everywhere — both
     // in the Google query and in snippet validation. "721", "228",
     // "13B" etc. are specific enough that they don't need marker-gating.
-    const isShortUnitNumber = (n: string): boolean => /^\d{1,2}$/.test((n || "").trim());
+    const isShortUnitNumber = (n: string): boolean => /^\d{1,2}$/.test(normalizeUnitClaim(n));
 
     // Build the unit term for a Google query. Short units get an OR of
     // explicit marker forms; long/alphanumeric units use the bare term.
     const unitQueryTerm = (unitNumber: string): string => {
-      const n = (unitNumber || "").trim();
+      const n = normalizeUnitClaim(unitNumber);
       if (!n) return "";
-      if (!isShortUnitNumber(n)) return `"${n}"`;
-      return `("Unit ${n}" OR "#${n}" OR "Apt ${n}" OR "Suite ${n}")`;
+      if (!isShortUnitNumber(n) && !isCompoundUnitClaim(n)) return `"${n}"`;
+      const markers = unitClaimVariants(n).flatMap((variant) => [
+        `"Unit ${variant}"`,
+        `"#${variant}"`,
+        `"Apt ${variant}"`,
+        `"Apartment ${variant}"`,
+        `"Suite ${variant}"`,
+      ]);
+      return `(${Array.from(new Set(markers)).join(" OR ")})`;
     };
 
     // ── Helper: does the snippet mention the unit number with a marker strong
@@ -16658,15 +16684,18 @@ Return ONLY compact JSON with this exact shape:
     // don't count.
     const snippetMentionsUnit = (r: any, unitNumber: string, streetTail?: string): boolean => {
       const text = resultText(r);
-      const num = unitNumber.toLowerCase().replace(/^0+/, ""); // strip leading zeros
+      const num = normalizeUnitClaim(unitNumber).replace(/^0+(?=\d)/, ""); // strip leading zeros
       if (!num) return false;
       // Strong markers — any of these is sufficient on its own.
-      const markerPatterns = [
-        new RegExp(`\\b(?:unit|apt\\.?|apartment|suite|ste\\.?|no\\.?)\\s*#?\\s*${num}\\b`, "i"),
-        new RegExp(`#\\s*${num}\\b`, "i"),
-        // URL slug form: property-name-122 (dash-prefixed, only in the link portion)
-        new RegExp(`-${num}(?:[\\/\\?\\-]|$)`, "i"),
-      ];
+      const markerPatterns = unitClaimVariants(num).flatMap((variant) => {
+        const escaped = escapeUnitRegex(variant.toLowerCase());
+        return [
+          new RegExp(`\\b(?:unit|apt\\.?|apartment|suite|ste\\.?|no\\.?)\\s*#?\\s*${escaped}\\b`, "i"),
+          new RegExp(`#\\s*${escaped}\\b`, "i"),
+          // URL slug form: property-name-122 (dash-prefixed, only in the link portion)
+          new RegExp(`-${escaped}(?:[\\/\\?\\-]|$)`, "i"),
+        ];
+      });
       if (markerPatterns.some((re) => re.test(text))) return true;
       // Weaker: number immediately after the street name ("Nehe Rd 122").
       // Only count when the street is also visible in the same text AND
@@ -16674,8 +16703,10 @@ Return ONLY compact JSON with this exact shape:
       // unlikely. For short units, this fallback is disabled entirely.
       if (streetTail && !isShortUnitNumber(unitNumber)) {
         const tail = streetTail.toLowerCase();
-        const adjacent = new RegExp(`\\b${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*,?\\s*#?\\s*${num}\\b`, "i");
-        if (adjacent.test(text)) return true;
+        for (const variant of unitClaimVariants(num)) {
+          const adjacent = new RegExp(`\\b${escapeUnitRegex(tail)}\\s*,?\\s*#?\\s*${escapeUnitRegex(variant.toLowerCase())}\\b`, "i");
+          if (adjacent.test(text)) return true;
+        }
       }
       return false;
     };
@@ -16721,20 +16752,25 @@ Return ONLY compact JSON with this exact shape:
       cfg: typeof PLATFORM_CONFIGS[0],
     ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
       const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
+      const unitClaims = unitVerificationClaims(unit.unitNumber, unit.address);
+      const primaryUnitClaim = unitClaims[0] || normalizeUnitClaim(unit.unitNumber);
       // Pre-clean the address so the unit number only appears in the
       // dedicated unit-number term of the query, never in the street term.
-      const cleanedAddr = stripUnitFromAddress(unit.address || "", unit.unitNumber);
+      const cleanedAddr = stripUnitFromAddress(unit.address || "", primaryUnitClaim);
       const street = extractStreet(cleanedAddr);
       // Run address-based query (primary) and name+city query (fallback)
       // in parallel. For short (1-2 digit) units we wrap the unit term
       // in an explicit-marker OR so Google only returns pages that
       // actually position the number as a unit identifier — not as a
       // review score / guest count / distance.
-      const unitTerm = unitQueryTerm(unit.unitNumber);
-      const queries = [
-        street && unitTerm ? `site:${domain} "${street}" ${unitTerm}` : null,
-        unitTerm ? `site:${domain} "${name}" "${city}" ${unitTerm}` : null,
-      ].filter(Boolean) as string[];
+      const unitTerms = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
+        .map(unitQueryTerm)
+        .filter(Boolean)
+        .slice(0, 2);
+      const queries = unitTerms.flatMap((unitTerm) => [
+        street ? `site:${domain} "${street}" ${unitTerm}` : null,
+        `site:${domain} "${name}" "${city}" ${unitTerm}`,
+      ]).filter(Boolean) as string[];
       try {
         const searchResults = await Promise.all(queries.map(async (q) => {
           const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
@@ -16771,7 +16807,8 @@ Return ONLY compact JSON with this exact shape:
           // never advance. This removes the old "vrbo.com anything" fallback
           // that caused the /es-es/p…vb villa to slip through.
           if (!isListingUrl(link, cfg)) continue;
-          const unitInSnippet = snippetMentionsUnit(r, unit.unitNumber, streetTail);
+          const unitInSnippet = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
+            .some((claim) => snippetMentionsUnit(r, claim, streetTail));
           // For titleMatch we also need the STREET to appear in the snippet.
           // A listing URL + unit-number mention alone is still a "possible
           // match" (shown yellow in the UI), not a confirmed one.
@@ -16803,7 +16840,7 @@ Return ONLY compact JSON with this exact shape:
     // mention our unit number with a marker, it's a different unit in
     // the same building → reject.
     const verifyUrlMentionsUnit = async (url: string, unitNumber: string): Promise<boolean> => {
-      const n = (unitNumber || "").trim();
+      const n = normalizeUnitClaim(unitNumber);
       if (!n || !url) return false;
       let parsed: URL;
       try { parsed = new URL(url); } catch { return false; }
@@ -16812,7 +16849,13 @@ Return ONLY compact JSON with this exact shape:
       // so Google indexes the listing as one canonical path.
       const pathClean = parsed.pathname.replace(/\.[a-z0-9.-]+$/i, "").replace(/\/+$/, "");
       if (!pathClean) return false;
-      const markers = [`"Unit ${n}"`, `"#${n}"`, `"Apt ${n}"`, `"Suite ${n}"`].join(" OR ");
+      const markers = unitClaimVariants(n).flatMap((variant) => [
+        `"Unit ${variant}"`,
+        `"#${variant}"`,
+        `"Apt ${variant}"`,
+        `"Apartment ${variant}"`,
+        `"Suite ${variant}"`,
+      ]).join(" OR ");
       const q = `site:${host}${pathClean} (${markers})`;
       try {
         const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "3" });
@@ -16859,7 +16902,7 @@ Return ONLY compact JSON with this exact shape:
       }
       return diskFiles.filter((file) => !isCommunityOrSharedPhotoCandidate({ folder: photoFolder, filename: file }));
     };
-    const photoSearch = async (photoFolder: string, unitNumber: string): Promise<{
+    const photoSearch = async (photoFolder: string, unitNumber: string, unitAddress = ""): Promise<{
       signals: PhotoSignals;
       matchedUrls: PhotoMatchedUrls;
       matchCounts: PhotoMatchCounts;
@@ -16877,8 +16920,7 @@ Return ONLY compact JSON with this exact shape:
       const allFiles = await selectUnitPhotoFilesForDuplicateCheck(folderPath, photoFolder);
       const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
-      const unitTokens = extractUnitTokens(unitNumber);
-      const verifyTokens = Array.from(new Set([...folderTokens, ...unitTokens]));
+      const verifyTokens = unitVerificationClaims(unitNumber, unitAddress, folderTokens);
       const photoHits: Record<"airbnb" | "vrbo" | "booking", Set<string>> = {
         airbnb: new Set(),
         vrbo: new Set(),
@@ -17047,14 +17089,14 @@ Return ONLY compact JSON with this exact shape:
     const isScannerFresh = (row: any | undefined): boolean =>
       !!row && row.checkedAt && (now - new Date(row.checkedAt).getTime() < SCANNER_FRESHNESS_MS);
 
-    const scannerRowAppliesToUnit = (photoFolder: string | undefined, unitNumber: string): boolean => {
+    const scannerRowAppliesToUnit = (photoFolder: string | undefined, unitNumber: string, unitAddress = ""): boolean => {
       if (!photoFolder) return false;
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
       if (folderTokens.length === 0) return true;
-      const unitTokens = extractUnitTokens(unitNumber);
+      const unitTokens = unitVerificationClaims(unitNumber, unitAddress);
       if (unitTokens.length === 0) return false;
-      const normalizedUnitTokens = new Set(unitTokens.map((t) => t.toLowerCase().replace(/^0+/, "")));
-      return folderTokens.some((token) => normalizedUnitTokens.has(token.toLowerCase().replace(/^0+/, "")));
+      const normalizedUnitTokens = new Set(unitTokens.map((t) => normalizeUnitClaim(t).replace(/^0+(?=\d)/, "")));
+      return folderTokens.some((token) => normalizedUnitTokens.has(normalizeUnitClaim(token).replace(/^0+(?=\d)/, "")));
     };
 
     const firstScannerMatchUrl = (row: any, platform: "airbnb" | "vrbo" | "booking"): string | null => {
@@ -17104,11 +17146,11 @@ Return ONLY compact JSON with this exact shape:
       units.map(async (unit) => {
         const [textResults, photoResult] = await Promise.all([
           Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
-          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, matchCount: 0, totalChecked: 0 }),
+          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber, unit.address) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, matchCount: 0, totalChecked: 0 }),
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
         const { signals, matchedUrls, matchCounts, totalChecked } = photoResult;
-        const scannerRow = unit.photoFolder && scannerRowAppliesToUnit(unit.photoFolder, unit.unitNumber)
+        const scannerRow = unit.photoFolder && scannerRowAppliesToUnit(unit.photoFolder, unit.unitNumber, unit.address)
           ? folderToScannerRow.get(unit.photoFolder)
           : undefined;
 
@@ -17445,15 +17487,16 @@ Return ONLY compact JSON with this exact shape:
       if (/na\s+hale\s+o\s+keauhou/i.test(communityName)) {
         return "78-6833 Alii Dr";
       }
+      if (/menehune\s+shores/i.test(communityName)) {
+        return "760 S Kihei Rd";
+      }
       return null;
     };
     const rawCommunityAddress = folderBodyConflict
       ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
       : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName;
     const primaryCommunityAddress = knownCommunityPrimaryAddress();
-    const communityAddress = primaryCommunityAddress && !streetRootFromListingAddress(rawCommunityAddress)
-      ? primaryCommunityAddress
-      : rawCommunityAddress;
+    const communityAddress = primaryCommunityAddress || rawCommunityAddress;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
     const routeStartedAt = Date.now();
     const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
@@ -17748,6 +17791,7 @@ Return ONLY compact JSON with this exact shape:
       if (/kaha lani/i.test(communityName)) return { city: "Wailua", state: "Hawaii" };
       if (/kekaha/i.test(communityName)) return { city: "Kekaha", state: "Hawaii" };
       if (/keauhou/i.test(communityName)) return { city: "Kailua-Kona", state: "Hawaii" };
+      if (/menehune\s+shores|kihei/i.test(communityName)) return { city: "Kihei", state: "Hawaii" };
       if (/poipu|pili mai|regency/i.test(communityName)) return { city: "Koloa", state: "Hawaii" };
       return null;
     };

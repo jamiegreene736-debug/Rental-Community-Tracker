@@ -45,7 +45,7 @@ import { storage } from "./storage";
 import type { PhotoListingCheck } from "@shared/schema";
 import fs from "fs";
 import path from "path";
-import { extractUnitTokens } from "@shared/folder-unit-map";
+import { normalizeUnitClaim, unitVerificationClaims } from "@shared/folder-unit-map";
 import {
   draftPhotoFolderRef,
   isScannableFolder,
@@ -128,7 +128,7 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
   const swap = await storage.getLatestUnitSwap(ref.propertyId, ref.oldUnitId);
   if (!swap) return null;
 
-  const tokens = extractUnitTokens(`${swap.newUnitLabel ?? ""} ${swap.newAddress ?? ""}`);
+  const tokens = unitVerificationClaims(swap.newUnitLabel ?? "", swap.newAddress ?? "");
   return tokens.length > 0 ? Array.from(new Set(tokens)) : null;
 }
 
@@ -168,7 +168,7 @@ async function callGoogleLens(imageUrl: string): Promise<any[] | null> {
 // Mirrors the preflight's verifyUrlMentionsUnit from PR #81.
 async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boolean> {
   if (!SEARCHAPI_KEY) return false;
-  const n = unitHint.trim();
+  const n = normalizeUnitClaim(unitHint);
   if (!n || !url) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
@@ -177,7 +177,18 @@ async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boo
   // Google indexes the listing as one canonical path.
   const pathClean = parsed.pathname.replace(/\.[a-z0-9.-]+$/i, "").replace(/\/+$/, "");
   if (!pathClean) return false;
-  const markers = [`"Unit ${n}"`, `"#${n}"`, `"Apt ${n}"`, `"Suite ${n}"`].join(" OR ");
+  const variants = Array.from(new Set([
+    n,
+    n.replace(/\s+/g, "-"),
+    n.replace(/[\s-]+/g, ""),
+  ].filter((v) => v && (v === n || v.length >= 3))));
+  const markers = variants.flatMap((variant) => [
+    `"Unit ${variant}"`,
+    `"#${variant}"`,
+    `"Apt ${variant}"`,
+    `"Apartment ${variant}"`,
+    `"Suite ${variant}"`,
+  ]).join(" OR ");
   const q = `site:${host}${pathClean} (${markers})`;
   try {
     const params = new URLSearchParams({ engine: "google", q, api_key: SEARCHAPI_KEY, num: "3" });

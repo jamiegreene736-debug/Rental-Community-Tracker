@@ -70,6 +70,73 @@ export function extractUnitTokens(unitNumber: string): string[] {
   return matches.filter((m) => /\d/.test(m));
 }
 
+export function normalizeUnitClaim(value: string): string {
+  return value
+    .replace(/&[#a-z0-9]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s*-\s*/g, "-")
+    .trim()
+    .toUpperCase();
+}
+
+// Pull explicit unit identifiers that are attached to a unit marker.
+// This keeps compound condo IDs intact:
+//   "2695 S Kihei Rd APT 2 301" -> ["2 301"]
+//   "2695 S Kihei Rd Unit 2 306" -> ["2 306"]
+// and avoids treating the bare leading building number ("2") as enough
+// evidence to verify a different condo in the same building.
+export function extractMarkedUnitClaims(value: string): string[] {
+  const claims: string[] = [];
+  const seen = new Set<string>();
+  const re = /\b(?:unit|apt\.?|apartment|suite|ste\.?|#)\s*#?\s*([a-z]?\d+[a-z]?(?:\s*(?:-|#|\s)\s*[a-z]?\d+[a-z]?){0,1})\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(value)) !== null) {
+    const raw = match[1] ?? "";
+    const normalized = normalizeUnitClaim(raw.replace(/\s+/g, " "));
+    if (!normalized || !/\d/.test(normalized)) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    claims.push(normalized);
+  }
+  return claims;
+}
+
+export function isCompoundUnitClaim(value: string): boolean {
+  return /\d+[A-Z]?(?:\s+|-|#)\d+/i.test(normalizeUnitClaim(value));
+}
+
+export function unitVerificationClaims(
+  unitNumber: string,
+  address = "",
+  extraTokens: string[] = [],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (value: string) => {
+    const normalized = normalizeUnitClaim(value);
+    if (!normalized || !/\d/.test(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  for (const token of extraTokens) add(token);
+
+  const addressClaims = extractMarkedUnitClaims(address);
+  const hasCompoundAddressClaim = addressClaims.some(isCompoundUnitClaim);
+  for (const claim of addressClaims) add(claim);
+
+  // If the full address carries a compound unit ID, do not fall back to a
+  // shorter UI label like "Unit #2". That exact case produced a false
+  // positive where Apt 2 301 was verified against Apt 2 306.
+  if (!hasCompoundAddressClaim) {
+    for (const claim of extractMarkedUnitClaims(unitNumber)) add(claim);
+    for (const token of extractUnitTokens(unitNumber)) add(token);
+  }
+
+  return out;
+}
+
 // Returns the unit-number tokens to verify against for a folder.
 // `null` means there's no entry — the scanner should fall back to
 // extracting a hint from the folder name itself (the legacy path)
