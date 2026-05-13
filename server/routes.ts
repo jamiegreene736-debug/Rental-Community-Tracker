@@ -17076,6 +17076,7 @@ Return ONLY compact JSON with this exact shape:
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
     const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
     const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
+    const singleListingMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
 
     const PLATFORM_CONFIGS = [
       { key: "airbnb",  pattern: "airbnb.com/rooms/" },
@@ -17114,6 +17115,21 @@ Return ONLY compact JSON with this exact shape:
     // Build a lowercase "haystack" from a search result for text checks.
     const resultText = (r: any): string =>
       `${r.title || ""} ${r.snippet || ""} ${r.link || ""}`.toLowerCase();
+
+    const normalizeSearchText = (value: string): string =>
+      String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+
+    const addressEvidenceInResult = (r: any, street: string): boolean => {
+      const normalizedStreet = normalizeSearchText(street);
+      if (!normalizedStreet || normalizedStreet.length < 5) return false;
+      const hay = normalizeSearchText(resultText(r));
+      if (hay.includes(normalizedStreet)) return true;
+      const parts = normalizedStreet.split(" ").filter(Boolean);
+      const streetNumber = parts[0] || "";
+      const streetNameParts = parts.slice(1).filter((p) => p.length > 2);
+      const streetNameHits = streetNameParts.filter((p) => hay.includes(p)).length;
+      return /^\d+$/.test(streetNumber) && hay.includes(streetNumber) && streetNameHits >= Math.min(2, streetNameParts.length);
+    };
 
     const escapeUnitRegex = (value: string): string =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -17235,7 +17251,7 @@ Return ONLY compact JSON with this exact shape:
       cfg: typeof PLATFORM_CONFIGS[0],
     ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
       const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
-      const unitClaims = unitVerificationClaims(unit.unitNumber, unit.address);
+      const unitClaims = singleListingMode ? [] : unitVerificationClaims(unit.unitNumber, unit.address);
       const primaryUnitClaim = unitClaims[0] || normalizeUnitClaim(unit.unitNumber);
       // Pre-clean the address so the unit number only appears in the
       // dedicated unit-number term of the query, never in the street term.
@@ -17246,14 +17262,21 @@ Return ONLY compact JSON with this exact shape:
       // in an explicit-marker OR so Google only returns pages that
       // actually position the number as a unit identifier — not as a
       // review score / guest count / distance.
-      const unitTerms = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
-        .map(unitQueryTerm)
-        .filter(Boolean)
-        .slice(0, 2);
-      const queries = unitTerms.flatMap((unitTerm) => [
-        street ? `site:${domain} "${street}" ${unitTerm}` : null,
-        `site:${domain} "${name}" "${city}" ${unitTerm}`,
-      ]).filter(Boolean) as string[];
+      const queries = singleListingMode
+        ? [
+            street ? `site:${domain} "${street}" "${city}"` : null,
+            `site:${domain} "${name}" "${city}"`,
+          ].filter(Boolean) as string[]
+        : (() => {
+            const unitTerms = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
+              .map(unitQueryTerm)
+              .filter(Boolean)
+              .slice(0, 2);
+            return unitTerms.flatMap((unitTerm) => [
+              street ? `site:${domain} "${street}" ${unitTerm}` : null,
+              `site:${domain} "${name}" "${city}" ${unitTerm}`,
+            ]).filter(Boolean) as string[];
+          })();
       try {
         const searchResults = await Promise.all(queries.map(async (q) => {
           const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
@@ -17290,6 +17313,15 @@ Return ONLY compact JSON with this exact shape:
           // never advance. This removes the old "vrbo.com anything" fallback
           // that caused the /es-es/p…vb villa to slip through.
           if (!isListingUrl(link, cfg)) continue;
+          if (singleListingMode) {
+            const addressMatch = addressEvidenceInResult(r, street);
+            const nameMatch = name.length >= 4 && normalizeSearchText(resultText(r)).includes(normalizeSearchText(name));
+            if (addressMatch || nameMatch) {
+              return { listed: true, url: link, titleMatch: true };
+            }
+            if (!bestUrl) { bestUrl = link; bestTitleMatch = false; }
+            continue;
+          }
           const unitInSnippet = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
             .some((claim) => snippetMentionsUnit(r, claim, streetTail));
           // For titleMatch we also need the STREET to appear in the snippet.
@@ -17403,7 +17435,8 @@ Return ONLY compact JSON with this exact shape:
       const allFiles = await selectUnitPhotoFilesForDuplicateCheck(folderPath, photoFolder);
       const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
-      const verifyTokens = unitVerificationClaims(unitNumber, unitAddress, folderTokens);
+      const verifyTokens = singleListingMode ? [] : unitVerificationClaims(unitNumber, unitAddress, folderTokens);
+      console.log(`[preflight-platform-check] photoSearch folder=${photoFolder} singleListing=${singleListingMode} mode=${fullPhotoAudit ? "full" : "sample"} files=${files.length}/${allFiles.length}`);
       const photoHits: Record<"airbnb" | "vrbo" | "booking", Set<string>> = {
         airbnb: new Set(),
         vrbo: new Set(),
@@ -17670,6 +17703,7 @@ Return ONLY compact JSON with this exact shape:
     const foldersParam = (req.query.folders as string || "");
     const folders = foldersParam.split(",").map(f => f.replace(/[^a-zA-Z0-9_-]/g, "")).filter(Boolean);
     if (folders.length === 0) return res.status(400).json({ error: "folders is required" });
+    const singleListingMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
 
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
     const PLATFORMS = ["airbnb.com", "vrbo.com", "booking.com"];
@@ -17684,7 +17718,7 @@ Return ONLY compact JSON with this exact shape:
         .filter((f: string) => /\.(jpg|jpeg|png)$/i.test(f))
         .filter((f: string) => !isCommunityOrSharedPhotoCandidate({ folder, filename: f }))
         .sort()
-        .slice(0, 5);
+        .slice(0, singleListingMode ? 12 : 5);
 
       for (const file of files) {
         const localPath = path.join(folderPath, file);

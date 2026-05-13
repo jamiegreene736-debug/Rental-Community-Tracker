@@ -481,7 +481,8 @@ export default function BuilderPreflight() {
 
     await Promise.all(
       unitsToCheck.map(async (unit) => {
-        const address = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
+        const singleUnitListing = property.units.length === 1;
+        const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, Unit ${unit.unitNumber}`);
         const hasUnitPhoto = fullPhotoAudit ? !!(unit as any).photoFolder : (!(unit as any)._isReplaced && (unit as any).photoFolder);
         const unitPayload = [{
           unitId: unit.id,
@@ -494,6 +495,7 @@ export default function BuilderPreflight() {
           city,
           units: JSON.stringify(unitPayload),
           photoMode: fullPhotoAudit ? "full" : "sample",
+          singleListing: singleUnitListing ? "1" : "0",
         });
         if (hasUnitPhoto) setCheckPhase("photo");
         try {
