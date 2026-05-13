@@ -166,6 +166,15 @@ const CSS = `
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = { _id: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
+type TmkLookupResult = {
+  taxMapKey: string;
+  confidence: "unit-cpr" | "master-parcel";
+  note: string;
+  searchedAddress: string;
+  geocodedAddress: string;
+  source: string;
+  sourceUrl?: string;
+};
 
 type Props = {
   propertyData?: GuestyPropertyData | null;
@@ -659,6 +668,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // compliance submits don't step on each other if the user switches
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
+  const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit">>>({});
+  const [tmkLookupUnitId, setTmkLookupUnitId] = useState("");
+  const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
+  const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
   // VRBO compliance back-to-back without one button's busy spinner
   // blocking the other. Server-side, the VRBO push hits Guesty's UI via
@@ -799,17 +812,43 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setEditableTitle(propertyData?.descriptions?.title ?? "");
   }, [propertyData?.descriptions?.title]);
 
+  useEffect(() => {
+    setComplianceOverrides({});
+    setTmkLookupResult(null);
+  }, [propertyId]);
+
+  const builderProperty = useMemo(() => {
+    return propertyId ? getUnitBuilderByPropertyId(propertyId) : null;
+  }, [propertyId]);
+
+  const tmkLookupUnits = useMemo(() => {
+    return (builderProperty?.units ?? []).map((unit, idx) => ({
+      id: unit.id || String(idx),
+      unitNumber: unit.unitNumber,
+      label: `Unit ${unit.unitNumber}`,
+    }));
+  }, [builderProperty]);
+
+  useEffect(() => {
+    if (tmkLookupUnits.length === 0) {
+      setTmkLookupUnitId("");
+      return;
+    }
+    setTmkLookupUnitId((prev) => prev && tmkLookupUnits.some((unit) => unit.id === prev) ? prev : tmkLookupUnits[0].id);
+  }, [tmkLookupUnits]);
+
   const effectivePropertyData = useMemo(() => {
     if (!propertyData) return null;
-    if (!propertyData.descriptions) return propertyData;
+    const withCompliance = { ...propertyData, ...complianceOverrides };
+    if (!propertyData.descriptions) return withCompliance;
     return {
-      ...propertyData,
+      ...withCompliance,
       descriptions: {
         ...propertyData.descriptions,
         title: editableTitle || propertyData.descriptions.title,
       },
     };
-  }, [propertyData, editableTitle]);
+  }, [propertyData, complianceOverrides, editableTitle]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -856,6 +895,46 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       notesHint: "tax compliance — confirm the relevant jurisdiction fields",
     };
   }, [effectivePropertyData?.address]);
+
+  const isHawaiiCompliance = useMemo(() => {
+    const addr = effectivePropertyData?.address;
+    const stateField = (typeof addr === "object" && addr ? (addr as any).state : "") ?? "";
+    const fullField = (typeof addr === "object" && addr ? (addr as any).full : (typeof addr === "string" ? addr : "")) ?? "";
+    return /\b(hawaii|hi)\b/i.test(`${stateField} ${fullField}`);
+  }, [effectivePropertyData?.address]);
+
+  const pullRealTaxMapKey = useCallback(async () => {
+    if (!effectivePropertyData?.address) return;
+    const fullAddress = typeof effectivePropertyData.address === "object"
+      ? effectivePropertyData.address.full
+      : String(effectivePropertyData.address);
+    const selectedUnit = tmkLookupUnits.find((unit) => unit.id === tmkLookupUnitId) ?? tmkLookupUnits[0];
+    if (!fullAddress) {
+      toast({ title: "Missing address", description: "A full Hawaii address is needed before TMK lookup.", variant: "destructive" });
+      return;
+    }
+    setTmkLookupBusy(true);
+    setTmkLookupResult(null);
+    try {
+      const params = new URLSearchParams({
+        address: fullAddress,
+        unitNumber: selectedUnit?.unitNumber ?? "",
+      });
+      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
+      setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
+      setTmkLookupResult(data as TmkLookupResult);
+      toast({
+        title: data.confidence === "unit-cpr" ? "Unit TMK applied" : "Parcel TMK applied",
+        description: data.note,
+      });
+    } catch (err: any) {
+      toast({ title: "TMK lookup failed", description: err?.message || String(err), variant: "destructive" });
+    } finally {
+      setTmkLookupBusy(false);
+    }
+  }, [effectivePropertyData?.address, tmkLookupUnitId, tmkLookupUnits, toast]);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -3587,6 +3666,65 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                {tmkLookupUnits.length > 1 && (
+                                  <select
+                                    value={tmkLookupUnitId}
+                                    onChange={(e) => setTmkLookupUnitId(e.target.value)}
+                                    disabled={tmkLookupBusy}
+                                    style={{
+                                      height: 28,
+                                      border: "1px solid var(--border)",
+                                      borderRadius: 5,
+                                      background: "#fff",
+                                      color: "var(--text)",
+                                      fontSize: 11,
+                                      padding: "0 6px",
+                                    }}
+                                    data-testid="select-tmk-lookup-unit"
+                                  >
+                                    {tmkLookupUnits.map((unit) => (
+                                      <option key={unit.id} value={unit.id}>{unit.label}</option>
+                                    ))}
+                                  </select>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={pullRealTaxMapKey}
+                                  disabled={tmkLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: tmkLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: tmkLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-tmk"
+                                >
+                                  {tmkLookupBusy ? "Pulling real TMK..." : "Pull real Tax Map Key"}
+                                </button>
+                                {tmkLookupResult && (
+                                  <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                    {tmkLookupResult.confidence === "unit-cpr" ? "Unit CPR match" : "Master parcel match"} · {tmkLookupResult.source}
+                                    {tmkLookupResult.sourceUrl && (
+                                      <>
+                                        {" · "}
+                                        <a href={tmkLookupResult.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "var(--primary)" }}>
+                                          source
+                                        </a>
+                                      </>
+                                    )}
+                                    <br />
+                                    {tmkLookupResult.note}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
