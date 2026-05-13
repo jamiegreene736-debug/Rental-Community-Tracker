@@ -5,6 +5,7 @@ import { storage } from "./storage";
 import {
   buyInEmails,
   buyInVendorContacts,
+  guestyPropertyMap,
   insertBuyInSchema,
   insertCommunityDraftSchema,
   insertManualReservationSchema,
@@ -2539,6 +2540,111 @@ function hasPublishableGuestyStreetAddress(address: any): boolean {
     /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|pl|place|ct|court|cir|circle|loop|way|hwy|highway|terrace|terr|trail|trl)\b/i.test(firstLine);
 
   return hasStreetNumber && hasStreetWord;
+}
+
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/[^\d.-]/g, ""));
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return null;
+}
+
+function inferBedroomsFromGuestyListing(listing: any): number | null {
+  const direct = numberFromUnknown(
+    listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds,
+  );
+  if (direct && direct > 0) return direct;
+  const title = firstNonEmptyString(listing?.title, listing?.nickname, listing?.name);
+  const match = title.match(/(\d+)\s*(?:br|bed(?:room)?s?)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function parseGuestyAddress(listing: any): { full: string; city: string; state: string; streetAddress: string | null } {
+  const address = listing?.address ?? {};
+  const full = firstNonEmptyString(
+    address?.full,
+    address?.formatted,
+    address?.display,
+    [address?.street, address?.city, address?.state, address?.zipcode, address?.country].filter(Boolean).join(", "),
+  );
+  const parts = full.split(",").map((s) => s.trim()).filter(Boolean);
+  const city = firstNonEmptyString(address?.city, address?.addressLocality, parts.length >= 3 ? parts[parts.length - 3] : parts[0]);
+  const rawState = firstNonEmptyString(address?.state, address?.stateCode, address?.addressRegion, parts.length >= 2 ? parts[parts.length - 2] : "");
+  const state = rawState.replace(/\s+\d{5}(?:-\d{4})?$/, "") || "Unknown";
+  const street = firstNonEmptyString(address?.street, address?.streetAddress, address?.addressLine1);
+  const firstLine = firstNonEmptyString(street, parts[0]);
+  const streetAddress = hasPublishableGuestyStreetAddress({ full: firstLine }) ? firstLine : null;
+  return {
+    full,
+    city: city || "Unknown",
+    state,
+    streetAddress,
+  };
+}
+
+function buildCommunityDraftFromGuestyListing(listing: any, guestyListingId: string) {
+  const title = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name, `Guesty listing ${guestyListingId}`);
+  const bedrooms = inferBedroomsFromGuestyListing(listing);
+  const address = parseGuestyAddress(listing);
+  return {
+    name: title,
+    city: address.city,
+    state: address.state,
+    streetAddress: address.streetAddress,
+    unitTypes: bedrooms ? `${bedrooms}BR standalone` : "Standalone draft",
+    confidenceScore: null,
+    researchSummary: [
+      "Imported from an existing Guesty listing because the listing existed in Guesty before a dashboard draft row was saved.",
+      address.streetAddress ? "" : "Street address still needs review before publishing again.",
+    ].filter(Boolean).join(" "),
+    sourceUrl: `https://app.guesty.com/properties/${guestyListingId}/property/v2`,
+    status: "published",
+    unit1Url: null,
+    unit1Bedrooms: bedrooms,
+    unit1Description: bedrooms ? `${bedrooms} bedroom listing imported from Guesty.` : "Listing imported from Guesty.",
+    unit1Bathrooms: listing?.bathrooms != null ? String(listing.bathrooms) : null,
+    unit1Sqft: null,
+    unit1MaxGuests: numberFromUnknown(listing?.accommodates ?? listing?.personCapacity),
+    unit1Bedding: null,
+    unit1ShortDescription: null,
+    unit1LongDescription: null,
+    unit1PhotoFolder: null,
+    unit2Url: null,
+    unit2Bedrooms: null,
+    unit2Description: null,
+    unit2Bathrooms: null,
+    unit2Sqft: null,
+    unit2MaxGuests: null,
+    unit2Bedding: null,
+    unit2ShortDescription: null,
+    unit2LongDescription: null,
+    unit2PhotoFolder: null,
+    combinedBedrooms: bedrooms,
+    suggestedRate: null,
+    pricingArea: suggestPricingArea(address.city, address.state),
+    singleListing: true,
+    listingTitle: firstNonEmptyString(listing?.title, title),
+    bookingTitle: firstNonEmptyString(listing?.title, title),
+    propertyType: firstNonEmptyString(listing?.propertyType, "Condominium"),
+    listingDescription: firstNonEmptyString(
+      listing?.publicDescription?.summary,
+      listing?.publicDescription?.space,
+      listing?.description,
+      null,
+    ) || null,
+    neighborhood: firstNonEmptyString(listing?.publicDescription?.neighborhood) || null,
+    transit: firstNonEmptyString(listing?.publicDescription?.transit) || null,
+    strPermit: null,
+  };
 }
 
 export async function registerRoutes(
@@ -19240,6 +19346,52 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/community/drafts", async (_req, res) => {
     const drafts = await storage.getCommunityDrafts();
     res.json(drafts);
+  });
+
+  app.post("/api/community/import-guesty-listing", async (req, res) => {
+    try {
+      const guestyListingId = typeof req.body?.guestyListingId === "string"
+        ? req.body.guestyListingId.trim()
+        : "";
+      if (!guestyListingId) {
+        return res.status(400).json({ error: "guestyListingId required" });
+      }
+
+      const existingMaps = await storage.getGuestyPropertyMap();
+      for (const row of existingMaps) {
+        if (row.guestyListingId !== guestyListingId || row.propertyId >= 0) continue;
+        const existingDraft = await storage.getCommunityDraft(Math.abs(row.propertyId));
+        if (existingDraft) {
+          return res.json({ draft: existingDraft, mapping: row, imported: false });
+        }
+      }
+
+      const listing = await guestyRequest("GET", `/listings/${encodeURIComponent(guestyListingId)}`) as any;
+      const rawDraft = buildCommunityDraftFromGuestyListing(listing, guestyListingId);
+      const parsed = insertCommunityDraftSchema.safeParse(normalizeCommunityDraftNumericFields(rawDraft));
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Guesty listing could not be converted to a dashboard draft", details: parsed.error.flatten() });
+      }
+
+      const draft = await storage.createCommunityDraft(parsed.data);
+      const mapping = await storage.upsertGuestyPropertyMap(-draft.id, guestyListingId);
+
+      const staleRows = existingMaps.filter(
+        (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== -draft.id,
+      );
+      for (const row of staleRows) {
+        await db.delete(guestyPropertyMap).where(eq(guestyPropertyMap.propertyId, row.propertyId));
+      }
+
+      res.json({
+        draft,
+        mapping,
+        imported: true,
+        staleMappingsRemoved: staleRows.map((row) => row.propertyId),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to import Guesty listing into dashboard drafts", message: err.message });
+    }
   });
 
   // ============================================================
