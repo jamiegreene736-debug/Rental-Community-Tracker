@@ -175,7 +175,7 @@ launchctl kickstart -k "gui/$UID/com.vrbosidecar.worker"
   <key>EnvironmentVariables</key>
   <dict>
     <key>MAX_LOCAL_CHROME_INSTANCES</key>
-    <string>3</string>
+    <string>8</string>
     <key>SERVER_CHROME_FALLBACK_ENABLED</key>
     <string>0</string>
   </dict>

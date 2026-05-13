@@ -4722,7 +4722,17 @@ async function processRequest(req) {
     if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
     } else {
-      await releaseChromeForRequest();
+      // Keep a non-ephemeral local Chrome allocation pinned to this
+      // worker process. Releasing the lock while keeping the CDP
+      // connection open lets another worker claim the same Chrome, or
+      // lets this worker claim a different Chrome while still reusing
+      // the old browser object. That makes parallel scans serialize or
+      // cross streams. The allocation heartbeat is cheap, and the
+      // supervisor starts one worker per local Chrome slot.
+      await verifyActiveChromeHealth(`finished ${opType}`).catch((e) => {
+        log(`local Chrome health after ${opType} failed: ${e?.message ?? e}`);
+        return teardownBrowser(`unhealthy after ${opType}`);
+      });
     }
   }
 }
@@ -4823,10 +4833,14 @@ async function main() {
   log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}`);
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
-  try {
-    await chromeSidecarManager.warmPrimaryLocal();
-  } catch (e) {
-    log(`local Chrome warmup skipped: ${e.message}`);
+  if (WORKER_SLOT === "1") {
+    try {
+      await chromeSidecarManager.warmPrimaryLocal();
+    } catch (e) {
+      log(`local Chrome warmup skipped: ${e.message}`);
+    }
+  } else {
+    log("local Chrome warmup skipped on non-primary worker slot");
   }
   process.on("SIGINT", async () => { await teardownBrowser("SIGINT"); process.exit(0); });
   process.on("SIGTERM", async () => { await teardownBrowser("SIGTERM"); process.exit(0); });
