@@ -669,7 +669,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
   const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit">>>({});
-  const [tmkLookupUnitId, setTmkLookupUnitId] = useState("");
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
@@ -817,26 +816,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setTmkLookupResult(null);
   }, [propertyId]);
 
-  const builderProperty = useMemo(() => {
-    return propertyId ? getUnitBuilderByPropertyId(propertyId) : null;
-  }, [propertyId]);
-
-  const tmkLookupUnits = useMemo(() => {
-    return (builderProperty?.units ?? []).map((unit, idx) => ({
-      id: unit.id || String(idx),
-      unitNumber: unit.unitNumber,
-      label: `Unit ${unit.unitNumber}`,
-    }));
-  }, [builderProperty]);
-
-  useEffect(() => {
-    if (tmkLookupUnits.length === 0) {
-      setTmkLookupUnitId("");
-      return;
-    }
-    setTmkLookupUnitId((prev) => prev && tmkLookupUnits.some((unit) => unit.id === prev) ? prev : tmkLookupUnits[0].id);
-  }, [tmkLookupUnits]);
-
   const effectivePropertyData = useMemo(() => {
     if (!propertyData) return null;
     const withCompliance = { ...propertyData, ...complianceOverrides };
@@ -908,9 +887,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const fullAddress = typeof effectivePropertyData.address === "object"
       ? effectivePropertyData.address.full
       : String(effectivePropertyData.address);
-    const selectedUnit = tmkLookupUnits.find((unit) => unit.id === tmkLookupUnitId) ?? tmkLookupUnits[0];
     if (!fullAddress) {
-      toast({ title: "Missing address", description: "A full Hawaii address is needed before TMK lookup.", variant: "destructive" });
+      toast({ title: "Missing Guesty address", description: "A full Hawaii Guesty listing address is needed before TMK lookup.", variant: "destructive" });
       return;
     }
     setTmkLookupBusy(true);
@@ -918,7 +896,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     try {
       const params = new URLSearchParams({
         address: fullAddress,
-        unitNumber: selectedUnit?.unitNumber ?? "",
       });
       const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`);
       const data = await resp.json();
@@ -926,7 +903,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
       setTmkLookupResult(data as TmkLookupResult);
       toast({
-        title: data.confidence === "unit-cpr" ? "Unit TMK applied" : "Parcel TMK applied",
+        title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
         description: data.note,
       });
     } catch (err: any) {
@@ -934,7 +911,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [effectivePropertyData?.address, tmkLookupUnitId, tmkLookupUnits, toast]);
+  }, [effectivePropertyData?.address, toast]);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -3668,27 +3645,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             {isHawaiiCompliance && (
                               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-                                {tmkLookupUnits.length > 1 && (
-                                  <select
-                                    value={tmkLookupUnitId}
-                                    onChange={(e) => setTmkLookupUnitId(e.target.value)}
-                                    disabled={tmkLookupBusy}
-                                    style={{
-                                      height: 28,
-                                      border: "1px solid var(--border)",
-                                      borderRadius: 5,
-                                      background: "#fff",
-                                      color: "var(--text)",
-                                      fontSize: 11,
-                                      padding: "0 6px",
-                                    }}
-                                    data-testid="select-tmk-lookup-unit"
-                                  >
-                                    {tmkLookupUnits.map((unit) => (
-                                      <option key={unit.id} value={unit.id}>{unit.label}</option>
-                                    ))}
-                                  </select>
-                                )}
                                 <button
                                   type="button"
                                   onClick={pullRealTaxMapKey}
@@ -3706,11 +3662,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   }}
                                   data-testid="button-pull-real-tmk"
                                 >
-                                  {tmkLookupBusy ? "Pulling real TMK..." : "Pull real Tax Map Key"}
+                                  {tmkLookupBusy ? "Pulling Guesty-address TMK..." : "Pull real TMK from Guesty address"}
                                 </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Uses the exact address that will be pushed to Guesty for Airbnb license verification.
+                                </div>
                                 {tmkLookupResult && (
                                   <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                    {tmkLookupResult.confidence === "unit-cpr" ? "Unit CPR match" : "Master parcel match"} · {tmkLookupResult.source}
+                                    {tmkLookupResult.confidence === "unit-cpr" ? "Guesty-address CPR match" : "Guesty-address parcel match"} · {tmkLookupResult.source}
                                     {tmkLookupResult.sourceUrl && (
                                       <>
                                         {" · "}

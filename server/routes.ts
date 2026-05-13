@@ -3317,13 +3317,9 @@ export async function registerRoutes(
       .replace(/^0+(?=\d)/, "");
   };
 
-  const tmkLookupAddressWithUnit = (address: string, unitNumber?: string): string => {
-    const unit = String(unitNumber ?? "").trim();
-    if (!unit) return address;
-    const escaped = unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const hasUnit = new RegExp(`\\b(?:unit|apt|apartment|suite|ste|#)\\s*${escaped}\\b`, "i").test(address);
-    if (hasUnit) return address;
-    return address.replace(/,\s*([^,]+,\s*HI\b)/i, ` Apt ${unit}, $1`);
+  const extractUnitTokenFromAddress = (address: string): string => {
+    const match = address.match(/\b(?:unit|apt|apartment|suite|ste|#)\s*([A-Z0-9-]+)\b/i);
+    return normalizeUnitToken(match?.[1]);
   };
 
   const queryKauaiParcels = async (params: URLSearchParams): Promise<KauaiParcelAttributes[]> => {
@@ -3346,7 +3342,8 @@ export async function registerRoutes(
     if (type.includes("parcel")) score += 5;
     if (unitToken && cpr && cpr === unitToken) score += 100;
     if (unitToken && partxt && normalizeUnitToken(partxt.slice(-4)) === unitToken) score += 60;
-    if (!unitToken && !type.includes("cpr")) score += 10;
+    if (!unitToken && !type.includes("cpr")) score += 40;
+    if (!unitToken && type.includes("cpr")) score -= 20;
     return score;
   };
 
@@ -3358,9 +3355,11 @@ export async function registerRoutes(
   // 12-digit parcel text (`PARTXT`) and qPublic record link (`LINKQ`).
   // Some condo resorts expose only the master parcel in GIS; return that
   // with an explicit note instead of pretending it is a CPR-unit hit.
+  // Important: look up the exact address that will be pushed to Guesty.
+  // Airbnb validates license/TMK details against the Guesty listing address,
+  // so do not append a sample unit or mutate the address before geocoding.
   app.get("/api/builder/tmk-lookup", async (req, res) => {
     const address = String(req.query.address ?? "").trim();
-    const unitNumber = String(req.query.unitNumber ?? "").trim();
     if (!address) return res.status(400).json({ error: "address is required" });
 
     if (!/\b(HI|Hawaii)\b/i.test(address)) {
@@ -3368,7 +3367,7 @@ export async function registerRoutes(
     }
 
     try {
-      const searchedAddress = tmkLookupAddressWithUnit(address, unitNumber);
+      const searchedAddress = address;
       const geocodeParams = new URLSearchParams({
         f: "json",
         SingleLine: searchedAddress,
@@ -3413,7 +3412,7 @@ export async function registerRoutes(
         relatedRows.push(...await queryKauaiParcels(relatedParams));
       }
 
-      const unitToken = normalizeUnitToken(unitNumber);
+      const unitToken = extractUnitTokenFromAddress(searchedAddress);
       const rows = [...pointRows, ...relatedRows]
         .filter((row, idx, all) => {
           const key = normalizeTmkText(row.PARTXT) ?? `${row.COTMK}-${row.CPR_UNIT}-${idx}`;
@@ -3433,13 +3432,13 @@ export async function registerRoutes(
 
       const selectedType = String(selected.TYPE ?? "");
       const selectedCpr = normalizeUnitToken(selected.CPR_UNIT);
-      const isUnitCpr = selectedType.toLowerCase().includes("cpr") && (!unitToken || selectedCpr === unitToken || normalizeUnitToken(taxMapKey.slice(-4)) === unitToken);
+      const isUnitCpr = Boolean(unitToken) && selectedType.toLowerCase().includes("cpr") && (selectedCpr === unitToken || normalizeUnitToken(taxMapKey.slice(-4)) === unitToken);
       const hasAnyCprRows = rows.some((row) => String(row.TYPE ?? "").toLowerCase().includes("cpr"));
       const note = isUnitCpr
-        ? `Matched County of Kauai CPR unit ${String(selected.CPR_UNIT ?? "").trim() || taxMapKey.slice(-4)}.`
+        ? `Matched County of Kauai CPR unit ${String(selected.CPR_UNIT ?? "").trim() || taxMapKey.slice(-4)} from the exact Guesty listing address.`
         : hasAnyCprRows
-          ? "Matched the official parcel, but not an individual CPR row for the selected unit. Verify the qPublic link before pushing if you need unit-level CPR."
-          : "Matched the official County of Kauai master parcel. The public GIS layer does not expose individual CPR units for this address.";
+          ? "Matched the official parcel for the exact Guesty listing address, but not an individual CPR row. Verify the qPublic link before pushing if Airbnb requires unit-level CPR."
+          : "Matched the official County of Kauai master parcel for the exact Guesty listing address. The public GIS layer does not expose individual CPR units for this address.";
 
       res.json({
         taxMapKey,
