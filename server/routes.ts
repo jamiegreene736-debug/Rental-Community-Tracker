@@ -21372,7 +21372,7 @@ Return ONLY compact JSON with this exact shape:
             dateOverride,
             sidecarQueueBudgetMs: 15 * 60_000,
             warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
-            reuseSharedOtaSearch: true,
+            reuseSharedOtaSearch: false,
             skipPm: true,
             pmPerSiteLimit: 3,
             pmMaxSites: 5,
@@ -21775,7 +21775,7 @@ Return ONLY compact JSON with this exact shape:
         propertyId,
         sidecarQueueBudgetMs: 15 * 60_000,
         seasonDeadlineMs: 25 * 60_000,
-        reuseSharedOtaSearch: true,
+        reuseSharedOtaSearch: false,
         sidecarStopGeneration,
       });
       assertSidecarRunCurrent();
@@ -22098,9 +22098,82 @@ Return ONLY compact JSON with this exact shape:
   // can hydrate the (id, bedrooms) → median lookup once per session.
   // Tiny response (~100 rows × 60 bytes) so the simpler "send it all"
   // shape beats a per-property fetch for the dashboard's needs.
+  const parsePositiveRate = (value: unknown): number | null => {
+    const n = typeof value === "number" ? value : typeof value === "string" ? Number.parseFloat(value) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const sameRateShape = (original: unknown, value: number): number | string =>
+    typeof original === "number" ? value : String(value);
+  const bedroomRateKey = (bedrooms: number): keyof (typeof BUY_IN_RATES)[string] =>
+    `${bedrooms}BR` as keyof (typeof BUY_IN_RATES)[string];
+  const adjacentBedroomUpperRatio = (community: string, smallerBedrooms: number, largerBedrooms: number): number => {
+    const staticRates = BUY_IN_RATES[community];
+    const smallerStatic = parsePositiveRate(staticRates?.[bedroomRateKey(smallerBedrooms)]);
+    const largerStatic = parsePositiveRate(staticRates?.[bedroomRateKey(largerBedrooms)]);
+    const staticRatio = smallerStatic && largerStatic ? largerStatic / smallerStatic : null;
+    const gap = Math.max(1, largerBedrooms - smallerBedrooms);
+    const fallbackRatio = Math.pow(1.45, gap);
+    const regionCap = getCommunityRegion(community) === "florida" ? 2.6 : 2.0;
+    return Math.min(Math.max((staticRatio ?? fallbackRatio) * 1.25, 1.35), regionCap);
+  };
+  const sanitizeMarketRateRows = (rates: any[]): any[] => {
+    const out = rates.map((rate) => ({
+      ...rate,
+      monthlyRates: rate?.monthlyRates && typeof rate.monthlyRates === "object" && !Array.isArray(rate.monthlyRates)
+        ? { ...rate.monthlyRates }
+        : rate?.monthlyRates,
+    }));
+    const byProperty = new Map<number, any[]>();
+    for (const rate of out) {
+      const propertyId = Number(rate?.propertyId);
+      if (!Number.isFinite(propertyId)) continue;
+      const list = byProperty.get(propertyId) ?? [];
+      list.push(rate);
+      byProperty.set(propertyId, list);
+    }
+
+    for (const [propertyId, list] of Array.from(byProperty.entries())) {
+      const community = PROPERTY_UNIT_NEEDS[propertyId]?.community;
+      if (!community) continue;
+      list.sort((a: any, b: any) => Number(a?.bedrooms ?? 0) - Number(b?.bedrooms ?? 0));
+      for (let i = 1; i < list.length; i++) {
+        const smaller = list[i - 1];
+        const larger = list[i];
+        const smallerBedrooms = Number(smaller?.bedrooms);
+        const largerBedrooms = Number(larger?.bedrooms);
+        if (!Number.isFinite(smallerBedrooms) || !Number.isFinite(largerBedrooms) || largerBedrooms <= smallerBedrooms) continue;
+        const ratio = adjacentBedroomUpperRatio(community, smallerBedrooms, largerBedrooms);
+        for (const field of ["medianNightly", "medianNightlyHigh", "medianNightlyHoliday"] as const) {
+          const smallerValue = parsePositiveRate(smaller?.[field]);
+          const largerValue = parsePositiveRate(larger?.[field]);
+          if (smallerValue == null || largerValue == null) continue;
+          const cap = Math.round(smallerValue * ratio);
+          if (largerValue > cap) larger[field] = sameRateShape(larger[field], cap);
+        }
+        const smallerMonthly = smaller?.monthlyRates;
+        const largerMonthly = larger?.monthlyRates;
+        if (smallerMonthly && largerMonthly && typeof smallerMonthly === "object" && typeof largerMonthly === "object") {
+          for (const [yearMonth, largerPayload] of Object.entries(largerMonthly as Record<string, any>)) {
+            const smallerPayload = (smallerMonthly as Record<string, any>)[yearMonth];
+            const smallerValue = parsePositiveRate(smallerPayload?.medianNightly);
+            const largerValue = parsePositiveRate((largerPayload as any)?.medianNightly);
+            if (smallerValue == null || largerValue == null) continue;
+            const cap = Math.round(smallerValue * ratio);
+            if (largerValue > cap) {
+              (largerMonthly as Record<string, any>)[yearMonth] = {
+                ...(largerPayload as any),
+                medianNightly: sameRateShape((largerPayload as any).medianNightly, cap),
+              };
+            }
+          }
+        }
+      }
+    }
+    return out;
+  };
   app.get("/api/property/market-rates", async (_req, res) => {
     const rates = await storage.getAllPropertyMarketRates();
-    res.json(rates);
+    res.json(sanitizeMarketRateRows(rates));
   });
 
   // POST /api/community/:id/persist-photos
