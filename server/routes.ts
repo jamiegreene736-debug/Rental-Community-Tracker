@@ -2591,10 +2591,95 @@ function parseGuestyAddress(listing: any): { full: string; city: string; state: 
   };
 }
 
+type KnownCommunityAddress = {
+  streetAddress: string;
+  city: string;
+  state: string;
+  zipcode: string;
+  country: string;
+  full: string;
+  lat: number;
+  lng: number;
+};
+
+function knownCommunityAddressFromText(...values: unknown[]): KnownCommunityAddress | null {
+  const text = values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+
+  if (/\bna\s+hale\s+o\s+keauhou\b/.test(text)) {
+    return {
+      streetAddress: "78-6833 Alii Dr",
+      city: "Kailua-Kona",
+      state: "Hawaii",
+      zipcode: "96740",
+      country: "US",
+      full: "78-6833 Alii Dr, Kailua-Kona, HI 96740",
+      lat: 19.5691,
+      lng: -155.9636,
+    };
+  }
+
+  if (/\bmenehune\s+shores\b/.test(text)) {
+    return {
+      streetAddress: "760 S Kihei Rd",
+      city: "Kihei",
+      state: "Hawaii",
+      zipcode: "96753",
+      country: "US",
+      full: "760 S Kihei Rd, Kihei, HI 96753",
+      lat: 20.7638,
+      lng: -156.4594,
+    };
+  }
+
+  return null;
+}
+
+async function repairKnownCommunityDraftAddress(draft: any) {
+  if (draft?.streetAddress) {
+    return { draft, repairedAddress: false };
+  }
+
+  const known = knownCommunityAddressFromText(
+    draft?.name,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.sourceUrl,
+    draft?.city,
+  );
+  if (!known) {
+    return { draft, repairedAddress: false };
+  }
+
+  const repaired = await storage.updateCommunityDraft(draft.id, {
+    streetAddress: known.streetAddress,
+    city: known.city,
+    state: known.state,
+  } as any);
+
+  return { draft: repaired, repairedAddress: true };
+}
+
 function buildCommunityDraftFromGuestyListing(listing: any, guestyListingId: string) {
   const title = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name, `Guesty listing ${guestyListingId}`);
   const bedrooms = inferBedroomsFromGuestyListing(listing);
-  const address = parseGuestyAddress(listing);
+  const parsedAddress = parseGuestyAddress(listing);
+  const knownAddress = knownCommunityAddressFromText(
+    title,
+    listing?.title,
+    listing?.nickname,
+    listing?.name,
+    listing?.address?.full,
+    guestyListingId,
+  );
+  const address = {
+    full: parsedAddress.full || knownAddress?.full || "",
+    city: parsedAddress.city && parsedAddress.city !== "Unknown" ? parsedAddress.city : knownAddress?.city || parsedAddress.city,
+    state: parsedAddress.state && parsedAddress.state !== "Unknown" ? parsedAddress.state : knownAddress?.state || parsedAddress.state,
+    streetAddress: parsedAddress.streetAddress || knownAddress?.streetAddress || null,
+  };
   return {
     name: title,
     city: address.city,
@@ -19362,7 +19447,13 @@ Return ONLY compact JSON with this exact shape:
         if (row.guestyListingId !== guestyListingId || row.propertyId >= 0) continue;
         const existingDraft = await storage.getCommunityDraft(Math.abs(row.propertyId));
         if (existingDraft) {
-          return res.json({ draft: existingDraft, mapping: row, imported: false });
+          const repaired = await repairKnownCommunityDraftAddress(existingDraft);
+          return res.json({
+            draft: repaired.draft,
+            mapping: row,
+            imported: false,
+            repairedAddress: repaired.repairedAddress,
+          });
         }
       }
 

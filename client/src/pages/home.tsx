@@ -615,9 +615,12 @@ export default function Home() {
     );
   };
 
-  const multiUnitCount = properties.filter((p) => p.multiUnit).length;
-  const avgBedrooms = Math.round((properties.reduce((s, p) => s + p.bedrooms, 0) / properties.length) * 10) / 10;
-  const pricedProperties = properties.filter((p) => p.lowPrice !== null);
+  const dashboardProperties = allProperties;
+  const multiUnitCount = dashboardProperties.filter((p) => p.multiUnit).length;
+  const avgBedrooms = dashboardProperties.length
+    ? Math.round((dashboardProperties.reduce((s, p) => s + p.bedrooms, 0) / dashboardProperties.length) * 10) / 10
+    : 0;
+  const pricedProperties = dashboardProperties.filter((p) => p.lowPrice !== null);
   const avgLow = pricedProperties.length
     ? Math.round(pricedProperties.reduce((s, p) => s + (p.lowPrice || 0), 0) / pricedProperties.length)
     : 0;
@@ -927,7 +930,7 @@ export default function Home() {
               <Building2 className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs text-muted-foreground font-medium">Total Properties</span>
             </div>
-            <p className="text-2xl font-bold" data-testid="text-total-properties">{properties.length}</p>
+            <p className="text-2xl font-bold" data-testid="text-total-properties">{dashboardProperties.length}</p>
           </Card>
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
@@ -1022,7 +1025,7 @@ export default function Home() {
         <Card id="property-table-card">
           <div className="p-3 border-b flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm text-muted-foreground" data-testid="text-showing-count" id="text-showing-count">
-              Showing {filtered.length} of {properties.length} properties
+              Showing {filtered.length} of {dashboardProperties.length} properties
             </p>
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="text-xs">
