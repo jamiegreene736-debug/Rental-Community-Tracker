@@ -98,6 +98,8 @@ type Property = {
   minimumStayNights?: number | null;
   minimumStayEvidence?: string | null;
   minimumStaySourceUrl?: string | null;
+  minimumStayRangeLow?: number | null;
+  minimumStayRangeHigh?: number | null;
   multiUnit: boolean;
   unitDetails: string;
   url: string;
@@ -342,13 +344,27 @@ function estimatedMinimumStayFor(property: Pick<Property, "pricingArea" | "commu
         });
 }
 
-function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "minimumStayEvidence" | "minimumStaySourceUrl" | "pricingArea" | "community" | "island">): {
+function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "minimumStayEvidence" | "minimumStaySourceUrl" | "minimumStayRangeLow" | "minimumStayRangeHigh" | "pricingArea" | "community" | "island">): {
   label: string;
   tone: "ok" | "warn" | "estimate";
   details: string;
 } {
   const evidence = property.minimumStayEvidence?.trim();
   const source = property.minimumStaySourceUrl?.trim();
+  if (
+    typeof property.minimumStayRangeLow === "number" &&
+    typeof property.minimumStayRangeHigh === "number" &&
+    property.minimumStayRangeLow > 0 &&
+    property.minimumStayRangeHigh >= property.minimumStayRangeLow
+  ) {
+    const low = property.minimumStayRangeLow;
+    const high = property.minimumStayRangeHigh;
+    return {
+      label: low === high ? `${low} night${low === 1 ? "" : "s"}` : `${low}-${high} nights`,
+      tone: "warn",
+      details: evidence || "Known minimum-stay values for this community vary by mapped listing, so the dashboard shows the confirmed range.",
+    };
+  }
   if (typeof property.minimumStayNights === "number" && property.minimumStayNights > 0) {
     return {
       label: `${property.minimumStayNights} night${property.minimumStayNights === 1 ? "" : "s"}`,
@@ -411,18 +427,91 @@ export default function Home() {
     refetchOnWindowFocus: false,
   });
 
+  const communityMinimumStayData = useMemo(() => {
+    const buckets = new Map<string, {
+      values: Set<number>;
+      evidence: string[];
+      sourceUrl: string | null;
+    }>();
+    const addValue = (community: string, stay: DashboardMinimumStay | undefined, label: string) => {
+      if (typeof stay?.minimumStayNights !== "number" || stay.minimumStayNights <= 0) return;
+      const bucket = buckets.get(community) ?? { values: new Set<number>(), evidence: [], sourceUrl: null };
+      bucket.values.add(stay.minimumStayNights);
+      bucket.evidence.push(stay.minimumStayEvidence || `${label} has a ${stay.minimumStayNights}-night minimum in Guesty.`);
+      if (!bucket.sourceUrl && stay.minimumStaySourceUrl) bucket.sourceUrl = stay.minimumStaySourceUrl;
+      buckets.set(community, bucket);
+    };
+
+    for (const p of properties) {
+      addValue(p.community, minimumStayData?.[p.id], p.name);
+    }
+    for (const d of communityDraftsDataForRows ?? []) {
+      const community = d.name;
+      const draftStay: DashboardMinimumStay | undefined =
+        typeof d.minimumStayNights === "number"
+          ? {
+              minimumStayNights: d.minimumStayNights,
+              minimumStayEvidence: d.minimumStayEvidence ?? null,
+              minimumStaySourceUrl: d.minimumStaySourceUrl ?? null,
+            }
+          : minimumStayData?.[-d.id];
+      addValue(community, draftStay, d.listingTitle || d.name);
+    }
+
+    const out = new Map<string, {
+      minimumStayNights?: number;
+      minimumStayRangeLow?: number;
+      minimumStayRangeHigh?: number;
+      minimumStayEvidence: string;
+      minimumStaySourceUrl: string | null;
+    }>();
+    for (const [community, bucket] of buckets) {
+      const values = [...bucket.values].sort((a, b) => a - b);
+      if (values.length === 0) continue;
+      const evidence = values.length === 1
+        ? `Known rule applied across ${community}: ${values[0]} night${values[0] === 1 ? "" : "s"}. ${bucket.evidence[0] ?? ""}`.trim()
+        : `Known minimum-stay values across ${community} mapped listings range from ${values[0]} to ${values[values.length - 1]} nights.`;
+      out.set(community, values.length === 1
+        ? {
+            minimumStayNights: values[0],
+            minimumStayEvidence: evidence,
+            minimumStaySourceUrl: bucket.sourceUrl,
+          }
+        : {
+            minimumStayRangeLow: values[0],
+            minimumStayRangeHigh: values[values.length - 1],
+            minimumStayEvidence: evidence,
+            minimumStaySourceUrl: bucket.sourceUrl,
+          });
+    }
+    return out;
+  }, [communityDraftsDataForRows, minimumStayData]);
+
   const activeProperties = useMemo(() => {
     return properties.map((p) => {
       const stay = minimumStayData?.[p.id];
-      if (!stay || typeof stay.minimumStayNights !== "number") return p;
+      const communityStay = communityMinimumStayData.get(p.community);
+      if (!stay && !communityStay) return p;
+      if (communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh) {
+        return {
+          ...p,
+          minimumStayNights: null,
+          minimumStayEvidence: communityStay.minimumStayEvidence,
+          minimumStaySourceUrl: communityStay.minimumStaySourceUrl,
+          minimumStayRangeLow: communityStay.minimumStayRangeLow,
+          minimumStayRangeHigh: communityStay.minimumStayRangeHigh,
+        };
+      }
       return {
         ...p,
-        minimumStayNights: stay.minimumStayNights,
-        minimumStayEvidence: stay.minimumStayEvidence,
-        minimumStaySourceUrl: stay.minimumStaySourceUrl,
+        minimumStayNights: stay?.minimumStayNights ?? communityStay?.minimumStayNights ?? null,
+        minimumStayEvidence: stay?.minimumStayEvidence ?? communityStay?.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: stay?.minimumStaySourceUrl ?? communityStay?.minimumStaySourceUrl ?? null,
+        minimumStayRangeLow: null,
+        minimumStayRangeHigh: null,
       };
     });
-  }, [minimumStayData]);
+  }, [communityMinimumStayData, minimumStayData]);
 
   // Map community drafts → Property-shaped rows so they show up in
   // the main table next to the active 11 properties. Synthetic
@@ -466,6 +555,10 @@ export default function Home() {
         ? (u1Br > 0 ? `${u1Br}BR standalone` : "Standalone (draft)")
         : (u1Br > 0 && u2Br > 0 ? `${u1Br}BR + ${u2Br}BR` : "Two units (draft)");
       const guestyStay = minimumStayData?.[-d.id];
+      const communityStay = communityMinimumStayData.get(d.name);
+      const communityRange = communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh
+        ? communityStay
+        : null;
       return {
         id: -d.id, // negative so id-keyed caches never collide with active rows
         draftId: d.id,
@@ -483,15 +576,27 @@ export default function Home() {
         bathrooms: totalBath,
         lowPrice: d.estimatedLowRate ?? d.suggestedRate ?? null,
         highPrice: d.estimatedHighRate ?? null,
-        minimumStayNights: d.minimumStayNights ?? guestyStay?.minimumStayNights ?? null,
-        minimumStayEvidence: d.minimumStayEvidence ?? guestyStay?.minimumStayEvidence ?? null,
-        minimumStaySourceUrl: d.minimumStaySourceUrl ?? guestyStay?.minimumStaySourceUrl ?? null,
+        minimumStayNights: communityRange
+          ? null
+          : d.minimumStayNights ?? guestyStay?.minimumStayNights ?? communityStay?.minimumStayNights ?? null,
+        minimumStayEvidence: communityRange?.minimumStayEvidence
+          ?? d.minimumStayEvidence
+          ?? guestyStay?.minimumStayEvidence
+          ?? communityStay?.minimumStayEvidence
+          ?? null,
+        minimumStaySourceUrl: communityRange?.minimumStaySourceUrl
+          ?? d.minimumStaySourceUrl
+          ?? guestyStay?.minimumStaySourceUrl
+          ?? communityStay?.minimumStaySourceUrl
+          ?? null,
+        minimumStayRangeLow: communityRange?.minimumStayRangeLow ?? null,
+        minimumStayRangeHigh: communityRange?.minimumStayRangeHigh ?? null,
         multiUnit: !isSingle,
         unitDetails,
         url: d.sourceUrl ?? "",
       };
     });
-  }, [communityDraftsDataForRows, minimumStayData]);
+  }, [communityDraftsDataForRows, communityMinimumStayData, minimumStayData]);
 
   // Combined list used by every downstream calc (qualityScores,
   // baseRates, communities/islands filters, the rendered rows).
@@ -579,8 +684,8 @@ export default function Home() {
         return sortDir === "asc" ? aRate - bRate : bRate - aRate;
       }
       if (sortField === "minimumStay") {
-        const aStay = typeof a.minimumStayNights === "number" ? a.minimumStayNights : Infinity;
-        const bStay = typeof b.minimumStayNights === "number" ? b.minimumStayNights : Infinity;
+        const aStay = typeof a.minimumStayNights === "number" ? a.minimumStayNights : a.minimumStayRangeLow ?? Infinity;
+        const bStay = typeof b.minimumStayNights === "number" ? b.minimumStayNights : b.minimumStayRangeLow ?? Infinity;
         return sortDir === "asc" ? aStay - bStay : bStay - aStay;
       }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
