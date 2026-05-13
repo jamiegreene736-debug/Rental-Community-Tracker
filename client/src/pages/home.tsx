@@ -298,9 +298,53 @@ function computeBaseRate(property: Property): number {
   return getBuyInRate(property.pricingArea, property.bedrooms, property.id);
 }
 
-function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "minimumStayEvidence" | "minimumStaySourceUrl">): {
+const ESTIMATED_MINIMUM_STAY_BY_AREA: Record<string, { low: number; high: number; note: string }> = {
+  "Kapaa Beachfront": {
+    low: 4,
+    high: 4,
+    note: "Dashboard fallback based on current Kaha Lani / Kapaa beachfront Guesty-mapped rows.",
+  },
+  "Poipu Oceanfront": {
+    low: 3,
+    high: 3,
+    note: "Dashboard fallback based on current Makahuena / Poipu oceanfront Guesty-mapped rows.",
+  },
+  "Pili Mai": {
+    low: 4,
+    high: 4,
+    note: "Dashboard fallback based on current Pili Mai Guesty-mapped rows.",
+  },
+  "Princeville": {
+    low: 4,
+    high: 4,
+    note: "Estimated from the currently mapped Princeville/Mauna Kai listing. Verify exact listing rules in Guesty when needed.",
+  },
+  "Poipu Kai": {
+    low: 4,
+    high: 4,
+    note: "Estimated from currently mapped Regency/Poipu Kai listings. Verify exact listing rules in Guesty when needed.",
+  },
+};
+
+function estimatedMinimumStayFor(property: Pick<Property, "pricingArea" | "community" | "island">) {
+  return ESTIMATED_MINIMUM_STAY_BY_AREA[property.pricingArea]
+    ?? ESTIMATED_MINIMUM_STAY_BY_AREA[property.community]
+    ?? (property.island === "Kauai"
+      ? {
+          low: 3,
+          high: 5,
+          note: "Conservative Kauai fallback range used because no exact Guesty/research minimum is saved for this row.",
+        }
+      : {
+          low: 2,
+          high: 7,
+          note: "Broad fallback range used because no exact Guesty/research minimum is saved for this row.",
+        });
+}
+
+function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "minimumStayEvidence" | "minimumStaySourceUrl" | "pricingArea" | "community" | "island">): {
   label: string;
-  tone: "ok" | "warn" | "unknown";
+  tone: "ok" | "warn" | "estimate";
   details: string;
 } {
   const evidence = property.minimumStayEvidence?.trim();
@@ -319,12 +363,16 @@ function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "mini
       details: evidence || "Research found a reliable source indicating no community-wide minimum stay.",
     };
   }
+  const estimate = estimatedMinimumStayFor(property);
+  const label = estimate.low === estimate.high
+    ? `~${estimate.low} night${estimate.low === 1 ? "" : "s"}`
+    : `~${estimate.low}-${estimate.high} nights`;
   return {
-    label: "Unknown",
-    tone: "unknown",
+    label,
+    tone: "estimate",
     details: [
-      "No reliable community-wide minimum stay evidence is saved yet.",
-      "We do not infer this from a single Airbnb, VRBO, or Booking.com listing.",
+      estimate.note,
+      "Shown as an estimate because no exact Guesty/research minimum is saved for this row.",
       source ? `Source checked: ${source}` : "",
     ].filter(Boolean).join(" "),
   };
@@ -1388,7 +1436,7 @@ export default function Home() {
                             className={
                               minStay.tone === "warn" ? "bg-amber-50 border-amber-200 text-amber-800 cursor-help"
                               : minStay.tone === "ok" ? "bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
-                              : "bg-muted/40 text-muted-foreground cursor-help"
+                              : "bg-blue-50 border-blue-200 text-blue-800 cursor-help"
                             }
                             data-testid={`badge-minimum-stay-${property.id}`}
                           >
