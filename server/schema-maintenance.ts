@@ -142,6 +142,9 @@ export async function ensureRuntimeSchema(): Promise<void> {
   await db.execute(sql`
     ALTER TABLE community_drafts
       ADD COLUMN IF NOT EXISTS street_address text,
+      ADD COLUMN IF NOT EXISTS minimum_stay_nights integer,
+      ADD COLUMN IF NOT EXISTS minimum_stay_evidence text,
+      ADD COLUMN IF NOT EXISTS minimum_stay_source_url text,
       ADD COLUMN IF NOT EXISTS unit1_bathrooms text,
       ADD COLUMN IF NOT EXISTS unit1_sqft text,
       ADD COLUMN IF NOT EXISTS unit1_max_guests integer,
@@ -165,6 +168,28 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS str_permit text
   `);
   console.log("[schema] ensured community_drafts listing draft columns");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS manual_reservations (
+      id serial PRIMARY KEY,
+      property_id integer NOT NULL,
+      guest_name text NOT NULL,
+      guest_email text,
+      guest_phone text,
+      check_in date NOT NULL,
+      check_out date NOT NULL,
+      total_rate numeric(10,2) NOT NULL,
+      notes text,
+      status text NOT NULL DEFAULT 'active',
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS manual_reservations_property_check_in_idx
+      ON manual_reservations (property_id, check_in)
+  `);
+  console.log("[schema] ensured manual_reservations table");
 
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS quo_sms_messages (

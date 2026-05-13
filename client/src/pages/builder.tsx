@@ -38,8 +38,13 @@ function parseAddress(addr: string) {
     if (stateZip.length >= 2) {
       state = stateZip[0];
       zipcode = stateZip[1];
+    } else if (stateZip.length === 1) {
+      state = stateZip[0];
     }
     city = parts[parts.length - 2].replace(/^(bldg|unit|apt|#)\s*\d+/i, "").trim() || parts[parts.length - 2];
+  } else if (parts.length === 2) {
+    city = parts[0];
+    state = parts[1];
   }
 
   return { full, city, state, zipcode, country: "US" };

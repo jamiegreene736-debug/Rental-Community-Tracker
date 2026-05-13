@@ -2523,6 +2523,24 @@ async function runMakeoverJob(jobId: string): Promise<void> {
   job.listeners.clear();
 }
 
+function hasPublishableGuestyStreetAddress(address: any): boolean {
+  const full =
+    typeof address?.full === "string" && address.full.trim()
+      ? address.full.trim()
+      : typeof address?.street === "string"
+        ? address.street.trim()
+        : "";
+
+  if (!full) return false;
+
+  const firstLine = full.split(",")[0]?.trim() ?? "";
+  const hasStreetNumber = /\d/.test(firstLine);
+  const hasStreetWord =
+    /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|pl|place|ct|court|cir|circle|loop|way|hwy|highway|terrace|terr|trail|trl)\b/i.test(firstLine);
+
+  return hasStreetNumber && hasStreetWord;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -3429,6 +3447,14 @@ export async function registerRoutes(
     const guestyPath = req.path.replace(/^\/api\/guesty-proxy/, "") || "/";
     const qs = new URLSearchParams(req.query as Record<string, string>).toString();
     const url = `https://open-api.guesty.com/v1${guestyPath}${qs ? "?" + qs : ""}`;
+
+    if (req.method === "POST" && guestyPath === "/listings" && !hasPublishableGuestyStreetAddress((req.body as any)?.address)) {
+      const current = String((req.body as any)?.address?.full || (req.body as any)?.address?.street || "no address").trim();
+      return res.status(400).json({
+        error: "MISSING_STREET_ADDRESS",
+        message: `A real street address is required before creating a Guesty listing. This draft currently has "${current}". Add the resort street address before publishing.`,
+      });
+    }
 
     const fetchOptions: RequestInit = {
       method: req.method,

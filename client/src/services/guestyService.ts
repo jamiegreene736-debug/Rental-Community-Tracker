@@ -149,6 +149,17 @@ export type BuildResult = {
   success: boolean;
 };
 
+function hasPublishableStreetAddress(address: GuestyAddress | undefined): boolean {
+  const full = (address?.full ?? "").trim();
+  if (!full) return false;
+
+  const firstLine = full.split(",")[0]?.trim() ?? "";
+  const hasStreetNumber = /\d/.test(firstLine);
+  const hasStreetWord = /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|pl|place|ct|court|cir|circle|loop|way|hwy|highway|terrace|terr|trail|trl)\b/i.test(firstLine);
+
+  return hasStreetNumber && hasStreetWord;
+}
+
 class GuestyService {
   // All Guesty API calls are proxied through /api/guesty-proxy — the server
   // handles OAuth token management, caching, and rate-limit recovery.
@@ -207,6 +218,13 @@ class GuestyService {
   }
 
   async createListing(data: GuestyPropertyData) {
+    if (!hasPublishableStreetAddress(data.address)) {
+      const current = data.address?.full?.trim() || "no address";
+      throw new Error(
+        `A real street address is required before creating a Guesty listing. This draft currently has "${current}". Add the resort street address before publishing.`
+      );
+    }
+
     const payload: Record<string, unknown> = {
       nickname: (data.nickname || "").slice(0, 40).trimEnd(),
       title: data.title,
