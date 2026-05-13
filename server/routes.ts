@@ -7,6 +7,7 @@ import {
   buyInVendorContacts,
   insertBuyInSchema,
   insertCommunityDraftSchema,
+  insertManualReservationSchema,
   insertUnitSwapSchema,
   reservationAliases,
   rentalAgreements,
@@ -9015,14 +9016,218 @@ export async function registerRoutes(
         }),
       );
 
+      const manualRows = await storage.getManualReservations({ propertyId, includePast });
+      const manualEnriched = await Promise.all(
+        manualRows.map(async (row) => {
+          const reservationId = `manual:${row.id}`;
+          const attached = await storage.getBuyInsByReservation(reservationId);
+          const slots = unitSlots.map((slot) => {
+            const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
+            return { ...slot, buyIn };
+          });
+          const filled = slots.filter((s) => s.buyIn).length;
+          const nights = Math.max(
+            1,
+            Math.round((+new Date(row.checkOut) - +new Date(row.checkIn)) / 86400000),
+          );
+          const guestName = row.guestName.trim();
+          const [firstName] = guestName.split(/\s+/);
+          const totalRate = Number(row.totalRate ?? 0) || 0;
+          return {
+            _id: reservationId,
+            status: "manual",
+            checkIn: row.checkIn,
+            checkOut: row.checkOut,
+            checkInDateLocalized: row.checkIn,
+            checkOutDateLocalized: row.checkOut,
+            nightsCount: nights,
+            guest: {
+              fullName: guestName,
+              firstName: firstName || guestName,
+              email: row.guestEmail ?? undefined,
+            },
+            money: {
+              hostPayout: totalRate,
+              fareAccommodation: totalRate,
+              netIncome: totalRate,
+              totalPaid: 0,
+              balanceDue: totalRate,
+              isFullyPaid: false,
+            },
+            source: "Manual",
+            integration: { platform: "Manual" },
+            confirmationCode: reservationId,
+            manualReservation: {
+              id: row.id,
+              propertyId: row.propertyId,
+              guestName: row.guestName,
+              guestEmail: row.guestEmail,
+              guestPhone: row.guestPhone,
+              totalRate: row.totalRate,
+              notes: row.notes,
+              status: row.status,
+            },
+            slots,
+            slotsFilled: filled,
+            slotsTotal: slots.length,
+            fullyLinked: filled === slots.length,
+          };
+        }),
+      );
+      const allReservations = [...enriched, ...manualEnriched].sort((a, b) => {
+        const ad = String(a.checkInDateLocalized ?? a.checkIn ?? "");
+        const bd = String(b.checkInDateLocalized ?? b.checkIn ?? "");
+        return ad.localeCompare(bd);
+      });
+
       res.json({
-        reservations: enriched,
-        total: enriched.length,
+        reservations: allReservations,
+        total: allReservations.length,
         unitSlots,
         propertyId,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch bookings", message: err.message });
+    }
+  });
+
+  app.post("/api/manual-reservations", async (req, res) => {
+    try {
+      const parsed = insertManualReservationSchema.parse({
+        ...req.body,
+        propertyId: Number(req.body?.propertyId),
+        guestName: String(req.body?.guestName ?? "").trim(),
+        guestEmail: String(req.body?.guestEmail ?? "").trim() || null,
+        guestPhone: normalizePhone(req.body?.guestPhone) || null,
+        checkIn: String(req.body?.checkIn ?? "").slice(0, 10),
+        checkOut: String(req.body?.checkOut ?? "").slice(0, 10),
+        totalRate: String(req.body?.totalRate ?? "0"),
+        notes: String(req.body?.notes ?? "").trim() || null,
+        status: "active",
+      });
+      if (!getPropertyUnits(parsed.propertyId).length) {
+        return res.status(400).json({ error: `No unit config found for property ${parsed.propertyId}` });
+      }
+      if (!parsed.guestName) {
+        return res.status(400).json({ error: "Guest name is required" });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(parsed.checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.checkOut)) {
+        return res.status(400).json({ error: "Valid check-in and check-out dates are required" });
+      }
+      if (+new Date(parsed.checkOut) <= +new Date(parsed.checkIn)) {
+        return res.status(400).json({ error: "Check-out must be after check-in" });
+      }
+      if ((Number(parsed.totalRate) || 0) < 0) {
+        return res.status(400).json({ error: "Guest rate cannot be negative" });
+      }
+      const row = await storage.createManualReservation(parsed);
+      res.status(201).json({ reservation: row, reservationId: `manual:${row.id}` });
+    } catch (err: any) {
+      res.status(400).json({ error: "Failed to create manual reservation", message: err.message });
+    }
+  });
+
+  app.patch("/api/manual-reservations/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid manual reservation id" });
+      const existing = await storage.getManualReservation(id);
+      if (!existing) return res.status(404).json({ error: "Manual reservation not found" });
+      const patch: Record<string, unknown> = {};
+      if ("propertyId" in req.body) patch.propertyId = Number(req.body.propertyId);
+      if ("guestName" in req.body) patch.guestName = String(req.body.guestName ?? "").trim();
+      if ("guestEmail" in req.body) patch.guestEmail = String(req.body.guestEmail ?? "").trim() || null;
+      if ("guestPhone" in req.body) patch.guestPhone = normalizePhone(req.body.guestPhone) || null;
+      if ("checkIn" in req.body) patch.checkIn = String(req.body.checkIn ?? "").slice(0, 10);
+      if ("checkOut" in req.body) patch.checkOut = String(req.body.checkOut ?? "").slice(0, 10);
+      if ("totalRate" in req.body) patch.totalRate = String(req.body.totalRate ?? "0");
+      if ("notes" in req.body) patch.notes = String(req.body.notes ?? "").trim() || null;
+      if ("status" in req.body) patch.status = String(req.body.status ?? "active").trim() || "active";
+      if (typeof patch.guestName === "string" && !patch.guestName) {
+        return res.status(400).json({ error: "Guest name is required" });
+      }
+      if (typeof patch.checkIn === "string" && !/^\d{4}-\d{2}-\d{2}$/.test(patch.checkIn)) {
+        return res.status(400).json({ error: "Valid check-in date is required" });
+      }
+      if (typeof patch.checkOut === "string" && !/^\d{4}-\d{2}-\d{2}$/.test(patch.checkOut)) {
+        return res.status(400).json({ error: "Valid check-out date is required" });
+      }
+      if (typeof patch.propertyId === "number" && !getPropertyUnits(patch.propertyId).length) {
+        return res.status(400).json({ error: `No unit config found for property ${patch.propertyId}` });
+      }
+      const checkIn = typeof patch.checkIn === "string" ? patch.checkIn : existing.checkIn;
+      const checkOut = typeof patch.checkOut === "string" ? patch.checkOut : existing.checkOut;
+      if (+new Date(checkOut) <= +new Date(checkIn)) {
+        return res.status(400).json({ error: "Check-out must be after check-in" });
+      }
+      if ((Number(patch.totalRate) || 0) < 0) {
+        return res.status(400).json({ error: "Guest rate cannot be negative" });
+      }
+      const updated = await storage.updateManualReservation(id, patch as any);
+      res.json({ reservation: updated, reservationId: `manual:${updated.id}` });
+    } catch (err: any) {
+      res.status(400).json({ error: "Failed to update manual reservation", message: err.message });
+    }
+  });
+
+  app.delete("/api/manual-reservations/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid manual reservation id" });
+      const ok = await storage.deleteManualReservation(id);
+      if (!ok) return res.status(404).json({ error: "Manual reservation not found" });
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to delete manual reservation", message: err.message });
+    }
+  });
+
+  app.post("/api/manual-reservations/:id/sms", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid manual reservation id" });
+      const row = await storage.getManualReservation(id);
+      if (!row || row.status !== "active") return res.status(404).json({ error: "Manual reservation not found" });
+      const body = String(req.body?.body ?? "").trim();
+      const to = normalizePhone(req.body?.to ?? row.guestPhone);
+      const config = getQuoSmsConfigStatus();
+      if (!config.configured) {
+        return res.status(503).json({
+          error: "SMS is not configured",
+          message: `Add ${config.missing.join(" and ")} in Railway before sending texts.`,
+          missing: config.missing,
+        });
+      }
+      const message = await sendQuoSms({
+        conversationId: `manual:${row.id}`,
+        reservationId: `manual:${row.id}`,
+        guestName: row.guestName,
+        to,
+        body,
+      });
+      res.json({ ok: true, message });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to send manual reservation SMS", message: err.message });
+    }
+  });
+
+  app.post("/api/manual-reservations/:id/email", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid manual reservation id" });
+      const row = await storage.getManualReservation(id);
+      if (!row || row.status !== "active") return res.status(404).json({ error: "Manual reservation not found" });
+      const to = String(req.body?.to ?? row.guestEmail ?? "").trim();
+      const subject = String(req.body?.subject ?? "").trim();
+      const body = String(req.body?.body ?? "").trim();
+      if (!to || !subject || !body) {
+        return res.status(400).json({ error: "Guest email, subject, and body are required" });
+      }
+      const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
+      const sent = await sendBuyInEmail({ from, to, subject, body });
+      res.json({ ok: true, email: { to, from, subject, providerMessageId: sent.messageId ?? null } });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to send manual reservation email", message: err.message });
     }
   });
 

@@ -53,6 +53,30 @@ export const insertBuyInSchema = createInsertSchema(buyIns).omit({
 export type InsertBuyIn = z.infer<typeof insertBuyInSchema>;
 export type BuyIn = typeof buyIns.$inferSelect;
 
+export const manualReservations = pgTable("manual_reservations", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  guestName: text("guest_name").notNull(),
+  guestEmail: text("guest_email"),
+  guestPhone: text("guest_phone"),
+  checkIn: date("check_in").notNull(),
+  checkOut: date("check_out").notNull(),
+  totalRate: numeric("total_rate", { precision: 10, scale: 2 }).notNull(),
+  notes: text("notes"),
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertManualReservationSchema = createInsertSchema(manualReservations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertManualReservation = z.infer<typeof insertManualReservationSchema>;
+export type ManualReservation = typeof manualReservations.$inferSelect;
+
 export const reservationAliases = pgTable("reservation_aliases", {
   id: serial("id").primaryKey(),
   reservationId: text("reservation_id").notNull().unique(),

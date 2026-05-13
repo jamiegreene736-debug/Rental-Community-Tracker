@@ -1,6 +1,7 @@
 import {
   type User, type InsertUser,
   type BuyIn, type InsertBuyIn,
+  type ManualReservation, type InsertManualReservation,
   type LodgifyBooking, type InsertLodgifyBooking,
   type ScannerRun, type InsertScannerRun,
   type AvailabilityScan, type InsertAvailabilityScan,
@@ -22,7 +23,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -122,6 +123,12 @@ export interface IStorage {
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
+
+  createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation>;
+  getManualReservations(filters?: { propertyId?: number; includePast?: boolean }): Promise<ManualReservation[]>;
+  getManualReservation(id: number): Promise<ManualReservation | undefined>;
+  updateManualReservation(id: number, data: Partial<InsertManualReservation>): Promise<ManualReservation | undefined>;
+  deleteManualReservation(id: number): Promise<boolean>;
 
   upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking>;
   getLodgifyBookings(): Promise<LodgifyBooking[]>;
@@ -323,6 +330,49 @@ export class DatabaseStorage implements IStorage {
       .where(eq(buyIns.id, buyInId))
       .returning();
     return row;
+  }
+
+  async createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation> {
+    const [row] = await db.insert(manualReservations).values(reservation).returning();
+    return row;
+  }
+
+  async getManualReservations(filters?: { propertyId?: number; includePast?: boolean }): Promise<ManualReservation[]> {
+    const clauses = [eq(manualReservations.status, "active")];
+    if (filters?.propertyId) {
+      clauses.push(eq(manualReservations.propertyId, filters.propertyId));
+    }
+    if (!filters?.includePast) {
+      clauses.push(gte(manualReservations.checkOut, new Date().toISOString().slice(0, 10)));
+    }
+    return db
+      .select()
+      .from(manualReservations)
+      .where(and(...clauses))
+      .orderBy(manualReservations.checkIn);
+  }
+
+  async getManualReservation(id: number): Promise<ManualReservation | undefined> {
+    const [row] = await db.select().from(manualReservations).where(eq(manualReservations.id, id));
+    return row;
+  }
+
+  async updateManualReservation(id: number, data: Partial<InsertManualReservation>): Promise<ManualReservation | undefined> {
+    const [row] = await db
+      .update(manualReservations)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(manualReservations.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteManualReservation(id: number): Promise<boolean> {
+    const [row] = await db
+      .update(manualReservations)
+      .set({ status: "deleted", updatedAt: new Date() })
+      .where(eq(manualReservations.id, id))
+      .returning();
+    return !!row;
   }
 
   async upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking> {

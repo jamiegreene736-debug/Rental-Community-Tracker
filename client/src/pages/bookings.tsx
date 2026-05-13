@@ -73,6 +73,16 @@ interface GuestyReservation {
   slotsFilled: number;
   slotsTotal: number;
   fullyLinked: boolean;
+  manualReservation?: {
+    id: number;
+    propertyId: number;
+    guestName: string;
+    guestEmail?: string | null;
+    guestPhone?: string | null;
+    totalRate?: number | string | null;
+    notes?: string | null;
+    status?: string | null;
+  };
 }
 
 interface GuestyPayment {
@@ -277,6 +287,17 @@ type UnitProximityResponse =
       generatedAt: string;
     };
 
+type ManualReservationFormState = {
+  propertyId: string;
+  guestName: string;
+  guestEmail: string;
+  guestPhone: string;
+  checkIn: string;
+  checkOut: string;
+  totalRate: string;
+  notes: string;
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function fmtMoney(n: number | string | null | undefined): string {
@@ -294,6 +315,10 @@ function guestInboxHref(r: GuestyReservation): string {
   return `/inbox?${params.toString()}`;
 }
 
+function isManualReservation(r: GuestyReservation): boolean {
+  return !!r.manualReservation || r._id.startsWith("manual:") || channelKindOf(r) === "manual";
+}
+
 function groundFloorRequirementHref(r: GuestyReservation, propertyId: number): string {
   const params = new URLSearchParams();
   params.set("propertyId", String(propertyId));
@@ -306,6 +331,108 @@ function groundFloorRequirementHref(r: GuestyReservation, propertyId: number): s
   if (checkIn) params.set("checkIn", checkIn.slice(0, 10));
   if (checkOut) params.set("checkOut", checkOut.slice(0, 10));
   return `/api/bookings/${encodeURIComponent(r._id)}/ground-floor-requirement?${params.toString()}`;
+}
+
+function ManualReservationContactPanel({ reservation }: { reservation: GuestyReservation }) {
+  const { toast } = useToast();
+  const manual = reservation.manualReservation;
+  const manualId = manual?.id;
+  const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+  const firstName = guestName.split(/\s+/)[0] || guestName;
+  const stayText = `${fmtDate(checkInOf(reservation))} to ${fmtDate(checkOutOf(reservation))}`;
+  const [smsBody, setSmsBody] = useState(
+    `Hi ${firstName}, this confirms your reservation from ${stayText}. Thanks, John Carpenter`,
+  );
+  const [emailSubject, setEmailSubject] = useState(`Reservation confirmation for ${stayText}`);
+  const [emailBody, setEmailBody] = useState(
+    `Aloha ${firstName},\n\nThis confirms your reservation from ${stayText}.\n\nMahalo,\nJohn Carpenter\nVacationRentalExpertz`,
+  );
+
+  const sendSms = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", `/api/manual-reservations/${manualId}/sms`, {
+        to: manual?.guestPhone,
+        body: smsBody,
+      }).then((r) => r.json()),
+    onSuccess: () => toast({ title: "Text sent" }),
+    onError: (e: any) => toast({ title: "Text failed", description: e.message, variant: "destructive" }),
+  });
+
+  const sendEmail = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", `/api/manual-reservations/${manualId}/email`, {
+        to: manual?.guestEmail,
+        subject: emailSubject,
+        body: emailBody,
+      }).then((r) => r.json()),
+    onSuccess: () => toast({ title: "Email sent" }),
+    onError: (e: any) => toast({ title: "Email failed", description: e.message, variant: "destructive" }),
+  });
+
+  if (!manual || !manualId) return null;
+
+  return (
+    <div className="rounded border bg-background p-3 space-y-3">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-medium">Manual guest contact</p>
+          <p className="text-xs text-muted-foreground">
+            Operations-only reservation. No Guesty or OTA message thread is connected.
+          </p>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {manual.guestPhone || "No phone"} · {manual.guestEmail || "No email"}
+        </div>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="space-y-2">
+          <Label className="text-xs">Text via QUO</Label>
+          <Textarea
+            value={smsBody}
+            onChange={(e) => setSmsBody(e.target.value)}
+            rows={4}
+            className="text-sm"
+            data-testid={`manual-sms-body-${manualId}`}
+          />
+          <Button
+            size="sm"
+            onClick={() => sendSms.mutate()}
+            disabled={!manual.guestPhone || sendSms.isPending}
+            data-testid={`button-send-manual-sms-${manualId}`}
+          >
+            <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
+            {sendSms.isPending ? "Sending..." : "Send text"}
+          </Button>
+        </div>
+        <div className="space-y-2">
+          <Label className="text-xs">Email via Gmail/SMTP</Label>
+          <Input
+            value={emailSubject}
+            onChange={(e) => setEmailSubject(e.target.value)}
+            placeholder="Subject"
+            data-testid={`manual-email-subject-${manualId}`}
+          />
+          <Textarea
+            value={emailBody}
+            onChange={(e) => setEmailBody(e.target.value)}
+            rows={4}
+            className="text-sm"
+            data-testid={`manual-email-body-${manualId}`}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => sendEmail.mutate()}
+            disabled={!manual.guestEmail || sendEmail.isPending}
+            data-testid={`button-send-manual-email-${manualId}`}
+          >
+            <Mail className="h-3.5 w-3.5 mr-1.5" />
+            {sendEmail.isPending ? "Sending..." : "Send email"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -1705,6 +1832,18 @@ export default function Bookings() {
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(null);
   const [includePast, setIncludePast] = useState(false);
   const [reportMonth, setReportMonth] = useState(() => monthInputValue(new Date()));
+  const emptyManualReservationForm = (): ManualReservationFormState => ({
+    propertyId: selectedPropertyId?.toString() ?? "",
+    guestName: "",
+    guestEmail: "",
+    guestPhone: "",
+    checkIn: "",
+    checkOut: "",
+    totalRate: "",
+    notes: "",
+  });
+  const [manualDialogOpen, setManualDialogOpen] = useState(false);
+  const [manualForm, setManualForm] = useState<ManualReservationFormState>(() => emptyManualReservationForm());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [picker, setPicker] = useState<
     | { reservation: GuestyReservation; slot: SlotInfo }
@@ -1951,6 +2090,27 @@ export default function Bookings() {
     });
     return list;
   }, [rawReservations, sortBy, sortDir]);
+
+  const createManualReservationMutation = useMutation({
+    mutationFn: (payload: ManualReservationFormState) =>
+      apiRequest("POST", "/api/manual-reservations", {
+        propertyId: Number(payload.propertyId),
+        guestName: payload.guestName,
+        guestEmail: payload.guestEmail,
+        guestPhone: payload.guestPhone,
+        checkIn: payload.checkIn,
+        checkOut: payload.checkOut,
+        totalRate: payload.totalRate,
+        notes: payload.notes,
+      }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      setManualDialogOpen(false);
+      setManualForm(emptyManualReservationForm());
+      toast({ title: "Manual reservation added" });
+    },
+    onError: (e: any) => toast({ title: "Manual reservation failed", description: e.message, variant: "destructive" }),
+  });
 
   const attachMutation = useMutation({
     mutationFn: ({ reservationId, buyInId }: { reservationId: string; buyInId: number }) =>
@@ -3082,6 +3242,18 @@ export default function Bookings() {
                 />
                 <Label htmlFor="include-past" className="text-sm cursor-pointer">Include past stays</Label>
               </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setManualForm(emptyManualReservationForm());
+                  setManualDialogOpen(true);
+                }}
+                data-testid="button-add-manual-reservation"
+              >
+                <Calendar className="h-3.5 w-3.5 mr-1.5" />
+                Add manual reservation
+              </Button>
               {selectedPropertyId && unitSlots.length > 0 && (
                 <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
                   <BedDouble className="h-3.5 w-3.5 inline mr-1 opacity-60" />
@@ -3646,6 +3818,7 @@ export default function Bookings() {
                   && autoFillSidecarActive;
                 const comboOptions = lastAutoFillCombos[r._id] ?? [];
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
+                const manualReservation = isManualReservation(r);
                 return (
                   <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
                     {/* Summary row */}
@@ -3666,19 +3839,23 @@ export default function Bookings() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
-                            <Button
-                              asChild
-                              size="sm"
-                              variant="outline"
-                              className="h-6 shrink-0 px-2 text-[10px]"
-                              title="Open this guest's conversation in Inbox"
-                              data-testid={`button-guest-inbox-${r._id}`}
-                            >
-                              <Link href={guestInboxHref(r)} onClick={(e) => e.stopPropagation()}>
-                                <MessageSquare className="h-3 w-3 mr-1" />
-                                Guest Inbox
-                              </Link>
-                            </Button>
+                            {manualReservation ? (
+                              <Badge variant="outline" className="h-6 text-[10px]">Manual</Badge>
+                            ) : (
+                              <Button
+                                asChild
+                                size="sm"
+                                variant="outline"
+                                className="h-6 shrink-0 px-2 text-[10px]"
+                                title="Open this guest's conversation in Inbox"
+                                data-testid={`button-guest-inbox-${r._id}`}
+                              >
+                                <Link href={guestInboxHref(r)} onClick={(e) => e.stopPropagation()}>
+                                  <MessageSquare className="h-3 w-3 mr-1" />
+                                  Guest Inbox
+                                </Link>
+                              </Button>
+                            )}
                           </div>
                           {r.confirmationCode && (
                             <p className="text-[10px] text-muted-foreground font-mono">
@@ -3766,9 +3943,10 @@ export default function Bookings() {
                     {/* Expanded: per-unit-slot detail */}
                     {isOpen && (
                       <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
-                        {selectedPropertyId && (
+                        {selectedPropertyId && !manualReservation && (
                           <GroundFloorRequirementNotice reservation={r} propertyId={selectedPropertyId} />
                         )}
+                        {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {/* Auto-fill: one click to search + attach cheapest
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (
@@ -4160,6 +4338,153 @@ export default function Bookings() {
           </Tabs>
         )}
       </div>
+
+      <Dialog
+        open={manualDialogOpen}
+        onOpenChange={(open) => {
+          setManualDialogOpen(open);
+          if (!open) setManualForm(emptyManualReservationForm());
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Add manual reservation</DialogTitle>
+            <DialogDescription>
+              Operations-only record for buy-in tracking. It will not create a Guesty booking or OTA message thread.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2 sm:grid-cols-2">
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="manual-property">Property</Label>
+              <Select
+                value={manualForm.propertyId}
+                onValueChange={(value) => setManualForm((prev) => ({ ...prev, propertyId: value }))}
+              >
+                <SelectTrigger id="manual-property" data-testid="select-manual-reservation-property">
+                  <SelectValue placeholder="Choose a buy-in property" />
+                </SelectTrigger>
+                <SelectContent>
+                  {operationalPropertyMap.map((mapping) => (
+                    <SelectItem key={mapping.propertyId} value={String(mapping.propertyId)}>
+                      {listingNameById.get(mapping.guestyListingId) ?? `Property ${mapping.propertyId}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="manual-guest-name">Guest name</Label>
+              <Input
+                id="manual-guest-name"
+                value={manualForm.guestName}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, guestName: e.target.value }))}
+                placeholder="Guest name"
+                data-testid="input-manual-reservation-guest"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="manual-rate">Total rate</Label>
+              <Input
+                id="manual-rate"
+                type="number"
+                min="0"
+                step="0.01"
+                value={manualForm.totalRate}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, totalRate: e.target.value }))}
+                placeholder="0.00"
+                data-testid="input-manual-reservation-rate"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="manual-check-in">Check-in</Label>
+              <Input
+                id="manual-check-in"
+                type="date"
+                value={manualForm.checkIn}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, checkIn: e.target.value }))}
+                data-testid="input-manual-reservation-check-in"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="manual-check-out">Check-out</Label>
+              <Input
+                id="manual-check-out"
+                type="date"
+                value={manualForm.checkOut}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, checkOut: e.target.value }))}
+                data-testid="input-manual-reservation-check-out"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="manual-email">Email</Label>
+              <Input
+                id="manual-email"
+                type="email"
+                value={manualForm.guestEmail}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, guestEmail: e.target.value }))}
+                placeholder="guest@example.com"
+                data-testid="input-manual-reservation-email"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="manual-phone">Phone</Label>
+              <Input
+                id="manual-phone"
+                value={manualForm.guestPhone}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, guestPhone: e.target.value }))}
+                placeholder="+18085551234"
+                data-testid="input-manual-reservation-phone"
+              />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="manual-notes">Notes</Label>
+              <Textarea
+                id="manual-notes"
+                value={manualForm.notes}
+                onChange={(e) => setManualForm((prev) => ({ ...prev, notes: e.target.value }))}
+                rows={3}
+                placeholder="Internal notes for this manual buy-in record"
+                data-testid="textarea-manual-reservation-notes"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setManualDialogOpen(false);
+                setManualForm(emptyManualReservationForm());
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                createManualReservationMutation.isPending ||
+                !manualForm.propertyId ||
+                !manualForm.guestName.trim() ||
+                !manualForm.checkIn ||
+                !manualForm.checkOut ||
+                !manualForm.totalRate
+              }
+              onClick={() => createManualReservationMutation.mutate(manualForm)}
+              data-testid="button-create-manual-reservation"
+            >
+              {createManualReservationMutation.isPending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  Adding...
+                </>
+              ) : (
+                "Add reservation"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Candidate picker dialog — scoped to one slot */}
       <Dialog open={!!picker} onOpenChange={(open) => { if (!open) setPicker(null); }}>
