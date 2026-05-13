@@ -5,7 +5,8 @@ import { spawn } from "child_process";
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 820 };
 const DEFAULT_LOCAL_CDP_PORT = 9222;
-const DEFAULT_MAX_LOCAL_INSTANCES = 3;
+const DEFAULT_MAX_LOCAL_INSTANCES = 8;
+const HARD_MAX_LOCAL_INSTANCES = 12;
 const DEFAULT_SERVER_CDP_BASE_PORT = 9223;
 const DEFAULT_SERVER_WEBDRIVER_BASE_PORT = 4445;
 const DEFAULT_SERVER_NOVNC_BASE_PORT = 7901;
@@ -43,6 +44,12 @@ function nonEmptyEnv(...names) {
     if (value != null && String(value).trim() !== "") return String(value).trim();
   }
   return "";
+}
+
+function macAppPathFromChromeBinary(binary) {
+  const marker = ".app/Contents/MacOS/";
+  const idx = String(binary ?? "").indexOf(marker);
+  return idx >= 0 ? String(binary).slice(0, idx + ".app".length) : "";
 }
 
 function jsonRead(file) {
@@ -368,8 +375,9 @@ export class ChromeSidecarManager {
     this.viewport = options.viewport ?? DEFAULT_VIEWPORT;
     this.primary = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
     this.serverFallbackEnabled = boolFromEnv("SERVER_CHROME_FALLBACK_ENABLED", false);
+    this.serverFallbackForVrbo = boolFromEnv("SERVER_CHROME_FALLBACK_VRBO", false);
     this.maxLocalInstances = Math.min(
-      DEFAULT_MAX_LOCAL_INSTANCES,
+      HARD_MAX_LOCAL_INSTANCES,
       Math.max(1, Math.floor(numberFromEnv("MAX_LOCAL_CHROME_INSTANCES", DEFAULT_MAX_LOCAL_INSTANCES))),
     );
     this.localCdpPort = numberFromEnv("LOCAL_CHROME_PORT", DEFAULT_LOCAL_CDP_PORT);
@@ -381,6 +389,7 @@ export class ChromeSidecarManager {
       process.env.LOCAL_CHROME_USER_DATA_DIR ??
       path.join(os.homedir(), "Library/Application Support/VrboSidecar-Chrome");
     this.localVisible = boolFromEnv("SIDECAR_CHROME_VISIBLE", false);
+    this.macosBackgroundLaunch = boolFromEnv("SIDECAR_MACOS_BACKGROUND_LAUNCH", true);
     this.hiddenWindowPosition = process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? "-32000,-32000";
     this.lockDir =
       process.env.SIDECAR_LOCK_DIR ??
@@ -425,9 +434,13 @@ export class ChromeSidecarManager {
       if (local) return local;
     }
 
-    if (this.serverFallbackEnabled) {
+    const opType = String(request?.opType ?? "");
+    const vrboLocalOnly = /^vrbo_/i.test(opType) && !this.serverFallbackForVrbo;
+    if (this.serverFallbackEnabled && !vrboLocalOnly) {
       const server = await this.tryAcquireServer(request);
       if (server) return server;
+    } else if (this.serverFallbackEnabled && vrboLocalOnly) {
+      this.log(`${opType || "vrbo"} kept local-only; SERVER_CHROME_FALLBACK_VRBO=1 required for server fallback`);
     }
 
     if (this.primary !== "local") {
@@ -436,7 +449,7 @@ export class ChromeSidecarManager {
     }
 
     throw new Error(
-      `All ${this.maxLocalInstances} local Chrome sidecars are busy. Wait for one to finish, or raise MAX_LOCAL_CHROME_INSTANCES up to ${DEFAULT_MAX_LOCAL_INSTANCES}.`,
+      `All ${this.maxLocalInstances} local Chrome sidecars are busy. Wait for one to finish, or raise MAX_LOCAL_CHROME_INSTANCES up to ${HARD_MAX_LOCAL_INSTANCES}.`,
     );
   }
 
@@ -703,6 +716,8 @@ export class ChromeSidecarManager {
       `--window-position=${this.localVisible ? "120,80" : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
       ...(this.localVisible ? [] : ["--start-minimized", "--no-startup-window"]),
+      "--disable-notifications",
+      "--disable-backgrounding-occluded-windows",
       "--no-first-run",
       "--no-default-browser-check",
       "--no-sandbox",
@@ -712,10 +727,17 @@ export class ChromeSidecarManager {
       "about:blank",
     ];
     const launchHiddenOnMac = process.platform === "darwin" && !this.localVisible;
-    const command = this.localChromeBinary;
-    const args = chromeArgs;
+    const macAppPath = launchHiddenOnMac && this.macosBackgroundLaunch
+      ? macAppPathFromChromeBinary(this.localChromeBinary)
+      : "";
+    const command = macAppPath ? "open" : this.localChromeBinary;
+    const args = macAppPath
+      ? ["-g", "-j", "-n", macAppPath, "--args", ...chromeArgs]
+      : chromeArgs;
     this.log(
-      `spawning ${instance.label} ${launchHiddenOnMac ? "direct hidden/offscreen " : ""}(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
+      `spawning ${instance.label} ${
+        launchHiddenOnMac ? (macAppPath ? "macOS background hidden/offscreen " : "direct hidden/offscreen ") : ""
+      }(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
     );
     const proc = spawn(command, args, { detached: true, stdio: "ignore" });
     proc.unref?.();

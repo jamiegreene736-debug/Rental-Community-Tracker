@@ -389,7 +389,7 @@ console.log("  ✓ live config has no duplicates");
 // ---------- Pricing tables (shared/pricing-rates) ----------
 console.log("\npricing tables suite");
 
-import { getBuyInRate, suggestPricingArea, BUY_IN_RATES } from "../shared/pricing-rates";
+import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates } from "../shared/pricing-rates";
 
 // Caribe Cove (Kissimmee, FL) is the operator-validated 2BR low tier —
 // $125/unit base × 2 units = $250 buy-in, matching what the unit
@@ -417,6 +417,31 @@ assert.equal(
   "unknown bedroom count on a Florida community should use the FL fallback ($80/BR)",
 );
 console.log("  ✓ Florida fallback is $80/BR");
+
+setLivePropertyMarketRates([{
+  propertyId: 900001,
+  bedrooms: 2,
+  medianNightly: 100,
+  medianNightlyHigh: 150,
+  medianNightlyHoliday: 225,
+  monthlyRates: {
+    "2026-07": { medianNightly: 60, season: "HIGH", sampleCount: 1 },
+  },
+  sampleCount: 12,
+  refreshedAt: "2026-05-13T00:00:00.000Z",
+  source: "season-band-multichannel-median",
+}]);
+assert.equal(
+  getBuyInRate("Windsor Hills", 2, 900001, "HIGH", "2026-07"),
+  150,
+  "canonical HIGH basis should drive pricing even when a monthly sample is lower",
+);
+assert.equal(
+  getBuyInRate("Windsor Hills", 2, 900001, "LOW", "2026-07"),
+  100,
+  "canonical LOW basis should drive pricing even when monthly sample metadata exists",
+);
+console.log("  ✓ monthly samples do not override canonical season basis");
 
 // suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
 // resolve to "Caribe Cove" via the new community-name match — not to

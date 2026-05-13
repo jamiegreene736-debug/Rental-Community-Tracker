@@ -34,8 +34,12 @@ const CHROME_DATA_DIR = path.join(
 const CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9222;
 const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
-const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1" || SIDE_CAR_CHROME_VISIBLE;
+const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1";
+const SIDECAR_CAPTCHA_SURFACE_WINDOW = process.env.SIDECAR_CAPTCHA_SURFACE_WINDOW !== "0";
+const SIDECAR_CAPTCHA_ALLOW_FOCUS = process.env.SIDECAR_CAPTCHA_ALLOW_FOCUS !== "0";
+const SIDECAR_MACOS_BACKGROUND_LAUNCH = process.env.SIDECAR_MACOS_BACKGROUND_LAUNCH !== "0";
 const HIDDEN_WINDOW_POSITION = "-32000,-32000";
+const VISIBLE_WINDOW_POSITION = process.env.SIDECAR_CHROME_VISIBLE_POSITION ?? "120,80";
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -54,7 +58,11 @@ const VRBO_MANUAL_VERIFY_POLL_MS = Number(process.env.SIDECAR_VRBO_MANUAL_VERIFY
 const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETRY_MS ?? 1_500);
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGET_MS ?? 150_000);
-const PER_REQUEST_BUDGET_MS = 90_000;
+const REQUEST_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_REQUEST_HARD_TIMEOUT_MS ?? 10 * 60_000);
+const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_REQUEST_MAX_ATTEMPTS ?? 2) || 2));
+const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
+const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
+const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const VIEWPORT = { width: 1280, height: 820 };
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
 const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
@@ -66,6 +74,7 @@ let context = null;
 let page = null;
 let contextGuardsInstalled = false;
 let activeChromeAllocation = null;
+let captchaWindowVisible = false;
 
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
@@ -89,6 +98,86 @@ function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
   ]);
 }
 
+class SidecarHardTimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SidecarHardTimeoutError";
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function transientErrorMessage(message) {
+  return /timeout|timed out|navigation|net::|socket|fetch failed|econnreset|econnrefused|etimedout|protocol error|target closed|browser has been closed|disconnected|context.*closed|page.*closed|execution context was destroyed|cdp/i.test(
+    String(message ?? ""),
+  );
+}
+
+function isTransientScrapeError(error) {
+  if (error instanceof SidecarCancelledError || error instanceof SidecarHardTimeoutError) return false;
+  return transientErrorMessage(error?.message ?? error);
+}
+
+function hardTimeoutMsForOp(opType) {
+  const manualBuffer = VRBO_MANUAL_VERIFY_TIMEOUT_MS + 90_000;
+  switch (opType) {
+    case "vrbo_search":
+    case "vrbo_photo_scrape":
+      return Math.max(REQUEST_HARD_TIMEOUT_MS, manualBuffer);
+    case "pm_site_search":
+      return Math.max(REQUEST_HARD_TIMEOUT_MS, PM_SITE_SEARCH_BUDGET_MS + 90_000);
+    case "pm_url_check_batch":
+      return Math.max(REQUEST_HARD_TIMEOUT_MS, 4 * 60_000);
+    default:
+      return REQUEST_HARD_TIMEOUT_MS;
+  }
+}
+
+async function runWithHardTimeout(label, opType, fn) {
+  const timeoutMs = hardTimeoutMsForOp(opType);
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(fn),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new SidecarHardTimeoutError(`${label} exceeded hard timeout ${timeoutMs}ms`));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function parseWindowPosition(raw, fallback) {
+  const [x, y] = String(raw ?? "").split(",").map((part) => Number(part.trim()));
+  if (Number.isFinite(x) && Number.isFinite(y)) return { left: Math.round(x), top: Math.round(y) };
+  return fallback;
+}
+
+function macAppPathFromChromeBinary(binary) {
+  const marker = ".app/Contents/MacOS/";
+  const idx = String(binary ?? "").indexOf(marker);
+  return idx >= 0 ? String(binary).slice(0, idx + ".app".length) : "";
+}
+
 function hostFromUrl(rawUrl) {
   try {
     return new URL(rawUrl).hostname.replace(/^www\./i, "");
@@ -103,7 +192,7 @@ function shouldBlockNavigation(rawUrl) {
 }
 
 async function minimizeSidecarWindow(targetPage = page) {
-  if (SIDECAR_ALLOW_FOCUS || SIDE_CAR_CHROME_VISIBLE) return;
+  if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   if (!context || !targetPage || targetPage.isClosed?.()) return;
   const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
   if (!session) return;
@@ -111,6 +200,19 @@ async function minimizeSidecarWindow(targetPage = page) {
     const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
     const windowId = info?.windowId;
     if (typeof windowId !== "number") return;
+    const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
+    await withSoftTimeout(
+      session.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: {
+          left: hidden.left,
+          top: hidden.top,
+          width: VIEWPORT.width,
+          height: VIEWPORT.height + 80,
+        },
+      }),
+      1_500,
+    );
     await withSoftTimeout(
       session.send("Browser.setWindowBounds", {
         windowId,
@@ -127,12 +229,74 @@ async function minimizeSidecarWindow(targetPage = page) {
 }
 
 function scheduleSidecarMinimize(targetPage = page) {
-  if (SIDECAR_ALLOW_FOCUS || SIDE_CAR_CHROME_VISIBLE) return;
+  if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   for (const delay of [0, 150, 500, 1500]) {
     const timer = setTimeout(() => {
       void minimizeSidecarWindow(targetPage);
     }, delay);
     timer.unref?.();
+  }
+}
+
+async function setCaptchaWindowVisibility(targetPage = page, visible, label = "sidecar", id = "") {
+  if (SIDE_CAR_CHROME_VISIBLE) return true;
+  if (!context || !targetPage || targetPage.isClosed?.()) return false;
+  if (visible && !SIDECAR_CAPTCHA_SURFACE_WINDOW) {
+    log(`${label} ${id}: CAPTCHA manual surfacing disabled by SIDECAR_CAPTCHA_SURFACE_WINDOW=0`);
+    return false;
+  }
+
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return false;
+  try {
+    const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
+    const windowId = info?.windowId;
+    if (typeof windowId !== "number") return false;
+
+    if (visible) {
+      const pos = parseWindowPosition(VISIBLE_WINDOW_POSITION, { left: 120, top: 80 });
+      captchaWindowVisible = true;
+      await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }), 1_500);
+      await withSoftTimeout(
+        session.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: {
+            left: pos.left,
+            top: pos.top,
+            width: VIEWPORT.width,
+            height: VIEWPORT.height + 80,
+          },
+        }),
+        1_500,
+      );
+      if (SIDECAR_CAPTCHA_ALLOW_FOCUS || SIDECAR_ALLOW_FOCUS) {
+        await targetPage.bringToFront().catch(() => {});
+      }
+      log(`${label} ${id}: surfaced only this Chrome window for manual CAPTCHA verification`);
+    } else {
+      captchaWindowVisible = false;
+      const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
+      await withSoftTimeout(
+        session.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: {
+            left: hidden.left,
+            top: hidden.top,
+            width: VIEWPORT.width,
+            height: VIEWPORT.height + 80,
+          },
+        }),
+        1_500,
+      );
+      await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } }), 1_500);
+      log(`${label} ${id}: returned Chrome window to hidden/background mode`);
+    }
+    return true;
+  } catch (e) {
+    log(`${label} ${id}: CAPTCHA window visibility change failed: ${e?.message ?? e}`);
+    return false;
+  } finally {
+    await withSoftTimeout(session.detach(), 500);
   }
 }
 
@@ -520,15 +684,22 @@ async function ensureChromeRunning() {
     `--window-position=${SIDE_CAR_CHROME_VISIBLE ? "120,80" : HIDDEN_WINDOW_POSITION}`,
     "--force-device-scale-factor=1",
     ...(SIDE_CAR_CHROME_VISIBLE ? [] : ["--start-minimized", "--no-startup-window"]),
+    "--disable-notifications",
+    "--disable-backgrounding-occluded-windows",
     "--no-first-run",
     "--no-default-browser-check",
     "about:blank",
   ];
   const launchHiddenOnMac = process.platform === "darwin" && !SIDE_CAR_CHROME_VISIBLE;
-  const command = CHROME_BINARY;
-  const args = chromeArgs;
+  const macAppPath = launchHiddenOnMac && SIDECAR_MACOS_BACKGROUND_LAUNCH
+    ? macAppPathFromChromeBinary(CHROME_BINARY)
+    : "";
+  const command = macAppPath ? "open" : CHROME_BINARY;
+  const args = macAppPath ? ["-g", "-j", "-n", macAppPath, "--args", ...chromeArgs] : chromeArgs;
   log(
-    `spawning Chrome ${launchHiddenOnMac ? "direct hidden/offscreen " : ""}(port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`,
+    `spawning Chrome ${
+      launchHiddenOnMac ? (macAppPath ? "macOS background hidden/offscreen " : "direct hidden/offscreen ") : ""
+    }(port ${CDP_PORT}, user-data-dir ${CHROME_DATA_DIR})…`,
   );
   const proc = spawn(
     command,
@@ -561,6 +732,15 @@ async function acquireChromeForRequest(request = {}) {
   return activeChromeAllocation;
 }
 
+async function verifyActiveChromeHealth(label = "chrome health") {
+  if (!activeChromeAllocation?.cdpUrl) return true;
+  const ok = await withSoftTimeout(chromeSidecarManager.isCdpReady(activeChromeAllocation.cdpUrl), 2_500, false);
+  if (!ok) {
+    throw new Error(`${label}: CDP health check failed for ${activeChromeAllocation.label}`);
+  }
+  return true;
+}
+
 async function releaseChromeForRequest() {
   if (!activeChromeAllocation) return;
   const allocation = activeChromeAllocation;
@@ -590,6 +770,7 @@ async function ensureBrowser() {
   const allocation = await acquireChromeForRequest();
   if (browser && context && page && !page.isClosed()) return;
   log(`connecting to Chrome via CDP (${allocation.label})…`);
+  await verifyActiveChromeHealth("before connect");
   browser = await chromium.connectOverCDP(allocation.cdpUrl);
   context = browser.contexts()[0] ?? (await browser.newContext());
   await installContextGuards();
@@ -1052,7 +1233,10 @@ async function tryPressAndHoldChallenge(targetPage, handle, label, id) {
 }
 
 async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
-  if (!VRBO_2CAPTCHA_ENABLED) return false;
+  if (!VRBO_2CAPTCHA_ENABLED) {
+    log(`${label} ${id}: 2Captcha disabled by SIDECAR_VRBO_2CAPTCHA=0; manual fallback may be needed`);
+    return false;
+  }
   for (let attempt = 1; attempt <= Math.max(1, VRBO_2CAPTCHA_MAX_ATTEMPTS); attempt++) {
     try {
       const clip = await findVrboChallengeBox(targetPage);
@@ -1143,42 +1327,44 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     : await pageLooksLikeVrboHumanChallenge(targetPage);
   if (!hasChallenge) return false;
 
-  if (SIDECAR_ALLOW_FOCUS) {
-    await targetPage.bringToFront().catch(() => {});
-  }
   await normalizePageDisplay(targetPage).catch(() => {});
-  log(`${label} ${id}: VRBO verification challenge detected; trying 2Captcha slider solver before manual fallback`);
+  log(`${label} ${id}: VRBO verification challenge detected; keeping Chrome hidden while trying 2Captcha first`);
   if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {
     await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
     await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
     return true;
   }
 
-  log(`${label} ${id}: VRBO manual verification required; waiting for operator to clear it`);
+  log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
+  await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
   await showVrboManualVerificationBanner(targetPage, label);
+  try {
+    const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await targetPage.waitForTimeout(VRBO_MANUAL_VERIFY_POLL_MS).catch(() => {});
+      try {
+        await sendHeartbeat(`manual VRBO verification: ${label}`, true, id);
+      } catch (e) {
+        if (e instanceof SidecarCancelledError) throw e;
+      }
 
-  const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await targetPage.waitForTimeout(VRBO_MANUAL_VERIFY_POLL_MS).catch(() => {});
-    try {
-      await sendHeartbeat(`manual VRBO verification: ${label}`, true, id);
-    } catch (e) {
-      if (e instanceof SidecarCancelledError) throw e;
+      const stillBlocked = await pageLooksLikeVrboHumanChallenge(targetPage);
+      if (!stillBlocked) {
+        log(`${label} ${id}: VRBO manual verification cleared; resuming`);
+        await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+        await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+        return true;
+      }
+      await showVrboManualVerificationBanner(targetPage, label);
     }
 
-    const stillBlocked = await pageLooksLikeVrboHumanChallenge(targetPage);
-    if (!stillBlocked) {
-      log(`${label} ${id}: VRBO manual verification cleared; resuming`);
-      await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-      await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
-      return true;
-    }
-    await showVrboManualVerificationBanner(targetPage, label);
+    throw new Error(
+      "Vrbo manual verification still required. Complete the human check in the sidecar Chrome window, then rerun the request.",
+    );
+  } finally {
+    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
   }
-
-  throw new Error(
-    "Vrbo manual verification still required. Complete the human check in the sidecar Chrome window, then rerun the request.",
-  );
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
@@ -4369,16 +4555,19 @@ async function processPmSiteSearch(id, params) {
   await ensureBrowser();
   const out = [];
   const tabs = new Set();
-  for (const site of sites.slice(0, maxSites)) {
+  const selectedSites = sites.slice(0, maxSites);
+  const concurrency = Math.min(PM_SITE_SEARCH_TAB_CONCURRENCY, selectedSites.length);
+  log(`pm_site_search ${id}: running up to ${concurrency} PM site tab(s) in parallel`);
+  await mapWithConcurrency(selectedSites, concurrency, async (site) => {
     if (!hasBudget(8_000)) {
       log(`pm_site_search ${id}: stopping before ${site.label}; budget nearly exhausted`);
-      break;
+      return;
     }
     let tab = null;
     try {
       if (!site.searchUrl) {
         log(`pm_site_search ${id}: ${site.label} skipped; no rental search URL configured`);
-        continue;
+        return;
       }
       await sendHeartbeat(`PM websites: opening ${site.label}`, true, id);
       tab = await context.newPage();
@@ -4404,11 +4593,12 @@ async function processPmSiteSearch(id, params) {
       const bedroomFilterApplied = Boolean(bedroomFilled) || /(?:bedrooms?|beds?)=\d/i.test(String(url));
       const cards = await extractPmSearchSeeds(tab, site, searchTerm, bedrooms, perSiteLimit, nightsBetween(checkIn, checkOut), bedroomFilterApplied);
       log(`pm_site_search ${id}: ${site.label} priced result cards=${cards.length}`);
+      const siteOut = [];
       for (const card of cards) {
         const total = Number(card.totalPrice || 0);
         const nightly = Number(card.nightlyPrice || (total > 0 ? Math.round(total / nightsBetween(checkIn, checkOut)) : 0));
         if (!(total > 0) && !(nightly > 0)) continue;
-        out.push({
+        siteOut.push({
           url: card.url,
           title: card.title,
           sourceLabel: site.label,
@@ -4420,12 +4610,13 @@ async function processPmSiteSearch(id, params) {
           snippet: `${site.label} rental search result · ${card.snippet || ""}`.slice(0, 360),
         });
       }
+      out.push(...siteOut);
     } catch (e) {
       log(`pm_site_search ${id}: ${site?.label ?? "site"} error: ${e?.message ?? e}`);
     } finally {
       if (tab && !tab.isClosed?.()) await tab.close().catch(() => {});
     }
-  }
+  });
   await Promise.all(Array.from(tabs).map(async (tab) => {
     try { if (tab && !tab.isClosed?.()) await tab.close(); } catch {}
   }));
@@ -4451,11 +4642,13 @@ async function processPmUrlCheckBatch(id, params) {
   const { urls, checkIn, checkOut, bedrooms } = params;
   log(`pm_url_check_batch ${id}: ${urls.length} urls ${checkIn}→${checkOut}`);
   await ensureBrowser();
-  const cap = Math.min(urls.length, 5);
+  const cap = Math.min(urls.length, PM_URL_CHECK_BATCH_CONCURRENCY);
   const slice = urls.slice(0, cap);
   const tabs = new Set();
-  const results = await Promise.all(
-    slice.map(async (url) => {
+  const results = await mapWithConcurrency(
+    slice,
+    Math.min(PM_URL_CHECK_BATCH_CONCURRENCY, slice.length),
+    async (url) => {
       let tab = null;
       try {
         tab = await context.newPage();
@@ -4471,7 +4664,7 @@ async function processPmUrlCheckBatch(id, params) {
           reason: `tab error: ${e?.message ?? String(e)}`.slice(0, 200),
         };
       }
-    }),
+    },
   );
   await Promise.all(Array.from(tabs).map(async (tab) => {
     try { if (tab && !tab.isClosed?.()) await tab.close(); } catch {}
@@ -4496,7 +4689,7 @@ async function processRequest(req) {
   };
 
   // Acquire the browser at the request boundary so the local worker pool
-  // can spread jobs across up to three Mac Chrome sidecars.
+  // can spread jobs across the configured Mac Chrome sidecars.
   await acquireChromeForRequest({ id: req.id, opType });
   await ensureBrowser();
 
@@ -4573,7 +4766,30 @@ async function tick() {
   const startedAt = Date.now();
   const stopBusyHeartbeat = startBusyHeartbeat(req.opType ?? "request", req.id);
   try {
-    await processRequest(req);
+    let lastError = null;
+    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (attempt > 1) {
+          const backoff = REQUEST_RETRY_BASE_MS * Math.pow(2, attempt - 2);
+          log(`retrying ${req.id} (${req.opType}) attempt ${attempt}/${maxAttempts} after ${backoff}ms`);
+          await sleep(backoff);
+        }
+        await runWithHardTimeout(`request ${req.id} ${req.opType ?? "request"}`, req.opType ?? "request", () => processRequest(req));
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        const canRetry = attempt < maxAttempts && isTransientScrapeError(e);
+        log(
+          `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${e?.message ?? e}` +
+          (canRetry ? " (transient; will retry)" : ""),
+        );
+        await teardownBrowser(canRetry ? "retry after transient failure" : "request failure cleanup").catch(() => {});
+        if (!canRetry) break;
+      }
+    }
+    if (lastError) throw lastError;
     consecutiveErrors = 0;
     log(`done ${req.id} in ${Date.now() - startedAt}ms`);
     return true;
@@ -4584,6 +4800,10 @@ async function tick() {
       log(`process error for ${req.id}: ${e.message}`);
     }
     try { await postResult(req.id, undefined, e.message ?? String(e)); } catch {}
+    if (e instanceof SidecarHardTimeoutError) {
+      log(`hard timeout for ${req.id}; exiting worker so supervisor restarts a clean process`);
+      setTimeout(() => process.exit(2), 250).unref?.();
+    }
     if (/closed|disconnected|protocol|target/i.test(e.message ?? "")) {
       await teardownBrowser("error suggests CDP died");
     }

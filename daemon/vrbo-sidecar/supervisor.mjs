@@ -4,7 +4,10 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workerPath = path.join(__dirname, "worker.mjs");
-const maxWorkers = Math.min(3, Math.max(1, Number(process.env.MAX_LOCAL_CHROME_INSTANCES ?? 3) || 3));
+const DEFAULT_MAX_WORKERS = 8;
+const HARD_MAX_WORKERS = 12;
+const requestedWorkers = Number(process.env.MAX_LOCAL_CHROME_INSTANCES ?? DEFAULT_MAX_WORKERS) || DEFAULT_MAX_WORKERS;
+const maxWorkers = Math.min(HARD_MAX_WORKERS, Math.max(1, Math.floor(requestedWorkers)));
 const children = new Map();
 let shuttingDown = false;
 
@@ -20,7 +23,7 @@ function startWorker(slot) {
       ...process.env,
       SIDECAR_WORKER_SLOT: String(slot),
       MAX_LOCAL_CHROME_INSTANCES: String(maxWorkers),
-      SERVER_CHROME_FALLBACK_ENABLED: "0",
+      SERVER_CHROME_FALLBACK_ENABLED: process.env.SERVER_CHROME_FALLBACK_ENABLED ?? "0",
     },
   });
   children.set(slot, child);

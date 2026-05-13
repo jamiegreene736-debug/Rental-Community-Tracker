@@ -65,24 +65,60 @@ SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/supervi
 ```
 
 Hidden mode also suppresses Playwright `bringToFront()` calls during
-VRBO verification challenges. To keep Chrome hidden but allow the
-worker to focus the challenge tab, set `SIDECAR_ALLOW_FOCUS=1`.
+normal scraping. When VRBO shows a human verification challenge, the
+worker first keeps Chrome hidden while it tries 2Captcha. Only if
+2Captcha is disabled, fails, or times out does the affected Chrome
+window surface for manual solving. After the challenge clears or the
+manual wait times out, the worker returns that window to hidden mode.
+
+```sh
+SIDECAR_CHROME_VISIBLE=0                 # default hidden/background mode
+SIDECAR_MACOS_BACKGROUND_LAUNCH=1        # use macOS background launch
+SIDECAR_CAPTCHA_SURFACE_WINDOW=1         # reveal only for manual CAPTCHA fallback
+SIDECAR_CAPTCHA_ALLOW_FOCUS=1            # allow focus stealing only for CAPTCHA fallback
+SIDECAR_CHROME_VISIBLE_POSITION=120,80   # where the manual fallback window appears
+SIDECAR_CHROME_HIDDEN_POSITION=-32000,-32000
+```
 
 ## Local concurrency
 
 Server Chrome fallback is disabled by default. The supervisor starts a
 local worker pool instead, and `chrome-sidecar-manager.mjs` allocates
-up to three local Chrome profiles:
+up to eight local Chrome profiles by default:
 
 - `http://127.0.0.1:9222` using `VrboSidecar-Chrome`
 - `http://127.0.0.1:9223` using `VrboSidecar-Chrome-2`
 - `http://127.0.0.1:9224` using `VrboSidecar-Chrome-3`
+- ...through `VrboSidecar-Chrome-8` when `MAX_LOCAL_CHROME_INSTANCES=8`
 
-Set `MAX_LOCAL_CHROME_INSTANCES=1`, `2`, or `3` to lower the cap. The
-manager refuses a fourth concurrent job instead of opening more Chrome
-sessions. The supervisor passes `SERVER_CHROME_FALLBACK_ENABLED=0` to
-every worker, so server fallback stays off unless that supervisor or
-launchd configuration is deliberately changed.
+Set `MAX_LOCAL_CHROME_INSTANCES=1` through `8` for normal operation.
+The manager has a hard safety cap of `12`. PM website discovery and PM
+URL checks also use tab-level concurrency:
+
+```sh
+SIDECAR_PM_SITE_TAB_CONCURRENCY=3
+SIDECAR_PM_URL_BATCH_CONCURRENCY=8
+```
+
+Hybrid overflow is still opt-in. Set `SERVER_CHROME_FALLBACK_ENABLED=1`
+to let non-VRBO bulk work spill to server Chrome when every local
+worker is busy. VRBO stays local-only by default because CAPTCHA/manual
+solve needs the operator Mac; set `SERVER_CHROME_FALLBACK_VRBO=1` only
+when that tradeoff is intentional.
+
+```sh
+SERVER_CHROME_FALLBACK_ENABLED=0
+SERVER_CHROME_FALLBACK_VRBO=0
+```
+
+Each worker retries transient browser/network failures once by default
+and exits for supervisor restart if a request exceeds its hard timeout:
+
+```sh
+SIDECAR_REQUEST_MAX_ATTEMPTS=2
+SIDECAR_REQUEST_RETRY_BASE_MS=1500
+SIDECAR_REQUEST_HARD_TIMEOUT_MS=600000
+```
 
 ## VRBO slider CAPTCHA automation
 
@@ -102,10 +138,11 @@ SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS=120  # default solve wait
 SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS=1    # default attempts per wall
 ```
 
-The daemon captures the visible challenge box, Railway submits it as a
+The daemon captures the challenge box while Chrome remains hidden,
+Railway submits it as a
 2Captcha CoordinatesTask, and the daemon drags the slider in the headed
 Chrome window using the returned coordinate. If the challenge does not
-clear, the normal manual banner still appears.
+clear, that specific Chrome window is surfaced with the manual banner.
 
 If the daemon's Chrome session is stuck (rare — manifests as
 "Browser context management is not supported" on connect), kill

@@ -2423,14 +2423,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!propertyId) return [];
     const propPricing = getPropertyPricing(propertyId);
     if (!propPricing || !propPricing.units.length) return [];
-    return propPricing.units[0].monthlyRates.map((row, i) => ({
-      month: row.month,
-      year: row.year,
-      yearMonth: row.yearMonth,
-      season: row.season,
-      totalBuyIn: propPricing.units.reduce((s, u) => s + u.monthlyRates[i].buyInRate, 0),
-      totalSell:  propPricing.units.reduce((s, u) => s + u.monthlyRates[i].sellRate, 0),
-    }));
+    return propPricing.units[0].monthlyRates.map((row, i) => {
+      const monthlySampleRates = propPricing.units.map((u) => {
+        const sample = getLiveBuyIn(propertyId, u.bedrooms)?.monthlyRates[row.yearMonth]?.medianNightly;
+        return typeof sample === "number" && Number.isFinite(sample) && sample > 0 ? sample : null;
+      });
+      const monthlySampleComplete = monthlySampleRates.every((n) => n != null);
+      const monthlySampleTotal = monthlySampleComplete
+        ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
+        : null;
+      return {
+        month: row.month,
+        year: row.year,
+        yearMonth: row.yearMonth,
+        season: row.season,
+        totalBuyIn: propPricing.units.reduce((s, u) => s + u.monthlyRates[i].buyInRate, 0),
+        totalSell:  propPricing.units.reduce((s, u) => s + u.monthlyRates[i].sellRate, 0),
+        monthlySampleTotal,
+      };
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
@@ -4445,7 +4456,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {getSeasonLabel(row.season)}
                                         </span>
                                       </td>
-                                      <td>${buyIn.toLocaleString()}</td>
+                                      <td>
+                                        ${buyIn.toLocaleString()}
+                                        {row.monthlySampleTotal != null && Math.abs(row.monthlySampleTotal - buyIn) >= 1 && (
+                                          <div
+                                            style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}
+                                            title="Saved monthly scraper sample is retained for diagnostics; the pricing table now uses the canonical season-band basis for this season."
+                                          >
+                                            sample ${row.monthlySampleTotal.toLocaleString()} ignored
+                                          </div>
+                                        )}
+                                      </td>
                                       <td style={{ fontWeight: 600 }}>${sheet.toLocaleString()}</td>
                                       <td style={{ fontWeight: 600 }}>
                                         {guesty ? (

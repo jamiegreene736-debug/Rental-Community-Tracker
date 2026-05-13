@@ -280,19 +280,9 @@ export function normalizeSeasonalBasis(
   return { low: lowBasis, high, holiday };
 }
 
-const MONTHLY_BASIS_OUTLIER_BAND = 0.30;
-
-function clampMonthlyBasisToSeason(monthlyBasis: number, seasonBasis: number | null): number {
-  if (!Number.isFinite(monthlyBasis) || monthlyBasis <= 0) return seasonBasis ?? 0;
-  if (seasonBasis == null || !Number.isFinite(seasonBasis) || seasonBasis <= 0) return monthlyBasis;
-  const low = Math.round(seasonBasis * (1 - MONTHLY_BASIS_OUTLIER_BAND));
-  const high = Math.round(seasonBasis * (1 + MONTHLY_BASIS_OUTLIER_BAND));
-  return Math.max(low, Math.min(high, Math.round(monthlyBasis)));
-}
-
 // Fallback chain (highest → lowest priority):
-//   1. Live per-season basis for (propertyId, bedrooms, season) when
-//      a season is supplied AND the multi-season scan populated it.
+//   1. Live per-season basis for (propertyId, bedrooms, season) when a
+//      season is supplied AND the multi-season scan populated it.
 //   2. Live LOW basis × SEASON_MULTIPLIERS for the season (legacy
 //      multiplier model when per-season basis is absent).
 //   3. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
@@ -303,6 +293,11 @@ function clampMonthlyBasisToSeason(monthlyBasis: number, seasonBasis: number | n
 // (the legacy single-value behavior). When supplied, returns the
 // season-specific basis from the multi-season scan when available,
 // otherwise applies the multiplier to the LOW basis.
+//
+// `yearMonth` is accepted for API compatibility with callers that also
+// surface saved monthly scrape samples. Those monthly samples are
+// diagnostic evidence only; they do not override the canonical seasonal
+// basis used for pricing or Guesty pushes.
 export function getBuyInRate(
   community: string,
   bedrooms: number,
@@ -313,22 +308,12 @@ export function getBuyInRate(
   if (propertyId != null) {
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
     if (live) {
-      const monthly = yearMonth ? live.monthlyRates[yearMonth] : undefined;
       const normalized = normalizeSeasonalBasis(
         community,
         live.medianNightly,
         live.medianNightlyHigh,
         live.medianNightlyHoliday,
       );
-      if (monthly && monthly.medianNightly > 0) {
-        const monthlySeason = monthly.season ?? season ?? "LOW";
-        const seasonBasis = monthlySeason === "HIGH"
-          ? normalized.high
-          : monthlySeason === "HOLIDAY"
-            ? normalized.holiday
-            : normalized.low;
-        return clampMonthlyBasisToSeason(monthly.medianNightly, seasonBasis);
-      }
       // Season-specific basis when available + requested.
       if (season === "HIGH" && normalized.high != null) return normalized.high;
       if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
