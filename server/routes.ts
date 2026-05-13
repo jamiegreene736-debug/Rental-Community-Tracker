@@ -21855,7 +21855,9 @@ Return ONLY compact JSON with this exact shape:
           typeof args.subTotal === "number" &&
           args.subTotal > 0;
         const currentWindowFraction = hasSubProgress
-          ? Math.max(0, Math.min(1, args.subDone! / args.subTotal!))
+          ? Math.max(0.03, Math.min(1, args.subDone! / args.subTotal!))
+          : typeof args.current === "number"
+            ? 0.03
           : 0;
         const percent = totalWindows > 0
           ? Math.round(((done + currentWindowFraction) / totalWindows) * 100)
@@ -21884,6 +21886,8 @@ Return ONLY compact JSON with this exact shape:
       };
       const OTA_BAND_WINDOW_BUDGET_MS = 5 * 60_000;
       const PM_SAMPLE_WINDOW_BUDGET_MS = 10 * 60_000;
+      const pmSampleSubTotal = Math.max(1, wantBedrooms.length);
+      const otaBandSubTotal = Math.max(1, wantBedrooms.length * 3);
       const runBandWindowScan = async (
         label: string,
         dateOverride: { checkIn: string; checkOut: string },
@@ -22117,8 +22121,8 @@ Return ONLY compact JSON with this exact shape:
             currentStartedAt,
             label: `Sampling reusable ${sample.season} PM/direct rates (${completed}/${totalWindows} complete)`,
             subDone: 0,
-            subTotal: undefined,
-            subLabel: undefined,
+            subTotal: pmSampleSubTotal,
+            subLabel: `Starting ${sample.season} PM/direct checks`,
             subStartedAt: currentStartedAt,
           });
           const scan = await runPmSeasonSample(sample, completed + 1, completed);
@@ -22145,8 +22149,8 @@ Return ONLY compact JSON with this exact shape:
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
             subDone: 0,
-            subTotal: undefined,
-            subLabel: undefined,
+            subTotal: otaBandSubTotal,
+            subLabel: `Starting Airbnb, VRBO, and Booking.com checks`,
             subStartedAt: currentStartedAt,
           });
           const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut }, completed + 1, completed);
@@ -22192,8 +22196,8 @@ Return ONLY compact JSON with this exact shape:
             currentStartedAt,
             label: `Scanning ${currentLabel} (${completed}/${totalWindows} complete)`,
             subDone: 0,
-            subTotal: undefined,
-            subLabel: undefined,
+            subTotal: otaBandSubTotal,
+            subLabel: `Starting Airbnb, VRBO, and Booking.com checks`,
             subStartedAt: currentStartedAt,
           });
           const scan = await runBandWindowScan(currentLabel, { checkIn: win.checkIn, checkOut: win.checkOut }, completed + 1, completed);

@@ -80,6 +80,21 @@ SIDECAR_CHROME_VISIBLE_POSITION=120,80   # where the manual fallback window appe
 SIDECAR_CHROME_HIDDEN_POSITION=-32000,-32000
 ```
 
+For a dedicated sidecar monitor, set `SIDECAR_CHROME_VISIBLE=1` and
+place the visible grid on that display. Chrome launches with macOS
+`open -g` so it should appear without stealing focus from Safari, and
+visible mode does not pass `--start-minimized`:
+
+```sh
+SIDECAR_CHROME_VISIBLE=1
+SIDECAR_CHROME_VISIBLE_GRID_ORIGIN=1600,60
+SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=2
+SIDECAR_CHROME_VISIBLE_GRID_GAP_X=24
+SIDECAR_CHROME_VISIBLE_GRID_GAP_Y=36
+# Optional exact per-instance override:
+# SIDECAR_CHROME_VISIBLE_POSITIONS=1600,60;2904,60;1600,996;2904,996
+```
+
 ## Local concurrency
 
 Server Chrome fallback is disabled by default. The supervisor starts a

@@ -1434,12 +1434,18 @@ async function awaitOpResult(opts: {
       reason: pausedState.reason ? `sidecar queue stopped: ${pausedState.reason}` : "sidecar queue stopped by operator",
     };
   }
-  const { id } = enqueueOp(opts.enqueueArgs);
+  const { id, deduped } = enqueueOp(opts.enqueueArgs);
   let activeStartedAt: number | null = null;
   let aborted = false;
+  const cancelIfOwned = (reason: string) => {
+    // A deduped waiter is sharing an already-running browser job with
+    // another caller. Its local timeout/abort should stop waiting, but
+    // must not kill the Chrome task out from under the original owner.
+    if (!deduped) cancelRequest(id, reason);
+  };
   const onAbort = () => {
     aborted = true;
-    cancelRequest(id, abortReason());
+    cancelIfOwned(abortReason());
   };
   opts.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -1489,11 +1495,11 @@ async function awaitOpResult(opts: {
         };
       }
       if (r.status === "in_progress" && activeStartedAt === null) {
-        activeStartedAt = r.claimedAt ?? now;
+        activeStartedAt = deduped ? now : (r.claimedAt ?? now);
       }
       if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
         const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;
-        cancelRequest(id, reason);
+        cancelIfOwned(reason);
         return {
           results: null,
           workerOnline: false,
@@ -1503,7 +1509,7 @@ async function awaitOpResult(opts: {
       }
       if (activeStartedAt !== null && now - activeStartedAt >= walletMs) {
         const reason = `wallet budget ${walletMs}ms exceeded while worker active`;
-        cancelRequest(id, reason);
+        cancelIfOwned(reason);
         return {
           results: null,
           workerOnline: false,

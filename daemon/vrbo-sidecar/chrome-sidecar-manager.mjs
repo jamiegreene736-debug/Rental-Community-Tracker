@@ -38,6 +38,28 @@ function numberFromEnv(name, defaultValue) {
   return Number.isFinite(n) ? n : defaultValue;
 }
 
+function parsePosition(value, fallback = { left: 120, top: 80 }) {
+  const [leftRaw, topRaw] = String(value ?? "").split(",").map((part) => Number(part.trim()));
+  if (!fallback && (!Number.isFinite(leftRaw) || !Number.isFinite(topRaw))) return null;
+  return {
+    left: Number.isFinite(leftRaw) ? Math.round(leftRaw) : fallback.left,
+    top: Number.isFinite(topRaw) ? Math.round(topRaw) : fallback.top,
+  };
+}
+
+function formatPosition(pos) {
+  return `${Math.round(pos.left)},${Math.round(pos.top)}`;
+}
+
+function parsePositionList(value) {
+  return String(value ?? "")
+    .split(/[;|]/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => parsePosition(part, null))
+    .filter((pos) => pos && Number.isFinite(pos.left) && Number.isFinite(pos.top));
+}
+
 function nonEmptyEnv(...names) {
   for (const name of names) {
     const value = process.env[name];
@@ -391,6 +413,15 @@ export class ChromeSidecarManager {
     this.localVisible = boolFromEnv("SIDECAR_CHROME_VISIBLE", false);
     this.macosBackgroundLaunch = boolFromEnv("SIDECAR_MACOS_BACKGROUND_LAUNCH", true);
     this.hiddenWindowPosition = process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? "-32000,-32000";
+    this.visibleWindowPosition = process.env.SIDECAR_CHROME_VISIBLE_POSITION ?? "120,80";
+    this.visibleWindowPositions = parsePositionList(process.env.SIDECAR_CHROME_VISIBLE_POSITIONS ?? "");
+    this.visibleGridOrigin = parsePosition(
+      process.env.SIDECAR_CHROME_VISIBLE_GRID_ORIGIN ?? this.visibleWindowPosition,
+      { left: 120, top: 80 },
+    );
+    this.visibleGridColumns = Math.max(1, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_COLUMNS", 2)));
+    this.visibleGridGapX = Math.max(0, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_GAP_X", 24)));
+    this.visibleGridGapY = Math.max(0, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_GAP_Y", 36)));
     this.lockDir =
       process.env.SIDECAR_LOCK_DIR ??
       path.join(os.homedir(), ".vrbo-sidecar", "locks");
@@ -708,12 +739,13 @@ export class ChromeSidecarManager {
       throw new Error(`Google Chrome not found at ${this.localChromeBinary}`);
     }
     fs.mkdirSync(instance.chromeDataDir, { recursive: true });
+    const visiblePosition = this.visiblePositionForInstance(instance);
     const chromeArgs = [
       `--remote-debugging-port=${instance.cdpPort}`,
       "--remote-debugging-address=127.0.0.1",
       `--user-data-dir=${instance.chromeDataDir}`,
       `--window-size=${this.viewport.width},${this.viewport.height + 80}`,
-      `--window-position=${this.localVisible ? "120,80" : this.hiddenWindowPosition}`,
+      `--window-position=${this.localVisible ? visiblePosition : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
       ...(this.localVisible ? [] : ["--start-minimized", "--no-startup-window"]),
       "--disable-notifications",
@@ -726,13 +758,14 @@ export class ChromeSidecarManager {
       "--disable-gpu",
       "about:blank",
     ];
-    const launchHiddenOnMac = process.platform === "darwin" && !this.localVisible;
-    const macAppPath = launchHiddenOnMac && this.macosBackgroundLaunch
+    const launchViaMacOpen = process.platform === "darwin" && this.macosBackgroundLaunch;
+    const launchHiddenOnMac = launchViaMacOpen && !this.localVisible;
+    const macAppPath = launchViaMacOpen
       ? macAppPathFromChromeBinary(this.localChromeBinary)
       : "";
     const command = macAppPath ? "open" : this.localChromeBinary;
     const args = macAppPath
-      ? ["-g", "-j", "-n", macAppPath, "--args", ...chromeArgs]
+      ? ["-g", ...(this.localVisible ? [] : ["-j"]), "-n", macAppPath, "--args", ...chromeArgs]
       : chromeArgs;
     this.log(
       `spawning ${instance.label} ${
@@ -741,6 +774,17 @@ export class ChromeSidecarManager {
     );
     const proc = spawn(command, args, { detached: true, stdio: "ignore" });
     proc.unref?.();
+  }
+
+  visiblePositionForInstance(instance) {
+    if (!this.localVisible) return this.hiddenWindowPosition;
+    const explicit = this.visibleWindowPositions[instance.index];
+    if (explicit) return formatPosition(explicit);
+    const col = instance.index % this.visibleGridColumns;
+    const row = Math.floor(instance.index / this.visibleGridColumns);
+    const left = this.visibleGridOrigin.left + col * (this.viewport.width + this.visibleGridGapX);
+    const top = this.visibleGridOrigin.top + row * (this.viewport.height + 80 + this.visibleGridGapY);
+    return formatPosition({ left, top });
   }
 
   async isCdpReady(cdpUrl) {

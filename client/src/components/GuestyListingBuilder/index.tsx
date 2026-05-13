@@ -4049,7 +4049,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const subElapsedSec = Math.floor((subElapsedMs % 60000) / 1000);
                               const subElapsedStr = `${subElapsedMin}:${String(subElapsedSec).padStart(2, "0")}`;
                               const progressText = hasWindowProgress
-                                ? `${completedWindows}/${totalWindows} windows${hasSubProgress ? ` · ${completedSubChecks}/${totalSubChecks} checks` : ""} · ${completedPercent}%`
+                                ? `${currentWindow != null ? `window ${currentWindow}/${totalWindows}` : `${completedWindows}/${totalWindows} windows`}${hasSubProgress ? ` · ${completedSubChecks}/${totalSubChecks} checks` : ""} · ${completedPercent}%`
                                 : `${Math.max(0, Math.min(100, refreshProgress.percent))}%`;
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
