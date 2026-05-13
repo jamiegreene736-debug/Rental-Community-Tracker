@@ -351,6 +351,31 @@ export default function Home() {
     queryKey: ["/api/community/drafts"],
   });
 
+  type DashboardMinimumStay = {
+    minimumStayNights: number | null;
+    minimumStayEvidence: string | null;
+    minimumStaySourceUrl: string | null;
+  };
+  type DashboardMinimumStayMap = Record<number, DashboardMinimumStay>;
+  const { data: minimumStayData } = useQuery<DashboardMinimumStayMap>({
+    queryKey: ["/api/dashboard/minimum-stays"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const activeProperties = useMemo(() => {
+    return properties.map((p) => {
+      const stay = minimumStayData?.[p.id];
+      if (!stay || typeof stay.minimumStayNights !== "number") return p;
+      return {
+        ...p,
+        minimumStayNights: stay.minimumStayNights,
+        minimumStayEvidence: stay.minimumStayEvidence,
+        minimumStaySourceUrl: stay.minimumStaySourceUrl,
+      };
+    });
+  }, [minimumStayData]);
+
   // Map community drafts → Property-shaped rows so they show up in
   // the main table next to the active 11 properties. Synthetic
   // negative `id` ensures no collision with active property ids —
@@ -392,6 +417,7 @@ export default function Home() {
       const unitDetails = isSingle
         ? (u1Br > 0 ? `${u1Br}BR standalone` : "Standalone (draft)")
         : (u1Br > 0 && u2Br > 0 ? `${u1Br}BR + ${u2Br}BR` : "Two units (draft)");
+      const guestyStay = minimumStayData?.[-d.id];
       return {
         id: -d.id, // negative so id-keyed caches never collide with active rows
         draftId: d.id,
@@ -409,23 +435,23 @@ export default function Home() {
         bathrooms: totalBath,
         lowPrice: d.estimatedLowRate ?? d.suggestedRate ?? null,
         highPrice: d.estimatedHighRate ?? null,
-        minimumStayNights: d.minimumStayNights ?? null,
-        minimumStayEvidence: d.minimumStayEvidence ?? null,
-        minimumStaySourceUrl: d.minimumStaySourceUrl ?? null,
+        minimumStayNights: d.minimumStayNights ?? guestyStay?.minimumStayNights ?? null,
+        minimumStayEvidence: d.minimumStayEvidence ?? guestyStay?.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: d.minimumStaySourceUrl ?? guestyStay?.minimumStaySourceUrl ?? null,
         multiUnit: !isSingle,
         unitDetails,
         url: d.sourceUrl ?? "",
       };
     });
-  }, [communityDraftsDataForRows]);
+  }, [communityDraftsDataForRows, minimumStayData]);
 
   // Combined list used by every downstream calc (qualityScores,
   // baseRates, communities/islands filters, the rendered rows).
   // Active properties first so they sort to the top by default;
   // drafts append below until the user changes sort order.
   const allProperties = useMemo(
-    () => [...properties, ...draftsAsProperties],
-    [draftsAsProperties],
+    () => [...activeProperties, ...draftsAsProperties],
+    [activeProperties, draftsAsProperties],
   );
 
   const qualityScores = useMemo(() => {

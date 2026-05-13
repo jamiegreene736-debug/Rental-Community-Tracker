@@ -3178,6 +3178,67 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/dashboard/minimum-stays
+  //
+  // Dashboard Min Stay values for mapped listings. Community research stores
+  // source-backed HOA/resort rules on community_drafts, but the legacy
+  // hardcoded dashboard rows do not have draft metadata. For those rows, use
+  // the current Guesty listing booking terms instead of guessing from OTA
+  // search results.
+  app.get("/api/dashboard/minimum-stays", async (_req, res) => {
+    try {
+      const map = await storage.getGuestyPropertyMap();
+      if (map.length === 0) return res.json({});
+
+      const resp = await guestyRequest(
+        "GET",
+        `/listings?limit=200&fields=_id%20terms%20title%20nickname`,
+      ) as { results?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+      const listings = Array.isArray(resp) ? resp : (resp.results ?? []);
+      const byId = new Map<string, Record<string, unknown>>(
+        listings.map((l) => [l._id as string, l]),
+      );
+
+      const asPositiveInt = (value: unknown): number | null => {
+        const n = typeof value === "number"
+          ? value
+          : typeof value === "string"
+            ? Number(value.replace(/[^\d.]/g, ""))
+            : NaN;
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return Math.round(n);
+      };
+
+      const result: Record<number, {
+        minimumStayNights: number | null;
+        minimumStayEvidence: string | null;
+        minimumStaySourceUrl: string | null;
+      }> = {};
+
+      for (const m of map) {
+        const listing = byId.get(m.guestyListingId);
+        if (!listing) continue;
+        const terms = (listing.terms && typeof listing.terms === "object")
+          ? listing.terms as Record<string, unknown>
+          : {};
+        const minNights = asPositiveInt(
+          terms.minNights ?? terms.minimumNights ?? terms.minLOS ?? terms.minimumStay,
+        );
+        if (minNights == null) continue;
+        const title = String(listing.nickname || listing.title || "mapped Guesty listing");
+        result[m.propertyId] = {
+          minimumStayNights: minNights,
+          minimumStayEvidence: `Guesty booking terms for ${title} show a ${minNights}-night minimum.`,
+          minimumStaySourceUrl: "",
+        };
+      }
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch minimum stays", message: err.message });
+    }
+  });
+
   app.get("/api/dashboard/revenue-week", async (_req, res) => {
     const now = new Date();
     const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
