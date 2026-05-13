@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useLocation } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
@@ -641,6 +642,7 @@ function ChannelMarkupCard({
 
 export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
@@ -1654,12 +1656,47 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
 
-      if (propertyId) {
+      let syncPropertyId = propertyId;
+      try {
+        const importRes = await fetch("/api/community/import-guesty-listing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ guestyListingId: result.listingId }),
+        });
+        if (importRes.ok) {
+          const imported = await importRes.json().catch(() => null) as {
+            draft?: { id?: number; name?: string; listingTitle?: string | null };
+            mapping?: { propertyId?: number };
+            imported?: boolean;
+          } | null;
+          const importedDraftId = imported?.draft?.id;
+          if (typeof imported?.mapping?.propertyId === "number") {
+            syncPropertyId = imported.mapping.propertyId;
+          } else if (typeof importedDraftId === "number") {
+            syncPropertyId = -importedDraftId;
+          }
+          await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+          if (imported?.imported) {
+            toast({
+              title: "Saved to dashboard",
+              description: `${imported.draft?.listingTitle || imported.draft?.name || "Guesty listing"} is now available on the dashboard.`,
+              duration: 7000,
+            });
+          }
+        } else {
+          const error = await importRes.json().catch(() => ({})) as { error?: string; message?: string };
+          console.warn("Guesty listing created but dashboard import failed", error);
+        }
+      } catch (e) {
+        console.warn("Guesty listing created but dashboard import failed", e);
+      }
+
+      if (syncPropertyId) {
         try {
           await fetch("/api/builder/schedule-sync", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ propertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
+            body: JSON.stringify({ propertyId: syncPropertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
           });
           toast({ title: "Availability sync scheduled", description: "Blackout dates will be pushed to Guesty in ~1 hour.", duration: 6000 });
         } catch {
@@ -1668,7 +1705,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     }
     onBuildComplete?.({ listingId: result.listingId });
-  }, [effectivePropertyData, building, conn, onBuildComplete, toast]);
+  }, [effectivePropertyData, building, conn, onBuildComplete, queryClient, toast]);
 
   // ── Push updates ──────────────────────────────────────────────────────────
   const handleUpdate = useCallback(async () => {
