@@ -671,8 +671,9 @@ export default function Home() {
 
   // Reverse-image-search status for the Photo Match column. One row
   // per photo folder. The per-property status is the WORST across that
-  // property's folders (FOUND beats UNKNOWN beats CLEAN) — a match on
-  // any one folder is what Jamie cares about.
+  // property's folders. FOUND beats CLEAN/UNKNOWN because a match on
+  // any one folder is what Jamie cares about; UNKNOWN is inconclusive,
+  // not match evidence.
   type PhotoStatus = "clean" | "found" | "unknown";
   type PhotoCheckRow = {
     folder: string;
@@ -715,7 +716,17 @@ export default function Home() {
   // the worst across that property's folders (priority: found > unknown > clean).
   // `null` = no data yet for any of this property's folders (never scanned).
   type PhotoAggStatus = PhotoStatus | null;
-  type PhotoAgg = { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus; lastCheckedAt: string | null; matchCounts: { airbnb: number; vrbo: number; booking: number }; hasScannableFolders: boolean; folders: string[] };
+  type PhotoAgg = {
+    airbnb: PhotoAggStatus;
+    vrbo: PhotoAggStatus;
+    booking: PhotoAggStatus;
+    lastCheckedAt: string | null;
+    matchCounts: { airbnb: number; vrbo: number; booking: number };
+    hasScannableFolders: boolean;
+    folders: string[];
+    checkedRows: number;
+    errorMessages: string[];
+  };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
     const draftsByPropertyId = new Map<number, CommunityDraft>();
@@ -753,16 +764,30 @@ export default function Home() {
         if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`);
       }
       const folders = Array.from(folderSet);
-      let agg: PhotoAgg = { airbnb: null, vrbo: null, booking: null, lastCheckedAt: null, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, hasScannableFolders: folders.length > 0, folders };
+      let agg: PhotoAgg = {
+        airbnb: null,
+        vrbo: null,
+        booking: null,
+        lastCheckedAt: null,
+        matchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
+        hasScannableFolders: folders.length > 0,
+        folders,
+        checkedRows: 0,
+        errorMessages: [],
+      };
       for (const f of folders) {
         const row = photoCheckByFolder.get(f);
         if (!row) continue;
+        agg.checkedRows += 1;
         agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
         agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
         agg.booking = worst(agg.booking, row.bookingStatus);
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
+        if (row.errorMessage && !agg.errorMessages.includes(row.errorMessage)) {
+          agg.errorMessages.push(row.errorMessage);
+        }
         if (row.checkedAt && (!agg.lastCheckedAt || row.checkedAt > agg.lastCheckedAt)) {
           agg.lastCheckedAt = row.checkedAt;
         }
@@ -1042,7 +1067,7 @@ export default function Home() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[96px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, amber = not yet checked / Lens error">
+                <TableHead className="w-[96px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photo Match</span>
                     <Button
@@ -1342,10 +1367,12 @@ export default function Home() {
                       //   - green ✓  → photos not found on that platform
                       //   - red ✗    → photos matched to ≥2 other listings
                       //                on that platform (likely re-post)
-                      //   - amber ⚠  → not yet scanned OR Lens errored.
-                      //                Check back after the automated scan.
+                      //   - gray ?   → not yet scanned or inconclusive.
+                      // Unknown is deliberately neutral here: it means
+                      // the scanner could not classify the folder, not
+                      // that a possible OTA photo match exists.
                       const agg = photoByProperty.get(property.id);
-                      type Tone = "ok" | "warn" | "bad" | "na";
+                      type Tone = "ok" | "unknown" | "bad" | "na";
                       // "na" = the property has no scannable folders
                       // (all unit photoFolders are placeholders or
                       // community-*). The scanner won't write rows for
@@ -1358,13 +1385,13 @@ export default function Home() {
                         if (noFolders) return "na";
                         if (s === "clean") return "ok";
                         if (s === "found") return "bad";
-                        return "warn"; // unknown or null
+                        return "unknown"; // unknown or null: inconclusive, not a match
                       };
                       const PAL: Record<Tone, { bg: string; glyph: string }> = {
-                        ok:   { bg: "#16a34a", glyph: "✓" },
-                        warn: { bg: "#f59e0b", glyph: "⚠" },
-                        bad:  { bg: "#dc2626", glyph: "✗" },
-                        na:   { bg: "#9ca3af", glyph: "–" },
+                        ok:      { bg: "#16a34a", glyph: "✓" },
+                        unknown: { bg: "#9ca3af", glyph: "?" },
+                        bad:     { bg: "#dc2626", glyph: "✗" },
+                        na:      { bg: "#9ca3af", glyph: "–" },
                       };
                       const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number }> = [
                         { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0 },
@@ -1373,6 +1400,7 @@ export default function Home() {
                       ];
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
+                      const errorPreview = agg?.errorMessages?.[0]?.replace(/\s+/g, " ").slice(0, 180);
                       return (
                         <div className="flex gap-0.5 justify-center items-center" data-testid={`photo-match-${property.id}`}>
                           {items.map((it) => {
@@ -1382,8 +1410,8 @@ export default function Home() {
                               noFolders ? `${it.name}: no scannable units — backfill real unit numbers in unit-builder-data to enable scanning` :
                               it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                               it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found (last checked ${stamp})` :
-                              it.status === "unknown" ? `${it.name}: Lens error on last run (${stamp}) — will retry` :
-                              `${it.name}: waiting for automated scan`;
+                              it.status === "unknown" ? `${it.name}: inconclusive, not a match (${stamp})${errorPreview ? ` — ${errorPreview}` : ""}` :
+                              `${it.name}: not checked yet`;
                             return (
                               <span
                                 key={it.letter}

@@ -75,6 +75,7 @@ const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 
 export type PlatformStatus = "clean" | "found" | "unknown";
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
+type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
 type PhotoCandidate = {
   filename: string;
   hidden?: boolean | null;
@@ -132,30 +133,38 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
   return tokens.length > 0 ? Array.from(new Set(tokens)) : null;
 }
 
-async function callGoogleLens(imageUrl: string): Promise<any[] | null> {
-  if (!SEARCHAPI_KEY) return null;
+function compactErrorDetail(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
+  if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
   try {
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${SEARCHAPI_KEY}`,
     );
     if (!resp.ok) {
-      console.error(`[photo-listing-scanner] Lens HTTP ${resp.status} for ${imageUrl}`);
-      return null;
+      const body = await resp.text().catch(() => "");
+      const detail = compactErrorDetail(body);
+      const msg = `Google Lens/SearchAPI HTTP ${resp.status}${detail ? `: ${detail}` : ""}`;
+      console.error(`[photo-listing-scanner] ${msg} for ${imageUrl}`);
+      return { ok: false, error: msg };
     }
     const data = await resp.json() as any;
     const rowsFrom = (source: string, rows: any[] | undefined): any[] =>
       Array.isArray(rows)
         ? rows.map((row, idx) => ({ ...row, __lensSource: source, __lensPosition: Number(row?.position ?? idx + 1) }))
         : [];
-    return [
+    return { ok: true, rows: [
       ...rowsFrom("visual", data.visual_matches),
       ...rowsFrom("page", data.pages_with_matching_images),
       ...rowsFrom("image", data.image_results),
       ...rowsFrom("organic", data.organic_results),
-    ];
+    ] };
   } catch (e: any) {
-    console.error(`[photo-listing-scanner] Lens error for ${imageUrl}: ${e?.message}`);
-    return null;
+    const msg = `Google Lens/SearchAPI request failed: ${e?.message ?? String(e)}`;
+    console.error(`[photo-listing-scanner] ${msg} for ${imageUrl}`);
+    return { ok: false, error: msg };
   }
 }
 
@@ -346,6 +355,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     booking: { photoHitCount: 0, matches: [] },
   };
   let anyLensSucceeded = false;
+  const lensErrors: string[] = [];
 
   // Verification tokens prefer the hand-maintained FOLDER_UNIT_TOKENS
   // map, then the folder-name hint, then the latest replacement-unit
@@ -389,8 +399,12 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     const photoUrl = `${PUBLIC_HOST}/photos/${folder}/${label.filename}`;
     result.photosChecked += 1;
     result.lensCalls += 1;
-    const matches = await callGoogleLens(photoUrl);
-    if (matches === null) continue;
+    const lens = await callGoogleLens(photoUrl);
+    if (!lens.ok) {
+      lensErrors.push(lens.error);
+      continue;
+    }
+    const matches = lens.rows;
     anyLensSucceeded = true;
 
     for (const host of HOSTS) {
@@ -437,6 +451,10 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   result.airbnbStatus  = finalize("airbnb");
   result.vrboStatus    = finalize("vrbo");
   result.bookingStatus = finalize("booking");
+  if (!anyLensSucceeded && lensErrors.length > 0) {
+    const distinct = Array.from(new Set(lensErrors)).slice(0, 2);
+    result.errorMessage = `Lens unavailable for selected unit photos: ${distinct.join("; ")}`;
+  }
   result.airbnbMatches  = tally.airbnb.matches.slice(0, 20);
   result.vrboMatches    = tally.vrbo.matches.slice(0, 20);
   result.bookingMatches = tally.booking.matches.slice(0, 20);
