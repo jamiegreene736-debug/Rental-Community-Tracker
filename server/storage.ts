@@ -345,11 +345,19 @@ export class DatabaseStorage implements IStorage {
     if (!filters?.includePast) {
       clauses.push(gte(manualReservations.checkOut, new Date().toISOString().slice(0, 10)));
     }
-    return db
-      .select()
-      .from(manualReservations)
-      .where(and(...clauses))
-      .orderBy(manualReservations.checkIn);
+    try {
+      return await db
+        .select()
+        .from(manualReservations)
+        .where(and(...clauses))
+        .orderBy(manualReservations.checkIn);
+    } catch (error: any) {
+      if (error?.code === "42P01" || /manual_reservations.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("manual_reservations table is missing; returning no manual reservations until db:push runs");
+        return [];
+      }
+      throw error;
+    }
   }
 
   async getManualReservation(id: number): Promise<ManualReservation | undefined> {
