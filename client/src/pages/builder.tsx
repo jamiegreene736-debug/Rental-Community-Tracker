@@ -234,10 +234,15 @@ export default function Builder() {
   const propertyData = useMemo<GuestyPropertyData | null>(() => {
     if (!property) return null;
 
-    const totalGuests = property.units.reduce((s, u) => s + u.maxGuests, 0);
-    const totalSqft = property.units.reduce((s, u) => s + parseSqft(u.sqft), 0);
-    const totalBedrooms = property.units.reduce((s, u) => s + u.bedrooms, 0);
-    const totalBathrooms = property.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0);
+    const units = Array.isArray(property.units) ? property.units : [];
+    const communityPhotos = Array.isArray(property.communityPhotos) ? property.communityPhotos : [];
+    const getLabel = typeof labelFor === "function" ? labelFor : (() => null);
+    const hidden = typeof isHidden === "function" ? isHidden : (() => false);
+
+    const totalGuests = units.reduce((s, u) => s + (Number(u.maxGuests) || 0), 0);
+    const totalSqft = units.reduce((s, u) => s + parseSqft(String(u.sqft ?? "")), 0);
+    const totalBedrooms = units.reduce((s, u) => s + (Number(u.bedrooms) || 0), 0);
+    const totalBathrooms = units.reduce((s, u) => s + (parseFloat(String(u.bathrooms ?? "")) || 0), 0);
     const listingRooms = buildListingRooms(propertyId);
 
     const basePrice = pricing?.totalBaseSellRate ?? 0;
@@ -249,11 +254,12 @@ export default function Builder() {
     // that were in the original static list. New rescraped photos rely on
     // Claude labels via labelFor().
     const staticLabelFor = (folder: string, filename: string): string | undefined => {
-      const inCommunity = property.communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
+      const inCommunity = communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
       if (inCommunity) return inCommunity.label;
-      for (const u of property.units) {
+      for (const u of units) {
         if (u.photoFolder !== folder) continue;
-        const hit = u.photos.find((p) => p.filename === filename);
+        const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
+        const hit = unitPhotos.find((p) => p.filename === filename);
         if (hit) return hit.label;
       }
       return undefined;
@@ -265,11 +271,14 @@ export default function Builder() {
     // position hint (when we have one) and partition the "begin" list so we
     // can thread one community tile between each unit's run — the published
     // channels render better with a visual break between unit A and unit B.
-    const communityFiles = folderFiles[property.communityPhotoFolder] ?? property.communityPhotos.map((p) => p.filename);
-    const knownComm = new Map(property.communityPhotos.map((p) => [p.filename, p]));
+    const communityFolderFiles = folderFiles[property.communityPhotoFolder];
+    const communityFiles = Array.isArray(communityFolderFiles)
+      ? communityFolderFiles
+      : communityPhotos.map((p) => p.filename);
+    const knownComm = new Map(communityPhotos.map((p) => [p.filename, p]));
     const communityBeginAll = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
     const communityEnd      = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
-    const communityBeginVisible = communityBeginAll.filter((f) => !isHidden(property.communityPhotoFolder, f));
+    const communityBeginVisible = communityBeginAll.filter((f) => !hidden(property.communityPhotoFolder, f));
 
     // Reserve N-1 tiles to sit between units (one separator per gap), and
     // put the rest up-front as the "community opener" block. For the common
@@ -283,7 +292,7 @@ export default function Builder() {
     const pushCommunity = (filename: string, bandLabel: string) => {
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
         source: bandLabel,
       });
     };
@@ -293,30 +302,34 @@ export default function Builder() {
       pushCommunity(filename, `Community — ${property.complexName}`);
     }
 
-    property.units.forEach((u, i) => {
+    units.forEach((u, i) => {
       // Prefer the live folder listing (what's actually on disk after any
       // rescrape), fall back to the static u.photos array.
-      const files = folderFiles[u.photoFolder] ?? u.photos.map((p) => p.filename);
+      const unitFolderFiles = folderFiles[u.photoFolder];
+      const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
+      const files = Array.isArray(unitFolderFiles)
+        ? unitFolderFiles
+        : unitPhotos.map((p) => p.filename);
       for (const filename of files) {
-        if (isHidden(u.photoFolder, filename)) continue;
+        if (hidden(u.photoFolder, filename)) continue;
         photos.push({
           url: `${origin}/photos/${u.photoFolder}/${filename}`,
-          caption: labelFor(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
+          caption: getLabel(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         });
       }
       // After each unit (except the last one), insert one community
       // separator so the published feed has a visual break between units.
-      if (i < property.units.length - 1 && communitySeparators[i]) {
+      if (i < units.length - 1 && communitySeparators[i]) {
         pushCommunity(communitySeparators[i], `Community — ${property.complexName}`);
       }
     });
 
     for (const filename of communityEnd) {
-      if (isHidden(property.communityPhotoFolder, filename)) continue;
+      if (hidden(property.communityPhotoFolder, filename)) continue;
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
         source: `Community — ${property.complexName}`,
       });
     }
@@ -359,19 +372,19 @@ export default function Builder() {
       touristTaxAccount: property.touristTaxAccount,
       descriptions: {
         title: property.bookingTitle,
-        summary: `${property.units.length === 1 ? `${SINGLE_LISTING_SAMPLE_DISCLOSURE}\n\n---` : LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
+        summary: `${units.length === 1 ? `${SINGLE_LISTING_SAMPLE_DISCLOSURE}\n\n---` : LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
         space: [
-          property.units
+          units
             .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
             .join("\n\n"),
-          property.units.length >= 2 && walkResult
+          units.length >= 2 && walkResult
             ? `\n\n${walkResult.description}`
             : "",
         ].join(""),
         neighborhood: property.neighborhood,
         transit: property.transit,
         houseRules:
-          property.units.length === 1
+          units.length === 1
             ? "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am."
             : "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
       },
