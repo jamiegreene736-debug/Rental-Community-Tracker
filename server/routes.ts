@@ -27,7 +27,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
-import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
+import { resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -10572,16 +10572,20 @@ export async function registerRoutes(
       address: body.address,
     });
     const isFloridaProfile = profile.jurisdiction === "fort_myers_beach_fl" || profile.jurisdiction === "florida";
-    const dbprLicenseValue = body.dbprLicense || (isFloridaProfile ? body.taxMapKey : null);
-    const touristTaxAccountValue = body.touristTaxAccount || (isFloridaProfile ? body.tatLicense : null);
+    const taxMapKeyValue = usableLicenseValue(body.taxMapKey);
+    const tatLicenseValue = usableLicenseValue(body.tatLicense);
+    const getLicenseValue = usableLicenseValue(body.getLicense);
+    const strPermitValue = usableLicenseValue(body.strPermit);
+    const dbprLicenseValue = usableLicenseValue(body.dbprLicense) || (isFloridaProfile ? taxMapKeyValue : null);
+    const touristTaxAccountValue = usableLicenseValue(body.touristTaxAccount) || (isFloridaProfile ? tatLicenseValue : null);
     return res.json({
       ok: true,
       profile,
       values: {
-        taxMapKey: body.taxMapKey || null,
-        tatLicense: body.tatLicense || null,
-        getLicense: body.getLicense || null,
-        strPermit: body.strPermit || null,
+        taxMapKey: taxMapKeyValue,
+        tatLicense: tatLicenseValue,
+        getLicense: getLicenseValue,
+        strPermit: strPermitValue,
         dbprLicense: dbprLicenseValue || null,
         touristTaxAccount: touristTaxAccountValue || null,
       },
@@ -10616,10 +10620,15 @@ export async function registerRoutes(
         state: String(addressForProfile.state ?? ""),
       });
       const isFloridaProfile = profile.jurisdiction === "fort_myers_beach_fl" || profile.jurisdiction === "florida";
-      const effectiveDbprLicense = dbprLicense || (isFloridaProfile ? taxMapKey : undefined);
-      const effectiveTouristTaxAccount = touristTaxAccount || (isFloridaProfile ? tatLicense : undefined);
-      const effectiveTaxMapKey = isFloridaProfile ? undefined : taxMapKey;
-      const effectiveTatLicense = isFloridaProfile ? undefined : tatLicense;
+      const effectiveGetLicense = usableLicenseValue(getLicense);
+      const effectiveStrPermit = usableLicenseValue(strPermit);
+      const effectiveDbprLicense = usableLicenseValue(dbprLicense) || (isFloridaProfile ? usableLicenseValue(taxMapKey) : undefined);
+      const effectiveTouristTaxAccount = usableLicenseValue(touristTaxAccount) || (isFloridaProfile ? usableLicenseValue(tatLicense) : undefined);
+      const effectiveTaxMapKey = isFloridaProfile ? undefined : usableLicenseValue(taxMapKey);
+      const effectiveTatLicense = isFloridaProfile ? undefined : usableLicenseValue(tatLicense);
+      if (!effectiveTaxMapKey && !effectiveTatLicense && !effectiveGetLicense && !effectiveStrPermit && !effectiveDbprLicense && !effectiveTouristTaxAccount) {
+        return res.status(400).json({ error: "At least one real, non-sample compliance identifier is required" });
+      }
 
       // ── Step 1: Guesty tags (internal reference) ────────────────────────────
       const existingTags: string[] = Array.isArray(current.tags) ? current.tags : [];
@@ -10633,16 +10642,16 @@ export async function registerRoutes(
       );
       if (effectiveTaxMapKey) stripped.push(`TMK:${effectiveTaxMapKey}`);
       if (effectiveTatLicense) stripped.push(`TAT:${effectiveTatLicense}`);
-      if (getLicense) stripped.push(`GET:${getLicense}`);
-      if (strPermit) stripped.push(`STR:${strPermit}`);
+      if (effectiveGetLicense) stripped.push(`GET:${effectiveGetLicense}`);
+      if (effectiveStrPermit) stripped.push(`STR:${effectiveStrPermit}`);
       if (effectiveDbprLicense) stripped.push(`DBPR:${effectiveDbprLicense}`);
       if (effectiveTouristTaxAccount) stripped.push(`TDT:${effectiveTouristTaxAccount}`);
       await guestyRequest("PUT", `/listings/${listingId}`, { tags: stripped });
 
       // ── Step 2: licenseNumber field — Guesty's top-level "Registration/License
       //            Number" field. Use local STR first, then state lodging/tax IDs.
-      const licenseNumValue = strPermit || effectiveDbprLicense || effectiveTatLicense || getLicense || null;
-      const taxIdValue = effectiveTouristTaxAccount || getLicense || null;
+      const licenseNumValue = effectiveStrPermit || effectiveDbprLicense || effectiveTatLicense || effectiveGetLicense || null;
+      const taxIdValue = effectiveTouristTaxAccount || effectiveGetLicense || null;
       const licPayload: Record<string, string> = {};
       if (licenseNumValue) licPayload.licenseNumber = licenseNumValue;
       if (taxIdValue) licPayload.taxId = taxIdValue;
@@ -10685,7 +10694,7 @@ export async function registerRoutes(
           { name: "number", value: effectiveTatLicense },
         ];
         if (effectiveTaxMapKey) contentData.push({ name: "tmk_number", value: effectiveTaxMapKey });
-        if (strPermit) contentData.push({ name: "permit_number", value: strPermit });
+        if (effectiveStrPermit) contentData.push({ name: "permit_number", value: effectiveStrPermit });
         bookingPayload["channels"] = {
           bookingCom: {
             license: {
@@ -10722,10 +10731,10 @@ export async function registerRoutes(
         notesWithoutOldBlock = notesWithoutOldBlock.split(marker)[0].trimEnd();
       }
       const complianceLines: string[] = [COMPLIANCE_MARKER, profile.title];
-      if (strPermit) complianceLines.push(`Short-Term Rental Registration / Permit: ${strPermit}`);
+      if (effectiveStrPermit) complianceLines.push(`Short-Term Rental Registration / Permit: ${effectiveStrPermit}`);
       if (effectiveDbprLicense) complianceLines.push(`Florida DBPR Vacation Rental License: ${effectiveDbprLicense}`);
       if (effectiveTouristTaxAccount) complianceLines.push(`Tourist Development Tax Account: ${effectiveTouristTaxAccount}`);
-      if (getLicense) complianceLines.push(`General Excise Tax ID (GET): ${getLicense}`);
+      if (effectiveGetLicense) complianceLines.push(`General Excise Tax ID (GET): ${effectiveGetLicense}`);
       if (effectiveTatLicense) complianceLines.push(`Transient Accommodations Tax ID (TAT): ${effectiveTatLicense}`);
       const newNotes = [notesWithoutOldBlock, complianceLines.join("\n")].filter(Boolean).join("\n\n");
       await guestyRequest("PUT", `/listings/${listingId}`, { publicDescription: { notes: newNotes } });
@@ -10756,8 +10765,8 @@ export async function registerRoutes(
       const tagsVerified =
         (!effectiveTaxMapKey || savedTags.some(t => t.includes(effectiveTaxMapKey))) &&
         (!effectiveTatLicense || savedTags.some(t => t.includes(effectiveTatLicense))) &&
-        (!getLicense || savedTags.some(t => t.includes(getLicense))) &&
-        (!strPermit || savedTags.some(t => t.includes(strPermit))) &&
+        (!effectiveGetLicense || savedTags.some(t => t.includes(effectiveGetLicense))) &&
+        (!effectiveStrPermit || savedTags.some(t => t.includes(effectiveStrPermit))) &&
         (!effectiveDbprLicense || savedTags.some(t => t.includes(effectiveDbprLicense))) &&
         (!effectiveTouristTaxAccount || savedTags.some(t => t.includes(effectiveTouristTaxAccount)));
       const notesVerified = savedNotes.includes(COMPLIANCE_MARKER);

@@ -12,7 +12,7 @@ import PhotoCurator from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
-import { resolveLicenseComplianceProfile, type LicenseFieldKey } from "@shared/license-compliance";
+import { isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey } from "@shared/license-compliance";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -880,12 +880,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
       const missingRequired = (data.profile?.requirements ?? [])
-        .filter((req: any) => req.required && !data.values?.[req.key])
+        .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
       toast({
         title: data.profile?.title ?? "License requirements loaded",
         description: missingRequired.length
-          ? `Still missing: ${missingRequired.join(", ")}`
+          ? `Still missing real values: ${missingRequired.join(", ")}`
           : "All mapped required license values are present.",
       });
     } catch (e: any) {
@@ -3825,14 +3825,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginTop: 14 }}>
                             {complianceProfile.requirements.map((req) => {
                               const value = complianceValueFor(req.key);
+                              const isPlaceholder = isPlaceholderLicenseValue(value);
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
                                     {req.shortLabel}{req.required ? " Required" : ""}
                                   </div>
                                   <div style={{ fontSize: 13, fontFamily: "monospace", display: "flex", justifyContent: "space-between", gap: 8 }}>
-                                    <span>{value || `sample: ${req.sample}`}</span>
-                                    {value && (
+                                    <span>{value ? `${isPlaceholder ? "sample: " : ""}${value}` : `sample: ${req.sample}`}</span>
+                                    {value && !isPlaceholder && (
                                       <button
                                         style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                         onClick={() => { navigator.clipboard.writeText(value); toast({ title: `Copied ${req.shortLabel}` }); }}
@@ -3840,6 +3841,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       >📋</button>
                                     )}
                                   </div>
+                                  {isPlaceholder && (
+                                    <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
+                                      Sample value only. Enter or pull the real {req.shortLabel} before pushing compliance.
+                                    </div>
+                                  )}
                                   <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 5, lineHeight: 1.35 }}>
                                     {req.helpText}
                                   </div>
@@ -3860,7 +3866,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     }}
                                     data-testid={`btn-pull-${req.key}`}
                                   >
-                                    {value ? `Refresh ${req.shortLabel}` : `Pull ${req.shortLabel}`}
+                                    {value && !isPlaceholder ? `Refresh ${req.shortLabel}` : `Pull ${req.shortLabel}`}
                                   </button>
                                 </div>
                               );

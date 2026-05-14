@@ -28,6 +28,37 @@ function norm(value: unknown): string {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+export function isPlaceholderLicenseValue(value: unknown): boolean {
+  const raw = String(value ?? "").trim();
+  if (!raw) return true;
+
+  const normalized = norm(raw);
+  if (/\b(sample|example|placeholder|dummy|test)\b/.test(normalized)) return true;
+  if (normalized.includes("license number")) return true;
+  if (normalized.includes("account number")) return true;
+  if (normalized.includes("county tdt account")) return true;
+
+  const digitsOnly = raw.replace(/\D/g, "");
+  if (/9{4,}/.test(digitsOnly)) return true;
+  if (/^(cnd|dwe)\s+(or|and)\s+(cnd|dwe)/.test(normalized)) return true;
+
+  const knownSamples = new Set([
+    "420150080001",
+    "ta 023 450 1234 01",
+    "ge 023 450 1234 01",
+    "tvr 2024 012 or tvnc 0342",
+    "cnd4600000 or dwe4600000",
+    "19 0096",
+    "19 0096 or lbtr 999999",
+  ]);
+  return knownSamples.has(normalized);
+}
+
+export function usableLicenseValue(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  return raw && !isPlaceholderLicenseValue(raw) ? raw : null;
+}
+
 export function resolveLicenseComplianceProfile(input: {
   city?: string | null;
   state?: string | null;
