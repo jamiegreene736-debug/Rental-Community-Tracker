@@ -1203,7 +1203,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [normalizeScope, setNormalizeScope] = useState<"this" | "all">("this");
   const [normalizeCurrent, setNormalizeCurrent] = useState(0);
   const [normalizeTotal, setNormalizeTotal] = useState(0);
-  const [normalizeListingName, setNormalizeListingName] = useState<string>("");
+  const [normalizePhotoListingName, setNormalizePhotoListingName] = useState<string>("");
   const [normalizeFixed, setNormalizeFixed] = useState(0);
   const [normalizeSkipped, setNormalizeSkipped] = useState(0);
   const [normalizeFailed, setNormalizeFailed] = useState(0);
@@ -1218,7 +1218,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setNormalizeScope(scope);
     setNormalizeCurrent(0);
     setNormalizeTotal(0);
-    setNormalizeListingName("");
+    setNormalizePhotoListingName("");
     setNormalizeFixed(0);
     setNormalizeSkipped(0);
     setNormalizeFailed(0);
@@ -1257,7 +1257,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           if (evt.type === "start") {
             setNormalizeListingCount(evt.listingCount);
           } else if (evt.type === "listing-start") {
-            setNormalizeListingName(evt.name);
+            setNormalizePhotoListingName(evt.name);
             setNormalizeTotal(evt.photoCount);
             setNormalizeCurrent(0);
           } else if (evt.type === "photo") {
@@ -5412,7 +5412,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     <div style={{ fontSize: 12, color: "#92400e" }}>
                                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
                                         <span>
-                                          ⏳ {normalizeScope === "all" ? `${normalizeListingName || "starting…"} — ` : ""}
+                                          ⏳ {normalizeScope === "all" ? `${normalizePhotoListingName || "starting…"} — ` : ""}
                                           photo {normalizeCurrent}/{normalizeTotal}
                                         </span>
                                         <span style={{ fontSize: 11, color: "#15803d" }}>✓ {normalizeFixed} fixed</span>
