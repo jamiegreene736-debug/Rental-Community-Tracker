@@ -213,6 +213,16 @@ function statusIcon(status: string) {
   return "…";
 }
 
+function normalizeListingName(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[–—-]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 // Channel markup push card. Lets the user set a per-channel price uplift
 // (e.g. +17% on Booking.com to recover the commission) and pushes it to
@@ -663,6 +673,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // mapped property (rather than just changing the push target while
   // the rest of the page stays on the previous property's data).
   const [propertyMap, setPropertyMap] = useState<Array<{ propertyId: number; guestyListingId: string }>>([]);
+  const autoMapAttemptRef = useRef<string | null>(null);
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
   // Per-listing "Push Compliance" button state so multiple in-flight
@@ -673,6 +684,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
+
+  const rememberPropertyMap = useCallback((propertyIdToMap: number, guestyListingId: string) => {
+    setPropertyMap((prev) => [
+      ...prev.filter((m) => m.propertyId !== propertyIdToMap),
+      { propertyId: propertyIdToMap, guestyListingId },
+    ]);
+    queryClient.invalidateQueries({ queryKey: ["/api/guesty-property-map"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
+  }, [queryClient]);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
   // VRBO compliance back-to-back without one button's busy spinner
   // blocking the other. Server-side, the VRBO push hits Guesty's UI via
@@ -1715,7 +1735,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   //      bedding, photos) showed the new property's data while the
   //      "push target" stayed pointed at the old one.
   useEffect(() => {
-    if (!propertyId || listings.length === 0 || propertyMap.length === 0) return;
+    if (!propertyId || listings.length === 0) return;
     const match = propertyMap.find((m) => m.propertyId === propertyId);
     if (match && listings.some((l) => l._id === match.guestyListingId)) {
       setSelectedId(match.guestyListingId);
@@ -1723,6 +1743,52 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setSelectedId("");
     }
   }, [propertyId, listings, propertyMap]);
+
+  // ── Repair old draft pages that have a matching Guesty listing but no map ──
+  // Earlier builds could import a just-created Guesty listing into a *new*
+  // draft and leave the builder's current draft unmapped. When we can prove
+  // there is exactly one Guesty listing with the same title/nickname, connect
+  // it automatically so the dropdown and dashboard green G recover together.
+  useEffect(() => {
+    if (!propertyId || propertyId >= 0 || listings.length === 0 || propertyMap.some((m) => m.propertyId === propertyId)) return;
+    const candidateNames = new Set(
+      [
+        propertyData?.nickname,
+        propertyData?.title,
+        propertyData?.descriptions?.title,
+      ]
+        .map((name) => normalizeListingName(name))
+        .filter(Boolean),
+    );
+    if (candidateNames.size === 0) return;
+    const exactMatches = listings.filter((listing) => {
+      const names = [listing.nickname, listing.title].map((name) => normalizeListingName(name)).filter(Boolean);
+      return names.some((name) => candidateNames.has(name));
+    });
+    if (exactMatches.length !== 1) return;
+
+    const match = exactMatches[0];
+    const attemptKey = `${propertyId}:${match._id}`;
+    if (autoMapAttemptRef.current === attemptKey) return;
+    autoMapAttemptRef.current = attemptKey;
+
+    fetch("/api/guesty-property-map", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ propertyId, guestyListingId: match._id }),
+    })
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error("Guesty property map repair failed");
+        rememberPropertyMap(propertyId, match._id);
+        setSelectedId(match._id);
+        toast({
+          title: "Guesty listing matched",
+          description: "This builder draft is now connected to the matching Guesty listing.",
+          duration: 6000,
+        });
+      })
+      .catch(() => { /* non-fatal; the user can still select manually */ });
+  }, [propertyId, listings, propertyMap, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap, toast]);
 
   // ── Load channel status when selection changes ─────────────────────────────
   const refreshChannelStatus = useCallback(() => {
@@ -1809,7 +1875,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         const importRes = await fetch("/api/community/import-guesty-listing", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ guestyListingId: result.listingId }),
+          body: JSON.stringify({ guestyListingId: result.listingId, propertyId }),
         });
         if (importRes.ok) {
           const imported = await importRes.json().catch(() => null) as {
@@ -1823,6 +1889,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           } else if (typeof importedDraftId === "number") {
             syncPropertyId = -importedDraftId;
           }
+          if (syncPropertyId) rememberPropertyMap(syncPropertyId, result.listingId);
           await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
           if (imported?.imported) {
             toast({
@@ -1846,6 +1913,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ propertyId: syncPropertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
           });
+          rememberPropertyMap(syncPropertyId, result.listingId);
           toast({ title: "Availability sync scheduled", description: "Blackout dates will be pushed to Guesty in ~1 hour.", duration: 6000 });
         } catch {
           // non-fatal
@@ -1853,7 +1921,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     }
     onBuildComplete?.({ listingId: result.listingId });
-  }, [effectivePropertyData, building, conn, onBuildComplete, queryClient, toast]);
+  }, [effectivePropertyData, building, conn, onBuildComplete, propertyId, queryClient, rememberPropertyMap, toast]);
 
   // ── Push updates ──────────────────────────────────────────────────────────
   const handleUpdate = useCallback(async () => {

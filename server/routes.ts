@@ -20149,6 +20149,38 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const existingMaps = await storage.getGuestyPropertyMap();
+      const requestedPropertyId = typeof req.body?.propertyId === "number" && Number.isInteger(req.body.propertyId)
+        ? req.body.propertyId
+        : null;
+      if (requestedPropertyId) {
+        const mapping = await storage.upsertGuestyPropertyMap(requestedPropertyId, guestyListingId);
+        const staleRows = existingMaps.filter(
+          (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== requestedPropertyId,
+        );
+        for (const row of staleRows) {
+          await db.delete(guestyPropertyMap).where(eq(guestyPropertyMap.propertyId, row.propertyId));
+        }
+
+        let draft = null;
+        let repairedAddress = false;
+        if (requestedPropertyId < 0) {
+          const existingDraft = await storage.getCommunityDraft(Math.abs(requestedPropertyId));
+          if (existingDraft) {
+            const repaired = await repairKnownCommunityDraftAddress(existingDraft);
+            draft = repaired.draft;
+            repairedAddress = repaired.repairedAddress;
+          }
+        }
+
+        return res.json({
+          draft,
+          mapping,
+          imported: false,
+          repairedAddress,
+          staleMappingsRemoved: staleRows.map((row) => row.propertyId),
+        });
+      }
+
       for (const row of existingMaps) {
         if (row.guestyListingId !== guestyListingId || row.propertyId >= 0) continue;
         const existingDraft = await storage.getCommunityDraft(Math.abs(row.propertyId));
