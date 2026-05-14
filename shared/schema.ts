@@ -79,7 +79,7 @@ export type ManualReservation = typeof manualReservations.$inferSelect;
 
 export const reservationAliases = pgTable("reservation_aliases", {
   id: serial("id").primaryKey(),
-  reservationId: text("reservation_id").notNull().unique(),
+  reservationId: text("reservation_id").notNull(),
   guestName: text("guest_name"),
   aliasEmail: text("alias_email").notNull(),
   simpleloginAliasId: integer("simplelogin_alias_id"),
@@ -151,7 +151,7 @@ export type BuyInEmail = typeof buyInEmails.$inferSelect;
 
 export const rentalAgreements = pgTable("rental_agreements", {
   id: serial("id").primaryKey(),
-  token: text("token").notNull().unique(),
+  token: text("token").notNull(),
   reservationId: text("reservation_id").notNull(),
   conversationId: text("conversation_id"),
   channel: text("channel").notNull(),
@@ -190,7 +190,7 @@ export type RentalAgreement = typeof rentalAgreements.$inferSelect;
 
 export const lodgifyBookings = pgTable("lodgify_bookings", {
   id: serial("id").primaryKey(),
-  lodgifyBookingId: integer("lodgify_booking_id").notNull().unique(),
+  lodgifyBookingId: integer("lodgify_booking_id").notNull(),
   propertyId: integer("property_id"),
   unitId: text("unit_id"),
   lodgifyPropertyId: integer("lodgify_property_id"),
@@ -454,7 +454,7 @@ export type PropertyMarketRate = typeof propertyMarketRates.$inferSelect;
 
 export const lodgifyPropertyMap = pgTable("lodgify_property_map", {
   id: serial("id").primaryKey(),
-  propertyId: integer("property_id").notNull().unique(),
+  propertyId: integer("property_id").notNull(),
   lodgifyPropertyId: text("lodgify_property_id").notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -488,7 +488,7 @@ export type MessageTemplate = typeof messageTemplates.$inferSelect;
 
 export const guestyPropertyMap = pgTable("guesty_property_map", {
   id: serial("id").primaryKey(),
-  propertyId: integer("property_id").notNull().unique(),
+  propertyId: integer("property_id").notNull(),
   guestyListingId: text("guesty_listing_id").notNull(),
   lastSyncedAt: timestamp("last_synced_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -544,7 +544,7 @@ export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
 // retrying forever.
 export const bookingConfirmations = pgTable("booking_confirmations", {
   id: serial("id").primaryKey(),
-  reservationId: text("reservation_id").notNull().unique(),
+  reservationId: text("reservation_id").notNull(),
   conversationId: text("conversation_id").notNull(),
   guestName: text("guest_name"),
   listingId: text("listing_id"),
@@ -672,7 +672,7 @@ export type InsertScannerOverride = typeof scannerOverrides.$inferInsert;
 // every few minutes and kicks off jobs for whichever rows are past due.
 export const scannerSchedule = pgTable("scanner_schedule", {
   id: serial("id").primaryKey(),
-  propertyId: integer("property_id").notNull().unique(),
+  propertyId: integer("property_id").notNull(),
   enabled: boolean("enabled").notNull().default(false),
   intervalHours: integer("interval_hours").notNull().default(12),
   // What the scheduled run should do. Flags so we can flip price-push
@@ -765,7 +765,7 @@ export type InsertPhotoLabel = typeof photoLabels.$inferInsert;
 // the column sane.
 export const photoListingChecks = pgTable("photo_listing_checks", {
   id: serial("id").primaryKey(),
-  photoFolder: text("photo_folder").notNull().unique(),
+  photoFolder: text("photo_folder").notNull(),
   airbnbStatus: text("airbnb_status").notNull().default("unknown"),
   vrboStatus: text("vrbo_status").notNull().default("unknown"),
   bookingStatus: text("booking_status").notNull().default("unknown"),
