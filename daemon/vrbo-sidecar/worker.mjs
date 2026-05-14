@@ -1448,27 +1448,62 @@ async function processAirbnbSearch(id, params) {
     }
     function parsePrice(fullText) {
       const text = clean(fullText);
+      const lower = text.toLowerCase();
       const totalMatch =
         text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|for\s+\d+\s+nights?)/i) ||
         text.match(/total(?:\s+before\s+taxes)?\s*\$\s*([\d,]+(?:\.\d+)?)/i);
       if (totalMatch) {
         const total = parseAmount(totalMatch[1]);
-        if (total > 0) return { totalPrice: Math.round(total), nightlyPrice: Math.round(total / expectedNights) };
+        if (total > 0) {
+          const includesTaxes = /\bincludes?\s+tax(?:es)?\b|\btaxes?\s*(?:and|&)\s*fees?\s*included\b/.test(lower);
+          const beforeTaxes = /\bbefore\s+tax(?:es)?\b/.test(lower);
+          return {
+            totalPrice: Math.round(total),
+            nightlyPrice: Math.round(total / expectedNights),
+            priceIncludesTaxes: includesTaxes && !beforeTaxes,
+            priceIncludesFees: true,
+            priceBasis: includesTaxes && !beforeTaxes ? "all_in" : "pre_tax_total",
+          };
+        }
       }
       const nightlyMatch =
         text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:night|\/night|per night)/i) ||
         text.match(/(?:night|\/night|per night)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
       if (nightlyMatch) {
         const nightly = parseAmount(nightlyMatch[1]);
-        if (nightly > 0) return { nightlyPrice: Math.round(nightly), totalPrice: Math.round(nightly * expectedNights) };
+        if (nightly > 0) {
+          return {
+            nightlyPrice: Math.round(nightly),
+            totalPrice: Math.round(nightly * expectedNights),
+            priceIncludesTaxes: false,
+            priceIncludesFees: false,
+            priceBasis: "nightly_base",
+          };
+        }
       }
       const amounts = Array.from(text.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
         .map((m) => parseAmount(m[1]))
         .filter((n) => n > 0);
       const plausibleTotal = amounts.filter((n) => n >= Math.max(250, expectedNights * 80)).sort((a, b) => a - b)[0];
-      if (plausibleTotal) return { totalPrice: Math.round(plausibleTotal), nightlyPrice: Math.round(plausibleTotal / expectedNights) };
+      if (plausibleTotal) {
+        return {
+          totalPrice: Math.round(plausibleTotal),
+          nightlyPrice: Math.round(plausibleTotal / expectedNights),
+          priceIncludesTaxes: false,
+          priceIncludesFees: true,
+          priceBasis: "stay_total",
+        };
+      }
       const plausibleNightly = amounts.filter((n) => n >= 50 && n <= 5000).sort((a, b) => a - b)[0];
-      if (plausibleNightly) return { nightlyPrice: Math.round(plausibleNightly), totalPrice: Math.round(plausibleNightly * expectedNights) };
+      if (plausibleNightly) {
+        return {
+          nightlyPrice: Math.round(plausibleNightly),
+          totalPrice: Math.round(plausibleNightly * expectedNights),
+          priceIncludesTaxes: false,
+          priceIncludesFees: false,
+          priceBasis: "nightly_base",
+        };
+      }
       return null;
     }
     function extractedStayNights(fullText) {
@@ -1526,6 +1561,9 @@ async function processAirbnbSearch(id, params) {
         title: title.slice(0, 100),
         totalPrice: price.totalPrice,
         nightlyPrice: price.nightlyPrice,
+        priceIncludesTaxes: price.priceIncludesTaxes,
+        priceIncludesFees: price.priceIncludesFees,
+        priceBasis: price.priceBasis,
         bedrooms: bedrooms ?? targetBedrooms,
         image: imageFrom(card),
         snippet: fullText.slice(0, 220),
@@ -2297,18 +2335,24 @@ async function processVrboSearch(id, params) {
       let totalPrice = 0;
       let totalNights = 0;
       let priceIncludesTaxes = false;
+      let priceIncludesFees = true;
+      let priceBasis = "pre_tax_total";
 
       const totalMatch = fullText.match(/\$\s*([\d,]+)\s*total\s*(?:includes\s*taxes)?/i);
       if (totalMatch) {
         totalPrice = parseInt(totalMatch[1].replace(/,/g, ""), 10);
         totalNights = expectedNights;
         priceIncludesTaxes = /total\s*includes\s*taxes/i.test(fullText);
+        priceIncludesFees = true;
+        priceBasis = priceIncludesTaxes ? "all_in" : "pre_tax_total";
       } else {
         const m = fullText.match(/\$\s*([\d,]+)\s*for\s*(\d+)\s*nights/i);
         if (m) {
           totalPrice = parseInt(m[1].replace(/,/g, ""), 10);
           totalNights = parseInt(m[2], 10);
           priceIncludesTaxes = false;
+          priceIncludesFees = true;
+          priceBasis = "pre_tax_total";
         }
       }
       if (!(totalPrice > 0) || !(totalNights > 0)) { drops.noPrice++; continue; }
@@ -2321,6 +2365,8 @@ async function processVrboSearch(id, params) {
         nightlyPrice: Math.round(totalPrice / totalNights),
         bedrooms: bedroomsExtracted,
         priceIncludesTaxes,
+        priceIncludesFees,
+        priceBasis,
       });
     }
     return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
@@ -2527,6 +2573,9 @@ async function processBookingSearch(id, params) {
         // so we just publish total + a best-effort per-night.
         nightlyPrice: 0, // filled in by caller using its known night count
         bedrooms: bedrooms || undefined,
+        priceIncludesTaxes: true,
+        priceIncludesFees: true,
+        priceBasis: "all_in",
         image,
         snippet: fullText.slice(0, 220),
       });
@@ -4404,19 +4453,38 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
       }
       function parsePrice(raw) {
         const text = clean(raw);
+        const lower = text.toLowerCase();
         const totalMatch =
           text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|for\s+\d+\s+nights?)/i) ||
           text.match(/total(?:\s+before\s+taxes)?\s*\$\s*([\d,]+(?:\.\d+)?)/i);
         if (totalMatch) {
           const total = parseAmount(totalMatch[1]);
-          if (total > 0) return { totalPrice: Math.round(total), nightlyPrice: Math.round(total / expectedNights) };
+          if (total > 0) {
+            const includesTaxes = /\bincludes?\s+tax(?:es)?\b|\btaxes?\s*(?:and|&)\s*fees?\s*included\b/.test(lower);
+            const beforeTaxes = /\bbefore\s+tax(?:es)?\b/.test(lower);
+            return {
+              totalPrice: Math.round(total),
+              nightlyPrice: Math.round(total / expectedNights),
+              priceIncludesTaxes: includesTaxes && !beforeTaxes,
+              priceIncludesFees: true,
+              priceBasis: includesTaxes && !beforeTaxes ? "all_in" : "pre_tax_total",
+            };
+          }
         }
         const nightlyMatch =
           text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/|per|a\s+)?\s*(?:night|nt|nightly)/i) ||
           text.match(/(?:from|starting(?:\s+at)?)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
         if (nightlyMatch) {
           const nightly = parseAmount(nightlyMatch[1]);
-          if (nightly > 0) return { nightlyPrice: Math.round(nightly), totalPrice: Math.round(nightly * expectedNights) };
+          if (nightly > 0) {
+            return {
+              nightlyPrice: Math.round(nightly),
+              totalPrice: Math.round(nightly * expectedNights),
+              priceIncludesTaxes: false,
+              priceIncludesFees: false,
+              priceBasis: "nightly_base",
+            };
+          }
         }
         const amounts = Array.from(text.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
           .map((m) => parseAmount(m[1]))
@@ -4426,6 +4494,9 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           return {
             totalPrice: Math.round(amounts[0]),
             nightlyPrice: Math.round(amounts[0] / expectedNights),
+            priceIncludesTaxes: false,
+            priceIncludesFees: true,
+            priceBasis: "stay_total",
           };
         }
         const plausibleNightly = amounts.find((n) => n >= 50 && n <= 5000);
@@ -4433,6 +4504,9 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           return {
             nightlyPrice: Math.round(plausibleNightly),
             totalPrice: Math.round(plausibleNightly * expectedNights),
+            priceIncludesTaxes: false,
+            priceIncludesFees: false,
+            priceBasis: "nightly_base",
           };
         }
         const plausibleTotal = amounts.find((n) => n >= Math.max(250, expectedNights * 80));
@@ -4440,6 +4514,9 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           return {
             totalPrice: Math.round(plausibleTotal),
             nightlyPrice: Math.round(plausibleTotal / expectedNights),
+            priceIncludesTaxes: false,
+            priceIncludesFees: true,
+            priceBasis: "stay_total",
           };
         }
         return null;
@@ -4528,6 +4605,9 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
           title: title.slice(0, 100),
           totalPrice: price.totalPrice,
           nightlyPrice: price.nightlyPrice,
+          priceIncludesTaxes: price.priceIncludesTaxes,
+          priceIncludesFees: price.priceIncludesFees,
+          priceBasis: price.priceBasis,
           bedrooms: br,
           bedroomSource: cardBedrooms === null ? "search-filter" : "search-card",
           image: imageFrom(card),
@@ -4606,6 +4686,9 @@ async function processPmSiteSearch(id, params) {
           nightlyPrice: Math.round(nightly > 0 ? nightly : total / nightsBetween(checkIn, checkOut)),
           bedrooms: card.bedrooms,
           bedroomSource: card.bedroomSource,
+          priceIncludesTaxes: card.priceIncludesTaxes,
+          priceIncludesFees: card.priceIncludesFees,
+          priceBasis: card.priceBasis,
           image: card.image,
           snippet: `${site.label} rental search result · ${card.snippet || ""}`.slice(0, 360),
         });

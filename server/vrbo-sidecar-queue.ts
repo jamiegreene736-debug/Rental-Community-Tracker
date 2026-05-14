@@ -242,6 +242,11 @@ export type SidecarPropertyCandidate = {
   // Optional + defaults to false so older daemon binaries (pre-#299)
   // get the legacy normalization behavior automatically.
   priceIncludesTaxes?: boolean;
+  // True when the scraped quote already includes mandatory platform /
+  // property fees such as cleaning and service fees. Nightly/base-only
+  // snippets set this false so the server can estimate all-in cost.
+  priceIncludesFees?: boolean;
+  priceBasis?: "all_in" | "pre_tax_total" | "stay_total" | "nightly_base" | "unknown";
 };
 
 export type SidecarSerpHit = {

@@ -89,30 +89,36 @@ function rethrowIfSidecarRunCancelled(error: unknown): void {
   if ((error as any)?.name === "SidecarRunCancelledError") throw error;
 }
 
-// Tax/fee normalization to bring sidecar VRBO + Booking + PM rates onto
-// the same all-in basis as Airbnb search-card totals.
-//
-// Airbnb search cards are treated as the source of truth for the exact
-// stay window; their totals are already close to all-in for our basis.
-//
-// VRBO sidecar scrapes `$X for Y nights` from the search-card
-// label, which is the listing total + Vrbo service fee BUT
-// EXCLUDES state/local taxes (those land at checkout). Booking.com
-// is the same shape. Some PM direct APIs return base nightly calendars
-// without taxes/fees, while the browser sidecar often sees all-in totals
-// once it submits the date search; callers flag which PM samples already
-// include taxes.
-//
-// To make per-channel medians honest, multiply VRBO + Booking
-// nightlies by the region's combined tax rate. Hawaii TAT (10.25%)
-// + GET (4.71%) + County GET (0.5%) ≈ 15.5%, round to 1.155.
-// Florida sales tax (6%) + tourist development tax (5%) ≈ 11%,
-// round to 1.11. These are coarse — actual rates vary by county —
-// but they get the median within ~1-2% of correct, which is
-// already better than the old "raw mix of pre/post-tax" basis.
+// Normalize every sidecar quote to an all-in nightly basis before it
+// participates in channel medians or cheapest snapshots. OTA/PM cards vary:
+// some expose the full stay with taxes and required fees, some say "total
+// before taxes", and some expose only base/nightly rent. The scraper now
+// reports that basis explicitly; older daemons are handled with conservative
+// channel defaults.
 const TAX_NORMALIZATION_FACTOR: Record<RegionKey, number> = {
   hawaii: 1.155,
   florida: 1.11,
+};
+
+type PriceBasis = "all_in" | "pre_tax_total" | "stay_total" | "nightly_base" | "unknown";
+
+const REQUIRED_FEE_FACTOR: Record<ChannelKey, number> = {
+  // OTA guest service fees are not identical by booking, but these estimates
+  // prevent base-nightly snippets from undercutting true guest cost.
+  airbnb: 1.14,
+  vrbo: 1.10,
+  booking: 1.00,
+  pm: 1.00,
+};
+
+const CLEANING_FEE_BASE: Record<RegionKey, number> = {
+  hawaii: 175,
+  florida: 145,
+};
+
+const CLEANING_FEE_PER_BEDROOM: Record<RegionKey, number> = {
+  hawaii: 55,
+  florida: 45,
 };
 
 export function inferRegion(city: string, state: string): RegionKey {
@@ -125,14 +131,55 @@ export function inferRegion(city: string, state: string): RegionKey {
   return "hawaii";
 }
 
-function applyTaxNormalization(
+function defaultPriceIncludesTaxes(channel: ChannelKey, basis?: PriceBasis): boolean {
+  if (basis === "all_in") return true;
+  if (basis === "pre_tax_total" || basis === "stay_total" || basis === "nightly_base" || basis === "unknown") return false;
+  // Booking's sidecar historically derives the nightly from the full card stay
+  // total. Treat missing metadata as all-in to avoid double-taxing old workers.
+  return channel === "booking";
+}
+
+function defaultPriceIncludesFees(channel: ChannelKey, basis?: PriceBasis): boolean {
+  if (basis === "nightly_base" || basis === "unknown") return false;
+  if (basis === "all_in" || basis === "pre_tax_total" || basis === "stay_total") return true;
+  // Older Airbnb/Vrbo workers primarily returned stay totals; PM cards are
+  // much more likely to be base-nightly snippets unless flagged otherwise.
+  return channel === "airbnb" || channel === "vrbo" || channel === "booking";
+}
+
+function estimatedCleaningFeeNightly(region: RegionKey, bedrooms: number, nights: number): number {
+  const br = Number.isFinite(bedrooms) && bedrooms > 0 ? Math.round(bedrooms) : 2;
+  const stayFee = CLEANING_FEE_BASE[region] + CLEANING_FEE_PER_BEDROOM[region] * Math.min(Math.max(br, 1), 8);
+  return Math.round(stayFee / Math.max(1, nights));
+}
+
+function normalizeQuotedNightly(
   rate: number,
   channel: ChannelKey,
   region: RegionKey,
+  bedrooms: number,
+  nights: number,
+  opts?: {
+    priceIncludesTaxes?: boolean;
+    priceIncludesFees?: boolean;
+    priceBasis?: PriceBasis;
+  },
 ): number {
-  // Airbnb sidecar totals are already the platform-search quote — leave them.
-  if (channel === "airbnb") return rate;
-  return Math.round(rate * TAX_NORMALIZATION_FACTOR[region]);
+  if (!(rate > 0)) return 0;
+  let normalized = Math.round(rate);
+  const basis = opts?.priceBasis ?? "unknown";
+  const includesFees = opts?.priceIncludesFees ?? defaultPriceIncludesFees(channel, basis);
+  const includesTaxes = opts?.priceIncludesTaxes ?? defaultPriceIncludesTaxes(channel, basis);
+  if (!includesFees) {
+    normalized = Math.round(
+      normalized * REQUIRED_FEE_FACTOR[channel] +
+      estimatedCleaningFeeNightly(region, bedrooms, nights),
+    );
+  }
+  if (!includesTaxes) {
+    normalized = Math.round(normalized * TAX_NORMALIZATION_FACTOR[region]);
+  }
+  return normalized;
 }
 
 function nightsBetween(checkIn: string, checkOut: string): number {
@@ -237,6 +284,8 @@ type PmRateSample = {
   nightlyPrice: number;
   totalPrice: number;
   includesTaxes: boolean;
+  includesFees: boolean;
+  priceBasis?: PriceBasis;
 };
 
 async function fetchPmMarketRatesForBedroom(args: {
@@ -368,7 +417,9 @@ async function fetchPmMarketRatesForBedroom(args: {
           bedrooms: c.bedrooms ?? br,
           nightlyPrice: Math.round(total / nights),
           totalPrice: total,
-          includesTaxes: c.priceIncludesTaxes ?? true,
+          includesTaxes: c.priceIncludesTaxes ?? defaultPriceIncludesTaxes("pm", c.priceBasis),
+          includesFees: c.priceIncludesFees ?? defaultPriceIncludesFees("pm", c.priceBasis),
+          priceBasis: c.priceBasis,
         });
       }
     } catch (e: any) {
@@ -378,7 +429,11 @@ async function fetchPmMarketRatesForBedroom(args: {
   }
 
   const normalizedRates = samples
-    .map((s) => s.includesTaxes ? s.nightlyPrice : applyTaxNormalization(s.nightlyPrice, "pm", args.region))
+    .map((s) => normalizeQuotedNightly(s.nightlyPrice, "pm", args.region, br, nights, {
+      priceIncludesTaxes: s.includesTaxes,
+      priceIncludesFees: s.includesFees,
+      priceBasis: s.priceBasis,
+    }))
     .filter((n) => Number.isFinite(n) && n > 0)
     .sort((a, b) => a - b);
   const medianNightly = medianOfSorted(normalizedRates);
@@ -536,6 +591,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
 
   const targetDest = args.searchName ?? args.community;
   const nights = nightsBetween(checkIn, checkOut);
+  const region = inferRegion(args.city, args.state);
   const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
   const warningSeason = args.warningSeason ?? "LOW";
   if (!args.skipSidecar) assertSidecarRunCurrent();
@@ -561,10 +617,12 @@ export async function fetchMultiChannelBuyInByBR(args: {
     channel: ChannelKey;
     cheapestNightly: number | null;
     availableCount: number;
-    // PR #299: when daemon used Vrbo's new "$X total includes taxes &
-    // fees" format, cheapestNightly is already all-in. Skip the
-    // per-region tax-normalization multiplier downstream.
+    // Sidecar channel prices are normalized to all-in nightly before
+    // landing here. These legacy flags remain optional for old callers
+    // and diagnostics, but final aggregation no longer re-normalizes.
     cheapestIncludesTaxes?: boolean;
+    cheapestIncludesFees?: boolean;
+    cheapestPriceBasis?: PriceBasis;
     rates?: number[];
     workerOnline: boolean;
     // PR #312: capture the wrapper's `reason` string so the
@@ -680,10 +738,15 @@ export async function fetchMultiChannelBuyInByBR(args: {
                 ? Math.round(c.nightlyPrice * nights)
                 : 0;
             if (!(total > 0)) continue;
-            const nightly = Math.round(total / nights);
+            const rawNightly = Math.round(total / nights);
             for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
               const bucket = byBr.get(targetBr);
               if (!bucket) continue;
+              const nightly = normalizeQuotedNightly(rawNightly, "airbnb", region, targetBr, nights, {
+                priceIncludesTaxes: c.priceIncludesTaxes,
+                priceIncludesFees: c.priceIncludesFees,
+                priceBasis: c.priceBasis,
+              });
               bucket.rates.push(nightly);
               bucket.availableCount++;
               if (nightly < bucket.cheapest) bucket.cheapest = nightly;
@@ -737,14 +800,18 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // Sidecar VRBO scrape returns nightlyPrice already
           // amortized from the multi-night total.
           //
-          // PR #299: also track whether the cheapest came from Vrbo's
-          // new all-in format ("$X total includes taxes & fees"). If
-          // so, downstream skips the per-region tax multiplier — the
-          // value is already fully loaded.
+          // Normalize each candidate before choosing cheapest so all-in and
+          // pre-tax Vrbo card formats compare fairly.
           const targetBrs = targetBrsForSearch(br);
-          const byBr = new Map<number, { cheapest: number; availableCount: number; cheapestIncludesTaxes: boolean }>();
+          const byBr = new Map<number, {
+            cheapest: number;
+            availableCount: number;
+            cheapestIncludesTaxes: boolean;
+            cheapestIncludesFees: boolean;
+            cheapestPriceBasis?: PriceBasis;
+          }>();
           for (const targetBr of targetBrs) {
-            byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, cheapestIncludesTaxes: false });
+            byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, cheapestIncludesTaxes: false, cheapestIncludesFees: true });
           }
           for (const c of r.candidates) {
             if (!(c.nightlyPrice > 0)) continue;
@@ -752,9 +819,16 @@ export async function fetchMultiChannelBuyInByBR(args: {
               const bucket = byBr.get(targetBr);
               if (!bucket) continue;
               bucket.availableCount++;
-              if (c.nightlyPrice < bucket.cheapest) {
-                bucket.cheapest = c.nightlyPrice;
-                bucket.cheapestIncludesTaxes = c.priceIncludesTaxes ?? false;
+              const nightly = normalizeQuotedNightly(c.nightlyPrice, "vrbo", region, targetBr, nights, {
+                priceIncludesTaxes: c.priceIncludesTaxes,
+                priceIncludesFees: c.priceIncludesFees,
+                priceBasis: c.priceBasis,
+              });
+              if (nightly < bucket.cheapest) {
+                bucket.cheapest = nightly;
+                bucket.cheapestIncludesTaxes = c.priceIncludesTaxes ?? defaultPriceIncludesTaxes("vrbo", c.priceBasis);
+                bucket.cheapestIncludesFees = c.priceIncludesFees ?? defaultPriceIncludesFees("vrbo", c.priceBasis);
+                bucket.cheapestPriceBasis = c.priceBasis;
               }
             }
           }
@@ -766,6 +840,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
               cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
               availableCount: bucket?.availableCount ?? 0,
               cheapestIncludesTaxes: bucket?.cheapestIncludesTaxes ?? false,
+              cheapestIncludesFees: bucket?.cheapestIncludesFees ?? true,
+              cheapestPriceBasis: bucket?.cheapestPriceBasis,
               workerOnline: r.workerOnline,
               reason: r.reason,
             };
@@ -805,20 +881,25 @@ export async function fetchMultiChannelBuyInByBR(args: {
           // BookingSearch processor in worker.mjs). Compute nightly
           // from this exact sampled window.
           const targetBrs = targetBrsForSearch(br);
-          const byBr = new Map<number, { cheapest: number; availableCount: number }>();
+            const byBr = new Map<number, { cheapest: number; availableCount: number }>();
           for (const targetBr of targetBrs) {
             byBr.set(targetBr, { cheapest: Infinity, availableCount: 0 });
           }
-          for (const c of r.candidates) {
-            if (!(c.totalPrice > 0)) continue;
-            const nightly = Math.round(c.totalPrice / nights);
-            for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
-              const bucket = byBr.get(targetBr);
-              if (!bucket) continue;
-              bucket.availableCount++;
-              if (nightly < bucket.cheapest) bucket.cheapest = nightly;
+            for (const c of r.candidates) {
+              if (!(c.totalPrice > 0)) continue;
+              const rawNightly = Math.round(c.totalPrice / nights);
+              for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
+                const bucket = byBr.get(targetBr);
+                if (!bucket) continue;
+                bucket.availableCount++;
+                const nightly = normalizeQuotedNightly(rawNightly, "booking", region, targetBr, nights, {
+                  priceIncludesTaxes: c.priceIncludesTaxes,
+                  priceIncludesFees: c.priceIncludesFees,
+                  priceBasis: c.priceBasis,
+                });
+                if (nightly < bucket.cheapest) bucket.cheapest = nightly;
+              }
             }
-          }
           return targetBrs.map((targetBr) => {
             const bucket = byBr.get(targetBr);
             return {
@@ -870,7 +951,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
     Promise.all(pmOps),
   ]);
 
-  const region = inferRegion(args.city, args.state);
   const daemonOnline =
     sidecarResults.some((r) => r.workerOnline) ||
     pmResults.some((r) => r.workerOnline);
@@ -927,18 +1007,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     const pmRates = pmResults.find((r) => r.br === br);
 
-    // PR #299: Vrbo's new card format ("$X total includes taxes & fees")
-    // gives us all-in nightly directly — skip the per-region tax
-    // normalization in that case. Old "$X for Y nights" format (pre-
-    // tax) still gets multiplied by the tax factor as before.
-    const vrboNormalized = vrboSidecar?.cheapestNightly != null
-      ? (vrboSidecar.cheapestIncludesTaxes
-          ? vrboSidecar.cheapestNightly
-          : applyTaxNormalization(vrboSidecar.cheapestNightly, "vrbo", region))
-      : null;
-    const bookingNormalized = bookingSidecar?.cheapestNightly != null
-      ? applyTaxNormalization(bookingSidecar.cheapestNightly, "booking", region)
-      : null;
+    // Channel sidecar workers normalize each candidate to all-in nightly
+    // before cheapest selection, so final aggregation just sanity-checks.
+    const vrboNormalized = vrboSidecar?.cheapestNightly ?? null;
+    const bookingNormalized = bookingSidecar?.cheapestNightly ?? null;
 
     channelCheapestByBR[br] = {
       airbnb: airbnbCheapest,
