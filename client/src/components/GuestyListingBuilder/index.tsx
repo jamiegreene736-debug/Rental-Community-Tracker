@@ -859,19 +859,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
     const value = complianceValueFor(req.key);
     if (!value || isPlaceholderLicenseValue(value)) {
+      if (req.key === "dbprLicense") {
+        const dbprSource = complianceProfile.sources.find((source) => /dbpr/i.test(source.label));
+        if (dbprSource?.url) {
+          window.open(dbprSource.url, "_blank", "noopener,noreferrer");
+        }
+        toast({
+          title: "Florida DBPR search opened",
+          description: "Use the DBPR public search to find the real CND/DWE vacation-rental license, paste it here, then validate before pushing compliance.",
+        });
+        return;
+      }
       const description = req.key === "dbprLicense"
         ? "Paste the real CND/DWE Florida DBPR vacation-rental license from the DBPR search, then validate it. The public auto-pull currently only finds the Fort Myers Beach STR/LBTR value."
         : req.key === "touristTaxAccount"
           ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
           : `Paste the real ${req.shortLabel} before pushing compliance.`;
-      toast({ title: req.shortLabel, description, variant: req.required ? "destructive" : "default" });
+      toast({ title: req.shortLabel, description });
       return;
     }
     toast({
       title: `${req.shortLabel} looks usable`,
       description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
     });
-  }, [complianceValueFor, toast]);
+  }, [complianceValueFor, complianceProfile.sources, toast]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -3853,6 +3864,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const isPlaceholder = isPlaceholderLicenseValue(value);
                               const inputValue = value && !isPlaceholder ? value : "";
                               const canPublicPull = complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit";
+                              const shouldOpenDbprSearch = req.key === "dbprLicense" && (!value || isPlaceholder);
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -3915,6 +3927,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   >
                                     {canPublicPull
                                       ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
+                                      : shouldOpenDbprSearch
+                                        ? "Open Florida DBPR search"
                                       : `Validate pasted ${req.shortLabel}`}
                                   </button>
                                 </div>
