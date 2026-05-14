@@ -12,7 +12,7 @@ import PhotoCurator from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
-import { isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey } from "@shared/license-compliance";
+import { isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -847,6 +847,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     return effectivePropertyData[key as keyof typeof effectivePropertyData] as string | undefined;
   }, [effectivePropertyData, complianceProfile.jurisdiction]);
+
+  const complianceDisplayValue = useCallback((value?: string | null): string => {
+    return value && !isPlaceholderLicenseValue(value) ? value : "—";
+  }, []);
+
+  const canCopyComplianceValue = useCallback((value?: string | null): boolean => {
+    return Boolean(value && !isPlaceholderLicenseValue(value));
+  }, []);
+
+  const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
+    const value = complianceValueFor(req.key);
+    if (!value || isPlaceholderLicenseValue(value)) {
+      const description = req.key === "dbprLicense"
+        ? "Paste the real CND/DWE Florida DBPR vacation-rental license from the DBPR search, then validate it. The public auto-pull currently only finds the Fort Myers Beach STR/LBTR value."
+        : req.key === "touristTaxAccount"
+          ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
+          : `Paste the real ${req.shortLabel} before pushing compliance.`;
+      toast({ title: req.shortLabel, description, variant: req.required ? "destructive" : "default" });
+      return;
+    }
+    toast({
+      title: `${req.shortLabel} looks usable`,
+      description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
+    });
+  }, [complianceValueFor, toast]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -3654,7 +3679,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             }}
                             data-testid="btn-pull-license-requirements"
                           >
-                            {licenseLookupBusy ? "Checking..." : "Check / pull public licenses"}
+                            {licenseLookupBusy ? "Checking..." : "Check requirements / pull STR"}
                           </button>
                           <button
                             disabled={!selectedId}
@@ -3721,8 +3746,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tmk-value">
-                              <span>{effectivePropertyData.taxMapKey ?? "—"}</span>
-                              {effectivePropertyData.taxMapKey && (
+                              <span>{complianceDisplayValue(effectivePropertyData.taxMapKey)}</span>
+                              {canCopyComplianceValue(effectivePropertyData.taxMapKey) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                   onClick={() => { navigator.clipboard.writeText(effectivePropertyData.taxMapKey!); toast({ title: "Copied TMK" }); }}
@@ -3778,8 +3803,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-get-value">
-                              <span>{effectivePropertyData.getLicense ?? "—"}</span>
-                              {effectivePropertyData.getLicense && (
+                              <span>{complianceDisplayValue(effectivePropertyData.getLicense)}</span>
+                              {canCopyComplianceValue(effectivePropertyData.getLicense) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                   onClick={() => { navigator.clipboard.writeText(effectivePropertyData.getLicense!); toast({ title: "Copied GET License" }); }}
@@ -3794,8 +3819,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tat-value">
-                              <span>{effectivePropertyData.tatLicense ?? "—"}</span>
-                              {effectivePropertyData.tatLicense && (
+                              <span>{complianceDisplayValue(effectivePropertyData.tatLicense)}</span>
+                              {canCopyComplianceValue(effectivePropertyData.tatLicense) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                   onClick={() => { navigator.clipboard.writeText(effectivePropertyData.tatLicense!); toast({ title: "Copied TAT License" }); }}
@@ -3810,8 +3835,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-str-permit-value">
-                              <span>{effectivePropertyData.strPermit ?? "—"}</span>
-                              {effectivePropertyData.strPermit && (
+                              <span>{complianceDisplayValue(effectivePropertyData.strPermit)}</span>
+                              {canCopyComplianceValue(effectivePropertyData.strPermit) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
                                   onClick={() => { navigator.clipboard.writeText(effectivePropertyData.strPermit!); toast({ title: "Copied STR Permit" }); }}
@@ -3874,7 +3899,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <button
                                     type="button"
                                     disabled={licenseLookupBusy}
-                                    onClick={pullLicenseRequirements}
+                                    onClick={canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req)}
                                     style={{
                                       marginTop: 8,
                                       fontSize: 11,
@@ -3890,7 +3915,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   >
                                     {canPublicPull
                                       ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
-                                      : "Validate requirements"}
+                                      : `Validate pasted ${req.shortLabel}`}
                                   </button>
                                 </div>
                               );
