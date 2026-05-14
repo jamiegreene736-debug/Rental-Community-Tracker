@@ -513,7 +513,14 @@ export function enqueueOp(
         existing.status === "pending" ||
         existing.status === "in_progress" ||
         (existing.status === "completed" && existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
-      if (isFresh) return { id: existingId, deduped: true };
+      if (isFresh) {
+        console.log(
+          `[vrbo-sidecar-queue] deduped ${req.opType} request onto ${existingId} (${existing.status}, age=${Math.round((nowMs() - existing.createdAt) / 1000)}s)`,
+        );
+        return { id: existingId, deduped: true };
+      }
+    } else {
+      requestKeyIndex.delete(requestKey);
     }
   }
   const id = makeId();

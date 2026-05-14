@@ -140,6 +140,56 @@ function publicPhotoBaseUrl(req: any): string {
   return agreementBaseUrl(req);
 }
 
+type PricingRefreshLock = {
+  token: string;
+  propertyKey: number;
+  label: string;
+  startedAt: number;
+};
+
+const PRICING_REFRESH_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
+const pricingRefreshLocks = new Map<number, PricingRefreshLock>();
+
+function cleanupPricingRefreshLocks(): void {
+  const now = Date.now();
+  for (const [propertyKey, lock] of Array.from(pricingRefreshLocks.entries())) {
+    if (now - lock.startedAt > PRICING_REFRESH_LOCK_TTL_MS) {
+      pricingRefreshLocks.delete(propertyKey);
+    }
+  }
+}
+
+function claimPricingRefreshLock(
+  propertyKey: number,
+  label: string,
+  resumeToken?: string | null,
+): { claimed: true; lock: PricingRefreshLock } | { claimed: false; lock: PricingRefreshLock } {
+  cleanupPricingRefreshLocks();
+  const existing = pricingRefreshLocks.get(propertyKey);
+  if (existing) {
+    if (resumeToken && existing.token === resumeToken) {
+      return { claimed: true, lock: existing };
+    }
+    return { claimed: false, lock: existing };
+  }
+  const lock: PricingRefreshLock = {
+    token: randomBytes(12).toString("hex"),
+    propertyKey,
+    label,
+    startedAt: Date.now(),
+  };
+  pricingRefreshLocks.set(propertyKey, lock);
+  return { claimed: true, lock };
+}
+
+function releasePricingRefreshLock(lock: PricingRefreshLock | null | undefined): void {
+  if (!lock) return;
+  const current = pricingRefreshLocks.get(lock.propertyKey);
+  if (current?.token === lock.token) {
+    pricingRefreshLocks.delete(lock.propertyKey);
+  }
+}
+
 function isImgBbRateLimit(status: number, body: string): boolean {
   return status === 429 || /rate limit|too many requests/i.test(body);
 }
@@ -21514,19 +21564,36 @@ Return ONLY compact JSON with this exact shape:
     const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
+    const refreshToken = String(req.query.refreshToken ?? "").trim() || null;
+    const propertyKey = -id;
+    const lockClaim = claimPricingRefreshLock(propertyKey, `draft ${id} pricing refresh`, refreshToken);
+    if (!lockClaim.claimed) {
+      const current = getRefreshProgress(propertyKey);
+      console.log(
+        `[refresh-pricing] duplicate refresh ignored for draft ${id}; active=${lockClaim.lock.label} age=${Math.round((Date.now() - lockClaim.lock.startedAt) / 1000)}s`,
+      );
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        alreadyRunning: true,
+        propertyId: propertyKey,
+        progress: current,
+      });
+    }
+    const refreshLock = lockClaim.lock;
     const clearProgressSoon = (propertyKey: number) => {
       setTimeout(() => clearRefreshProgress(propertyKey), 5 * 60 * 1000);
     };
     if (runBackground && !isBackgroundWorker) {
-      const propertyKey = -id;
       const startedAt = Date.now();
       setRefreshProgress({ propertyId: propertyKey, startedAt, phase: "starting", percent: 1, label: "Queued market-rate refresh" });
       const port = process.env.PORT || "5000";
       setTimeout(() => {
-        void fetch(`http://127.0.0.1:${port}/api/community/${id}/refresh-pricing?run=1`, { method: "POST" })
+        void fetch(`http://127.0.0.1:${port}/api/community/${id}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(refreshLock.token)}`, { method: "POST" })
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
+              releasePricingRefreshLock(refreshLock);
               setRefreshProgress({
                 propertyId: propertyKey,
                 startedAt,
@@ -21539,6 +21606,7 @@ Return ONLY compact JSON with this exact shape:
             }
           })
           .catch((e: any) => {
+            releasePricingRefreshLock(refreshLock);
             setRefreshProgress({
               propertyId: propertyKey,
               startedAt,
@@ -21592,6 +21660,7 @@ Return ONLY compact JSON with this exact shape:
         error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
       });
       if (isBackgroundWorker) clearProgressSoon(-id);
+      releasePricingRefreshLock(refreshLock);
       return res.status(cancelled ? 409 : 500).json({
         error: cancelled ? "Draft market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
         cancelled,
@@ -21706,6 +21775,7 @@ Return ONLY compact JSON with this exact shape:
     console.log(
       `[refresh-pricing] draft ${id} ("${draft.name}") region=${seasonScan.region} ${seasonScan.durationMs}ms · BRs=${bedroomCounts.join(",")} · estimatedLow=${estimatedLowRate} estimatedHigh=${estimatedHighRate}`,
     );
+    releasePricingRefreshLock(refreshLock);
 
     res.json({
       ok: true,
@@ -21779,6 +21849,22 @@ Return ONLY compact JSON with this exact shape:
     const { getHeartbeat, getSidecarStopGeneration, hasSidecarStopGenerationChanged } = await import("./vrbo-sidecar-queue");
     const runBackground = String(req.query.background ?? "") === "1";
     const isBackgroundWorker = String(req.query.run ?? "") === "1";
+    const refreshToken = String(req.query.refreshToken ?? "").trim() || null;
+    const lockClaim = claimPricingRefreshLock(propertyId, `property ${propertyId} market-rate refresh`, refreshToken);
+    if (!lockClaim.claimed) {
+      const current = getRefreshProgress(propertyId);
+      console.log(
+        `[refresh-market-rates] duplicate refresh ignored for property ${propertyId}; active=${lockClaim.lock.label} age=${Math.round((Date.now() - lockClaim.lock.startedAt) / 1000)}s`,
+      );
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        alreadyRunning: true,
+        propertyId,
+        progress: current,
+      });
+    }
+    const refreshLock = lockClaim.lock;
     const clearProgressSoon = (propertyKey: number) => {
       setTimeout(() => clearRefreshProgress(propertyKey), 5 * 60 * 1000);
     };
@@ -21787,10 +21873,11 @@ Return ONLY compact JSON with this exact shape:
       setRefreshProgress({ propertyId, startedAt, phase: "starting", percent: 1, label: "Queued season-band market-rate refresh" });
       const port = process.env.PORT || "5000";
       setTimeout(() => {
-        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=banded`, { method: "POST" })
+        void fetch(`http://127.0.0.1:${port}/api/property/${propertyId}/refresh-market-rates?run=1&mode=banded&refreshToken=${encodeURIComponent(refreshLock.token)}`, { method: "POST" })
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
+              releasePricingRefreshLock(refreshLock);
               setRefreshProgress({
                 propertyId,
                 startedAt,
@@ -21803,6 +21890,7 @@ Return ONLY compact JSON with this exact shape:
             }
           })
           .catch((e: any) => {
+            releasePricingRefreshLock(refreshLock);
             setRefreshProgress({
               propertyId,
               startedAt,
@@ -22480,6 +22568,7 @@ Return ONLY compact JSON with this exact shape:
             `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.monthsCovered}mo HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
           ).join(", "),
         );
+        releasePricingRefreshLock(refreshLock);
         return res.json({
           ok: true,
           propertyId,
@@ -22511,6 +22600,7 @@ Return ONLY compact JSON with this exact shape:
           `[refresh-market-rates] season-band property ${propertyId} ${cancelled ? "cancelled" : "failed"}:`,
           e?.message ?? e,
         );
+        releasePricingRefreshLock(refreshLock);
         return res.status(cancelled ? 409 : 500).json({
           error: cancelled ? "Season-band market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
           cancelled,
@@ -22559,6 +22649,7 @@ Return ONLY compact JSON with this exact shape:
         error: cancelled ? "Cancelled by Sidecar Stop" : e?.message ?? String(e),
       });
       if (isBackgroundWorker) clearProgressSoon(propertyId);
+      releasePricingRefreshLock(refreshLock);
       return res.status(cancelled ? 409 : 500).json({
         error: cancelled ? "Market-rate scan cancelled by Sidecar Stop" : e?.message ?? String(e),
         cancelled,
@@ -22714,6 +22805,7 @@ Return ONLY compact JSON with this exact shape:
         `${p.bedrooms}BR LOW=$${p.low}/${p.basisSource}/${p.channelCount}ch HIGH=${p.high ?? "—"} HOLIDAY=${p.holiday ?? "—"}`
       ).join(", "),
     );
+    releasePricingRefreshLock(refreshLock);
     res.json({
       ok: true,
       propertyId,
