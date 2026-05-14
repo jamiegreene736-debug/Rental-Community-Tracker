@@ -403,8 +403,7 @@ export function getSeasonalRateReference(
     const multiplier = SEASON_MULTIPLIERS[region][season];
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const base = getBuyInRate(config.community, unit.bedrooms, propertyId);
-      nightlyBuyIn += Math.round(base * multiplier);
+      nightlyBuyIn += getBuyInRate(config.community, unit.bedrooms, propertyId, season);
     }
     const nightlySell = cleanBaseRateFromBuyIn(nightlyBuyIn);
     return { season, nightly: nightlySell, multiplier };
@@ -552,12 +551,11 @@ export function calculateStaySellRate(
   const current = new Date(start);
   while (current < end) {
     const season = getSeasonForDate(current, region);
-    const multiplier = SEASON_MULTIPLIERS[region][season];
+    const yearMonth = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}`;
 
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
-      nightlyBuyIn += Math.round(baseBuyIn * multiplier);
+      nightlyBuyIn += getBuyInRate(config.community, unit.bedrooms, propertyId, season, yearMonth);
     }
     const nightlySellRate = cleanBaseRateFromBuyIn(nightlyBuyIn);
 

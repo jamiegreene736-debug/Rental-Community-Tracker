@@ -4454,7 +4454,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. OTA rates are scanned for each contiguous season date band. PM/direct websites are sampled once for LOW, HIGH, and HOLIDAY, then reused across matching bands. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. When a channel omits taxes, cleaning, or required fees, the scanner estimates them before saving the basis. OTA rates are scanned for each contiguous season date band. PM/direct websites are sampled once for LOW, HIGH, and HOLIDAY, then reused across matching bands. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {

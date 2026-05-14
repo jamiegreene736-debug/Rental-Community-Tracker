@@ -122,12 +122,11 @@ export async function runFullScanForProperty(
     summaries.push(`blocks +${result.created}/-${result.removed}${result.failures.length ? `/×${result.failures.length}` : ""}`);
   }
 
-  // ── Rate push: per-month Guesty calendar from STATIC buy-in cost ──
-  // Uses the manually-curated BUY_IN_RATES from shared/pricing-rates.ts
-  // (cost we PAY per night) × season multiplier, then marks up to hit
-  // the target margin after the direct-channel fee. The earlier version
-  // used live OTA website prices as the cost basis, which was wrong —
-  // those are SELL prices already inflated by other hosts' margins.
+  // ── Rate push: per-month Guesty calendar from saved all-in buy-in basis ──
+  // Uses the persisted per-property market basis when available. Those
+  // sidecar rows are normalized to include taxes, cleaning, and required
+  // fees before being saved; the static BUY_IN_RATES table remains the
+  // fallback when a property has not been refreshed yet.
   if (opts.runPricing) {
     const feeDirect = 0.03;
     const today = new Date();
@@ -137,8 +136,8 @@ export async function runFullScanForProperty(
       const y = d.getFullYear();
       const mm = d.getMonth() + 1;
       const yearMonth = `${y}-${String(mm).padStart(2, "0")}`;
-      // Cost basis = sum of buy-in cost per slot for this month/season
-      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth);
+      // Cost basis = sum of buy-in cost per slot for this month/season.
+      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth, propertyId);
       if (setCost <= 0) continue;
       const targetRate = Math.round(((1 + opts.targetMargin) * setCost) / (1 - feeDirect));
       const startDate = new Date(y, mm - 1, 1).toISOString().slice(0, 10);

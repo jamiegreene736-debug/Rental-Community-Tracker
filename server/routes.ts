@@ -16266,7 +16266,7 @@ Return ONLY compact JSON with this exact shape:
   // forecast that the UI renders side-by-side with the scanner output.
   //
   // Formula:
-  //   baseNightly     = sum over units of buy_in_rate[BR] × season_multiplier
+  //   baseNightly     = sum over units of the saved all-in buy-in basis for this month/season
   //   demandFactor    = tight → 1.12  |  open → 1.00  |  blocked → 0 (skipped)
   //   targetRate      = round(baseNightly × demandFactor × (1 + margin) / (1 - 0.03))
   //   deltaVsBase     = (targetRate - baseOnlyRate) / baseOnlyRate
@@ -16295,7 +16295,7 @@ Return ONLY compact JSON with this exact shape:
       const monthKey = w.startDate.slice(0, 7);
       let baseNightly = baseByMonth.get(monthKey);
       if (baseNightly == null) {
-        baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey);
+        baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey, propertyId);
         baseByMonth.set(monthKey, baseNightly);
       }
       const demandFactor = w.verdict === "tight" ? 1.12 : w.verdict === "blocked" ? 0 : 1.00;
