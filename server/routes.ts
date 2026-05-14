@@ -2690,6 +2690,34 @@ function knownCommunityAddressFromText(...values: unknown[]): KnownCommunityAddr
 }
 
 async function repairKnownCommunityDraftAddress(draft: any) {
+  const santaMariaText = [
+    draft?.name,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.sourceUrl,
+    draft?.streetAddress,
+    draft?.unit1Address,
+    draft?.city,
+    draft?.state,
+  ].map(normalizeDraftSearchText).join(" ");
+
+  if (
+    (draft as any)?.singleListing === true &&
+    santaMariaText.includes("santa maria") &&
+    santaMariaText.includes("fort myers") &&
+    !/\bunit\s*3106\b|\b#\s*3106\b|\bapt\s*3106\b|\b7307\s+estero\s+(?:blvd|boulevard)\s+3106\b/i.test(String(draft?.unit1Address ?? ""))
+  ) {
+    const unitAddress = "7307 Estero Blvd Unit 3106, Fort Myers Beach, FL 33931";
+    const repaired = await storage.updateCommunityDraft(draft.id, {
+      streetAddress: "7307 Estero Blvd",
+      city: "Fort Myers Beach",
+      state: "Florida",
+      unit1Address: unitAddress,
+    } as any);
+    console.log(`[community-drafts] repaired Santa Maria standalone unit address for draft ${draft.id}: ${unitAddress}`);
+    return { draft: repaired, repairedAddress: true };
+  }
+
   if (draft?.streetAddress) {
     return { draft, repairedAddress: false };
   }
@@ -20412,6 +20440,12 @@ Return ONLY compact JSON with this exact shape:
     const photoBackfills = [];
     for (const draft of drafts) {
       if (deletedIds.includes(Number(draft.id))) continue;
+      if (isSantaMariaFortMyersDraft(draft)) {
+        const repaired = await repairKnownCommunityDraftAddress(draft);
+        if (repaired.repairedAddress && repaired.draft) {
+          Object.assign(draft as any, repaired.draft);
+        }
+      }
       if ((draft as any).singleListing !== true) continue;
       if (!guestyListingIdFromDraftSourceUrl(draft.sourceUrl)) continue;
       try {
