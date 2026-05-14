@@ -1805,13 +1805,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [propertyId, listings, propertyMap]);
 
-  // ── Repair old draft pages that have a matching Guesty listing but no map ──
+  // ── Repair old draft pages that have a matching Guesty listing but no usable map ──
   // Earlier builds could import a just-created Guesty listing into a *new*
   // draft and leave the builder's current draft unmapped. When we can prove
   // there is exactly one Guesty listing with the same title/nickname, connect
   // it automatically so the dropdown and dashboard green G recover together.
+  // Guesty commonly truncates listing nicknames around 40 chars, so recovery
+  // accepts a one-sided prefix match only when the shared prefix is long enough
+  // to remain unambiguous.
   useEffect(() => {
-    if (!propertyId || propertyId >= 0 || listings.length === 0 || propertyMap.some((m) => m.propertyId === propertyId)) return;
+    if (!propertyId || propertyId >= 0 || listings.length === 0) return;
+    const existingMap = propertyMap.find((m) => m.propertyId === propertyId);
+    const existingMapIsValid = existingMap && listings.some((l) => l._id === existingMap.guestyListingId);
+    if (existingMapIsValid) return;
     try {
       const candidateNames = new Set<string>();
       for (const name of [propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title]) {
@@ -1819,19 +1825,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (normalized) candidateNames.add(normalized);
       }
       if (candidateNames.size === 0) return;
+      const isRecoverableNameMatch = (candidate: string, listingName: string) => {
+        if (!candidate || !listingName) return false;
+        if (candidate === listingName) return true;
+        const minLength = Math.min(candidate.length, listingName.length);
+        return minLength >= 32 && (candidate.startsWith(listingName) || listingName.startsWith(candidate));
+      };
       const exactMatches: GuestyListing[] = [];
       for (const listing of listings) {
         for (const name of [listing.nickname, listing.title]) {
           const normalized = normalizeListingName(name);
-          if (normalized && candidateNames.has(normalized)) {
+          let matched = false;
+          for (const candidate of candidateNames) {
+            if (isRecoverableNameMatch(candidate, normalized)) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
             exactMatches.push(listing);
             break;
           }
         }
       }
-      if (exactMatches.length !== 1) return;
+      const uniqueMatches = Array.from(new Map(exactMatches.map((listing) => [listing._id, listing])).values());
+      if (uniqueMatches.length !== 1) return;
 
-      const match = exactMatches[0];
+      const match = uniqueMatches[0];
       const attemptKey = `${propertyId}:${match._id}`;
       if (autoMapAttemptRef.current === attemptKey) return;
       autoMapAttemptRef.current = attemptKey;
