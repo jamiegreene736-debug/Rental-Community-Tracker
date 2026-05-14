@@ -2792,6 +2792,113 @@ function guestyListingIdFromDraftSourceUrl(sourceUrl: unknown): string | null {
   return id || null;
 }
 
+function guestyPictureUrl(pic: any): string | null {
+  const candidates = [
+    pic?.original,
+    pic?.url,
+    pic?.regular,
+    pic?.thumbnail,
+    pic?.large,
+  ];
+  for (const value of candidates) {
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (/^https?:\/\//i.test(raw)) return raw;
+  }
+  return null;
+}
+
+async function countDiskPhotos(folder: string): Promise<number> {
+  const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeFolder) return 0;
+  const folderPath = path.join(process.cwd(), "client/public/photos", safeFolder);
+  try {
+    const files = await fs.promises.readdir(folderPath);
+    return files.filter((file) => /\.(?:jpe?g|png|webp)$/i.test(file)).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function persistImportedGuestyDraftPhotos(draft: any, listing?: any): Promise<{ folder: string; saved: number; scanned: boolean } | null> {
+  const draftId = Number(draft?.id);
+  if (!Number.isFinite(draftId) || draftId <= 0) return null;
+  if ((draft as any)?.singleListing !== true) return null;
+  const guestyListingId = guestyListingIdFromDraftSourceUrl(draft?.sourceUrl);
+  if (!guestyListingId) return null;
+
+  const folder = `draft-${draftId}-unit-a`;
+  const existingFolder = typeof draft?.unit1PhotoFolder === "string" && draft.unit1PhotoFolder.trim()
+    ? draft.unit1PhotoFolder.trim()
+    : folder;
+  const existingCount = await countDiskPhotos(existingFolder);
+  if (existingCount > 0) {
+    if (draft?.unit1PhotoFolder !== existingFolder) {
+      await storage.updateCommunityDraft(draftId, { unit1PhotoFolder: existingFolder } as any);
+    }
+    const existingCheck = await storage.getPhotoListingCheckByFolder(existingFolder);
+    const staleUnknownCheck = existingCheck &&
+      existingCheck.airbnbStatus === "unknown" &&
+      existingCheck.vrboStatus === "unknown" &&
+      existingCheck.bookingStatus === "unknown" &&
+      (existingCheck.photosChecked <= 0 || /unit-number identifier|No visible photos/i.test(existingCheck.errorMessage ?? ""));
+    if (!existingCheck || staleUnknownCheck) {
+      void runPhotoListingCheckForFolders([existingFolder]);
+      return { folder: existingFolder, saved: existingCount, scanned: true };
+    }
+    return null;
+  }
+
+  let sourceListing = listing;
+  if (!sourceListing || !Array.isArray(sourceListing?.pictures)) {
+    sourceListing = await guestyRequest("GET", `/listings/${encodeURIComponent(guestyListingId)}?fields=pictures,nickname,title,name`) as any;
+  }
+  const urls = Array.from(new Set(
+    (Array.isArray(sourceListing?.pictures) ? sourceListing.pictures : [])
+      .map(guestyPictureUrl)
+      .filter((url: string | null): url is string => !!url),
+  )).slice(0, 35);
+  if (urls.length === 0) return null;
+
+  const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+  await fs.promises.rm(folderPath, { recursive: true, force: true });
+  await fs.promises.mkdir(folderPath, { recursive: true });
+
+  let saved = 0;
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, { headers: { "User-Agent": "NexStay/1.0" } });
+      if (!resp.ok) continue;
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      if (buffer.length < 5000) continue;
+      const ext = (url.match(/\.(jpe?g|png|webp)\b/i)?.[1] ?? "jpg").toLowerCase().replace("jpeg", "jpg");
+      const filename = `${String(saved).padStart(2, "0")}.${ext}`;
+      await fs.promises.writeFile(path.join(folderPath, filename), buffer);
+      saved += 1;
+    } catch (e: any) {
+      console.warn(`[guesty-draft-photos] draft ${draftId}: failed to persist ${url}: ${e?.message ?? e}`);
+    }
+  }
+
+  if (saved === 0) return null;
+  await fs.promises.writeFile(path.join(folderPath, "_source.json"), JSON.stringify({
+    sourceListing: {
+      url: `https://app.guesty.com/properties/${guestyListingId}/property/v2`,
+      platform: "guesty",
+      selectedAt: new Date().toISOString(),
+      source: "guesty-import-draft",
+    },
+    unitLabel: draft?.name ?? sourceListing?.nickname ?? sourceListing?.title ?? "Imported Guesty listing",
+  }, null, 2));
+
+  await storage.updateCommunityDraft(draftId, {
+    unit1PhotoFolder: folder,
+    unit1Url: draft?.unit1Url ?? draft?.sourceUrl ?? null,
+  } as any);
+  void runPhotoListingCheckForFolders([folder]);
+  console.log(`[guesty-draft-photos] draft ${draftId}: persisted ${saved} Guesty picture(s) to ${folder} and queued photo match scan`);
+  return { folder, saved, scanned: true };
+}
+
 function normalizeDraftSearchText(value: unknown): string {
   return String(value ?? "")
     .toLowerCase()
@@ -20247,7 +20354,23 @@ Return ONLY compact JSON with this exact shape:
 
   app.get("/api/community/drafts", async (_req, res) => {
     const deletedIds = await pruneStaleSantaMariaPlaceholders("draft list");
-    const drafts = await storage.getCommunityDrafts();
+    let drafts = await storage.getCommunityDrafts();
+    const photoBackfills = [];
+    for (const draft of drafts) {
+      if (deletedIds.includes(Number(draft.id))) continue;
+      if ((draft as any).singleListing !== true) continue;
+      if (!guestyListingIdFromDraftSourceUrl(draft.sourceUrl)) continue;
+      try {
+        const backfill = await persistImportedGuestyDraftPhotos(draft);
+        if (backfill) photoBackfills.push({ draftId: draft.id, ...backfill });
+      } catch (e: any) {
+        console.warn(`[guesty-draft-photos] draft ${draft.id}: backfill failed during draft list: ${e?.message ?? e}`);
+      }
+    }
+    if (photoBackfills.length > 0) {
+      console.log(`[community-drafts] backfilled Guesty photos for imported draft(s): ${photoBackfills.map((b) => `${b.draftId}:${b.saved}`).join(", ")}`);
+      drafts = await storage.getCommunityDrafts();
+    }
     if (deletedIds.length === 0) {
       return res.json(drafts);
     }
@@ -20282,6 +20405,7 @@ Return ONLY compact JSON with this exact shape:
           const existingDraft = await storage.getCommunityDraft(Math.abs(requestedPropertyId));
           if (existingDraft) {
             const repaired = await repairKnownCommunityDraftAddress(existingDraft);
+            await persistImportedGuestyDraftPhotos(repaired.draft);
             draft = repaired.draft;
             repairedAddress = repaired.repairedAddress;
           }
@@ -20303,6 +20427,7 @@ Return ONLY compact JSON with this exact shape:
         const existingDraft = await storage.getCommunityDraft(Math.abs(row.propertyId));
         if (existingDraft) {
           const repaired = await repairKnownCommunityDraftAddress(existingDraft);
+          await persistImportedGuestyDraftPhotos(repaired.draft);
           return res.json({
             draft: repaired.draft,
             mapping: row,
@@ -20320,6 +20445,7 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const draft = await storage.createCommunityDraft(parsed.data);
+      const photoBackfill = await persistImportedGuestyDraftPhotos(draft, listing);
       const mapping = await storage.upsertGuestyPropertyMap(-draft.id, guestyListingId);
 
       const staleRows = existingMaps.filter(
@@ -20336,6 +20462,7 @@ Return ONLY compact JSON with this exact shape:
         imported: true,
         staleMappingsRemoved: staleRows.map((row) => row.propertyId),
         staleDraftsRemoved,
+        photoBackfill,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to import Guesty listing into dashboard drafts", message: err.message });

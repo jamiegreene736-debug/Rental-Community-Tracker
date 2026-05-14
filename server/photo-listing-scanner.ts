@@ -72,6 +72,7 @@ const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
+const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
 export type PlatformStatus = "clean" | "found" | "unknown";
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
@@ -127,7 +128,23 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
   const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
   if (!ref) return null;
   const swap = await storage.getLatestUnitSwap(ref.propertyId, ref.oldUnitId);
-  if (!swap) return null;
+  if (!swap) {
+    if (ref.propertyId < 0 && /unit-a$/i.test(ref.oldUnitId)) {
+      const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
+      if ((draft as any)?.singleListing === true) {
+        const tokens = unitVerificationClaims(
+          draft?.name ?? "",
+          [draft?.streetAddress, draft?.city, draft?.state].filter(Boolean).join(", "),
+        );
+        // Some imported single-listing condos have a valid resort address
+        // but no unit number. We still scan them: authorized URL suppression
+        // removes our own OTA pages, and the two-photo threshold keeps this
+        // from treating one generic exterior match as a repost.
+        return tokens.length > 0 ? Array.from(new Set(tokens)) : [STANDALONE_DRAFT_NO_UNIT_TOKEN];
+      }
+    }
+    return null;
+  }
 
   const tokens = unitVerificationClaims(swap.newUnitLabel ?? "", swap.newAddress ?? "");
   return tokens.length > 0 ? Array.from(new Set(tokens)) : null;
@@ -276,12 +293,14 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   //   kekaha-main, keauhou-estate (no digit in name)
   // Once these folders are renamed to include a real unit number
   // (e.g. pili-mai-12c), they'll start scanning automatically.
-  const verifyTokens = await dynamicVerificationTokensForFolder(folder);
-  if (!verifyTokens || verifyTokens.length === 0) {
+  const rawVerifyTokens = await dynamicVerificationTokensForFolder(folder);
+  if (!rawVerifyTokens || rawVerifyTokens.length === 0) {
     result.errorMessage = "Folder has no unit-number identifier — verification disabled, scan skipped to avoid false positives";
     await persist(result);
     return result;
   }
+  const allowUnverifiedStandalone = rawVerifyTokens.includes(STANDALONE_DRAFT_NO_UNIT_TOKEN);
+  const verifyTokens = rawVerifyTokens.filter((token) => token !== STANDALONE_DRAFT_NO_UNIT_TOKEN);
 
   // Capture the prior status row BEFORE upserting so we can emit
   // state-worsen alerts after the new row lands. Null → never scanned.
@@ -379,6 +398,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   const MAX_VERIFY_PER_HOST_PER_PHOTO = 3;
 
   const verify = async (listingUrl: string): Promise<boolean> => {
+    if (allowUnverifiedStandalone) return true;
     if (!verifyTokens || verifyTokens.length === 0) return true; // can't verify, accept
     const cached = verifyCache.get(listingUrl);
     if (cached !== undefined) return cached;
