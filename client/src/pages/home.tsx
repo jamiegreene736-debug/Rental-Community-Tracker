@@ -21,6 +21,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -741,6 +748,17 @@ export default function Home() {
       currency: "USD",
       maximumFractionDigits: 0,
     }).format(value);
+  const formatShortDate = (value: string | null) => {
+    if (!value) return "N/A";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "N/A";
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
+  const formatShortDateTime = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "N/A";
+    return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
 
   const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
 
@@ -770,6 +788,18 @@ export default function Home() {
   type WeeklyRevenue = {
     revenue: number;
     bookingCount: number;
+    bookings: Array<{
+      id: string;
+      guestName: string;
+      listingName: string;
+      confirmationCode: string | null;
+      source: string;
+      status: string;
+      bookedAt: string;
+      checkIn: string | null;
+      checkOut: string | null;
+      amount: number;
+    }>;
     startDate: string;
     endDate: string;
     windowLabel?: string;
@@ -1083,19 +1113,83 @@ export default function Home() {
             </div>
             <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center gap-2 mb-1">
-              <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Revenue, past 7 days</span>
-            </div>
-            <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
-              {weeklyRevenueLoading ? "..." : formatCurrency(weeklyRevenue?.revenue ?? 0)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Rolling 7-day booking window
-              {weeklyRevenue ? ` · ${weeklyRevenue.bookingCount} booking${weeklyRevenue.bookingCount === 1 ? "" : "s"}` : ""}
-            </p>
-          </Card>
+          <Dialog>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="shadcn-card rounded-xl border bg-card border-card-border p-4 text-left text-card-foreground shadow-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <TrendingUp className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground font-medium">Revenue, past 7 days</span>
+                </div>
+                <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
+                  {weeklyRevenueLoading ? "..." : formatCurrency(weeklyRevenue?.revenue ?? 0)}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Rolling 7-day booking window
+                  {weeklyRevenue ? ` · ${weeklyRevenue.bookingCount} booking${weeklyRevenue.bookingCount === 1 ? "" : "s"}` : ""}
+                </p>
+              </button>
+            </DialogTrigger>
+            <DialogContent className="max-w-4xl">
+              <DialogHeader>
+                <DialogTitle>Revenue bookings, past 7 days</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="text-muted-foreground">
+                    {weeklyRevenue?.windowLabel ?? "Rolling past 7 days"}
+                    {weeklyRevenue ? ` · ${formatShortDate(weeklyRevenue.startDate)} to ${formatShortDate(weeklyRevenue.endDate)}` : ""}
+                  </span>
+                  <span className="font-semibold">
+                    {formatCurrency(weeklyRevenue?.revenue ?? 0)} from {weeklyRevenue?.bookingCount ?? 0} booking{(weeklyRevenue?.bookingCount ?? 0) === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {weeklyRevenueLoading ? (
+                  <p className="text-sm text-muted-foreground">Loading booking details...</p>
+                ) : weeklyRevenue?.bookings?.length ? (
+                  <div className="overflow-x-auto rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Booked</TableHead>
+                          <TableHead>Guest</TableHead>
+                          <TableHead>Listing</TableHead>
+                          <TableHead>Stay</TableHead>
+                          <TableHead>Channel</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-right">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {weeklyRevenue.bookings.map((booking) => (
+                          <TableRow key={booking.id || `${booking.guestName}-${booking.bookedAt}`}>
+                            <TableCell className="whitespace-nowrap">{formatShortDateTime(booking.bookedAt)}</TableCell>
+                            <TableCell>
+                              <div className="font-medium">{booking.guestName}</div>
+                              {booking.confirmationCode && (
+                                <div className="text-xs text-muted-foreground">{booking.confirmationCode}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="min-w-[180px]">{booking.listingName}</TableCell>
+                            <TableCell className="whitespace-nowrap">
+                              {formatShortDate(booking.checkIn)} - {formatShortDate(booking.checkOut)}
+                            </TableCell>
+                            <TableCell>{booking.source}</TableCell>
+                            <TableCell>{booking.status || "N/A"}</TableCell>
+                            <TableCell className="text-right font-medium">{formatCurrency(booking.amount)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No revenue bookings found in this rolling 7-day window.</p>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
 
         {/* PR #318: dashboard alerts banner removed. Alerts now live

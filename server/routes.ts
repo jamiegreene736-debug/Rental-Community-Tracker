@@ -4415,7 +4415,7 @@ export async function registerRoutes(
     };
 
     try {
-      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate listingId money source integration confirmationCode");
+      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate checkIn checkOut listing listingId money guest source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
         { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
@@ -4453,6 +4453,18 @@ export async function registerRoutes(
 
       let revenue = 0;
       let bookingCount = 0;
+      const bookings: Array<{
+        id: string;
+        guestName: string;
+        listingName: string;
+        confirmationCode: string | null;
+        source: string;
+        status: string;
+        bookedAt: string;
+        checkIn: string | null;
+        checkOut: string | null;
+        amount: number;
+      }> = [];
 
       for (const reservation of reservations) {
         const madeAt = bookingActivityAt(reservation);
@@ -4463,11 +4475,30 @@ export async function registerRoutes(
         if (amount <= 0) continue;
         revenue += amount;
         bookingCount += 1;
+        const guest = reservation?.guest ?? {};
+        const guestName = [
+          guest?.firstName ?? guest?.first_name,
+          guest?.lastName ?? guest?.last_name,
+        ].filter(Boolean).join(" ").trim();
+        const listing = reservation?.listing ?? {};
+        bookings.push({
+          id: String(reservation?._id ?? reservation?.id ?? ""),
+          guestName: guestName || String(guest?.fullName ?? guest?.full_name ?? guest?.name ?? "Guest"),
+          listingName: String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing"),
+          confirmationCode: reservation?.confirmationCode ? String(reservation.confirmationCode) : null,
+          source: String(reservation?.source ?? reservation?.integration?.platform ?? "Guesty"),
+          status: String(reservation?.status ?? ""),
+          bookedAt: madeAt.toISOString(),
+          checkIn: reservation?.checkIn ? String(reservation.checkIn) : null,
+          checkOut: reservation?.checkOut ? String(reservation.checkOut) : null,
+          amount,
+        });
       }
 
       res.json({
         revenue,
         bookingCount,
+        bookings: bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt)),
         startDate: start.toISOString(),
         endDate: now.toISOString(),
         windowLabel: "Rolling past 7 days",
