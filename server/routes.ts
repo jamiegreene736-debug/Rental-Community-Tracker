@@ -2620,6 +2620,30 @@ function inferBedroomsFromGuestyListing(listing: any): number | null {
   return match ? Number(match[1]) : null;
 }
 
+function positiveDraftInteger(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2"): number | null {
+  const stored = unitKey === "unit1" ? draft?.unit1Bedrooms : draft?.unit2Bedrooms;
+  const combined = draft?.singleListing === true ? draft?.combinedBedrooms : null;
+  const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
+  if (fromStructured) return fromStructured;
+
+  const text = [
+    unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
+    unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.name,
+    draft?.unitTypes,
+    draft?.listingDescription,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  return match ? positiveDraftInteger(match[1]) : null;
+}
+
 function parseGuestyAddress(listing: any): { full: string; city: string; state: string; streetAddress: string | null } {
   const address = listing?.address ?? {};
   const full = firstNonEmptyString(
@@ -22361,9 +22385,15 @@ Return ONLY compact JSON with this exact shape:
     // the SPECIFIC resort/property name as it appears on Vrbo/Airbnb
     // (e.g. "Kaha Lani Resort" not "Kapaa Beachfront"), since this
     // single name drives all three channels.
-    const bedroomsRaw = [draft.unit1Bedrooms, draft.unit2Bedrooms]
-      .filter((b): b is number => typeof b === "number" && b > 0);
-    const bedroomCounts = Array.from(new Set(bedroomsRaw)).sort((a, b) => a - b);
+    const bedroomsRaw = (draft as any).singleListing === true
+      ? [inferCommunityDraftBedroomCount(draft, "unit1")]
+      : [
+          inferCommunityDraftBedroomCount(draft, "unit1"),
+          inferCommunityDraftBedroomCount(draft, "unit2"),
+        ];
+    const validBedroomCounts = bedroomsRaw
+      .filter((b): b is number => typeof b === "number" && Number.isFinite(b) && b > 0);
+    const bedroomCounts = Array.from(new Set(validBedroomCounts)).sort((a, b) => a - b);
     if (bedroomCounts.length === 0) {
       // Wizard hasn't filled in unit bedrooms yet — fall back to the
       // legacy single-window engine pull so we still surface estimated

@@ -57,6 +57,31 @@ function regionFromState(state: string): RegionType {
   return /florida|fl\b/i.test(state || "") ? "florida" : "hawaii";
 }
 
+function positiveInteger(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function inferDraftBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
+  const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
+  const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
+  const fromStructured = positiveInteger(stored) ?? positiveInteger(combined);
+  if (fromStructured) return fromStructured;
+
+  const text = [
+    unitKey === "unit1" ? draft.unit1Description : draft.unit2Description,
+    unitKey === "unit1" ? draft.unit1Bedding : draft.unit2Bedding,
+    draft.listingTitle,
+    draft.bookingTitle,
+    draft.name,
+    draft.unitTypes,
+    draft.listingDescription,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  const fromText = match ? positiveInteger(match[1]) : null;
+  return fromText ?? 2;
+}
+
 // Pick a base buy-in for a single unit. Order of preference:
 //   1. BUY_IN_RATES[draft.pricingArea][${bedrooms}BR]  (operator
 //      picked an area on Step 5 → exact rate from the table)
@@ -111,9 +136,9 @@ export function buildDraftPropertyPricing(
     ? draft.pricingArea
     : draft.name;
 
-  const u1Br = draft.unit1Bedrooms ?? 2;
-  const u2Br = draft.unit2Bedrooms ?? 2;
   const isSingle = (draft as any).singleListing === true;
+  const u1Br = inferDraftBedroomCount(draft, "unit1");
+  const u2Br = inferDraftBedroomCount(draft, "unit2");
 
   const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br);
   const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br);
