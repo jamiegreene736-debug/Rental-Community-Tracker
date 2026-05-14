@@ -2792,6 +2792,57 @@ function guestyListingIdFromDraftSourceUrl(sourceUrl: unknown): string | null {
   return id || null;
 }
 
+function normalizeDraftSearchText(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function santaMariaDraftHaystack(draft: any): string {
+  return [
+    draft?.name,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.communityName,
+    draft?.streetAddress,
+    draft?.city,
+    draft?.state,
+  ].map(normalizeDraftSearchText).filter(Boolean).join(" ");
+}
+
+function isSantaMariaFortMyersDraft(draft: any): boolean {
+  const haystack = santaMariaDraftHaystack(draft);
+  const state = normalizeDraftSearchText(draft?.state);
+  const city = normalizeDraftSearchText(draft?.city);
+  const title = normalizeDraftSearchText(draft?.listingTitle || draft?.name);
+  return (
+    state.includes("florida") &&
+    (city.includes("fort myers") || haystack.includes("fort myers beach")) &&
+    (haystack.includes("santa maria") || haystack.includes("7307 estero") || title.includes("sunny 2br condo at fort myers beach"))
+  );
+}
+
+function isWeakUnmappedSantaMariaPlaceholder(draft: any, mappedDraftIds: Set<number>): boolean {
+  if (!draft?.id || mappedDraftIds.has(Number(draft.id))) return false;
+  if (guestyListingIdFromDraftSourceUrl(draft?.sourceUrl)) return false;
+  if (!isSantaMariaFortMyersDraft(draft)) return false;
+
+  const title = normalizeDraftSearchText(draft?.listingTitle || draft?.name);
+  const bedrooms = Number(draft?.combinedBedrooms ?? draft?.unit1Bedrooms ?? 0) || 0;
+  const guests = Number(draft?.unit1MaxGuests ?? 0) || 0;
+  const rate = Number(draft?.estimatedLowRate ?? draft?.suggestedRate ?? 0) || 0;
+
+  // The stale duplicate created by the old single-listing flow is an unmapped
+  // Fort Myers/Santa Maria shell with no usable inventory or pricing. Keep this
+  // intentionally narrow so complete operator-created drafts are not removed.
+  return (
+    title.includes("sunny 2br condo at fort myers beach") ||
+    ((bedrooms <= 0 || guests <= 0 || rate <= 0) && title.includes("fort myers beach"))
+  );
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -20164,9 +20215,43 @@ Return ONLY compact JSON with this exact shape:
   // ============================================================
   // Community Draft CRUD
   // ============================================================
+  async function pruneStaleSantaMariaPlaceholders(reason: string): Promise<number[]> {
+    const [drafts, map] = await Promise.all([
+      storage.getCommunityDrafts(),
+      storage.getGuestyPropertyMap(),
+    ]);
+    const mappedDraftIds = new Set(
+      map
+        .filter((row) => row.propertyId < 0)
+        .map((row) => Math.abs(row.propertyId)),
+    );
+    const hasConnectedSantaMariaDraft = drafts.some((draft: any) =>
+      isSantaMariaFortMyersDraft(draft) &&
+      (mappedDraftIds.has(Number(draft.id)) || !!guestyListingIdFromDraftSourceUrl(draft.sourceUrl)),
+    );
+    if (!hasConnectedSantaMariaDraft) return [];
+
+    const staleDrafts = drafts.filter((draft: any) => isWeakUnmappedSantaMariaPlaceholder(draft, mappedDraftIds));
+    const deletedIds: number[] = [];
+    for (const draft of staleDrafts) {
+      const draftId = Number(draft.id);
+      if (!Number.isFinite(draftId)) continue;
+      const deleted = await storage.deleteCommunityDraft(draftId);
+      if (deleted) deletedIds.push(draftId);
+    }
+    if (deletedIds.length > 0) {
+      console.log(`[community-drafts] pruned stale Santa Maria placeholder draft(s) during ${reason}: ${deletedIds.join(", ")}`);
+    }
+    return deletedIds;
+  }
+
   app.get("/api/community/drafts", async (_req, res) => {
+    const deletedIds = await pruneStaleSantaMariaPlaceholders("draft list");
     const drafts = await storage.getCommunityDrafts();
-    res.json(drafts);
+    if (deletedIds.length === 0) {
+      return res.json(drafts);
+    }
+    res.json(drafts.filter((draft: any) => !deletedIds.includes(Number(draft.id))));
   });
 
   app.post("/api/community/import-guesty-listing", async (req, res) => {
@@ -20201,6 +20286,7 @@ Return ONLY compact JSON with this exact shape:
             repairedAddress = repaired.repairedAddress;
           }
         }
+        const staleDraftsRemoved = await pruneStaleSantaMariaPlaceholders("Guesty import remap");
 
         return res.json({
           draft,
@@ -20208,6 +20294,7 @@ Return ONLY compact JSON with this exact shape:
           imported: false,
           repairedAddress,
           staleMappingsRemoved: staleRows.map((row) => row.propertyId),
+          staleDraftsRemoved,
         });
       }
 
@@ -20241,12 +20328,14 @@ Return ONLY compact JSON with this exact shape:
       for (const row of staleRows) {
         await db.delete(guestyPropertyMap).where(eq(guestyPropertyMap.propertyId, row.propertyId));
       }
+      const staleDraftsRemoved = await pruneStaleSantaMariaPlaceholders("Guesty import create");
 
       res.json({
         draft,
         mapping,
         imported: true,
         staleMappingsRemoved: staleRows.map((row) => row.propertyId),
+        staleDraftsRemoved,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to import Guesty listing into dashboard drafts", message: err.message });
