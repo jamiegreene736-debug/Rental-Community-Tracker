@@ -3036,6 +3036,19 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  void (async () => {
+    try {
+      const drafts = await storage.getCommunityDrafts();
+      for (const draft of drafts as any[]) {
+        if (isSantaMariaFortMyersDraft(draft)) {
+          await repairKnownCommunityDraftAddress(draft);
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[community-drafts] Santa Maria unit-address boot repair failed: ${e?.message ?? e}`);
+    }
+  })();
+
   app.get("/api/photos/zip-multi", async (req, res) => {
     const foldersParam = req.query.folders as string;
     const name = (req.query.name as string) || "all-photos";
