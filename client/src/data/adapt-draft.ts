@@ -219,6 +219,7 @@ function descriptionForDraft(draft: CommunityDraft): string {
   if ((draft as any).singleListing !== true) return text;
   return text
     .replace(/please note:\s*this listing combines two units within the same community\.[\s\S]*?(?:---\s*)?/i, "")
+    .replace(/please note:\s*this is a sample unit\.[\s\S]*?(?:---\s*)?/i, "")
     .replace(/\bthis listing (?:is comprised of|combines) two [^.]+\.\s*/gi, "")
     .replace(/\btogether they offer [^.]+\.\s*/gi, "")
     .trim();

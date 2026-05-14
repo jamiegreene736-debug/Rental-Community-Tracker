@@ -1849,7 +1849,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         }
       }
       const uniqueMatches = Array.from(new Map(exactMatches.map((listing) => [listing._id, listing])).values());
-      if (uniqueMatches.length !== 1) return;
+      if (uniqueMatches.length === 0) return;
+      if (uniqueMatches.length > 1) {
+        console.warn("[GuestyListingBuilder] multiple draft Guesty listing matches; using the first Guesty result", {
+          propertyId,
+          matches: uniqueMatches.map((listing) => ({ id: listing._id, name: listing.nickname || listing.title || "" })),
+        });
+      }
 
       const match = uniqueMatches[0];
       const attemptKey = `${propertyId}:${match._id}`;
@@ -2984,6 +2990,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 }
               }
               setSelectedId(newId);
+              if (newId && propertyId < 0) {
+                rememberPropertyMap(propertyId, newId);
+                fetch("/api/guesty-property-map", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ propertyId, guestyListingId: newId }),
+                }).catch(() => { /* non-fatal; selection still works for this page */ });
+              }
             }}
             data-testid="select-guesty-listing"
             disabled={conn !== "connected"}
