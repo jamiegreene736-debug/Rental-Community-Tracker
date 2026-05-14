@@ -55,7 +55,7 @@ import {
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
-import { validateCommunityStreetAddress } from "@shared/community-addresses";
+import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 
 // 4 steps. Step 1 collapses location + community research into one
 // screen — city autocomplete kicks off /api/community/research and
@@ -479,7 +479,11 @@ export default function AddSingleListing() {
     setSelectedBedrooms(null);
     setFindResult(null);
     setSkipUrls([]);
-    setStreetAddress("");
+    setStreetAddress(inferCommunityStreetAddress({
+      communityName: c.name,
+      city: pickedCity?.city,
+      state: pickedCity?.state,
+    }));
     // Kick off the inventory count in the background. Picked-city
     // is required (we need city + state for the search query); if
     // it's somehow missing we just skip the count.
@@ -800,9 +804,14 @@ export default function AddSingleListing() {
       const data: FindResult = finalResult;
       setFindResult(data);
       if (data.found) {
+        const discoveredAddress = data.unit.address || inferCommunityStreetAddress({
+          communityName: selectedCommunity?.name ?? propertyName,
+          city: pickedCity.city,
+          state: pickedCity.state,
+        });
         // Pre-populate the downstream fields so Step 2/3/4 work without
         // any further operator typing.
-        setStreetAddress(data.unit.address);
+        setStreetAddress(discoveredAddress);
         setZillowSourceUrl(data.unit.url);
         setZillowFacts({
           bedrooms: data.unit.bedrooms > 0 ? data.unit.bedrooms : undefined,
@@ -853,7 +862,7 @@ export default function AddSingleListing() {
         }
         toast({
           title: "Found a clean unit",
-          description: `${data.unit.bedrooms > 0 ? `${data.unit.bedrooms}BR` : "Bedroom count TBD"} at ${data.unit.address} — verified clean of OTA listings by address and photo check.`,
+          description: `${data.unit.bedrooms > 0 ? `${data.unit.bedrooms}BR` : "Bedroom count TBD"} at ${discoveredAddress || "the selected resort"} — verified clean of OTA listings by address and photo check.`,
         });
         setStep(2);
       } else {
@@ -876,7 +885,7 @@ export default function AddSingleListing() {
       setFindLoading(false);
       findAbortRef.current = null;
     }
-  }, [pickedCity, selectedCommunity, selectedBedrooms, cityWideMode, toast]);
+  }, [pickedCity, selectedCommunity, propertyName, selectedBedrooms, cityWideMode, toast]);
 
   // CODEX NOTE (2026-05-05, claude/find-eta-cancel): cancel handler
   // for the operator-facing "Cancel search" button. Aborts the
@@ -1105,11 +1114,16 @@ export default function AddSingleListing() {
       toast({ title: "Missing city/state", variant: "destructive" });
       return;
     }
+    const effectiveStreetAddress = streetAddress.trim() || inferCommunityStreetAddress({
+      communityName: selectedCommunity?.name ?? propertyName,
+      city: pickedCity.city,
+      state: pickedCity.state,
+    });
     const addressCheck = validateCommunityStreetAddress({
       communityName: selectedCommunity?.name ?? propertyName,
       city: pickedCity.city,
       state: pickedCity.state,
-      streetAddress,
+      streetAddress: effectiveStreetAddress,
     });
     if (!addressCheck.ok) {
       toast({
@@ -1128,7 +1142,7 @@ export default function AddSingleListing() {
         // (adapt-draft.ts) to skip Unit B and render this as a
         // single-unit property.
         singleListing: true,
-        name: propertyName.trim() || streetAddress.trim() || `${pickedCity.city} listing`,
+        name: propertyName.trim() || effectiveStreetAddress || `${pickedCity.city} listing`,
         city: pickedCity.city,
         state: pickedCity.state,
         // Pass a unitTypes hint that satisfies checkCommunityType
@@ -1142,12 +1156,10 @@ export default function AddSingleListing() {
         minimumStayEvidence: selectedCommunity?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: selectedCommunity?.minimumStaySourceUrl ?? null,
         unit1Url: zillowSourceUrl || null,
-        // Keep the exact standalone unit address, including Unit/Apt/#
-        // suffixes. `streetAddress` below is the canonical resort street
-        // used for community grouping and intentionally strips unit
-        // identifiers, but Guesty/Airbnb license validation needs the real
-        // unit-level address whenever we have it.
-        unit1Address: streetAddress.trim() || null,
+        // Prefer the exact standalone unit address when discovery found one;
+        // otherwise fall back to the known resort street address so the draft
+        // can still be saved and later pushed with a real OTA-valid address.
+        unit1Address: effectiveStreetAddress || null,
         unit1Bedrooms: bedrooms || null,
         unit1Bathrooms: editedUnitA?.bathrooms ?? (zillowFacts.bathrooms ? String(zillowFacts.bathrooms) : null),
         unit1Sqft: editedUnitA?.sqft ?? null,

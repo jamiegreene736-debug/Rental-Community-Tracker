@@ -16,6 +16,7 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Keauhou Estates"], street: "78-6855 Ali'i Dr", city: "Kailua-Kona", state: "HI" },
   { names: ["Caribe Cove Resort", "Caribe Cove"], street: "9000 Treasure Trove Ln", city: "Kissimmee", state: "FL" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
+  { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },
 ];
 
 export function normalizeCommunityAddressToken(value: string): string {
@@ -27,6 +28,7 @@ export function normalizeCommunityAddressToken(value: string): string {
     .replace(/\b(lane)\b/g, "ln")
     .replace(/\b(street)\b/g, "st")
     .replace(/\b(avenue)\b/g, "ave")
+    .replace(/\b(boulevard)\b/g, "blvd")
     .replace(/\b(apartment|apt|unit|suite|ste|building|bldg|#)\s*[a-z0-9-]+\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
@@ -62,7 +64,7 @@ export function streetRootFromAddress(value: string | null | undefined): string 
 
 export function isLikelyStreetAddress(value: string | null | undefined): boolean {
   const street = streetRootFromAddress(value);
-  return /\b\d{1,6}\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i.test(street);
+  return /\b\d{1,6}\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i.test(street);
 }
 
 export function inferCommunityStreetAddress(input: {

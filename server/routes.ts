@@ -26105,8 +26105,7 @@ Return ONLY compact JSON with this exact shape:
     if (!finding.hasResortFee) return "";
     const amount = finding.amountText ? ` of ${finding.amountText}` : "";
     const frequency = finding.frequencyText ? ` ${finding.frequencyText.toLowerCase()}` : "";
-    const verb = finding.confidence === "high" ? "charges" : "may charge";
-    return `Please note: ${communityName} ${verb} a mandatory resort fee${amount}${frequency}. This fee is separate from the nightly rate, cleaning fee, and host-controlled taxes/fees, and may be collected by the resort, property manager, or booking platform.`;
+    return `Please note: guests pay a mandatory ${communityName} resort fee${amount}${frequency} on site at check-in, separate from the rates shown.`;
   };
 
   const appendResortFeeNote = (text: string, note: string, fullDescription?: string) => {
