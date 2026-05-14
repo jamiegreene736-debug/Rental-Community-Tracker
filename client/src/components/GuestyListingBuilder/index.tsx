@@ -1693,7 +1693,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (result.connected) {
         setConn("connected");
         try {
-          const data = await guestyService.getListings(50, 0);
+          const data = await guestyService.getListings(200, 0);
           if (!cancelled) setListings(data.results || []);
         } catch { /* non-fatal */ }
       } else {
@@ -1866,7 +1866,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           ? `ID: ${result.listingId} — listed on connected channels. It now appears in the dropdown above.`
           : `ID: ${result.listingId} — created as a draft (list-on-channels step didn't complete, check the build log). It now appears in the dropdown above.`,
       });
-      const fresh = await guestyService.getListings(50, 0);
+      const fresh = await guestyService.getListings(200, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
 
