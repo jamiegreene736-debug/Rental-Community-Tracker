@@ -165,7 +165,7 @@ const CSS = `
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
-type GuestyListing = { _id: string; nickname?: string; title?: string };
+type GuestyListing = { _id?: string; id?: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
 type TmkLookupResult = {
   taxMapKey: string;
@@ -247,6 +247,10 @@ function normalizeListingName(value: unknown): string {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function guestyListingId(listing: GuestyListing | null | undefined): string {
+  return String(listing?._id ?? listing?.id ?? "").trim();
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -1798,7 +1802,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     if (!propertyId || listings.length === 0) return;
     const match = propertyMap.find((m) => m.propertyId === propertyId);
-    if (match && listings.some((l) => l._id === match.guestyListingId)) {
+    if (match && listings.some((l) => guestyListingId(l) === match.guestyListingId)) {
       setSelectedId(match.guestyListingId);
     } else {
       setSelectedId("");
@@ -1816,7 +1820,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     if (!propertyId || propertyId >= 0 || listings.length === 0) return;
     const existingMap = propertyMap.find((m) => m.propertyId === propertyId);
-    const existingMapIsValid = existingMap && listings.some((l) => l._id === existingMap.guestyListingId);
+    const existingMapIsValid = existingMap && listings.some((l) => guestyListingId(l) === existingMap.guestyListingId);
     if (existingMapIsValid) return;
     try {
       const candidateNames = new Set<string>();
@@ -1848,29 +1852,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           }
         }
       }
-      const uniqueMatches = Array.from(new Map(exactMatches.map((listing) => [listing._id, listing])).values());
+      const uniqueMatches = Array.from(new Map(exactMatches.map((listing) => [guestyListingId(listing), listing])).values())
+        .filter((listing) => guestyListingId(listing));
       if (uniqueMatches.length === 0) return;
       if (uniqueMatches.length > 1) {
         console.warn("[GuestyListingBuilder] multiple draft Guesty listing matches; using the first Guesty result", {
           propertyId,
-          matches: uniqueMatches.map((listing) => ({ id: listing._id, name: listing.nickname || listing.title || "" })),
+          matches: uniqueMatches.map((listing) => ({ id: guestyListingId(listing), name: listing.nickname || listing.title || "" })),
         });
       }
 
       const match = uniqueMatches[0];
-      const attemptKey = `${propertyId}:${match._id}`;
+      const matchId = guestyListingId(match);
+      const attemptKey = `${propertyId}:${matchId}`;
       if (autoMapAttemptRef.current === attemptKey) return;
       autoMapAttemptRef.current = attemptKey;
 
       fetch("/api/guesty-property-map", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ propertyId, guestyListingId: match._id }),
+        body: JSON.stringify({ propertyId, guestyListingId: matchId }),
       })
         .then(async (resp) => {
           if (!resp.ok) throw new Error("Guesty property map repair failed");
-          rememberPropertyMap(propertyId, match._id);
-          setSelectedId(match._id);
+          rememberPropertyMap(propertyId, matchId);
+          setSelectedId(matchId);
           toast({
             title: "Guesty listing matched",
             description: "This builder draft is now connected to the matching Guesty listing.",
@@ -3003,9 +3009,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             disabled={conn !== "connected"}
           >
             <option value="">— Select an existing listing to view or update —</option>
-            {listings.map((l) => (
-              <option key={l._id} value={l._id}>{l.nickname || l.title || l._id}</option>
-            ))}
+            {listings.map((l) => {
+              const id = guestyListingId(l);
+              if (!id) return null;
+              return <option key={id} value={id}>{l.nickname || l.title || id}</option>;
+            })}
           </select>
 
           {selectedId && propertyData && (

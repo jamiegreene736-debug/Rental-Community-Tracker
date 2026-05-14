@@ -210,7 +210,7 @@ class GuestyService {
   }
 
   async getListings(limit = 25, skip = 0) {
-    return this.request<{ results: Array<{ _id: string; nickname?: string; title?: string }> }>(
+    return this.request<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>(
       "GET", "/listings", null, `limit=${limit}&skip=${skip}`
     );
   }
