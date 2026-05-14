@@ -443,6 +443,7 @@ export default function Builder() {
         propertyData={propertyData}
         propertyId={propertyId}
         sourceUrlsByFolder={sourceUrlsByFolder}
+        isSingleListing={property.units.length === 1}
         onPhotoOverridesChanged={refreshPhotoLabels}
         onBuildComplete={(result) => {
           if (result.listingId) {

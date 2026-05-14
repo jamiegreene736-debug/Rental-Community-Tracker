@@ -183,6 +183,7 @@ type Props = {
   // folder → source listing URL (Zillow/Airbnb/VRBO). Fed straight to the
   // PhotoCurator so each unit section can show a "View source listing" link.
   sourceUrlsByFolder?: Record<string, string>;
+  isSingleListing?: boolean;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
   // Fired after the user mutates a photo label (delete/restore/rename) in
@@ -235,6 +236,9 @@ function ChannelMarkupCard({
   seasonalMonths,
   guestyRatesByMonth,
   applyPushedRates,
+  targetMarginPct,
+  setTargetMarginPct,
+  allowCustomMargin,
 }: {
   listingId: string | null;
   // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
@@ -247,14 +251,13 @@ function ChannelMarkupCard({
   // catching up (which is eventually-consistent and was returning stale
   // rates in practice).
   applyPushedRates?: (rates: Array<{ yearMonth: string; price: number }>) => void;
+  targetMarginPct: number;
+  setTargetMarginPct: (value: number) => void;
+  allowCustomMargin: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-  // User's target margin — defaults to 20% (the old hard-coded floor).
-  // Configurable because some properties need a bigger cushion or can
-  // accept tighter margins in slow months.
-  const [targetMarginPct, setTargetMarginPct] = useState(20);
   const [seasonalPushResult, setSeasonalPushResult] = useState<any>(null);
 
   // Fee-differential markups: make every channel net the same as Direct
@@ -442,19 +445,28 @@ function ChannelMarkupCard({
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <label style={{ fontSize: 11, color: "#6b7280" }}>
-          Target margin:
+          {allowCustomMargin ? "Single-listing target margin:" : "Target margin:"}
           <input
             type="number"
             step="1"
-            min="0"
-            max="50"
+            min={allowCustomMargin ? -50 : 20}
+            max="100"
             value={targetMarginPct}
-            onChange={(e) => setTargetMarginPct(parseFloat(e.target.value) || 0)}
+            disabled={!allowCustomMargin}
+            onChange={(e) => {
+              const parsed = parseFloat(e.target.value);
+              setTargetMarginPct(Number.isFinite(parsed) ? parsed : 0);
+            }}
             style={{ marginLeft: 6, padding: "3px 6px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: 60 }}
             data-testid="input-target-margin"
           />
           <span style={{ marginLeft: 2 }}>%</span>
         </label>
+        {!allowCustomMargin && (
+          <span style={{ fontSize: 11, color: "#6b7280" }}>
+            Combo listings stay locked at the standard 20% margin guardrail.
+          </span>
+        )}
         {seasonalPriceRange && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
             Seasonal base rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
@@ -660,7 +672,7 @@ function ChannelMarkupCard({
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -2734,6 +2746,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [markupPct, setMarkupPct] = useState<Record<ChannelKey, number>>({
     airbnb: 0, vrbo: 0, booking: 0, direct: 0,
   });
+  const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
+  const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
+
+  useEffect(() => {
+    if (!isSingleListing) setTargetMarginPct(MIN_PROFIT_MARGIN * 100);
+  }, [isSingleListing]);
 
   // Hydrate markupPct from Guesty so saved values survive navigation.
   useEffect(() => {
@@ -4791,7 +4809,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <th>Guesty Base / Night</th>
                                   <th>Market Position</th>
                                   <th colSpan={4} style={{ textAlign: "center", borderLeft: "1px solid #e5e7eb" }}>
-                                    Guest Sell Rate + Net Profit per Channel — {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% floor target
+                                    Guest Sell Rate + Net Profit per Channel — {(pricingMarginTarget * 100).toFixed(0)}% floor target
                                   </th>
                                 </tr>
                                 <tr>
@@ -4817,9 +4835,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const sheet = row.totalSell;
                                   const buyIn = row.totalBuyIn;
                                   // For each channel, compute what the host actually nets
-                                  // at the current Guesty rate, and whether it meets the 20% floor.
+                                  // at the current Guesty rate, and whether it meets the active floor.
                                   const channelCells = (["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch) => {
-                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch), mk: 0 };
+                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch, pricingMarginTarget), mk: 0 };
                                     // Apply per-channel markup — what the guest actually pays
                                     // on this channel is Guesty base rate * (1 + markup).
                                     // Host then nets that * (1 - channel fee).
@@ -4836,8 +4854,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     const profit = Math.round(rawProfit);
                                     // 0.5bp tolerance so 19.9995% rounds up to "clears the
                                     // floor" instead of flipping cells red on dust.
-                                    const ok = margin >= MIN_PROFIT_MARGIN - 0.0005;
-                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
+                                    const ok = margin >= pricingMarginTarget - 0.0005;
+                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min: minProfitableRate(buyIn, ch, pricingMarginTarget), mk };
                                   });
                                   return (
                                     <tr key={row.yearMonth}>
@@ -4987,7 +5005,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           `Guest-facing ${c.ch} sell rate: $${c.sellRate!.toLocaleString()}/night.`
                                           + ` Guesty base rate: $${guesty!.avgRate.toLocaleString()}/night.`
                                           + (c.mk > 0 ? ` Channel markup: +${mkPct}%.` : " No channel markup.")
-                                          + ` Floor to hit 20% on ${c.ch}: $${c.min.toLocaleString()}/night.`
+                                          + ` Floor to hit ${(pricingMarginTarget * 100).toFixed(0)}% on ${c.ch}: $${c.min.toLocaleString()}/night.`
                                           + ` Estimated net profit: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
                                         return (
                                           <td
@@ -5023,7 +5041,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </table>
                             <div style={{ marginTop: 10, fontSize: 11, color: "#6b7280", lineHeight: 1.5 }}>
                               <b>Legend.</b> <b>Guesty Base</b> is the calendar rate stored in Guesty. Each channel cell starts with the <b>guest-facing sell rate</b> after that channel's markup, then the estimated net profit after that channel's host fee.
-                              <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears 20% floor.
+                              <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears {(pricingMarginTarget * 100).toFixed(0)}% floor.
                               {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the rate or add a channel markup</b>.
                               {" "}<b>Floor</b> is the minimum guest sell rate needed on that channel. Hover a cell for the full breakdown.
                             </div>
@@ -5042,6 +5060,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     seasonalMonths={seasonalMonths}
                     guestyRatesByMonth={guestyRatesByMonth}
                     applyPushedRates={applyPushedRates}
+                    targetMarginPct={targetMarginPct}
+                    setTargetMarginPct={setTargetMarginPct}
+                    allowCustomMargin={isSingleListing}
                   />
                 )}
 
