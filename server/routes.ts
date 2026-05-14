@@ -2690,6 +2690,7 @@ function knownCommunityAddressFromText(...values: unknown[]): KnownCommunityAddr
 }
 
 async function repairKnownCommunityDraftAddress(draft: any) {
+  const santaMariaUnitAddress = "7307 Estero Blvd #3104, Fort Myers Beach, FL 33931";
   const santaMariaText = [
     draft?.name,
     draft?.listingTitle,
@@ -2704,17 +2705,20 @@ async function repairKnownCommunityDraftAddress(draft: any) {
   if (
     (draft as any)?.singleListing === true &&
     santaMariaText.includes("santa maria") &&
-    santaMariaText.includes("fort myers") &&
-    !/\bunit\s*3104\b|\b#\s*3104\b|\bapt\s*3104\b|\b7307\s+estero\s+(?:blvd|boulevard)\s+3104\b/i.test(String(draft?.unit1Address ?? ""))
+    santaMariaText.includes("fort myers")
   ) {
-    const unitAddress = "7307 Estero Blvd #3104, Fort Myers Beach, FL 33931";
+    const currentUnitAddress = String(draft?.unit1Address ?? "").trim();
+    if (currentUnitAddress === santaMariaUnitAddress) {
+      console.log(`[community-drafts] Santa Maria standalone unit address already set for draft ${draft.id}: ${currentUnitAddress}`);
+      return { draft, repairedAddress: false };
+    }
     const repaired = await storage.updateCommunityDraft(draft.id, {
       streetAddress: "7307 Estero Blvd",
       city: "Fort Myers Beach",
       state: "Florida",
-      unit1Address: unitAddress,
+      unit1Address: santaMariaUnitAddress,
     } as any);
-    console.log(`[community-drafts] repaired Santa Maria standalone unit address for draft ${draft.id}: ${unitAddress}`);
+    console.log(`[community-drafts] repaired Santa Maria standalone unit address for draft ${draft.id}: ${currentUnitAddress || "(blank)"} -> ${santaMariaUnitAddress}`);
     return { draft: repaired, repairedAddress: true };
   }
 
