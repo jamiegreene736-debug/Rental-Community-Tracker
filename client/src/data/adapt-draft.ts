@@ -214,6 +214,70 @@ function looksLikeSamplePlaceholder(value: string): boolean {
   return false;
 }
 
+function titleCaseAddress(value: string): string {
+  return value.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+function cleanAddressComponent(value: string): string {
+  return value.replace(/\s+/g, " ").replace(/\s+,/g, ",").trim();
+}
+
+function parseListingAddressFromUrl(url: string | null | undefined): string | null {
+  const raw = String(url ?? "").trim();
+  if (!raw) return null;
+  const clean = (value: string): string | null => {
+    const decoded = decodeURIComponent(value)
+      .replace(/[_-]+/g, " ")
+      .replace(/\b(?:FL|HI|CA|TX|NY|GA|SC|NC|AL|MS|LA|WA|OR|CO|AZ|NV)\b/gi, " ")
+      .replace(/\b\d{5}(?: \d{4})?\b/g, " ")
+      .replace(/\bM\d{4,}(?: \d+)?\b/gi, " ")
+      .replace(/\bzpid\b.*$/i, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const m = decoded.match(
+      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
+    );
+    return m?.[1] ? titleCaseAddress(m[1].trim()) : null;
+  };
+
+  const zillowMatch = raw.match(/\/homedetails\/([^/]+)\//i);
+  if (zillowMatch) return clean(zillowMatch[1]);
+
+  const realtorMatch = raw.match(/\/realestateandhomes-detail\/([^/?#]+)/i);
+  if (realtorMatch) {
+    const slug = realtorMatch[1];
+    const firstSegment = slug.split("_")[0];
+    return clean(firstSegment) ?? clean(slug);
+  }
+
+  const redfinMatch = raw.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)(?:\/unit-([^/]+))?\/home\//i);
+  if (redfinMatch) {
+    const street = redfinMatch[1];
+    const unit = redfinMatch[2] ? ` Unit ${redfinMatch[2]}` : "";
+    return clean(`${street}${unit}`);
+  }
+
+  return null;
+}
+
+function fullUnitAddressForDraft(draft: CommunityDraft): string | null {
+  const explicit = String((draft as any).unit1Address ?? "").trim();
+  const parsed = explicit || parseListingAddressFromUrl(draft.unit1Url) || parseListingAddressFromUrl(draft.sourceUrl) || "";
+  if (!parsed) return null;
+  const hasCity = new RegExp(`\\b${draft.city.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(parsed);
+  const hasState = new RegExp(`\\b(?:${draft.state.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|${draft.state.toLowerCase() === "florida" ? "FL" : draft.state.toLowerCase() === "hawaii" ? "HI" : draft.state})\\b`, "i").test(parsed);
+  return cleanAddressComponent(`${parsed}${hasCity ? "" : `, ${draft.city}`}${hasState ? "" : `, ${draft.state}`}`);
+}
+
+function unitNumberFromAddress(address: string | null): string {
+  const text = String(address ?? "").trim();
+  if (!text) return "A";
+  const marked = text.match(/\b(?:unit|apt|apartment|suite|ste|#)\s*([A-Za-z]?\d{1,5}[A-Za-z]?)\b/i);
+  if (marked?.[1]) return marked[1].toUpperCase();
+  const trailing = text.split(",")[0]?.match(/\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+([A-Za-z]?\d{2,5}[A-Za-z]?)\b/i);
+  return trailing?.[1] ? trailing[1].toUpperCase() : "A";
+}
+
 function descriptionForDraft(draft: CommunityDraft): string {
   const text = draft.listingDescription ?? "";
   if ((draft as any).singleListing !== true) return text;
@@ -243,6 +307,8 @@ export function adaptDraftToPropertyUnitBuilder(
   const savedStrPermit = realDraftValue(draft.strPermit);
   const savedDbprLicense = realDraftValue((draft as any).dbprLicense);
   const savedTouristTaxAccount = realDraftValue((draft as any).touristTaxAccount);
+  const singleUnitAddress = (draft as any).singleListing === true ? fullUnitAddressForDraft(draft) : null;
+  const singleUnitNumber = unitNumberFromAddress(singleUnitAddress);
   const filesToPhotos = (folder: string | null | undefined) => {
     if (!folder) return [];
     const files = photoFiles[folder] ?? [];
@@ -259,7 +325,9 @@ export function adaptDraftToPropertyUnitBuilder(
     // Street address (when the operator filled it in on Step 5) gives
     // the preflight a real per-unit address to text-search; falls
     // back to "city, state" so older drafts keep rendering.
-    address: draft.streetAddress
+    address: singleUnitAddress
+      ? singleUnitAddress
+      : draft.streetAddress
       ? `${draft.streetAddress}, ${draft.city}, ${draft.state}`
       : `${draft.city}, ${draft.state}`,
     bookingTitle: draft.bookingTitle || draft.listingTitle || draft.name,
@@ -313,7 +381,7 @@ export function adaptDraftToPropertyUnitBuilder(
       ? [
           {
             id: `draft${draft.id}-unit-a`,
-            unitNumber: "A",
+            unitNumber: singleUnitNumber,
             bedrooms: u1Br,
             bathrooms: draft.unit1Bathrooms ?? "",
             sqft: draft.unit1Sqft ?? "",

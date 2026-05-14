@@ -1142,6 +1142,12 @@ export default function AddSingleListing() {
         minimumStayEvidence: selectedCommunity?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: selectedCommunity?.minimumStaySourceUrl ?? null,
         unit1Url: zillowSourceUrl || null,
+        // Keep the exact standalone unit address, including Unit/Apt/#
+        // suffixes. `streetAddress` below is the canonical resort street
+        // used for community grouping and intentionally strips unit
+        // identifiers, but Guesty/Airbnb license validation needs the real
+        // unit-level address whenever we have it.
+        unit1Address: streetAddress.trim() || null,
         unit1Bedrooms: bedrooms || null,
         unit1Bathrooms: editedUnitA?.bathrooms ?? (zillowFacts.bathrooms ? String(zillowFacts.bathrooms) : null),
         unit1Sqft: editedUnitA?.sqft ?? null,
@@ -1151,6 +1157,7 @@ export default function AddSingleListing() {
         unit1LongDescription: editedUnitA?.longDescription ?? null,
         // unit2_* explicitly null — see CODEX NOTE above.
         unit2Url: null,
+        unit2Address: null,
         unit2Bedrooms: null,
         unit2Bathrooms: null,
         unit2Sqft: null,
