@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Link, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -40,6 +40,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { checkCommunityType } from "@shared/community-type";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
+import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -345,6 +346,18 @@ export default function AddCommunity() {
   const AIRBNB_FEE = 0.155;
   const SELL_MARKUP = (1 + NET_MARGIN_TARGET) / (1 - AIRBNB_FEE); // ≈ 1.42
   const suggestedRate = baseRate > 0 ? Math.round(baseRate * SELL_MARKUP) : 0;
+  const suggestedStreetAddress = useMemo(() => inferCommunityStreetAddress({
+    communityName: selectedCommunity?.name,
+    city: selectedCommunity?.city,
+    state: selectedCommunity?.state,
+    unitAddresses: [(selectedUnit1 as any)?.address, (selectedUnit2 as any)?.address],
+  }), [selectedCommunity, selectedUnit1, selectedUnit2]);
+
+  useEffect(() => {
+    if (!editedStreetAddress.trim() && suggestedStreetAddress) {
+      setEditedStreetAddress(suggestedStreetAddress);
+    }
+  }, [editedStreetAddress, suggestedStreetAddress]);
 
   // ── Step 2: Research ────────────────────────────────────────
   const handleResearch = useCallback(async () => {
@@ -530,6 +543,11 @@ export default function AddCommunity() {
   // ── Step 3: Pairing suggestions ─────────────────────────────
   const handleSelectCommunity = useCallback(async (community: CommunityResult) => {
     setSelectedCommunity(community);
+    setEditedStreetAddress(inferCommunityStreetAddress({
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+    }));
     setUnitSearchLoading(true);
     setUnitSearchResults(null);
     setCommunityProfile(null);
@@ -731,6 +749,9 @@ export default function AddCommunity() {
       setEditedTransit(data.transit || "");
       setEditedUnitA(data.unitA ?? null);
       setEditedUnitB(data.unitB ?? null);
+      if (!editedStreetAddress.trim() && suggestedStreetAddress) {
+        setEditedStreetAddress(suggestedStreetAddress);
+      }
       // Seed the pricing-area picker from the wizard's city/state
       // unless the operator already picked one. The same default
       // logic powers buy-in / quality calcs for the existing 11
@@ -755,11 +776,26 @@ export default function AddCommunity() {
     } finally {
       setListingLoading(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, strPermit, toast]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, strPermit, editedStreetAddress, suggestedStreetAddress, toast]);
 
   // ── Save to dashboard ───────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!selectedCommunity) return;
+    const addressCheck = validateCommunityStreetAddress({
+      communityName: selectedCommunity.name,
+      city: selectedCommunity.city,
+      state: selectedCommunity.state,
+      streetAddress: editedStreetAddress.trim() || suggestedStreetAddress,
+    });
+    if (!addressCheck.ok) {
+      toast({
+        title: "Fix the property address",
+        description: addressCheck.error,
+        variant: "destructive",
+      });
+      if (addressCheck.expectedStreet) setEditedStreetAddress(addressCheck.expectedStreet);
+      return;
+    }
     setSaving(true);
     try {
       const saveResp = await apiRequest("POST", "/api/community/save", {
@@ -801,7 +837,7 @@ export default function AddCommunity() {
         bookingTitle: editedBookingTitle || null,
         propertyType: editedPropertyType || null,
         pricingArea: editedPricingArea || null,
-        streetAddress: editedStreetAddress.trim() || null,
+        streetAddress: addressCheck.streetAddress,
         listingDescription: editedDescription || null,
         neighborhood: editedNeighborhood || null,
         transit: editedTransit || null,
@@ -859,7 +895,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1788,17 +1824,17 @@ export default function AddCommunity() {
                     <div>
                       <label htmlFor="input-street-address" className="text-sm font-medium mb-1.5 block">
                         Street Address
-                        <span className="text-muted-foreground font-normal ml-2 text-xs">— complex-level (e.g. "1661 Pe'e Rd"); preflight appends Unit A / Unit B</span>
+                        <span className="text-muted-foreground font-normal ml-2 text-xs">— validated against the selected community</span>
                       </label>
                       <Input
                         id="input-street-address"
                         value={editedStreetAddress}
                         onChange={e => setEditedStreetAddress(e.target.value)}
-                        placeholder={selectedCommunity ? `${selectedCommunity.city}, ${selectedCommunity.state}` : "Street, e.g. 1661 Pe'e Rd"}
+                        placeholder={suggestedStreetAddress || "Street, e.g. 1661 Pe'e Rd"}
                         data-testid="input-street-address"
                       />
                       <p className="text-[11px] text-muted-foreground mt-1">
-                        Optional. Leave blank and the dashboard / preflight fall back to "{selectedCommunity?.city}, {selectedCommunity?.state}".
+                        Required before saving. Known resorts auto-fill their canonical street address so Guesty and Airbnb validate against the right community.
                       </p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

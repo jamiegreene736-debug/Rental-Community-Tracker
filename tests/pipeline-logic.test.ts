@@ -7,6 +7,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { researchCommunitiesForCity } from "../server/community-research";
+import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
 
 // ---------- Import the internals we want to test ----------
@@ -978,5 +980,44 @@ for (const col of ["single_listing", "booking_title", "property_type", "unit1_ba
   );
 }
 console.log("  ✓ runtime schema guard covers community_drafts listing draft columns");
+
+// ---------- Community address guards ----------
+console.log("\ncommunity address guard suite");
+
+assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Pili Mai",
+    city: "Koloa",
+    state: "HI",
+    unitAddresses: ["2253 Poipu Rd, Unit A, Koloa, HI 96756"],
+  }),
+  "2611 Kiahuna Plantation Dr",
+  "known communities should use the canonical resort address instead of a stale unit/source address",
+);
+console.log("  ✓ Pili Mai canonical address beats stale unit/source address");
+
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Pili Mai",
+    city: "Koloa",
+    state: "HI",
+    streetAddress: "2253 Poipu Rd",
+  }).ok,
+  false,
+  "Pili Mai should reject Kiahuna Plantation's 2253 Poipu Rd address",
+);
+console.log("  ✓ Pili Mai rejects the Kiahuna 2253 Poipu Rd mismatch");
+
+const dashboardPropertyIds = new Set([1, 4, 9, 19, 20, 23, 24, 27, 29, 32, 33]);
+for (const prop of unitBuilderData.filter((p) => dashboardPropertyIds.has(p.propertyId))) {
+  const check = validateCommunityStreetAddress({
+    communityName: prop.complexName,
+    city: prop.address.split(",").at(-2)?.trim(),
+    state: prop.address.split(",").at(-1)?.trim().split(/\s+/)[0],
+    streetAddress: prop.address,
+  });
+  assert.equal(check.ok, true, `${prop.propertyId} ${prop.complexName} should have a valid canonical community address`);
+}
+console.log("  ✓ active dashboard property addresses match their communities");
 
 console.log("\nall suites passed ✅");

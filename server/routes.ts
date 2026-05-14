@@ -68,6 +68,7 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
+import { validateCommunityStreetAddress } from "@shared/community-addresses";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -21348,7 +21349,24 @@ Return ONLY compact JSON with this exact shape:
         matchedDisqualifier: typeCheck.matchedDisqualifier,
       });
     }
-    const draft = await storage.createCommunityDraft(result.data);
+    const addressCheck = validateCommunityStreetAddress({
+      communityName: result.data.name,
+      city: result.data.city,
+      state: result.data.state,
+      streetAddress: result.data.streetAddress,
+    });
+    if (!addressCheck.ok) {
+      return res.status(400).json({
+        error: "Invalid community address",
+        reason: addressCheck.error,
+        expectedStreet: addressCheck.expectedStreet,
+      });
+    }
+
+    const draft = await storage.createCommunityDraft({
+      ...result.data,
+      streetAddress: addressCheck.streetAddress,
+    });
 
     // PR #328 (operator directive 2026-04-30): kick off PM auto-
     // discovery for the new community in the background. Find-buy-in

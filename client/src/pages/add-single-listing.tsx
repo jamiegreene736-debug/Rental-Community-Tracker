@@ -55,6 +55,7 @@ import {
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
+import { validateCommunityStreetAddress } from "@shared/community-addresses";
 
 // 4 steps. Step 1 collapses location + community research into one
 // screen — city autocomplete kicks off /api/community/research and
@@ -1104,6 +1105,20 @@ export default function AddSingleListing() {
       toast({ title: "Missing city/state", variant: "destructive" });
       return;
     }
+    const addressCheck = validateCommunityStreetAddress({
+      communityName: selectedCommunity?.name ?? propertyName,
+      city: pickedCity.city,
+      state: pickedCity.state,
+      streetAddress,
+    });
+    if (!addressCheck.ok) {
+      toast({
+        title: "Fix the property address",
+        description: addressCheck.error,
+        variant: "destructive",
+      });
+      return;
+    }
     setSaving(true);
     try {
       const saveResp = await apiRequest("POST", "/api/community/save", {
@@ -1151,7 +1166,7 @@ export default function AddSingleListing() {
         bookingTitle: editedBookingTitle || null,
         propertyType: editedPropertyType || null,
         pricingArea: editedPricingArea || null,
-        streetAddress: streetAddress.trim() || null,
+        streetAddress: addressCheck.streetAddress,
         listingDescription: editedDescription || null,
         neighborhood: editedNeighborhood || null,
         transit: editedTransit || null,
