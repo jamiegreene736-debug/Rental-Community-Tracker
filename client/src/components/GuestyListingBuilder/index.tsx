@@ -288,6 +288,28 @@ function ChannelMarkupCard({
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [seasonalPushResult, setSeasonalPushResult] = useState<any>(null);
+  const [targetMarginInput, setTargetMarginInput] = useState(String(targetMarginPct));
+
+  useEffect(() => {
+    setTargetMarginInput(String(targetMarginPct));
+  }, [targetMarginPct]);
+
+  const marginMinPct = allowCustomMargin ? -99 : 20;
+  const marginMaxPct = 100;
+  const applyTargetMarginInput = (raw: string) => {
+    setTargetMarginInput(raw);
+    const parsed = parseFloat(raw);
+    if (!Number.isFinite(parsed)) return;
+    setTargetMarginPct(Math.max(marginMinPct, Math.min(marginMaxPct, parsed)));
+  };
+  const normalizeTargetMarginInput = () => {
+    const parsed = parseFloat(targetMarginInput);
+    const next = Number.isFinite(parsed)
+      ? Math.max(marginMinPct, Math.min(marginMaxPct, parsed))
+      : targetMarginPct;
+    setTargetMarginPct(next);
+    setTargetMarginInput(String(next));
+  };
 
   // Fee-differential markups: make every channel net the same as Direct
   // after that channel's fee. Result is a FLAT per-channel markup that
@@ -478,14 +500,12 @@ function ChannelMarkupCard({
           <input
             type="number"
             step="1"
-            min={allowCustomMargin ? -50 : 20}
-            max="100"
-            value={targetMarginPct}
+            min={marginMinPct}
+            max={marginMaxPct}
+            value={targetMarginInput}
             disabled={!allowCustomMargin}
-            onChange={(e) => {
-              const parsed = parseFloat(e.target.value);
-              setTargetMarginPct(Number.isFinite(parsed) ? parsed : 0);
-            }}
+            onChange={(e) => applyTargetMarginInput(e.target.value)}
+            onBlur={normalizeTargetMarginInput}
             style={{ marginLeft: 6, padding: "3px 6px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: 60 }}
             data-testid="input-target-margin"
           />
