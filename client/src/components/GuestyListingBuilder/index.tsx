@@ -859,19 +859,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
     const value = complianceValueFor(req.key);
     if (!value || isPlaceholderLicenseValue(value)) {
-      if (req.key === "dbprLicense") {
-        const dbprSource = complianceProfile.sources.find((source) => /dbpr/i.test(source.label));
-        if (dbprSource?.url) {
-          window.open(dbprSource.url, "_blank", "noopener,noreferrer");
-        }
-        toast({
-          title: "Florida DBPR search opened",
-          description: "Use the DBPR public search to find the real CND/DWE vacation-rental license, paste it here, then validate before pushing compliance.",
-        });
-        return;
-      }
       const description = req.key === "dbprLicense"
-        ? "Paste the real CND/DWE Florida DBPR vacation-rental license from the DBPR search, then validate it. The public auto-pull currently only finds the Fort Myers Beach STR/LBTR value."
+        ? "Click the main requirements check to search Florida DBPR automatically. If DBPR has no confident public address/name match, this field stays blank instead of guessing."
         : req.key === "touristTaxAccount"
           ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
           : `Paste the real ${req.shortLabel} before pushing compliance.`;
@@ -882,7 +871,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       title: `${req.shortLabel} looks usable`,
       description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
     });
-  }, [complianceValueFor, complianceProfile.sources, toast]);
+  }, [complianceValueFor, toast]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -896,6 +885,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           address: effectivePropertyData.address.full,
           city: effectivePropertyData.address.city,
           state: effectivePropertyData.address.state,
+          listingName: effectivePropertyData.title || effectivePropertyData.nickname || effectivePropertyData.descriptions?.title,
           taxMapKey: effectivePropertyData.taxMapKey,
           tatLicense: effectivePropertyData.tatLicense,
           getLicense: effectivePropertyData.getLicense,
@@ -3863,8 +3853,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const value = complianceValueFor(req.key);
                               const isPlaceholder = isPlaceholderLicenseValue(value);
                               const inputValue = value && !isPlaceholder ? value : "";
-                              const canPublicPull = complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit";
-                              const shouldOpenDbprSearch = req.key === "dbprLicense" && (!value || isPlaceholder);
+                              const canPublicPull = complianceProfile.jurisdiction === "fort_myers_beach_fl" && (req.key === "strPermit" || req.key === "dbprLicense");
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -3882,7 +3871,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? " or pull it from the public Fort Myers STR portal" : ""} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR search" : "Fort Myers STR portal"}` : ""} before pushing compliance.
                                     </div>
                                   )}
                                   <input
@@ -3927,8 +3916,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   >
                                     {canPublicPull
                                       ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
-                                      : shouldOpenDbprSearch
-                                        ? "Open Florida DBPR search"
                                       : `Validate pasted ${req.shortLabel}`}
                                   </button>
                                 </div>

@@ -3399,6 +3399,19 @@ export async function registerRoutes(
     longitude?: number | null;
   };
 
+  type DbprLicenseRecord = {
+    id?: string | null;
+    name: string;
+    licenseNumber: string;
+    rank: string;
+    status: string;
+    expires: string;
+    locationAddress: string;
+    mainAddress?: string | null;
+    mailingAddress?: string | null;
+    searchTerm: string;
+  };
+
   const normalizeAddressText = (value: unknown): string => {
     return String(value ?? "")
       .toUpperCase()
@@ -3543,6 +3556,162 @@ export async function registerRoutes(
       match: best,
       candidates: candidates.slice(0, 8),
       note: `Matched public Town STR record ${best.licenseNumber} for ${best.parcelAddress || best.address || searchTerm}.`,
+    };
+  };
+
+  const decodeHtml = (value: string): string => {
+    return value
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, "\"")
+      .replace(/&#39;/gi, "'")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">");
+  };
+
+  const htmlToText = (value: string): string => {
+    return decodeHtml(value)
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  const dbprNameSearchTerms = (address: string, listingName?: string | null): string[] => {
+    const terms = new Set<string>();
+    const name = String(listingName ?? "")
+      .replace(/\b(?:bed(?:room)?|bath(?:room)?|sleeps?|unit|apt|apartment|condo|suite|vrbo|airbnb)\b/gi, " ")
+      .replace(/[^\w\s&'-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (name.length >= 4) {
+      terms.add(name);
+      const withoutUnit = name.replace(/\b#?\d+[A-Z]?\b/g, " ").replace(/\s+/g, " ").trim();
+      if (withoutUnit.length >= 4 && withoutUnit !== name) terms.add(withoutUnit);
+      const firstWords = withoutUnit.split(/\s+/).slice(0, 3).join(" ");
+      if (firstWords.length >= 4) terms.add(firstWords);
+    }
+
+    const streetTerm = streetSearchTermFromAddress(address);
+    const streetName = streetTerm.replace(/^\d+\s+/, "").replace(new RegExp(`\\s+(?:${STREET_SUFFIXES})$`), "").trim();
+    if (streetName.length >= 4) terms.add(streetName);
+    if (streetTerm.length >= 4) terms.add(streetTerm);
+    return Array.from(terms).slice(0, 5);
+  };
+
+  const parseDbprLicenseRecords = (html: string, searchTerm: string): DbprLicenseRecord[] => {
+    const records: DbprLicenseRecord[] = [];
+    const chunks = html.split(/<a\s+href=['"]inspectionDates\.asp\?SID=[^'"]*&id=/i).slice(1);
+    for (const chunk of chunks) {
+      const id = chunk.match(/^([^'"]+)/)?.[1] ?? null;
+      const name = htmlToText(chunk.match(/>(.*?)<\/a>/is)?.[1] ?? "");
+      const cells = Array.from(chunk.matchAll(/<td[^>]*align=['"]center['"][^>]*>\s*<font[^>]*>(.*?)<\/font>\s*<\/td>/gis)).map((match) => htmlToText(match[1]));
+      const licenseCell = cells.find((cell) => /\b(?:CND|DWE)\d{5,}\b/i.test(cell)) ?? "";
+      const licenseNumber = licenseCell.match(/\b(?:CND|DWE)\d{5,}\b/i)?.[0]?.toUpperCase() ?? "";
+      const rank = licenseCell.replace(licenseNumber, "").trim();
+      const statusCell = cells.find((cell) => /\b(?:Current|Active|Delinquent|Inactive|Expired|Application)\b/i.test(cell)) ?? "";
+      const expires = statusCell.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] ?? "";
+      const status = statusCell.replace(expires, "").trim();
+      const locationAddress = htmlToText(chunk.match(/License Location Address\*?:.*?<\/td>\s*<td[^>]*>\s*<font[^>]*>(.*?)<\/font>/is)?.[1] ?? "");
+      const mainAddress = htmlToText(chunk.match(/Main Address\*?:.*?<\/td>\s*<td[^>]*>\s*<font[^>]*>(.*?)<\/font>/is)?.[1] ?? "") || null;
+      const mailingAddress = htmlToText(chunk.match(/Mailing Address\*?:.*?<\/td>\s*<td[^>]*>\s*<font[^>]*>(.*?)<\/font>/is)?.[1] ?? "") || null;
+      if (!licenseNumber || !locationAddress) continue;
+      records.push({ id, name, licenseNumber, rank, status, expires, locationAddress, mainAddress, mailingAddress, searchTerm });
+    }
+    return records;
+  };
+
+  const fetchDbprNameSearch = async (searchTerm: string): Promise<DbprLicenseRecord[]> => {
+    const body = new URLSearchParams({
+      hSID: "",
+      hSearchType: "Name",
+      hOrgName: searchTerm,
+      hBoardType: "H",
+      OrgName: searchTerm,
+      SearchOpt: "Part",
+      RecsPerPage: "100",
+      Search1: "Search",
+    });
+    const resp = await fetch("https://www.myfloridalicense.com/wl11.asp?mode=2&search=Name&SID=&brd=H&typ=", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "NexStay/1.0",
+      },
+      body,
+    });
+    if (!resp.ok) throw new Error(`Florida DBPR public lookup failed (${resp.status})`);
+    return parseDbprLicenseRecords(await resp.text(), searchTerm);
+  };
+
+  const scoreDbprLicense = (record: DbprLicenseRecord, address: string, listingName?: string | null): number => {
+    const searched = normalizeAddressText(address);
+    const streetTerm = streetSearchTermFromAddress(address);
+    const unitTokens = extractUnitTokensFromAddress(address);
+    const location = normalizeAddressText(record.locationAddress);
+    const name = normalizeAddressText(record.name);
+    const rank = normalizeAddressText(record.rank);
+    const status = normalizeAddressText(record.status);
+    let score = 0;
+    if (/^(CND|DWE)\d{5,}$/i.test(record.licenseNumber)) score += 40;
+    if (/\b(?:CONDO|DWELLING)\b/.test(rank)) score += 25;
+    if (/\bCURRENT\b/.test(status) && /\bACTIVE\b/.test(status)) score += 25;
+    if (streetTerm && location.includes(streetTerm)) score += 100;
+    const searchedStreetNumber = searched.match(/\b\d{2,6}\b/)?.[0];
+    if (searchedStreetNumber && location.includes(searchedStreetNumber)) score += 40;
+    const searchedCity = searched.match(/\b(FORT MYERS BEACH|FORT MYERS|ESTERO|BONITA SPRINGS|NAPLES)\b/)?.[1];
+    if (searchedCity && location.includes(searchedCity)) score += 15;
+    if (unitTokens.length) {
+      const unitMatched = unitTokens.some((unitToken) => location.includes(`# ${unitToken}`)
+        || location.includes(`APT ${unitToken}`)
+        || location.includes(` ${unitToken} `)
+        || location.endsWith(` ${unitToken}`));
+      score += unitMatched ? 80 : -90;
+    }
+    const listingWords = normalizeAddressText(listingName).split(/\s+/).filter((word) => word.length >= 4);
+    const sharedNameWords = listingWords.filter((word) => name.includes(word)).length;
+    score += Math.min(sharedNameWords * 8, 32);
+    return score;
+  };
+
+  const lookupFloridaDbprLicense = async (address: string, listingName?: string | null): Promise<{ value: string | null; source: string; sourceUrl: string; match?: DbprLicenseRecord; candidates: DbprLicenseRecord[]; note: string } | null> => {
+    const terms = dbprNameSearchTerms(address, listingName);
+    if (!terms.length) return null;
+    const byLicense = new Map<string, DbprLicenseRecord>();
+    for (const term of terms) {
+      try {
+        const records = await fetchDbprNameSearch(term);
+        for (const record of records) {
+          if (!byLicense.has(record.licenseNumber)) byLicense.set(record.licenseNumber, record);
+        }
+      } catch (e: any) {
+        console.warn(`[dbpr-lookup] search ${term} failed: ${e?.message ?? e}`);
+      }
+    }
+    const candidates = Array.from(byLicense.values());
+    const ranked = candidates
+      .map((record) => ({ record, score: scoreDbprLicense(record, address, listingName) }))
+      .filter(({ score }) => score >= 120)
+      .sort((a, b) => b.score - a.score);
+    const best = ranked[0]?.record;
+    if (!best) {
+      return {
+        value: null,
+        source: "Florida DBPR public license search",
+        sourceUrl: "https://www.myfloridalicense.com/wl11.asp",
+        candidates: candidates.slice(0, 8),
+        note: candidates.length
+          ? "Searched Florida DBPR public licenses, but no DBPR record matched the address/unit strongly enough to auto-fill."
+          : "No Florida DBPR vacation-rental license appeared in the public search for this address/name.",
+      };
+    }
+    return {
+      value: best.licenseNumber,
+      source: "Florida DBPR public license search",
+      sourceUrl: "https://www.myfloridalicense.com/wl11.asp",
+      match: best,
+      candidates: candidates.slice(0, 8),
+      note: `Matched Florida DBPR ${best.licenseNumber} for ${best.locationAddress}.`,
     };
   };
 
@@ -10720,6 +10889,7 @@ export async function registerRoutes(
       city?: string;
       state?: string;
       address?: string;
+      listingName?: string;
       taxMapKey?: string;
       tatLicense?: string;
       getLicense?: string;
@@ -10740,18 +10910,30 @@ export async function registerRoutes(
     const dbprLicenseValue = usableLicenseValue(body.dbprLicense) || (isFloridaProfile ? taxMapKeyValue : null);
     const touristTaxAccountValue = usableLicenseValue(body.touristTaxAccount) || (isFloridaProfile ? tatLicenseValue : null);
     let resolvedStrPermitValue = strPermitValue;
+    let resolvedDbprLicenseValue = dbprLicenseValue;
     let lookupNote: string | null = null;
     let lookupSource: string | null = null;
-    let lookupCandidates: DeckardLicenseNode[] = [];
+    const lookupNotes: string[] = [];
+    let lookupCandidates: Array<DeckardLicenseNode | DbprLicenseRecord> = [];
     if (!resolvedStrPermitValue && profile.jurisdiction === "fort_myers_beach_fl" && body.address) {
       const strLookup = await lookupFortMyersBeachStrLicense(body.address);
       if (strLookup) {
         resolvedStrPermitValue = strLookup.value;
-        lookupNote = strLookup.note;
+        lookupNotes.push(strLookup.note);
         lookupSource = strLookup.sourceUrl;
-        lookupCandidates = strLookup.candidates;
+        lookupCandidates = lookupCandidates.concat(strLookup.candidates);
       }
     }
+    if (!resolvedDbprLicenseValue && isFloridaProfile && body.address) {
+      const dbprLookup = await lookupFloridaDbprLicense(body.address, body.listingName);
+      if (dbprLookup) {
+        resolvedDbprLicenseValue = dbprLookup.value;
+        lookupNotes.push(dbprLookup.note);
+        lookupSource = lookupSource || dbprLookup.sourceUrl;
+        lookupCandidates = lookupCandidates.concat(dbprLookup.candidates);
+      }
+    }
+    lookupNote = lookupNotes.join(" ");
     return res.json({
       ok: true,
       profile,
@@ -10760,7 +10942,7 @@ export async function registerRoutes(
         tatLicense: tatLicenseValue,
         getLicense: getLicenseValue,
         strPermit: resolvedStrPermitValue,
-        dbprLicense: dbprLicenseValue || null,
+        dbprLicense: resolvedDbprLicenseValue || null,
         touristTaxAccount: touristTaxAccountValue || null,
       },
       lookup: {
