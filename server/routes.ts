@@ -644,7 +644,10 @@ function addressIncludesUnitToken(address: string | null | undefined): boolean {
 }
 
 function withUnitToken(address: string | null, token: string | null): string | null {
-  if (!address || !token || addressIncludesUnitToken(address)) return address;
+  if (!address) return address;
+  const trailingUnit = address.match(/^(.+\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail))\s+([A-Za-z]?\d{2,5}[A-Za-z]?)$/i);
+  if (trailingUnit) return `${trailingUnit[1]} Unit ${trailingUnit[2].toUpperCase()}`;
+  if (!token || addressIncludesUnitToken(address)) return address;
   return `${address} Unit ${token}`;
 }
 

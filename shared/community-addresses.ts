@@ -58,6 +58,7 @@ export function streetRootFromAddress(value: string | null | undefined): string 
   if (!raw) return "";
   return raw.split(",")[0]
     .replace(/\b(?:apartment|apt|unit|suite|ste|building|bldg|#)\s*[a-z0-9-]+\b/gi, "")
+    .replace(/\b(Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Trl|Trail)\s+[A-Za-z]?\d{2,5}[A-Za-z]?\b$/i, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }
