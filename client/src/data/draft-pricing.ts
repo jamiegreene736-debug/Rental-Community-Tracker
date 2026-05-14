@@ -60,9 +60,10 @@ function regionFromState(state: string): RegionType {
 // Pick a base buy-in for a single unit. Order of preference:
 //   1. BUY_IN_RATES[draft.pricingArea][${bedrooms}BR]  (operator
 //      picked an area on Step 5 → exact rate from the table)
-//   2. estimatedLowRate / 2  (split equally across two units)
+//   2. estimatedLowRate reversed from sell-rate markup, split across
+//      two units for combos and kept whole for single-listing drafts
 //   3. FALLBACK_RATE_PER_BEDROOM × bedrooms
-function baseBuyInForUnit(draft: CommunityDraft, bedrooms: number, isFirstUnit: boolean): number {
+function baseBuyInForUnit(draft: CommunityDraft, bedrooms: number): number {
   const area = draft.pricingArea ?? "";
   if (area && BUY_IN_RATES[area]) {
     const key = `${bedrooms}BR` as keyof (typeof BUY_IN_RATES)[string];
@@ -70,10 +71,12 @@ function baseBuyInForUnit(draft: CommunityDraft, bedrooms: number, isFirstUnit: 
     if (typeof rate === "number" && rate > 0) return rate;
   }
   if (typeof draft.estimatedLowRate === "number" && draft.estimatedLowRate > 0) {
-    // Estimated rate is a per-night sell rate for the COMBINED listing.
-    // Reverse the markup to get a buy-in, then split per unit.
+    // Estimated rate is a per-night sell rate for the listing. Reverse
+    // the markup to get buy-in, then split only when the listing is a
+    // true combo. Standalone drafts should not manufacture a second unit.
     const buyInForCombined = Math.round(draft.estimatedLowRate / MARKUP);
-    return Math.round(buyInForCombined / 2);
+    const unitCount = (draft as any).singleListing === true ? 1 : 2;
+    return Math.round(buyInForCombined / unitCount);
   }
   return FALLBACK_RATE_PER_BEDROOM * bedrooms;
 }
@@ -110,9 +113,10 @@ export function buildDraftPropertyPricing(
 
   const u1Br = draft.unit1Bedrooms ?? 2;
   const u2Br = draft.unit2Bedrooms ?? 2;
+  const isSingle = (draft as any).singleListing === true;
 
-  const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br, true);
-  const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br, false);
+  const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br);
+  const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br);
 
   const unit1: UnitPricing = {
     unitId: `draft${draft.id}-unit-a`,
@@ -133,13 +137,14 @@ export function buildDraftPropertyPricing(
     monthlyRates: generateMonthlyRatesForUnit(unit2BaseBuyIn, region),
   };
 
-  const totalBaseBuyIn = unit1.baseBuyIn + unit2.baseBuyIn;
-  const totalBaseSellRate = unit1.baseSellRate + unit2.baseSellRate;
+  const units = isSingle ? [unit1] : [unit1, unit2];
+  const totalBaseBuyIn = units.reduce((sum, unit) => sum + unit.baseBuyIn, 0);
+  const totalBaseSellRate = units.reduce((sum, unit) => sum + unit.baseSellRate, 0);
 
   return {
     propertyId,
     totalBaseBuyIn,
     totalBaseSellRate,
-    units: [unit1, unit2],
+    units,
   };
 }

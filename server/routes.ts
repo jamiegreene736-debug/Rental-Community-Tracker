@@ -61,7 +61,7 @@ import {
   getSeasonForMonth,
   suggestPricingArea,
 } from "@shared/pricing-rates";
-import { verificationTokensForFolder } from "@shared/photo-folder-utils";
+import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
   isCompoundUnitClaim,
   normalizeUnitClaim,
@@ -24612,8 +24612,16 @@ Return ONLY compact JSON with this exact shape:
     try {
       const requested = Array.isArray((req.body as any)?.folders) ? (req.body as any).folders as string[] : null;
       const known = await listScanableFolders();
+      // For explicit dashboard row scans, accept dynamic draft/replacement
+      // folders even if they are not in the current "known" universe yet.
+      // The scanner will persist an UNKNOWN row with a clear reason when it
+      // cannot derive verification tokens, which is much better UX than a
+      // no-op 400 that leaves the row looking permanently disabled/grey.
+      const acceptableRequestedFolder = (folder: string) =>
+        known.includes(folder) ||
+        (isScannableFolder(folder) && (draftPhotoFolderRef(folder) !== null || replacementPhotoFolderRef(folder) !== null));
       const folders = requested && requested.length > 0
-        ? requested.filter((f) => known.includes(f))
+        ? requested.filter(acceptableRequestedFolder)
         : known;
       if (folders.length === 0) {
         return res.status(400).json({ error: "No scanable folders found (no photo labels in DB)" });

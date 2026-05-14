@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Component, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
@@ -193,6 +193,31 @@ type Props = {
   // tab badge "Photos (N)" and the deleted tile disappear immediately.
   onPhotoOverridesChanged?: () => void;
 };
+
+class BuilderSectionErrorBoundary extends Component<
+  { resetKey: string; fallback: ReactNode; children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("[GuestyListingBuilder] optional section render failed", error);
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const STEP_LABELS: Record<string, string> = {
@@ -3077,6 +3102,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
         {/* ── Channel Status Grid ───────────────────────────────── */}
         {selectedId && (
+          <BuilderSectionErrorBoundary
+            resetKey={`channel-status:${selectedId}`}
+            fallback={
+              <div className="glb-error-banner" style={{ marginBottom: 20 }}>
+                Channel status could not render for this Guesty listing, but the builder is still usable.
+              </div>
+            }
+          >
           <>
             <div className="glb-section-label">Channel Status</div>
             <div className="glb-channels">
@@ -3585,6 +3618,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             </div>
             <hr className="glb-divider" />
           </>
+          </BuilderSectionErrorBoundary>
         )}
 
         {/* ── Photo Sync Status (per channel) ──────────────────────
@@ -3595,8 +3629,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             communityFolder + bedrooms come from unit-builder-data so
             the full Isolate + Replace + Disconnect flow can call
             find-unit without the operator re-entering them. */}
-        {selectedId && (() => {
+        {selectedId && (
+          <BuilderSectionErrorBoundary
+            resetKey={`photo-sync:${propertyId ?? "unknown"}:${selectedId}`}
+            fallback={
+              <div className="glb-error-banner" style={{ marginBottom: 20 }}>
+                Photo sync status could not render for this Guesty listing. The rest of the builder is still usable.
+              </div>
+            }
+          >
+        {(() => {
           const builder = propertyId ? getUnitBuilderByPropertyId(propertyId) : undefined;
+          // Promoted drafts do not live in the static unit-builder map yet.
+          // The per-channel photo-isolation panel needs that canonical
+          // community folder to drive its replacement flow, so skip it for
+          // draft-only listings instead of letting an optional OTA panel
+          // take down the builder page.
+          if (!builder) return null;
           const totalBedrooms = builder?.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0);
           // Pre-fill partnerListingRef from Guesty's per-channel
           // identifiers — VRBO's advertiserId IS the partner-portal
@@ -3622,6 +3671,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             />
           );
         })()}
+          </BuilderSectionErrorBoundary>
+        )}
 
         {/* ── Data Preview Panel ────────────────────────────────── */}
         {propertyData && (

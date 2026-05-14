@@ -152,11 +152,10 @@ export function buildDraftBeddingConfig(
 ): PropertyBeddingConfig {
   const u1Br = draft.unit1Bedrooms ?? 2;
   const u2Br = draft.unit2Bedrooms ?? 2;
+  const unit1 = unitFromDraft(`draft${draft.id}-unit-a`, "A", u1Br, draft.unit1Bathrooms, draft.unit1Bedding);
+  const unit2 = unitFromDraft(`draft${draft.id}-unit-b`, "B", u2Br, draft.unit2Bathrooms, draft.unit2Bedding);
   return {
     propertyId,
-    units: [
-      unitFromDraft(`draft${draft.id}-unit-a`, "A", u1Br, draft.unit1Bathrooms, draft.unit1Bedding),
-      unitFromDraft(`draft${draft.id}-unit-b`, "B", u2Br, draft.unit2Bathrooms, draft.unit2Bedding),
-    ],
+    units: (draft as any).singleListing === true ? [unit1] : [unit1, unit2],
   };
 }
