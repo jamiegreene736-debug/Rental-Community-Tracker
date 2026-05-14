@@ -960,25 +960,34 @@ export class DatabaseStorage implements IStorage {
 
   // ── Photo listing (reverse-image) checks ──
   async upsertPhotoListingCheck(data: InsertPhotoListingCheck): Promise<PhotoListingCheck> {
-    const [row] = await db
-      .insert(photoListingChecks)
-      .values(data)
-      .onConflictDoUpdate({
-        target: photoListingChecks.photoFolder,
-        set: {
-          airbnbStatus: data.airbnbStatus,
-          vrboStatus: data.vrboStatus,
-          bookingStatus: data.bookingStatus,
-          airbnbMatches: data.airbnbMatches ?? null,
-          vrboMatches: data.vrboMatches ?? null,
-          bookingMatches: data.bookingMatches ?? null,
-          photosChecked: data.photosChecked ?? 0,
-          lensCalls: data.lensCalls ?? 0,
-          errorMessage: data.errorMessage ?? null,
-          checkedAt: new Date(),
-        },
-      })
-      .returning();
+    const update = {
+      airbnbStatus: data.airbnbStatus,
+      vrboStatus: data.vrboStatus,
+      bookingStatus: data.bookingStatus,
+      airbnbMatches: data.airbnbMatches ?? null,
+      vrboMatches: data.vrboMatches ?? null,
+      bookingMatches: data.bookingMatches ?? null,
+      photosChecked: data.photosChecked ?? 0,
+      lensCalls: data.lensCalls ?? 0,
+      errorMessage: data.errorMessage ?? null,
+      checkedAt: new Date(),
+    };
+    // Production predates a unique index on photo_folder, so ON CONFLICT
+    // crashes there. Do a read-update-insert upsert that works on the
+    // existing table shape; schema cleanup can happen later via db:push.
+    const [existing] = await db.select()
+      .from(photoListingChecks)
+      .where(eq(photoListingChecks.photoFolder, data.photoFolder))
+      .orderBy(desc(photoListingChecks.checkedAt))
+      .limit(1);
+    if (existing) {
+      const [row] = await db.update(photoListingChecks)
+        .set(update)
+        .where(eq(photoListingChecks.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoListingChecks).values(data).returning();
     return row;
   }
 
