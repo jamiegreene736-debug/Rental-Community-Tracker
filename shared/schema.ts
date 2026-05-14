@@ -353,6 +353,9 @@ export const communityDrafts = pgTable("community_drafts", {
   // sections ("The Neighborhood", "Getting Around").
   neighborhood: text("neighborhood"),
   transit: text("transit"),
+  taxMapKey: text("tax_map_key"),
+  tatLicense: text("tat_license"),
+  getLicense: text("get_license"),
   strPermit: text("str_permit"),
   dbprLicense: text("dbpr_license"),
   touristTaxAccount: text("tourist_tax_account"),

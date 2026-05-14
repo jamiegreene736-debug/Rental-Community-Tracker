@@ -232,6 +232,16 @@ export function adaptDraftToPropertyUnitBuilder(
   const u2Br = draft.unit2Bedrooms ?? 2;
   const blank = "";
   const licenseSamples = sampleLicensesForLocation(draft.city, draft.state);
+  const realDraftValue = (value: unknown): string | undefined => {
+    const text = String(value ?? "").trim();
+    return text && !looksLikeSamplePlaceholder(text) ? text : undefined;
+  };
+  const savedTaxMapKey = realDraftValue((draft as any).taxMapKey) ?? realDraftValue((draft as any).dbprLicense);
+  const savedTatLicense = realDraftValue((draft as any).tatLicense) ?? realDraftValue((draft as any).touristTaxAccount);
+  const savedGetLicense = realDraftValue((draft as any).getLicense);
+  const savedStrPermit = realDraftValue(draft.strPermit);
+  const savedDbprLicense = realDraftValue((draft as any).dbprLicense);
+  const savedTouristTaxAccount = realDraftValue((draft as any).touristTaxAccount);
   const filesToPhotos = (folder: string | null | undefined) => {
     if (!folder) return [];
     const files = photoFiles[folder] ?? [];
@@ -257,17 +267,17 @@ export function adaptDraftToPropertyUnitBuilder(
     propertyType: draft.propertyType ?? "Condominium",
     neighborhood: draft.neighborhood ?? blank,
     transit: draft.transit ?? blank,
-    taxMapKey: licenseSamples.taxMapKey,
-    tatLicense: licenseSamples.tatLicense,
-    getLicense: licenseSamples.getLicense,
+    taxMapKey: savedTaxMapKey ?? licenseSamples.taxMapKey,
+    tatLicense: savedTatLicense ?? licenseSamples.tatLicense,
+    getLicense: savedGetLicense ?? licenseSamples.getLicense,
     // Use the operator-entered STR permit if they typed one on Step 5,
     // otherwise drop in the county-appropriate sample format. Drafts
     // saved before the Florida county-aware samples landed have the
     // old generic placeholder stored as `draft.strPermit`; treat those
     // as "no real value typed" so the new county-specific sample wins.
-    strPermit: draft.strPermit && draft.strPermit.trim() && !looksLikeSamplePlaceholder(draft.strPermit)
-      ? draft.strPermit
-      : licenseSamples.strPermit,
+    strPermit: savedStrPermit ?? licenseSamples.strPermit,
+    dbprLicense: savedDbprLicense,
+    touristTaxAccount: savedTouristTaxAccount,
     // CODEX NOTE (2026-05-04, claude/single-listing): branch on
     // `singleListing` so standalone drafts ignore the unit2 photo
     // folder check. Reading `unit2PhotoFolder` for a single draft

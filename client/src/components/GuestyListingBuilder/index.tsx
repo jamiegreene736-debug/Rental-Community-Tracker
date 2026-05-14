@@ -876,6 +876,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return Boolean(value && !isPlaceholderLicenseValue(value));
   }, []);
 
+  const persistDraftComplianceValues = useCallback(async (
+    values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
+  ) => {
+    if (!propertyId || propertyId >= 0) return;
+    const payload: Record<string, string> = {};
+    for (const [key, value] of Object.entries(values)) {
+      const text = String(value ?? "").trim();
+      if (text && !isPlaceholderLicenseValue(text)) payload[key] = text;
+    }
+    if (Object.keys(payload).length === 0) return;
+    const resp = await fetch(`/api/community/${Math.abs(propertyId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const error = await resp.json().catch(() => ({}));
+      throw new Error(error?.error || error?.message || `Save failed (${resp.status})`);
+    }
+    await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+  }, [propertyId, queryClient]);
+
   const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
     const value = complianceValueFor(req.key);
     if (!value || isPlaceholderLicenseValue(value)) {
@@ -925,6 +947,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
+      await persistDraftComplianceValues(data.values ?? {});
       const missingRequired = (data.profile?.requirements ?? [])
         .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
@@ -939,7 +962,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setLicenseLookupBusy(false);
     }
-  }, [effectivePropertyData, complianceProfile.jurisdiction, toast]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction, persistDraftComplianceValues, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -1013,6 +1036,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
+      await persistDraftComplianceValues({ taxMapKey: data.taxMapKey });
       setTmkLookupResult(data as TmkLookupResult);
       toast({
         title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
@@ -1023,7 +1047,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [effectivePropertyData?.address, toast]);
+  }, [effectivePropertyData?.address, persistDraftComplianceValues, toast]);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -3947,6 +3971,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     onChange={(event) => {
                                       const next = event.target.value;
                                       setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
+                                    }}
+                                    onBlur={(event) => {
+                                      persistDraftComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
+                                        .catch((err) => toast({ title: "License save failed", description: err.message, variant: "destructive" }));
                                     }}
                                     placeholder={req.sample}
                                     style={{
