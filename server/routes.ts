@@ -2784,6 +2784,14 @@ function buildCommunityDraftFromGuestyListing(listing: any, guestyListingId: str
   };
 }
 
+function guestyListingIdFromDraftSourceUrl(sourceUrl: unknown): string | null {
+  const raw = typeof sourceUrl === "string" ? sourceUrl.trim() : "";
+  if (!raw) return null;
+  const match = raw.match(/app\.guesty\.com\/properties\/([^/?#]+)/i);
+  const id = match?.[1] ? decodeURIComponent(match[1]).trim() : "";
+  return id || null;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -3331,7 +3339,29 @@ export async function registerRoutes(
 
   app.get("/api/guesty-property-map", async (_req, res) => {
     try {
-      const map = await storage.getGuestyPropertyMap();
+      let map = await storage.getGuestyPropertyMap();
+      const mappedPropertyIds = new Set(map.map((row) => row.propertyId));
+
+      // Imported Guesty listings are stored as negative-id community drafts.
+      // Older deploys sometimes created the draft with a Guesty sourceUrl but
+      // missed the companion guesty_property_map row. Heal that gap here so
+      // dashboard green dots, builder auto-selection, inbox, bookings, and
+      // channel/photo workflows all agree on the same persisted mapping.
+      const drafts = await storage.getCommunityDrafts();
+      const repairedRows = [];
+      for (const draft of drafts) {
+        const propertyId = -draft.id;
+        if (mappedPropertyIds.has(propertyId)) continue;
+        const guestyListingId = guestyListingIdFromDraftSourceUrl(draft.sourceUrl);
+        if (!guestyListingId) continue;
+        const row = await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
+        repairedRows.push(row);
+        mappedPropertyIds.add(propertyId);
+      }
+      if (repairedRows.length > 0) {
+        console.log(`[guesty-property-map] repaired ${repairedRows.length} imported draft mapping(s) from Guesty sourceUrl`);
+        map = await storage.getGuestyPropertyMap();
+      }
       res.json(map);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch Guesty property map", message: err.message });

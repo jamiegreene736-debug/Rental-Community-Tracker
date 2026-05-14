@@ -15,7 +15,8 @@ import { apiRequest } from "@/lib/queryClient";
 import type { GuestyPropertyMap } from "@shared/schema";
 
 type GuestyListing = {
-  _id: string;
+  _id?: string;
+  id?: string;
   nickname?: string;
   title?: string;
   address?: { full?: string };
@@ -35,6 +36,9 @@ const unwrap = (d: any): GuestyListing[] => {
   if (Array.isArray(d?.data?.results)) return d.data.results;
   return [];
 };
+
+const listingId = (listing: GuestyListing | null | undefined) =>
+  String(listing?._id ?? listing?.id ?? "").trim();
 
 export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChange }: Props) {
   const { toast } = useToast();
@@ -71,11 +75,20 @@ export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChan
 
   const connect = async (listing: GuestyListing) => {
     if (propertyId == null || saving) return;
-    setSaving(listing._id);
+    const id = listingId(listing);
+    if (!id) {
+      toast({
+        title: "Connect failed",
+        description: "Guesty did not return a usable listing id for this row.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setSaving(id);
     try {
       const r = await apiRequest("POST", "/api/guesty-property-map", {
         propertyId,
-        guestyListingId: listing._id,
+        guestyListingId: id,
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
@@ -85,7 +98,7 @@ export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChan
       await qc.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
       toast({
         title: "Connected to Guesty",
-        description: `${propertyName} → ${listing.nickname || listing.title || listing._id}`,
+        description: `${propertyName} → ${listing.nickname || listing.title || id}`,
       });
       onOpenChange(false);
     } catch (err: any) {
@@ -132,14 +145,15 @@ export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChan
           ) : (
             <ul className="divide-y">
               {filtered.map((l) => {
-                const name = l.nickname || l.title || l._id;
+                const id = listingId(l);
+                const name = l.nickname || l.title || id;
                 const sub = [l.title && l.title !== name ? l.title : null, l.address?.full]
                   .filter(Boolean)
                   .join(" · ");
-                const claimedBy = mappedListingIds.get(l._id);
+                const claimedBy = mappedListingIds.get(id);
                 const claimedByOther = claimedBy != null && claimedBy !== propertyId;
                 return (
-                  <li key={l._id} className="flex items-center gap-3 px-3 py-2">
+                  <li key={id || name} className="flex items-center gap-3 px-3 py-2">
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{name}</div>
                       {sub && <div className="text-xs text-muted-foreground truncate">{sub}</div>}
@@ -156,10 +170,10 @@ export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChan
                       className="h-7 gap-1"
                       onClick={() => connect(l)}
                       disabled={saving !== null}
-                      data-testid={`button-guesty-connect-${l._id}`}
+                      data-testid={`button-guesty-connect-${id || "missing-id"}`}
                     >
                       <LinkIcon className="h-3 w-3" />
-                      {saving === l._id ? "Connecting…" : "Connect"}
+                      {saving === id ? "Connecting…" : "Connect"}
                     </Button>
                   </li>
                 );
