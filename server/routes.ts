@@ -637,6 +637,17 @@ function extractUnitTokenFromText(value: string): string | null {
   return compact?.[1]?.toUpperCase() ?? null;
 }
 
+function addressIncludesUnitToken(address: string | null | undefined): boolean {
+  const text = String(address ?? "");
+  return /\b(?:unit|suite|apt|apartment|condo|villa|#)\s*[A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?\b/i.test(text)
+    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{2,5}[A-Za-z]?\b/i.test(text);
+}
+
+function withUnitToken(address: string | null, token: string | null): string | null {
+  if (!address || !token || addressIncludesUnitToken(address)) return address;
+  return `${address} Unit ${token}`;
+}
+
 function htmlToPlainText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -21948,7 +21959,9 @@ Return ONLY compact JSON with this exact shape:
 
       // 1) Parse address from URL slug.
       const meta = candidateMeta.get(url.toLowerCase());
-      const addressGuess = addressFromSlug(url) ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
+      const addressGuessRaw = addressFromSlug(url) ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
+      const unitToken = extractUnitTokenFromText(`${meta?.title ?? ""} ${meta?.snippet ?? ""} ${decodeURIComponent(url)}`);
+      const addressGuess = withUnitToken(addressGuessRaw, unitToken);
       if (!addressGuess) {
         const reason = "Could not parse address from listing URL slug.";
         attempts.push({

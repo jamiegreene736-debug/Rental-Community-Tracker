@@ -163,6 +163,25 @@ function formatMinimumStay(community: CommunityResult): { label: string; tone: "
   };
 }
 
+function addressIncludesUnitToken(address: string | null | undefined): boolean {
+  const text = String(address ?? "");
+  return /\b(?:unit|suite|apt|apartment|condo|villa|#)\s*[A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?\b/i.test(text)
+    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{2,5}[A-Za-z]?\b/i.test(text);
+}
+
+function extractUnitTokenFromListingContext(value: string): string | null {
+  const text = decodeURIComponent(String(value ?? "").replace(/[_-]+/g, " "));
+  const explicit =
+    text.match(/#\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/) ||
+    text.match(/\b(?:unit|suite|apt|apartment|condo|villa)\s*#?\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/i);
+  return explicit?.[1]?.toUpperCase() ?? null;
+}
+
+function withUnitToken(address: string, token: string | null): string {
+  if (!address || !token || addressIncludesUnitToken(address)) return address;
+  return `${address} Unit ${token}`;
+}
+
 function communityResearchStage(progress: number): { label: string; detail: string } {
   if (progress < 25) {
     return {
@@ -1114,11 +1133,14 @@ export default function AddSingleListing() {
       toast({ title: "Missing city/state", variant: "destructive" });
       return;
     }
-    const effectiveStreetAddress = streetAddress.trim() || inferCommunityStreetAddress({
+    const inferredCommunityAddress = inferCommunityStreetAddress({
       communityName: selectedCommunity?.name ?? propertyName,
       city: pickedCity.city,
       state: pickedCity.state,
     });
+    const unitToken = extractUnitTokenFromListingContext(`${streetAddress} ${zillowSourceUrl} ${propertyName} ${editedTitle} ${editedBookingTitle}`);
+    const effectiveStreetAddress = streetAddress.trim() || inferredCommunityAddress;
+    const effectiveUnitAddress = withUnitToken(effectiveStreetAddress, unitToken);
     const addressCheck = validateCommunityStreetAddress({
       communityName: selectedCommunity?.name ?? propertyName,
       city: pickedCity.city,
@@ -1156,10 +1178,11 @@ export default function AddSingleListing() {
         minimumStayEvidence: selectedCommunity?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: selectedCommunity?.minimumStaySourceUrl ?? null,
         unit1Url: zillowSourceUrl || null,
-        // Prefer the exact standalone unit address when discovery found one;
-        // otherwise fall back to the known resort street address so the draft
-        // can still be saved and later pushed with a real OTA-valid address.
-        unit1Address: effectiveStreetAddress || null,
+        // Prefer the exact standalone unit address when discovery found one.
+        // If the selected resort address is canonical but the source URL/title
+        // carries an Apt/Unit/# token, append it here because public license
+        // pulls need the unit-level address, not only the resort street.
+        unit1Address: effectiveUnitAddress || null,
         unit1Bedrooms: bedrooms || null,
         unit1Bathrooms: editedUnitA?.bathrooms ?? (zillowFacts.bathrooms ? String(zillowFacts.bathrooms) : null),
         unit1Sqft: editedUnitA?.sqft ?? null,
