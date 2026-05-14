@@ -841,13 +841,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   const complianceValueFor = useCallback((key: LicenseFieldKey): string | undefined => {
     if (!effectivePropertyData) return undefined;
+    if (complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida") {
+      if (key === "dbprLicense") return effectivePropertyData.dbprLicense || effectivePropertyData.taxMapKey;
+      if (key === "touristTaxAccount") return effectivePropertyData.touristTaxAccount || effectivePropertyData.tatLicense;
+    }
     return effectivePropertyData[key as keyof typeof effectivePropertyData] as string | undefined;
-  }, [effectivePropertyData]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
     setLicenseLookupBusy(true);
     try {
+      const isFloridaProfile = complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida";
       const r = await fetch("/api/builder/resolve-license-requirements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -859,8 +864,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           tatLicense: effectivePropertyData.tatLicense,
           getLicense: effectivePropertyData.getLicense,
           strPermit: effectivePropertyData.strPermit,
-          dbprLicense: effectivePropertyData.dbprLicense,
-          touristTaxAccount: effectivePropertyData.touristTaxAccount,
+          dbprLicense: effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : undefined),
+          touristTaxAccount: effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : undefined),
         }),
       });
       const data = await r.json();
@@ -888,7 +893,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setLicenseLookupBusy(false);
     }
-  }, [effectivePropertyData, toast]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -3656,6 +3661,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             onClick={async () => {
                               if (!selectedId) return;
                               try {
+                                const isFloridaProfile = complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida";
                                 const res = await fetch("/api/builder/push-compliance", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
@@ -3665,8 +3671,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     tatLicense: effectivePropertyData.tatLicense,
                                     getLicense: effectivePropertyData.getLicense,
                                     strPermit: effectivePropertyData.strPermit,
-                                    dbprLicense: effectivePropertyData.dbprLicense,
-                                    touristTaxAccount: effectivePropertyData.touristTaxAccount,
+                                    dbprLicense: effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : undefined),
+                                    touristTaxAccount: effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : undefined),
                                   }),
                                 });
                                 const data = await res.json();

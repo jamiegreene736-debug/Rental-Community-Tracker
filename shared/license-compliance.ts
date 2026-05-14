@@ -49,12 +49,12 @@ export function resolveLicenseComplianceProfile(input: {
       requirements: [
         {
           key: "strPermit",
-          label: "Town of Fort Myers Beach STR Registration Number",
-          shortLabel: "Town STR Registration",
+          label: "Town of Fort Myers Beach STR Registration / Local Business Tax Receipt",
+          shortLabel: "Town STR / LBTR",
           required: true,
           requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
-          sample: "19-0096",
-          helpText: "Required for Fort Myers Beach short-term rental advertising, including internet advertisements.",
+          sample: "19-0096 or LBTR-999999",
+          helpText: "Track the Town registration or local business tax receipt used for Fort Myers Beach short-term rental advertising.",
         },
         {
           key: "dbprLicense",
