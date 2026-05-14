@@ -640,12 +640,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap> {
-    const [result] = await db
+    const [updated] = await db
+      .update(guestyPropertyMap)
+      .set({ guestyListingId, updatedAt: new Date() })
+      .where(eq(guestyPropertyMap.propertyId, propertyId))
+      .returning();
+    if (updated) return updated;
+
+    const [inserted] = await db
       .insert(guestyPropertyMap)
       .values({ propertyId, guestyListingId })
-      .onConflictDoUpdate({ target: guestyPropertyMap.propertyId, set: { guestyListingId, updatedAt: new Date() } })
       .returning();
-    return result;
+    return inserted;
   }
 
   async getGuestyPropertyMap(): Promise<GuestyPropertyMap[]> {
