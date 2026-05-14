@@ -595,7 +595,7 @@ export type QuoSmsMessage = typeof quoSmsMessages.$inferSelect;
 
 export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   id: serial("id").primaryKey(),
-  conversationId: text("conversation_id").notNull().unique(),
+  conversationId: text("conversation_id").notNull(),
   reservationId: text("reservation_id"),
   guestName: text("guest_name"),
   phone: text("phone").notNull(),
