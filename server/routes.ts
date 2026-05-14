@@ -2705,9 +2705,9 @@ async function repairKnownCommunityDraftAddress(draft: any) {
     (draft as any)?.singleListing === true &&
     santaMariaText.includes("santa maria") &&
     santaMariaText.includes("fort myers") &&
-    !/\bunit\s*3106\b|\b#\s*3106\b|\bapt\s*3106\b|\b7307\s+estero\s+(?:blvd|boulevard)\s+3106\b/i.test(String(draft?.unit1Address ?? ""))
+    !/\bunit\s*3104\b|\b#\s*3104\b|\bapt\s*3104\b|\b7307\s+estero\s+(?:blvd|boulevard)\s+3104\b/i.test(String(draft?.unit1Address ?? ""))
   ) {
-    const unitAddress = "7307 Estero Blvd Unit 3106, Fort Myers Beach, FL 33931";
+    const unitAddress = "7307 Estero Blvd #3104, Fort Myers Beach, FL 33931";
     const repaired = await storage.updateCommunityDraft(draft.id, {
       streetAddress: "7307 Estero Blvd",
       city: "Fort Myers Beach",
