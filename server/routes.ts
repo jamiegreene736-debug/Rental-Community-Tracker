@@ -17593,6 +17593,77 @@ Return ONLY compact JSON with this exact shape:
   });
 
   // ── Photo labels: read + relabel ──────────────────────────────────────
+  const autoLabelFolderJobs = new Set<string>();
+
+  const queueMissingPhotoLabels = async (
+    folder: string,
+    reason: string,
+  ): Promise<{ queued: boolean; missing: number; total: number; skippedReason?: string }> => {
+    if (!folder || !/^[\w-]+$/.test(folder)) {
+      return { queued: false, missing: 0, total: 0, skippedReason: "invalid folder" };
+    }
+
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) {
+      return { queued: false, missing: 0, total: 0, skippedReason: "ANTHROPIC_API_KEY not configured" };
+    }
+
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    const stat = await fs.promises.stat(folderPath).catch(() => null);
+    if (!stat?.isDirectory()) {
+      return { queued: false, missing: 0, total: 0, skippedReason: "folder not found" };
+    }
+
+    const files = await listPhotoFiles(folderPath);
+    const existing = await storage.getPhotoLabelsByFolder(folder);
+    const labeled = new Set(existing.map((row) => row.filename));
+    const missing = files.filter((filename) => !labeled.has(filename));
+    if (missing.length === 0) {
+      return { queued: false, missing: 0, total: files.length };
+    }
+
+    if (autoLabelFolderJobs.has(folder)) {
+      return { queued: true, missing: missing.length, total: files.length, skippedReason: "already running" };
+    }
+
+    autoLabelFolderJobs.add(folder);
+    console.log(`[auto-label] ${folder}: queued ${missing.length}/${files.length} missing photo label(s) from ${reason}`);
+    void (async () => {
+      const kind = inferKindFromFolder(folder);
+      let labeledCount = 0;
+      let failedCount = 0;
+      try {
+        for (const filename of missing) {
+          try {
+            const result = await labelPhoto(path.join(folderPath, filename), kind, anthropicKey);
+            if (result) {
+              await storage.upsertPhotoLabel({
+                folder,
+                filename,
+                label: result.label,
+                category: result.category,
+                confidence: result.confidence,
+                model: result.model,
+              });
+              labeledCount++;
+            } else {
+              failedCount++;
+            }
+          } catch (e: any) {
+            failedCount++;
+            console.warn(`[auto-label] ${folder}/${filename}: ${e?.message ?? e}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1400));
+        }
+      } finally {
+        autoLabelFolderJobs.delete(folder);
+        console.log(`[auto-label] ${folder}: finished missing-label pass (${labeledCount} labeled, ${failedCount} failed)`);
+      }
+    })();
+
+    return { queued: true, missing: missing.length, total: files.length };
+  };
+
   // Returns the Claude-vision-generated captions for a given folder plus
   // any human overrides (userLabel / userCategory / hidden). The curation
   // UI needs BOTH sets so it can show the model's output and let the user
@@ -17602,6 +17673,10 @@ Return ONLY compact JSON with this exact shape:
     const folder = req.params.folder;
     if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
     try {
+      const auto = String(req.query.auto ?? "").toLowerCase();
+      const autoLabel = auto === "missing" || auto === "1" || auto === "true"
+        ? await queueMissingPhotoLabels(folder, "photo-labels-fetch")
+        : null;
       const rows = await storage.getPhotoLabelsByFolder(folder);
       const labels: Record<string, {
         label: string;
@@ -17621,7 +17696,7 @@ Return ONLY compact JSON with this exact shape:
           hidden: r.hidden,
         };
       }
-      return res.json({ folder, labels, count: rows.length });
+      return res.json({ folder, labels, count: rows.length, ...(autoLabel ? { autoLabel } : {}) });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -24024,11 +24099,19 @@ Return ONLY compact JSON with this exact shape:
       if (Object.keys(update).length > 0) {
         await storage.updateCommunityDraft(draftId, update);
       }
+      const [unit1AutoLabel, unit2AutoLabel] = await Promise.all([
+        u1 && u1.saved > 0 ? queueMissingPhotoLabels(u1.folder, "draft-photos-persist") : Promise.resolve(null),
+        u2 && u2.saved > 0 ? queueMissingPhotoLabels(u2.folder, "draft-photos-persist") : Promise.resolve(null),
+      ]);
       console.log(`[draft-photos] draft ${draftId}: unit1 saved ${u1?.saved ?? 0}, unit2 saved ${u2?.saved ?? 0}`);
       res.json({
         ok: true,
         unit1: u1,
         unit2: u2,
+        autoLabeling: {
+          unit1: unit1AutoLabel,
+          unit2: unit2AutoLabel,
+        },
       });
     } catch (e: any) {
       console.error(`[draft-photos] draft ${draftId} failed: ${e.message}`);

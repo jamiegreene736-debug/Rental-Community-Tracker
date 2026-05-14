@@ -18,6 +18,12 @@ type LabelMeta = {
 };
 type FolderLabels = Record<string, LabelMeta>;
 type LabelsMap = Record<string, FolderLabels>;
+type AutoLabelStatus = {
+  queued?: boolean;
+  missing?: number;
+  total?: number;
+  skippedReason?: string;
+};
 
 export function usePhotoLabels(folders: readonly string[]): {
   labels: LabelsMap;
@@ -55,27 +61,42 @@ export function usePhotoLabels(folders: readonly string[]): {
   useEffect(() => {
     if (sortedUniqueFolders.length === 0) return;
     let cancelled = false;
+    let retryTimer: number | undefined;
     setLoading(true);
     Promise.all(
       sortedUniqueFolders.map(async (folder) => {
         try {
-          const r = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}`);
-          if (!r.ok) return [folder, {}] as const;
-          const data = await r.json() as { labels?: FolderLabels };
-          return [folder, data.labels ?? {}] as const;
+          const r = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}?auto=missing`);
+          if (!r.ok) return [folder, {}, null] as const;
+          const data = await r.json() as { labels?: FolderLabels; autoLabel?: AutoLabelStatus };
+          return [folder, data.labels ?? {}, data.autoLabel ?? null] as const;
         } catch {
-          return [folder, {}] as const;
+          return [folder, {}, null] as const;
         }
       }),
     ).then((results) => {
       if (cancelled) return;
       const next: LabelsMap = {};
-      for (const [folder, map] of results) next[folder] = map;
+      let shouldRefetch = false;
+      for (const [folder, map, autoLabel] of results) {
+        next[folder] = map;
+        if (autoLabel?.queued && (autoLabel.missing ?? 0) > 0) {
+          shouldRefetch = true;
+        }
+      }
       setLabels(next);
+      if (shouldRefetch) {
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) setRefreshTick((t) => t + 1);
+        }, 12_000);
+      }
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, refreshTick]);
 
