@@ -71,6 +71,8 @@ const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
 
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
+const LENS_TIMEOUT_MS = 45_000;
+const VERIFY_TIMEOUT_MS = 20_000;
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
@@ -156,9 +158,12 @@ function compactErrorDetail(text: string): string {
 
 async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
   if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LENS_TIMEOUT_MS);
   try {
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${SEARCHAPI_KEY}`,
+      { signal: controller.signal },
     );
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
@@ -179,9 +184,13 @@ async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
       ...rowsFrom("organic", data.organic_results),
     ] };
   } catch (e: any) {
-    const msg = `Google Lens/SearchAPI request failed: ${e?.message ?? String(e)}`;
+    const msg = e?.name === "AbortError"
+      ? `Google Lens/SearchAPI timed out after ${Math.round(LENS_TIMEOUT_MS / 1000)}s`
+      : `Google Lens/SearchAPI request failed: ${e?.message ?? String(e)}`;
     console.error(`[photo-listing-scanner] ${msg} for ${imageUrl}`);
     return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -216,9 +225,11 @@ async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boo
     `"Suite ${variant}"`,
   ]).join(" OR ");
   const q = `site:${host}${pathClean} (${markers})`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
   try {
     const params = new URLSearchParams({ engine: "google", q, api_key: SEARCHAPI_KEY, num: "3" });
-    const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+    const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: controller.signal });
     if (!resp.ok) {
       console.error(`[photo-listing-scanner] verify HTTP ${resp.status} for ${url}`);
       return false;
@@ -226,8 +237,13 @@ async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boo
     const data = await resp.json() as any;
     return ((data.organic_results || []) as any[]).length > 0;
   } catch (e: any) {
-    console.error(`[photo-listing-scanner] verify error for ${url}: ${e?.message}`);
+    const msg = e?.name === "AbortError"
+      ? `timed out after ${Math.round(VERIFY_TIMEOUT_MS / 1000)}s`
+      : e?.message;
+    console.error(`[photo-listing-scanner] verify error for ${url}: ${msg}`);
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -272,6 +288,7 @@ async function alertOnStateWorsen(
 }
 
 export async function runPhotoListingCheckForFolder(folder: string): Promise<ScanResult> {
+  console.error(`[photo-listing-scanner] ${folder}: starting`);
   const result: ScanResult = {
     folder,
     airbnbStatus: "unknown",
@@ -522,6 +539,24 @@ export async function listScanableFolders(): Promise<string[]> {
     set.add(replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId));
     const draft = String(swap.oldUnitId).match(/^draft(\d+)-unit-([a-z0-9_-]+)$/i);
     if (draft) set.add(`draft-${draft[1]}-unit-${draft[2]}`);
+  }
+
+  // Imported single-listing drafts can have a valid local photo folder
+  // without any photo-label rows and without a unit-swap row. Santa
+  // Maria hit exactly this path after it was linked to an existing
+  // Guesty listing whose pictures[] was empty: the photos existed on
+  // disk, but the normal scan universe never discovered the folder.
+  try {
+    const drafts = await storage.getCommunityDrafts();
+    for (const draft of drafts) {
+      if ((draft as any)?.singleListing !== true) continue;
+      const folder = typeof (draft as any)?.unit1PhotoFolder === "string" && (draft as any).unit1PhotoFolder.trim()
+        ? (draft as any).unit1PhotoFolder.trim()
+        : `draft-${draft.id}-unit-a`;
+      if (isScannableFolder(folder)) set.add(folder);
+    }
+  } catch (e: any) {
+    console.error(`[photo-listing-scanner] failed to enumerate imported draft folders: ${e?.message ?? e}`);
   }
 
   const out: string[] = [];
