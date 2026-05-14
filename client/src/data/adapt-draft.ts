@@ -10,7 +10,7 @@
 // Photo tab shows the operator's scraped photos. When omitted, photos
 // come up empty (Guesty connection / push flow handles them later).
 
-import { type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { SINGLE_LISTING_SAMPLE_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft } from "@shared/schema";
 import { buildDraftPropertyPricing } from "@/data/draft-pricing";
@@ -214,6 +214,16 @@ function looksLikeSamplePlaceholder(value: string): boolean {
   return false;
 }
 
+function descriptionForDraft(draft: CommunityDraft): string {
+  const text = draft.listingDescription ?? "";
+  if ((draft as any).singleListing !== true) return text;
+  return text
+    .replace(/please note:\s*this listing combines two units within the same community\.[\s\S]*?(?:---\s*)?/i, "")
+    .replace(/\bthis listing (?:is comprised of|combines) two [^.]+\.\s*/gi, "")
+    .replace(/\btogether they offer [^.]+\.\s*/gi, "")
+    .trim();
+}
+
 export function adaptDraftToPropertyUnitBuilder(
   draft: CommunityDraft,
   photoFiles: Record<string, string[]> = {},
@@ -242,8 +252,8 @@ export function adaptDraftToPropertyUnitBuilder(
       ? `${draft.streetAddress}, ${draft.city}, ${draft.state}`
       : `${draft.city}, ${draft.state}`,
     bookingTitle: draft.bookingTitle || draft.listingTitle || draft.name,
-    sampleDisclaimer: blank,
-    combinedDescription: draft.listingDescription ?? blank,
+    sampleDisclaimer: (draft as any).singleListing === true ? SINGLE_LISTING_SAMPLE_DISCLOSURE : blank,
+    combinedDescription: descriptionForDraft(draft) || blank,
     propertyType: draft.propertyType ?? "Condominium",
     neighborhood: draft.neighborhood ?? blank,
     transit: draft.transit ?? blank,

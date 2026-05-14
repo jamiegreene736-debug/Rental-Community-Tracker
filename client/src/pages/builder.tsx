@@ -5,7 +5,7 @@ import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
-import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE, SINGLE_LISTING_SAMPLE_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
@@ -359,7 +359,7 @@ export default function Builder() {
       touristTaxAccount: property.touristTaxAccount,
       descriptions: {
         title: property.bookingTitle,
-        summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
+        summary: `${property.units.length === 1 ? `${SINGLE_LISTING_SAMPLE_DISCLOSURE}\n\n---` : LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
         space: [
           property.units
             .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
@@ -371,7 +371,9 @@ export default function Builder() {
         neighborhood: property.neighborhood,
         transit: property.transit,
         houseRules:
-          "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
+          property.units.length === 1
+            ? "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am."
+            : "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
       },
       photos,
       pricing: {
