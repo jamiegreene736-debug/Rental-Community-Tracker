@@ -4560,6 +4560,13 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         let u;
         try { u = new URL(raw, baseUrl); } catch { return false; }
         const path = u.pathname.toLowerCase();
+        const pathAndQuery = `${path}?${u.searchParams.toString()}`.toLowerCase();
+        const searchOrListPage =
+          /\/site\/propertylist\b/i.test(path) ||
+          /\bpropertylist\b/i.test(path) ||
+          /(?:^|\/)(?:search|search-results|availability|property-list|properties|rentals?|vacation-rentals?|browse-all)(?:\/|$)/i.test(path) ||
+          /\b(?:propertylist|searchresults|search-results|availability|property-list)\b/i.test(pathAndQuery);
+        if (searchOrListPage) return false;
         if (path === "/" || /\/(?:search|availability|rentals?|vacation-rentals?|properties|collections?|areas?|locations?)\/?$/.test(path)) return false;
         if (/\/vrp\/unit\//i.test(path)) return true;
         if (/\d/.test(path)) return true;
@@ -4590,7 +4597,11 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         if (!looksDetail(url, fullText)) continue;
         const cardBedrooms = extractBedrooms(fullText);
         if (cardBedrooms !== null && cardBedrooms < bedrooms) continue;
-        if (cardBedrooms === null && !bedroomFilterApplied) continue;
+        // Do not promote cards solely because the search page appeared to
+        // have a bedroom filter. Some PM widgets ignore query/filter state
+        // and still show 1BR rows inside a 3BR search; the server auto-fill
+        // path needs card-level bedroom proof.
+        if (cardBedrooms === null) continue;
         const br = cardBedrooms ?? bedrooms;
         const price = parsePrice(fullText);
         if (!price) continue;

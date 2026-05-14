@@ -6909,6 +6909,20 @@ export async function registerRoutes(
     // Clicking a buy-in link should land on that unit's page, not a search
     // results page or the PM company's homepage. Patterns below match each
     // platform's canonical detail-page shape.
+    const isPmSearchListUrl = (rawUrl: string): boolean => {
+      try {
+        const u = new URL(rawUrl);
+        const path = u.pathname.toLowerCase();
+        const pathAndQuery = `${path}?${u.searchParams.toString()}`.toLowerCase();
+        return /\/site\/propertylist\b/i.test(path)
+          || /\bpropertylist\b/i.test(path)
+          || /(?:^|\/)(?:search|search-results|availability|property-list|properties|rentals?|vacation-rentals?|browse-all)(?:\/|$)/i.test(path)
+          || /\b(?:propertylist|searchresults|search-results|availability|property-list)\b/i.test(pathAndQuery);
+      } catch {
+        return false;
+      }
+    };
+
     const isDetailUrl = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): boolean => {
       let u: URL;
       try { u = new URL(rawUrl); } catch { return false; }
@@ -6930,9 +6944,9 @@ export async function registerRoutes(
         case "pm": {
           // PM sites vary wildly — an over-strict path heuristic kills the
           // only source with live prices (OTA organic results never carry
-          // price). Accept anything deeper than the bare homepage; callers
-          // can use `isLandingUrl` to rank landing pages lower.
-          return path.length > 1 && path !== "/";
+          // price). Accept anything deeper than the bare homepage, but never
+          // a search/listing grid like Escapia PropertyList/default.aspx.
+          return path.length > 1 && path !== "/" && !isPmSearchListUrl(rawUrl);
         }
       }
     };
@@ -6953,6 +6967,7 @@ export async function registerRoutes(
       if (source !== "pm") return false;
       let u: URL;
       try { u = new URL(rawUrl); } catch { return false; }
+      if (isPmSearchListUrl(rawUrl)) return true;
       const segments = u.pathname.split("/").filter(Boolean);
       if (segments.length === 0) return true;
       const last = segments[segments.length - 1].toLowerCase();
@@ -8061,7 +8076,7 @@ export async function registerRoutes(
         return r.candidates
           .filter((c) => {
             const explicit = rawCandidateExplicitBedroomSignal(c);
-            const sourceBedroom = ["search-card", "search-filter"].includes(String((c as any).bedroomSource)) && typeof c.bedrooms === "number"
+            const sourceBedroom = String((c as any).bedroomSource) === "search-card" && typeof c.bedrooms === "number"
               ? c.bedrooms
               : null;
             const inferred = explicit ?? sourceBedroom;
@@ -8072,7 +8087,7 @@ export async function registerRoutes(
             const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
             const explicit = rawCandidateExplicitBedroomSignal(c);
             const sidecarBedroomSource = String((c as any).bedroomSource ?? "");
-            const sourceBedroom = ["search-card", "search-filter"].includes(sidecarBedroomSource) && typeof c.bedrooms === "number"
+            const sourceBedroom = sidecarBedroomSource === "search-card" && typeof c.bedrooms === "number"
               ? c.bedrooms
               : undefined;
             const candidateBedrooms = explicit ?? sourceBedroom;
