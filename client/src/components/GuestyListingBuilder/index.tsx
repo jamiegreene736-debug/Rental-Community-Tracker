@@ -885,7 +885,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({
         title: data.profile?.title ?? "License requirements loaded",
         description: missingRequired.length
-          ? `Still missing real values: ${missingRequired.join(", ")}`
+          ? `${data.lookup?.note ? `${data.lookup.note} ` : ""}Still missing real values: ${missingRequired.join(", ")}`
           : "All mapped required license values are present.",
       });
     } catch (e: any) {
@@ -3654,7 +3654,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             }}
                             data-testid="btn-pull-license-requirements"
                           >
-                            {licenseLookupBusy ? "Checking..." : "Pull license requirements"}
+                            {licenseLookupBusy ? "Checking..." : "Check / pull public licenses"}
                           </button>
                           <button
                             disabled={!selectedId}
@@ -3826,6 +3826,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             {complianceProfile.requirements.map((req) => {
                               const value = complianceValueFor(req.key);
                               const isPlaceholder = isPlaceholderLicenseValue(value);
+                              const inputValue = value && !isPlaceholder ? value : "";
+                              const canPublicPull = complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit";
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -3843,9 +3845,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter or pull the real {req.shortLabel} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? " or pull it from the public Fort Myers STR portal" : ""} before pushing compliance.
                                     </div>
                                   )}
+                                  <input
+                                    value={inputValue}
+                                    onChange={(event) => {
+                                      const next = event.target.value;
+                                      setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
+                                    }}
+                                    placeholder={req.sample}
+                                    style={{
+                                      width: "100%",
+                                      marginTop: 8,
+                                      fontSize: 12,
+                                      fontFamily: "monospace",
+                                      padding: "6px 8px",
+                                      borderRadius: 5,
+                                      border: "1px solid var(--border)",
+                                      background: "#fff",
+                                      color: "var(--text)",
+                                    }}
+                                    data-testid={`input-compliance-${req.key}`}
+                                  />
                                   <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 5, lineHeight: 1.35 }}>
                                     {req.helpText}
                                   </div>
@@ -3866,7 +3888,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     }}
                                     data-testid={`btn-pull-${req.key}`}
                                   >
-                                    {value && !isPlaceholder ? `Refresh ${req.shortLabel}` : `Pull ${req.shortLabel}`}
+                                    {canPublicPull
+                                      ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
+                                      : "Validate requirements"}
                                   </button>
                                 </div>
                               );

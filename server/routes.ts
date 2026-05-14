@@ -3385,6 +3385,124 @@ export async function registerRoutes(
       : [];
   };
 
+  type DeckardLicenseNode = {
+    licenseId?: string | null;
+    licenseNumber?: string | null;
+    applicationNumber?: string | null;
+    licenseStatus?: string | null;
+    apn?: string | null;
+    address?: string | null;
+    unitNumber?: string | null;
+    expirationDate?: string | null;
+    parcelAddress?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+  };
+
+  const normalizeAddressText = (value: unknown): string => {
+    return String(value ?? "")
+      .toUpperCase()
+      .replace(/\b(?:UNIT|APT|APARTMENT|SUITE|STE)\b/g, "#")
+      .replace(/[^A-Z0-9#]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  const streetSearchTermFromAddress = (address: string): string => {
+    const normalized = normalizeAddressText(address);
+    const match = normalized.match(/^(\d+\s+[A-Z0-9 ]+?)(?:\s+#\s*[A-Z0-9-]+|\s+FORT MYERS|\s+FL\b|\s+US\b|$)/);
+    return (match?.[1] || normalized.split(/\b(?:FORT MYERS|FL|US)\b/)[0] || normalized).trim();
+  };
+
+  const scoreDeckardLicense = (node: DeckardLicenseNode, address: string): number => {
+    const searched = normalizeAddressText(address);
+    const streetTerm = streetSearchTermFromAddress(address);
+    const unitToken = extractUnitTokenFromAddress(address);
+    const addressText = normalizeAddressText(node.address);
+    const parcelText = normalizeAddressText(node.parcelAddress);
+    const combined = `${addressText} ${parcelText} ${normalizeAddressText(node.unitNumber)}`;
+    let score = 0;
+    if (streetTerm && combined.includes(streetTerm)) score += 80;
+    const streetNumber = searched.match(/\b\d{2,6}\b/)?.[0];
+    if (streetNumber && combined.includes(streetNumber)) score += 25;
+    if (unitToken) {
+      const unitInCombined = combined.includes(`# ${unitToken}`)
+        || combined.includes(` ${unitToken}`)
+        || normalizeUnitToken(node.unitNumber) === unitToken;
+      score += unitInCombined ? 80 : -100;
+    }
+    if (usableLicenseValue(node.licenseNumber)) score += 10;
+    return score;
+  };
+
+  const lookupFortMyersBeachStrLicense = async (address: string): Promise<{ value: string | null; source: string; sourceUrl: string; match?: DeckardLicenseNode; candidates: DeckardLicenseNode[]; note: string } | null> => {
+    const searchTerm = streetSearchTermFromAddress(address);
+    if (!searchTerm) return null;
+    const query = `
+      query SearchLicenses($regionId: ID!, $first: Int, $searchTerm: String!) {
+        publicRegionData(regionId: $regionId) {
+          licenses(first: $first, filter: { searchTerm: $searchTerm }) {
+            edges {
+              node {
+                licenseId
+                licenseNumber
+                applicationNumber
+                licenseStatus
+                apn
+                address
+                unitNumber
+                expirationDate
+                parcelAddress
+                latitude
+                longitude
+              }
+            }
+          }
+        }
+      }
+    `;
+    const resp = await fetch("https://apis.deckard.com/public/graphql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "NexStay/1.0" },
+      body: JSON.stringify({
+        query,
+        variables: {
+          regionId: "fl-lee-town_of_fort_myers_beach",
+          first: 25,
+          searchTerm,
+        },
+      }),
+    });
+    if (!resp.ok) throw new Error(`Fort Myers STR public lookup failed (${resp.status})`);
+    const data = await resp.json() as any;
+    const edges = data?.data?.publicRegionData?.licenses?.edges;
+    const candidates: DeckardLicenseNode[] = Array.isArray(edges) ? edges.map((edge: any) => edge?.node).filter(Boolean) : [];
+    const ranked = candidates
+      .map((node) => ({ node, score: scoreDeckardLicense(node, address) }))
+      .filter(({ node, score }) => score >= 80 && usableLicenseValue(node.licenseNumber))
+      .sort((a, b) => b.score - a.score);
+    const best = ranked[0]?.node;
+    if (!best) {
+      return {
+        value: null,
+        source: "Deckard Fort Myers Beach STR public portal",
+        sourceUrl: "https://str-public-portal.deckard.com/fl-lee-town_of_fort_myers_beach",
+        candidates: candidates.slice(0, 8),
+        note: candidates.length
+          ? "Found Fort Myers STR records near this address, but none matched the unit/address strongly enough to auto-fill."
+          : "No Fort Myers STR record matched this address in the public portal.",
+      };
+    }
+    return {
+      value: usableLicenseValue(best.licenseNumber),
+      source: "Deckard Fort Myers Beach STR public portal",
+      sourceUrl: "https://str-public-portal.deckard.com/fl-lee-town_of_fort_myers_beach",
+      match: best,
+      candidates: candidates.slice(0, 8),
+      note: `Matched public Town STR record ${best.licenseNumber} for ${best.parcelAddress || best.address || searchTerm}.`,
+    };
+  };
+
   const scoreKauaiParcel = (row: KauaiParcelAttributes, unitToken: string): number => {
     const type = String(row.TYPE ?? "").toLowerCase();
     const cpr = normalizeUnitToken(row.CPR_UNIT);
@@ -10578,6 +10696,19 @@ export async function registerRoutes(
     const strPermitValue = usableLicenseValue(body.strPermit);
     const dbprLicenseValue = usableLicenseValue(body.dbprLicense) || (isFloridaProfile ? taxMapKeyValue : null);
     const touristTaxAccountValue = usableLicenseValue(body.touristTaxAccount) || (isFloridaProfile ? tatLicenseValue : null);
+    let resolvedStrPermitValue = strPermitValue;
+    let lookupNote: string | null = null;
+    let lookupSource: string | null = null;
+    let lookupCandidates: DeckardLicenseNode[] = [];
+    if (!resolvedStrPermitValue && profile.jurisdiction === "fort_myers_beach_fl" && body.address) {
+      const strLookup = await lookupFortMyersBeachStrLicense(body.address);
+      if (strLookup) {
+        resolvedStrPermitValue = strLookup.value;
+        lookupNote = strLookup.note;
+        lookupSource = strLookup.sourceUrl;
+        lookupCandidates = strLookup.candidates;
+      }
+    }
     return res.json({
       ok: true,
       profile,
@@ -10585,9 +10716,14 @@ export async function registerRoutes(
         taxMapKey: taxMapKeyValue,
         tatLicense: tatLicenseValue,
         getLicense: getLicenseValue,
-        strPermit: strPermitValue,
+        strPermit: resolvedStrPermitValue,
         dbprLicense: dbprLicenseValue || null,
         touristTaxAccount: touristTaxAccountValue || null,
+      },
+      lookup: {
+        note: lookupNote,
+        sourceUrl: lookupSource,
+        candidates: lookupCandidates,
       },
     });
   });
