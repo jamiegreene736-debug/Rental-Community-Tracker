@@ -85,6 +85,8 @@ export type GuestyPropertyData = {
   tatLicense?: string;
   getLicense?: string;
   strPermit?: string;
+  dbprLicense?: string;
+  touristTaxAccount?: string;
   bedrooms?: number;
   bathrooms?: number;
   listingRooms?: GuestyRoom[];

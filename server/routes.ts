@@ -27,6 +27,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
+import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -10551,35 +10552,83 @@ export async function registerRoutes(
     });
   });
 
-  // POST /api/builder/push-compliance — pushes TMK, TAT, and GET license to Guesty's internal tags (not synced to Airbnb/VRBO)
+  // POST /api/builder/resolve-license-requirements — returns mapped jurisdiction
+  // rules and any already-known values. This does not guess license numbers.
+  app.post("/api/builder/resolve-license-requirements", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as {
+      city?: string;
+      state?: string;
+      address?: string;
+      taxMapKey?: string;
+      tatLicense?: string;
+      getLicense?: string;
+      strPermit?: string;
+      dbprLicense?: string;
+      touristTaxAccount?: string;
+    };
+    const profile = resolveLicenseComplianceProfile({
+      city: body.city,
+      state: body.state,
+      address: body.address,
+    });
+    return res.json({
+      ok: true,
+      profile,
+      values: {
+        taxMapKey: body.taxMapKey || null,
+        tatLicense: body.tatLicense || null,
+        getLicense: body.getLicense || null,
+        strPermit: body.strPermit || null,
+        dbprLicense: body.dbprLicense || null,
+        touristTaxAccount: body.touristTaxAccount || null,
+      },
+    });
+  });
+
+  // POST /api/builder/push-compliance — pushes jurisdiction compliance IDs
+  // into Guesty tags, public notes, top-level registration/tax fields, and
+  // best-effort channel fields where Guesty exposes them.
   app.post("/api/builder/push-compliance", async (req: Request, res: Response) => {
-    const { listingId, taxMapKey, tatLicense, getLicense, strPermit } = req.body as {
+    const { listingId, taxMapKey, tatLicense, getLicense, strPermit, dbprLicense, touristTaxAccount } = req.body as {
       listingId: string;
       taxMapKey?: string;
       tatLicense?: string;
       getLicense?: string;
       strPermit?: string;
+      dbprLicense?: string;
+      touristTaxAccount?: string;
     };
     if (!listingId) return res.status(400).json({ error: "listingId required" });
-    if (!taxMapKey && !tatLicense && !getLicense) return res.status(400).json({ error: "taxMapKey, tatLicense, or getLicense required" });
+    if (!taxMapKey && !tatLicense && !getLicense && !strPermit && !dbprLicense && !touristTaxAccount) {
+      return res.status(400).json({ error: "At least one compliance identifier is required" });
+    }
 
-    console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense} GET:${getLicense}`);
+    console.log(`[push-compliance] listing ${listingId} TMK:${taxMapKey} TAT:${tatLicense} GET:${getLicense} STR:${strPermit} DBPR:${dbprLicense}`);
     try {
       const current = await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
 
       // ── Step 1: Guesty tags (internal reference) ────────────────────────────
       const existingTags: string[] = Array.isArray(current.tags) ? current.tags : [];
-      const stripped = existingTags.filter(t => !t.startsWith("TMK:") && !t.startsWith("TAT:") && !t.startsWith("GET:"));
+      const stripped = existingTags.filter(t =>
+        !t.startsWith("TMK:") &&
+        !t.startsWith("TAT:") &&
+        !t.startsWith("GET:") &&
+        !t.startsWith("STR:") &&
+        !t.startsWith("DBPR:") &&
+        !t.startsWith("TDT:")
+      );
       if (taxMapKey) stripped.push(`TMK:${taxMapKey}`);
       if (tatLicense) stripped.push(`TAT:${tatLicense}`);
       if (getLicense) stripped.push(`GET:${getLicense}`);
+      if (strPermit) stripped.push(`STR:${strPermit}`);
+      if (dbprLicense) stripped.push(`DBPR:${dbprLicense}`);
+      if (touristTaxAccount) stripped.push(`TDT:${touristTaxAccount}`);
       await guestyRequest("PUT", `/listings/${listingId}`, { tags: stripped });
 
       // ── Step 2: licenseNumber field — Guesty's top-level "Registration/License
-      //            Number" field. TAT is the STR permit so it's the primary value.
-      //            taxId is Guesty's GET/General Excise Tax field.
-      const licenseNumValue = tatLicense || getLicense || null;
-      const taxIdValue = getLicense || null;
+      //            Number" field. Use local STR first, then state lodging/tax IDs.
+      const licenseNumValue = strPermit || dbprLicense || tatLicense || getLicense || null;
+      const taxIdValue = touristTaxAccount || getLicense || null;
       const licPayload: Record<string, string> = {};
       if (licenseNumValue) licPayload.licenseNumber = licenseNumValue;
       if (taxIdValue) licPayload.taxId = taxIdValue;
@@ -10591,11 +10640,11 @@ export async function registerRoutes(
       // Guesty exposes these under channels.homeaway only once VRBO OAuth is
       // active for the listing. We attempt a best-effort push and verify.
       const vrboPayload: Record<string, unknown> = {};
-      if (tatLicense || getLicense || taxMapKey) {
+      if (licenseNumValue || taxIdValue || taxMapKey) {
         vrboPayload["channels"] = {
           homeaway: {
-            ...(tatLicense  ? { licenseNumber: tatLicense } : {}),
-            ...(getLicense  ? { taxId:         getLicense } : {}),
+            ...(licenseNumValue ? { licenseNumber: licenseNumValue } : {}),
+            ...(taxIdValue  ? { taxId:         taxIdValue } : {}),
             ...(taxMapKey   ? { parcelNumber:   taxMapKey  } : {}),
           },
         };
@@ -10650,11 +10699,24 @@ export async function registerRoutes(
       // VRBO parcelNumber (Step 3), Booking.com tmk_number (Step 3b), and
       // Airbnb's regulation form directly — none of which are OTA-scanned
       // content fields. Keeping it out of the public notes is safe.
-      const COMPLIANCE_MARKER = "=== Hawaii Tax Compliance ===";
+      const addressForProfile = (current.address as Record<string, unknown> | undefined) ?? {};
+      const profile = resolveLicenseComplianceProfile({
+        address: String(addressForProfile.full ?? ""),
+        city: String(addressForProfile.city ?? ""),
+        state: String(addressForProfile.state ?? ""),
+      });
+      const oldMarkers = ["=== Hawaii Tax Compliance ===", "=== Rental License Compliance ==="];
+      const COMPLIANCE_MARKER = "=== Rental License Compliance ===";
       const pubDesc = (current.publicDescription || {}) as Record<string, string>;
       const existingNotes: string = pubDesc.notes || "";
-      const notesWithoutOldBlock = existingNotes.split(COMPLIANCE_MARKER)[0].trimEnd();
-      const complianceLines: string[] = [COMPLIANCE_MARKER];
+      let notesWithoutOldBlock = existingNotes;
+      for (const marker of oldMarkers) {
+        notesWithoutOldBlock = notesWithoutOldBlock.split(marker)[0].trimEnd();
+      }
+      const complianceLines: string[] = [COMPLIANCE_MARKER, profile.title];
+      if (strPermit) complianceLines.push(`Short-Term Rental Registration / Permit: ${strPermit}`);
+      if (dbprLicense) complianceLines.push(`Florida DBPR Vacation Rental License: ${dbprLicense}`);
+      if (touristTaxAccount) complianceLines.push(`Tourist Development Tax Account: ${touristTaxAccount}`);
       if (getLicense) complianceLines.push(`General Excise Tax ID (GET): ${getLicense}`);
       if (tatLicense) complianceLines.push(`Transient Accommodations Tax ID (TAT): ${tatLicense}`);
       const newNotes = [notesWithoutOldBlock, complianceLines.join("\n")].filter(Boolean).join("\n\n");
@@ -10686,7 +10748,10 @@ export async function registerRoutes(
       const tagsVerified =
         (!taxMapKey  || savedTags.some(t => t.includes(taxMapKey)))  &&
         (!tatLicense || savedTags.some(t => t.includes(tatLicense))) &&
-        (!getLicense || savedTags.some(t => t.includes(getLicense)));
+        (!getLicense || savedTags.some(t => t.includes(getLicense))) &&
+        (!strPermit || savedTags.some(t => t.includes(strPermit))) &&
+        (!dbprLicense || savedTags.some(t => t.includes(dbprLicense))) &&
+        (!touristTaxAccount || savedTags.some(t => t.includes(touristTaxAccount)));
       const notesVerified = savedNotes.includes(COMPLIANCE_MARKER);
       const licenseNumberSaved = licenseNumValue ? savedLicenseNumber === licenseNumValue : null;
       const taxIdSaved = taxIdValue ? savedTaxId === taxIdValue : null;

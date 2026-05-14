@@ -201,6 +201,11 @@ established it so you can read the rationale in the commit message.
     hash — use API response checks to verify server deploys, not
     bundle diffs.
 
+    When Jamie explicitly asks Codex to implement a production change,
+    finish with a clean deploy path: build, commit the focused scope,
+    push to `main`, and verify Railway. Do not stop at a local build
+    unless Jamie asks for local-only work.
+
 17. **Scraped photos live on a Railway volume mounted at
     `/app/client/public/photos`.** The Docker filesystem is ephemeral,
     so without a volume every deploy wipes the scrape output and the

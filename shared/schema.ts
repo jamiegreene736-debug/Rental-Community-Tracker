@@ -354,6 +354,8 @@ export const communityDrafts = pgTable("community_drafts", {
   neighborhood: text("neighborhood"),
   transit: text("transit"),
   strPermit: text("str_permit"),
+  dbprLicense: text("dbpr_license"),
+  touristTaxAccount: text("tourist_tax_account"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

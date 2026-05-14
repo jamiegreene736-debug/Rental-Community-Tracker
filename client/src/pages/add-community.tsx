@@ -41,6 +41,7 @@ import { useToast } from "@/hooks/use-toast";
 import { checkCommunityType } from "@shared/community-type";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
+import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -330,6 +331,8 @@ export default function AddCommunity() {
   const [editedUnitA, setEditedUnitA] = useState<UnitDraft | null>(null);
   const [editedUnitB, setEditedUnitB] = useState<UnitDraft | null>(null);
   const [strPermit, setStrPermit] = useState("");
+  const [dbprLicense, setDbprLicense] = useState("");
+  const [touristTaxAccount, setTouristTaxAccount] = useState("");
   const [saving, setSaving] = useState(false);
 
   const combinedBedrooms = (selectedUnit1?.bedrooms ?? 0) + (selectedUnit2?.bedrooms ?? 0);
@@ -352,6 +355,16 @@ export default function AddCommunity() {
     state: selectedCommunity?.state,
     unitAddresses: [(selectedUnit1 as any)?.address, (selectedUnit2 as any)?.address],
   }), [selectedCommunity, selectedUnit1, selectedUnit2]);
+  const licenseProfile = useMemo(() => resolveLicenseComplianceProfile({
+    city: selectedCommunity?.city ?? cityInput,
+    state: selectedCommunity?.state ?? selectedState,
+    address: [
+      editedStreetAddress.trim() || suggestedStreetAddress,
+      selectedCommunity?.name,
+      selectedCommunity?.city ?? cityInput,
+      selectedCommunity?.state ?? selectedState,
+    ].filter(Boolean).join(" "),
+  }), [selectedCommunity, cityInput, selectedState, editedStreetAddress, suggestedStreetAddress]);
 
   useEffect(() => {
     if (!editedStreetAddress.trim() && suggestedStreetAddress) {
@@ -842,6 +855,8 @@ export default function AddCommunity() {
         neighborhood: editedNeighborhood || null,
         transit: editedTransit || null,
         strPermit: strPermit.trim() || null,
+        dbprLicense: dbprLicense.trim() || null,
+        touristTaxAccount: touristTaxAccount.trim() || null,
         status: "draft_ready",
       });
       // Persist Step 4 photos so the builder has them when the
@@ -895,7 +910,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -2013,30 +2028,101 @@ export default function AddCommunity() {
                     );
                   })}
 
-                  {/* ── STR Permit ────────────────────────────── */}
+                  {/* ── License Requirements ──────────────────── */}
                   <Card className="p-4">
-                    <label htmlFor="input-str-permit" className="text-sm font-medium mb-1.5 block">
-                      STR Permit Number
-                      <span className="text-muted-foreground font-normal ml-2">— Obtain from county once property is secured</span>
-                    </label>
-                    <Input
-                      id="input-str-permit"
-                      value={strPermit}
-                      onChange={e => setStrPermit(e.target.value)}
-                      placeholder={listing.strPermitSample ?? "e.g. TVR-2024-012 or TVNC-0342"}
-                      className="font-mono"
-                      data-testid="input-str-permit"
-                    />
-                    <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                      <p className="font-medium text-foreground mb-1">Format by county:</p>
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-0.5">
-                        <span><span className="font-mono font-semibold">TVR-YYYY-##</span> — Kauai, VDA zone (Poipu, Princeville)</span>
-                        <span><span className="font-mono font-semibold">TVNC-####</span> — Kauai, non-VDA/residential (Kekaha, Kapaa)</span>
-                        <span><span className="font-mono font-semibold">STVR-YYYY-######</span> — Hawaii County (Big Island)</span>
-                        <span><span className="font-mono font-semibold">STRH-########</span> — Maui County</span>
-                        <span><span className="font-mono font-semibold">NUC-##-###-####</span> — Honolulu (Oahu)</span>
+                    <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-medium">{licenseProfile.title}</p>
+                        <p className="text-xs text-muted-foreground">{licenseProfile.summary}</p>
                       </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => toast({
+                          title: licenseProfile.title,
+                          description: licenseProfile.requirements.length
+                            ? `Loaded ${licenseProfile.requirements.length} mapped license requirement${licenseProfile.requirements.length === 1 ? "" : "s"} for this address.`
+                            : "No mapped license requirements found for this address yet.",
+                        })}
+                        data-testid="button-load-license-requirements"
+                      >
+                        Load license requirements
+                      </Button>
                     </div>
+                    {licenseProfile.requirements.length > 0 ? (
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {licenseProfile.requirements.map((req) => {
+                          const editable = req.key === "strPermit" || req.key === "dbprLicense" || req.key === "touristTaxAccount";
+                          const value =
+                            req.key === "strPermit" ? strPermit :
+                            req.key === "dbprLicense" ? dbprLicense :
+                            req.key === "touristTaxAccount" ? touristTaxAccount :
+                            "";
+                          const onChange =
+                            req.key === "strPermit" ? setStrPermit :
+                            req.key === "dbprLicense" ? setDbprLicense :
+                            req.key === "touristTaxAccount" ? setTouristTaxAccount :
+                            undefined;
+                          return (
+                            <div key={req.key} className="rounded-md border border-border bg-muted/30 p-3">
+                              <div className="mb-1 flex items-center justify-between gap-2">
+                                <label htmlFor={`input-${req.key}`} className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                  {req.shortLabel}
+                                </label>
+                                {req.required && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">Required</span>}
+                              </div>
+                              {editable ? (
+                                <Input
+                                  id={`input-${req.key}`}
+                                  value={value}
+                                  onChange={e => onChange?.(e.target.value)}
+                                  placeholder={req.key === "strPermit" ? (listing.strPermitSample ?? req.sample) : req.sample}
+                                  className="font-mono"
+                                  data-testid={`input-${req.key}`}
+                                />
+                              ) : (
+                                <div className="rounded-md border border-dashed border-border bg-background px-3 py-2 font-mono text-sm text-muted-foreground" data-testid={`sample-${req.key}`}>
+                                  sample: {req.sample}
+                                </div>
+                              )}
+                              <p className="mt-2 text-xs text-muted-foreground">{req.helpText}</p>
+                              {req.requiredForOtas.length > 0 && (
+                                <p className="mt-1 text-[11px] text-muted-foreground">OTA fields: {req.requiredForOtas.join(", ")}</p>
+                              )}
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="mt-2 h-7 px-2 text-xs"
+                                onClick={() => toast({
+                                  title: req.shortLabel,
+                                  description: editable
+                                    ? "This requirement is ready for the real license value once you have it."
+                                    : "This value is confirmed from the Builder compliance panel after the real property address is selected.",
+                                })}
+                                data-testid={`button-load-${req.key}`}
+                              >
+                                Pull {req.shortLabel}
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                        No automatic license rule is mapped for this city/state yet. Verify local registration requirements before publishing.
+                      </div>
+                    )}
+                    {licenseProfile.sources.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                        {licenseProfile.sources.map(source => (
+                          <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="text-primary underline-offset-2 hover:underline">
+                            {source.label}
+                          </a>
+                        ))}
+                      </div>
+                    )}
                   </Card>
                 </div>
 

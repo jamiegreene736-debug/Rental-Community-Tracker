@@ -355,6 +355,8 @@ export default function Builder() {
       tatLicense: property.tatLicense,
       getLicense: property.getLicense,
       strPermit: property.strPermit,
+      dbprLicense: property.dbprLicense,
+      touristTaxAccount: property.touristTaxAccount,
       descriptions: {
         title: property.bookingTitle,
         summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,

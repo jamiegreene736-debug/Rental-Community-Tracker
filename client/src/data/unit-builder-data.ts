@@ -72,6 +72,10 @@ export type PropertyUnitBuilder = {
   //   Maui County:  STRH-########    e.g. STRH-20220042
   //   Honolulu (Oahu):  NUC-##-###-####    e.g. NUC-22-001-0134
   strPermit?: string;
+  // Florida DBPR vacation rental license (Fort Myers Beach and other Florida units).
+  dbprLicense?: string;
+  // County tourist-development tax account/reference when the jurisdiction requires tracking it.
+  touristTaxAccount?: string;
   // Free-text note about floor plan / stairs / mobility access for
   // this complex. Surfaces in the AI Draft + auto-reply context only
   // (not pushed to OTA listings) so the AI can answer

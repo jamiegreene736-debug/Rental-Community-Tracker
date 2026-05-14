@@ -12,6 +12,7 @@ import PhotoCurator from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
+import { resolveLicenseComplianceProfile, type LicenseFieldKey } from "@shared/license-compliance";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -668,7 +669,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // compliance submits don't step on each other if the user switches
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
-  const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit">>>({});
+  const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>>({});
+  const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
@@ -828,6 +830,65 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       },
     };
   }, [propertyData, complianceOverrides, editableTitle]);
+
+  const complianceProfile = useMemo(() => {
+    return resolveLicenseComplianceProfile({
+      address: effectivePropertyData?.address?.full,
+      city: effectivePropertyData?.address?.city,
+      state: effectivePropertyData?.address?.state,
+    });
+  }, [effectivePropertyData?.address?.full, effectivePropertyData?.address?.city, effectivePropertyData?.address?.state]);
+
+  const complianceValueFor = useCallback((key: LicenseFieldKey): string | undefined => {
+    if (!effectivePropertyData) return undefined;
+    return effectivePropertyData[key as keyof typeof effectivePropertyData] as string | undefined;
+  }, [effectivePropertyData]);
+
+  const pullLicenseRequirements = useCallback(async () => {
+    if (!effectivePropertyData?.address) return;
+    setLicenseLookupBusy(true);
+    try {
+      const r = await fetch("/api/builder/resolve-license-requirements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: effectivePropertyData.address.full,
+          city: effectivePropertyData.address.city,
+          state: effectivePropertyData.address.state,
+          taxMapKey: effectivePropertyData.taxMapKey,
+          tatLicense: effectivePropertyData.tatLicense,
+          getLicense: effectivePropertyData.getLicense,
+          strPermit: effectivePropertyData.strPermit,
+          dbprLicense: effectivePropertyData.dbprLicense,
+          touristTaxAccount: effectivePropertyData.touristTaxAccount,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+      setComplianceOverrides((prev) => ({
+        ...prev,
+        ...(data.values?.taxMapKey ? { taxMapKey: data.values.taxMapKey } : {}),
+        ...(data.values?.tatLicense ? { tatLicense: data.values.tatLicense } : {}),
+        ...(data.values?.getLicense ? { getLicense: data.values.getLicense } : {}),
+        ...(data.values?.strPermit ? { strPermit: data.values.strPermit } : {}),
+        ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
+        ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
+      }));
+      const missingRequired = (data.profile?.requirements ?? [])
+        .filter((req: any) => req.required && !data.values?.[req.key])
+        .map((req: any) => req.shortLabel || req.label);
+      toast({
+        title: data.profile?.title ?? "License requirements loaded",
+        description: missingRequired.length
+          ? `Still missing: ${missingRequired.join(", ")}`
+          : "All mapped required license values are present.",
+      });
+    } catch (e: any) {
+      toast({ title: "License lookup failed", description: e.message, variant: "destructive" });
+    } finally {
+      setLicenseLookupBusy(false);
+    }
+  }, [effectivePropertyData, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -3567,12 +3628,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         underlying data field names stay HI-flavored
                         (taxMapKey / getLicense / tatLicense / strPermit);
                         only display labels change. */}
-                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit) && (
+                    {(complianceProfile.requirements.length > 0 || effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit || effectivePropertyData?.dbprLicense || effectivePropertyData?.touristTaxAccount) && (
                       <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-                            <span>🏛</span> Compliance &amp; Registration
+                          <div style={{ fontSize: 13, fontWeight: 600, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                            <span>🏛 {complianceProfile.title}</span>
+                            <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                              {complianceProfile.summary}
+                            </span>
                           </div>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          <button
+                            type="button"
+                            disabled={licenseLookupBusy}
+                            onClick={pullLicenseRequirements}
+                            style={{
+                              fontSize: 12, fontWeight: 600, padding: "6px 12px", borderRadius: 6,
+                              border: "1px solid var(--border)", cursor: licenseLookupBusy ? "wait" : "pointer",
+                              background: "#fff", color: "var(--text)",
+                            }}
+                            data-testid="btn-pull-license-requirements"
+                          >
+                            {licenseLookupBusy ? "Checking..." : "Pull license requirements"}
+                          </button>
                           <button
                             disabled={!selectedId}
                             onClick={async () => {
@@ -3587,11 +3665,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     tatLicense: effectivePropertyData.tatLicense,
                                     getLicense: effectivePropertyData.getLicense,
                                     strPermit: effectivePropertyData.strPermit,
+                                    dbprLicense: effectivePropertyData.dbprLicense,
+                                    touristTaxAccount: effectivePropertyData.touristTaxAccount,
                                   }),
                                 });
                                 const data = await res.json();
                                 if (data.success) {
-                                  const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ");
+                                  const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET|STR|DBPR|TDT):/.test(t)).join(", ");
                                   const licLine = data.licenseNumber?.ok === true
                                     ? `· License# field: ✓`
                                     : data.licenseNumber?.ok === false
@@ -3626,6 +3706,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           >
                             ↑ Push Compliance to Guesty
                           </button>
+                          </div>
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
                           <div>
@@ -3734,8 +3815,63 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                           </div>
                         </div>
+                        {complianceProfile.requirements.length > 0 && (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginTop: 14 }}>
+                            {complianceProfile.requirements.map((req) => {
+                              const value = complianceValueFor(req.key);
+                              return (
+                                <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
+                                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                                    {req.shortLabel}{req.required ? " Required" : ""}
+                                  </div>
+                                  <div style={{ fontSize: 13, fontFamily: "monospace", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                    <span>{value || `sample: ${req.sample}`}</span>
+                                    {value && (
+                                      <button
+                                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                        onClick={() => { navigator.clipboard.writeText(value); toast({ title: `Copied ${req.shortLabel}` }); }}
+                                        title="Copy to clipboard"
+                                      >📋</button>
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 5, lineHeight: 1.35 }}>
+                                    {req.helpText}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={licenseLookupBusy}
+                                    onClick={pullLicenseRequirements}
+                                    style={{
+                                      marginTop: 8,
+                                      fontSize: 11,
+                                      fontWeight: 600,
+                                      padding: "4px 8px",
+                                      borderRadius: 5,
+                                      border: "1px solid var(--border)",
+                                      background: "#fff",
+                                      color: "var(--text)",
+                                      cursor: licenseLookupBusy ? "wait" : "pointer",
+                                    }}
+                                    data-testid={`btn-pull-${req.key}`}
+                                  >
+                                    {value ? `Refresh ${req.shortLabel}` : `Pull ${req.shortLabel}`}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {complianceProfile.sources.length > 0 && (
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, fontSize: 11 }}>
+                            {complianceProfile.sources.map((source) => (
+                              <a key={source.url} href={source.url} target="_blank" rel="noreferrer" style={{ color: "#1e40af", textDecoration: "underline" }}>
+                                {source.label}
+                              </a>
+                            ))}
+                          </div>
+                        )}
                         <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 10, lineHeight: 1.6 }}>
-                          Push writes to <strong>4 destinations</strong>: (1) Guesty internal tags <code>GET:</code> / <code>TAT:</code> / <code>TMK:</code> — (2) <code>licenseNumber</code> field (TAT number → Guesty's "Registration Number") — (3) <code>taxId</code> field (GET number) — (4) <em>Notes</em> field with a structured Hawaii Tax Compliance block (the field VRBO reads for license compliance). VRBO channel compliance fields (<code>channels.homeaway</code>) are also attempted but only save once you connect VRBO OAuth in Guesty's channel settings. After pushing, the toast shows exactly what was accepted.
+                          Push writes to <strong>4 destinations</strong>: (1) Guesty internal tags <code>GET:</code> / <code>TAT:</code> / <code>TMK:</code> / <code>STR:</code> / <code>DBPR:</code> / <code>TDT:</code> — (2) <code>licenseNumber</code> field — (3) <code>taxId</code> field when available — (4) <em>Notes</em> field with a structured license compliance block. VRBO channel compliance fields (<code>channels.homeaway</code>) are also attempted but only save once you connect VRBO OAuth in Guesty's channel settings. After pushing, the toast shows exactly what was accepted.
                         </div>
                       </div>
                     )}
