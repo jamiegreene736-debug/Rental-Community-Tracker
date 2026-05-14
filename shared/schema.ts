@@ -570,7 +570,7 @@ export type BookingConfirmation = typeof bookingConfirmations.$inferSelect;
 // to a Guesty conversation when we can match the guest phone number.
 export const quoSmsMessages = pgTable("quo_sms_messages", {
   id: serial("id").primaryKey(),
-  providerMessageId: text("provider_message_id").notNull().unique(),
+  providerMessageId: text("provider_message_id").notNull(),
   conversationId: text("conversation_id"),
   reservationId: text("reservation_id"),
   guestName: text("guest_name"),
