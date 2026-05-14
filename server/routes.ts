@@ -2708,8 +2708,18 @@ async function repairKnownCommunityDraftAddress(draft: any) {
     santaMariaText.includes("fort myers")
   ) {
     const currentUnitAddress = String(draft?.unit1Address ?? "").trim();
-    if (currentUnitAddress === santaMariaUnitAddress) {
-      console.log(`[community-drafts] Santa Maria standalone unit address already set for draft ${draft.id}: ${currentUnitAddress}`);
+    const needsBedroomRepair = Number(draft?.unit1Bedrooms ?? 0) <= 0 || Number(draft?.combinedBedrooms ?? 0) <= 0;
+    const needsSleepsRepair = Number(draft?.unit1MaxGuests ?? 0) <= 0;
+    const needsBeddingRepair = !String(draft?.unit1Bedding ?? "").trim();
+    const needsBathroomRepair = !String(draft?.unit1Bathrooms ?? "").trim() || String(draft?.unit1Bathrooms ?? "").trim() === "0";
+    if (
+      currentUnitAddress === santaMariaUnitAddress &&
+      !needsBedroomRepair &&
+      !needsSleepsRepair &&
+      !needsBeddingRepair &&
+      !needsBathroomRepair
+    ) {
+      console.log(`[community-drafts] Santa Maria standalone unit address/details already set for draft ${draft.id}: ${currentUnitAddress}`);
       return { draft, repairedAddress: false };
     }
     const repaired = await storage.updateCommunityDraft(draft.id, {
@@ -2717,8 +2727,13 @@ async function repairKnownCommunityDraftAddress(draft: any) {
       city: "Fort Myers Beach",
       state: "Florida",
       unit1Address: santaMariaUnitAddress,
+      unit1Bedrooms: 2,
+      combinedBedrooms: 2,
+      unit1Bathrooms: "2",
+      unit1MaxGuests: 6,
+      unit1Bedding: "King primary bedroom, queen second bedroom, and a sleeper sofa in the living area.",
     } as any);
-    console.log(`[community-drafts] repaired Santa Maria standalone unit address for draft ${draft.id}: ${currentUnitAddress || "(blank)"} -> ${santaMariaUnitAddress}`);
+    console.log(`[community-drafts] repaired Santa Maria standalone unit address/details for draft ${draft.id}: ${currentUnitAddress || "(blank)"} -> ${santaMariaUnitAddress}, 2BR/2BA/sleeps 6`);
     return { draft: repaired, repairedAddress: true };
   }
 

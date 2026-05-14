@@ -47,7 +47,20 @@ function bedTypeFromText(s: string): GuestyBedType {
 //   "1 King, 1 Queen, 2 Twin"
 function parseBedding(beddingText: string | null | undefined, expectedBedrooms: number): BedroomDetail[] {
   const text = (beddingText || "").trim();
-  if (!text) return [];
+  const bedrooms: BedroomDetail[] = [];
+  if (!text) {
+    while (bedrooms.length < expectedBedrooms) {
+      const idx = bedrooms.length;
+      bedrooms.push({
+        roomNumber: idx + 1,
+        label: labelForBedroom(idx),
+        beds: [{ type: idx === 0 ? "KING_BED" : "QUEEN_BED", quantity: 1 }],
+        hasEnsuite: idx === 0,
+        ensuiteFeatures: idx === 0 ? ["walk-in-shower", "soaking-tub"] : [],
+      });
+    }
+    return bedrooms;
+  }
 
   // Split on common separators: comma, " + ", " and ", " & ".
   const segments = text
@@ -58,7 +71,6 @@ function parseBedding(beddingText: string | null | undefined, expectedBedrooms: 
   // Each segment is one BEDROOM's worth of beds (segment 1 = master,
   // segment 2 = bedroom 2, etc.). Inside a segment, the operator may
   // list multiple beds — "2 Twins" = 1 segment with quantity 2.
-  const bedrooms: BedroomDetail[] = [];
   for (let i = 0; i < segments.length && i < expectedBedrooms; i++) {
     const seg = segments[i];
     // Match leading quantity ("2 Twins")
@@ -87,6 +99,31 @@ function parseBedding(beddingText: string | null | undefined, expectedBedrooms: 
     });
   }
   return bedrooms;
+}
+
+function positiveInteger(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function inferBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
+  const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
+  const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
+  const fromStructured = positiveInteger(stored) ?? positiveInteger(combined);
+  if (fromStructured) return fromStructured;
+
+  const text = [
+    unitKey === "unit1" ? draft.unit1Description : draft.unit2Description,
+    unitKey === "unit1" ? draft.unit1Bedding : draft.unit2Bedding,
+    draft.listingTitle,
+    draft.bookingTitle,
+    draft.name,
+    draft.unitTypes,
+    draft.listingDescription,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  const fromText = match ? positiveInteger(match[1]) : null;
+  return fromText ?? 2;
 }
 
 function defaultBathrooms(bathroomCount: number, hasMasterEnsuite: boolean): BathroomDetail[] {
@@ -150,8 +187,8 @@ export function buildDraftBeddingConfig(
   draft: CommunityDraft,
   propertyId: number,
 ): PropertyBeddingConfig {
-  const u1Br = draft.unit1Bedrooms ?? 2;
-  const u2Br = draft.unit2Bedrooms ?? 2;
+  const u1Br = inferBedroomCount(draft, "unit1");
+  const u2Br = inferBedroomCount(draft, "unit2");
   const unit1 = unitFromDraft(`draft${draft.id}-unit-a`, "A", u1Br, draft.unit1Bathrooms, draft.unit1Bedding);
   const unit2 = unitFromDraft(`draft${draft.id}-unit-b`, "B", u2Br, draft.unit2Bathrooms, draft.unit2Bedding);
   return {
