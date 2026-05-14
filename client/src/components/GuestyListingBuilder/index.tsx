@@ -1889,6 +1889,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [propertyId, listings, propertyMap, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap, toast]);
 
+  // Last-resort draft recovery for Guesty payloads whose name fields differ
+  // slightly from our local title but still share the distinctive opening
+  // phrase. This keeps promoted single listings from landing on a blank
+  // dropdown when Guesty truncates or strips the final "Sleeps N" suffix.
+  useEffect(() => {
+    if (!propertyId || propertyId >= 0 || selectedId || listings.length === 0) return;
+    const titleNorm = normalizeListingName(propertyData?.descriptions?.title || propertyData?.title || propertyData?.nickname);
+    const titlePrefix = titleNorm.split(" ").slice(0, 5).join(" ");
+    if (titlePrefix.length < 18) return;
+    const matches = listings.filter((listing) => {
+      const id = guestyListingId(listing);
+      const nameNorm = normalizeListingName(listing.nickname || listing.title);
+      return id && (nameNorm.startsWith(titlePrefix) || titleNorm.startsWith(nameNorm));
+    });
+    const uniqueMatches = Array.from(new Map(matches.map((listing) => [guestyListingId(listing), listing])).values());
+    if (uniqueMatches.length === 0) return;
+    const id = guestyListingId(uniqueMatches[0]);
+    if (!id) return;
+    rememberPropertyMap(propertyId, id);
+    setSelectedId(id);
+    fetch("/api/guesty-property-map", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ propertyId, guestyListingId: id }),
+    }).catch(() => { /* non-fatal; local selection is still useful */ });
+  }, [propertyId, selectedId, listings, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap]);
+
   // ── Load channel status when selection changes ─────────────────────────────
   const refreshChannelStatus = useCallback(() => {
     if (!selectedId) { setChannelStatus(null); return; }
