@@ -2819,6 +2819,48 @@ async function countDiskPhotos(folder: string): Promise<number> {
   }
 }
 
+async function copyDiskPhotoFolder(sourceFolder: string, destinationFolder: string): Promise<number> {
+  const safeSource = sourceFolder.replace(/[^a-zA-Z0-9_-]/g, "");
+  const safeDestination = destinationFolder.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeSource || !safeDestination || safeSource === safeDestination) return 0;
+  const photosBase = path.join(process.cwd(), "client/public/photos");
+  const sourcePath = path.join(photosBase, safeSource);
+  const destinationPath = path.join(photosBase, safeDestination);
+  let files: string[];
+  try {
+    files = (await fs.promises.readdir(sourcePath)).filter((file) => /\.(?:jpe?g|png|webp)$/i.test(file)).sort();
+  } catch {
+    return 0;
+  }
+  if (files.length === 0) return 0;
+  await fs.promises.rm(destinationPath, { recursive: true, force: true });
+  await fs.promises.mkdir(destinationPath, { recursive: true });
+  for (const file of files) {
+    await fs.promises.copyFile(path.join(sourcePath, file), path.join(destinationPath, file));
+  }
+  try {
+    await fs.promises.copyFile(path.join(sourcePath, "_source.json"), path.join(destinationPath, "_source.json"));
+  } catch {
+    // Optional metadata only.
+  }
+  return files.length;
+}
+
+async function recoverImportedDraftPhotosFromKnownOrphan(draft: any, destinationFolder: string): Promise<number> {
+  // Santa Maria was first created by the Add Single Listing flow, then
+  // later linked to an existing Guesty listing whose pictures[] is empty.
+  // The stale placeholder draft row is gone, but its saved sample photos
+  // can still exist on the mounted Railway volume. Adopt them for the
+  // connected draft instead of leaving the OTA photo-match column gray.
+  if (!isSantaMariaFortMyersDraft(draft)) return 0;
+  const candidates = ["draft-4-unit-a"];
+  for (const sourceFolder of candidates) {
+    const copied = await copyDiskPhotoFolder(sourceFolder, destinationFolder);
+    if (copied > 0) return copied;
+  }
+  return 0;
+}
+
 async function persistImportedGuestyDraftPhotos(draft: any, listing?: any): Promise<{ folder: string; saved: number; scanned: boolean } | null> {
   const draftId = Number(draft?.id);
   if (!Number.isFinite(draftId) || draftId <= 0) return null;
@@ -2857,7 +2899,17 @@ async function persistImportedGuestyDraftPhotos(draft: any, listing?: any): Prom
       .map(guestyPictureUrl)
       .filter((url: string | null): url is string => !!url),
   )).slice(0, 35);
-  if (urls.length === 0) return null;
+  if (urls.length === 0) {
+    const recovered = await recoverImportedDraftPhotosFromKnownOrphan(draft, folder);
+    if (recovered <= 0) return null;
+    await storage.updateCommunityDraft(draftId, {
+      unit1PhotoFolder: folder,
+      unit1Url: draft?.unit1Url ?? draft?.sourceUrl ?? null,
+    } as any);
+    void runPhotoListingCheckForFolders([folder]);
+    console.log(`[guesty-draft-photos] draft ${draftId}: recovered ${recovered} orphaned sample photo(s) to ${folder} and queued photo match scan`);
+    return { folder, saved: recovered, scanned: true };
+  }
 
   const folderPath = path.join(process.cwd(), "client/public/photos", folder);
   await fs.promises.rm(folderPath, { recursive: true, force: true });
