@@ -3403,21 +3403,44 @@ export async function registerRoutes(
     return String(value ?? "")
       .toUpperCase()
       .replace(/\b(?:UNIT|APT|APARTMENT|SUITE|STE)\b/g, "#")
+      .replace(/\bBOULEVARD\b/g, "BLVD")
+      .replace(/\bSTREET\b/g, "ST")
+      .replace(/\bAVENUE\b/g, "AVE")
+      .replace(/\bROAD\b/g, "RD")
+      .replace(/\bDRIVE\b/g, "DR")
       .replace(/[^A-Z0-9#]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
   };
 
+  const STREET_SUFFIXES = "BLVD|ST|AVE|RD|DR|LN|CT|WAY|CIR|PKWY|PL|TER";
+
   const streetSearchTermFromAddress = (address: string): string => {
     const normalized = normalizeAddressText(address);
-    const match = normalized.match(/^(\d+\s+[A-Z0-9 ]+?)(?:\s+#\s*[A-Z0-9-]+|\s+FORT MYERS|\s+FL\b|\s+US\b|$)/);
-    return (match?.[1] || normalized.split(/\b(?:FORT MYERS|FL|US)\b/)[0] || normalized).trim();
+    const streetMatch = normalized.match(new RegExp(`\\b(\\d{2,6}\\s+[A-Z0-9 ]+?\\s+(?:${STREET_SUFFIXES}))\\b`));
+    const fallback = normalized.match(/^(\d+\s+[A-Z0-9 ]+?)(?:\s+#\s*[A-Z0-9-]+|\s+FORT MYERS|\s+FL\b|\s+US\b|$)/);
+    return (streetMatch?.[1] || fallback?.[1] || normalized.split(/\b(?:FORT MYERS|FL|US)\b/)[0] || normalized).trim();
+  };
+
+  const extractUnitTokensFromAddress = (address: string): string[] => {
+    const normalized = normalizeAddressText(address);
+    const tokens = new Set<string>();
+    for (const match of normalized.matchAll(/#\s*([A-Z0-9-]{2,8})/g)) {
+      const token = normalizeUnitToken(match[1]);
+      if (token) tokens.add(token);
+    }
+    const afterStreet = normalized.match(new RegExp(`\\b\\d{2,6}\\s+[A-Z0-9 ]+?\\s+(?:${STREET_SUFFIXES})\\s+(.+?)(?:\\s+FORT MYERS|\\s+FL\\b|\\s+US\\b|$)`))?.[1] || "";
+    for (const match of afterStreet.matchAll(/\b([A-Z0-9]{2,8})\b/g)) {
+      const token = normalizeUnitToken(match[1]);
+      if (token && !/^\d{5}$/.test(token) && !["AND", "OR"].includes(token)) tokens.add(token);
+    }
+    return Array.from(tokens);
   };
 
   const scoreDeckardLicense = (node: DeckardLicenseNode, address: string): number => {
     const searched = normalizeAddressText(address);
     const streetTerm = streetSearchTermFromAddress(address);
-    const unitToken = extractUnitTokenFromAddress(address);
+    const unitTokens = extractUnitTokensFromAddress(address);
     const addressText = normalizeAddressText(node.address);
     const parcelText = normalizeAddressText(node.parcelAddress);
     const combined = `${addressText} ${parcelText} ${normalizeAddressText(node.unitNumber)}`;
@@ -3425,10 +3448,10 @@ export async function registerRoutes(
     if (streetTerm && combined.includes(streetTerm)) score += 80;
     const streetNumber = searched.match(/\b\d{2,6}\b/)?.[0];
     if (streetNumber && combined.includes(streetNumber)) score += 25;
-    if (unitToken) {
-      const unitInCombined = combined.includes(`# ${unitToken}`)
+    if (unitTokens.length) {
+      const unitInCombined = unitTokens.some((unitToken) => combined.includes(`# ${unitToken}`)
         || combined.includes(` ${unitToken}`)
-        || normalizeUnitToken(node.unitNumber) === unitToken;
+        || normalizeUnitToken(node.unitNumber) === unitToken);
       score += unitInCombined ? 80 : -100;
     }
     if (usableLicenseValue(node.licenseNumber)) score += 10;
@@ -3481,6 +3504,26 @@ export async function registerRoutes(
       .map((node) => ({ node, score: scoreDeckardLicense(node, address) }))
       .filter(({ node, score }) => score >= 80 && usableLicenseValue(node.licenseNumber))
       .sort((a, b) => b.score - a.score);
+    const unitTokens = extractUnitTokensFromAddress(address);
+    const matchingUnitRecords = unitTokens.length
+      ? ranked
+          .filter(({ node }) => {
+            const combined = `${normalizeAddressText(node.address)} ${normalizeAddressText(node.parcelAddress)} ${normalizeAddressText(node.unitNumber)}`;
+            return unitTokens.some((unitToken) => combined.includes(`# ${unitToken}`) || combined.includes(` ${unitToken}`) || normalizeUnitToken(node.unitNumber) === unitToken);
+          })
+          .map(({ node }) => node)
+      : [];
+    if (matchingUnitRecords.length > 1) {
+      const values = Array.from(new Set(matchingUnitRecords.map((node) => usableLicenseValue(node.licenseNumber)).filter(Boolean))) as string[];
+      return {
+        value: values.join(" / "),
+        source: "Deckard Fort Myers Beach STR public portal",
+        sourceUrl: "https://str-public-portal.deckard.com/fl-lee-town_of_fort_myers_beach",
+        match: matchingUnitRecords[0],
+        candidates: candidates.slice(0, 8),
+        note: `Matched ${values.length} public Town STR records for this combo address: ${values.join(" / ")}.`,
+      };
+    }
     const best = ranked[0]?.node;
     if (!best) {
       return {
