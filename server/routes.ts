@@ -69,7 +69,7 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
-import { validateCommunityStreetAddress } from "@shared/community-addresses";
+import { communityAddressRuleForName, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -633,6 +633,8 @@ function extractUnitTokenFromText(value: string): string | null {
     text.match(/#\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/) ||
     text.match(/\b(?:unit|suite|apt|apartment|condo|villa)\s*#?\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/i);
   if (explicit?.[1]) return explicit[1].toUpperCase();
+  const trailingStreetUnit = text.match(/\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+([A-Za-z]?\d{1,5}[A-Za-z]?)\b/i);
+  if (trailingStreetUnit?.[1]) return trailingStreetUnit[1].toUpperCase();
   const compact = text.match(/\b([A-Z]\d+[A-Z]?|\d{2,4}[A-Z])\b/i);
   return compact?.[1]?.toUpperCase() ?? null;
 }
@@ -22370,11 +22372,33 @@ Return ONLY compact JSON with this exact shape:
         matchedDisqualifier: typeCheck.matchedDisqualifier,
       });
     }
+    const canonicalRule =
+      communityAddressRuleForName(result.data.name) ||
+      communityAddressRuleForName([
+        result.data.name,
+        result.data.listingTitle,
+        result.data.bookingTitle,
+        result.data.listingDescription,
+        result.data.neighborhood,
+        result.data.unit1Url,
+      ].filter(Boolean).join(" "));
+    const validationStreetAddress = canonicalRule?.street || result.data.streetAddress;
+    const unitToken = extractUnitTokenFromText([
+      result.data.unit1Address,
+      result.data.streetAddress,
+      result.data.unit1Url,
+      result.data.listingTitle,
+      result.data.bookingTitle,
+    ].filter(Boolean).join(" "));
+    const normalizedUnit1Address =
+      result.data.singleListing && canonicalRule
+        ? (withUnitToken(canonicalRule.street, unitToken) || canonicalRule.street)
+        : result.data.unit1Address;
     const addressCheck = validateCommunityStreetAddress({
       communityName: result.data.name,
       city: result.data.city,
       state: result.data.state,
-      streetAddress: result.data.streetAddress,
+      streetAddress: validationStreetAddress,
     });
     if (!addressCheck.ok) {
       return res.status(400).json({
@@ -22386,6 +22410,7 @@ Return ONLY compact JSON with this exact shape:
 
     const draft = await storage.createCommunityDraft({
       ...result.data,
+      unit1Address: normalizedUnit1Address,
       streetAddress: addressCheck.streetAddress,
     });
 

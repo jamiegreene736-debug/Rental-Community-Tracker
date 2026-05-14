@@ -55,7 +55,7 @@ import {
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
-import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
+import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 
 // 4 steps. Step 1 collapses location + community research into one
 // screen — city autocomplete kicks off /api/community/research and
@@ -174,7 +174,9 @@ function extractUnitTokenFromListingContext(value: string): string | null {
   const explicit =
     text.match(/#\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/) ||
     text.match(/\b(?:unit|suite|apt|apartment|condo|villa)\s*#?\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/i);
-  return explicit?.[1]?.toUpperCase() ?? null;
+  if (explicit?.[1]) return explicit[1].toUpperCase();
+  const trailingStreetUnit = text.match(/\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+([A-Za-z]?\d{1,5}[A-Za-z]?)\b/i);
+  return trailingStreetUnit?.[1]?.toUpperCase() ?? null;
 }
 
 function withUnitToken(address: string, token: string | null): string {
@@ -1136,16 +1138,19 @@ export default function AddSingleListing() {
       toast({ title: "Missing city/state", variant: "destructive" });
       return;
     }
+    const communityNameForSave = selectedCommunity?.name ?? propertyName;
+    const canonicalRule = communityAddressRuleForName(communityNameForSave);
     const inferredCommunityAddress = inferCommunityStreetAddress({
-      communityName: selectedCommunity?.name ?? propertyName,
+      communityName: communityNameForSave,
       city: pickedCity.city,
       state: pickedCity.state,
     });
     const unitToken = extractUnitTokenFromListingContext(`${streetAddress} ${zillowSourceUrl} ${propertyName} ${editedTitle} ${editedBookingTitle}`);
-    const effectiveStreetAddress = streetAddress.trim() || inferredCommunityAddress;
+    const sourceStreetAddress = streetAddress.trim();
+    const effectiveStreetAddress = canonicalRule?.street || sourceStreetAddress || inferredCommunityAddress;
     const effectiveUnitAddress = withUnitToken(effectiveStreetAddress, unitToken);
     const addressCheck = validateCommunityStreetAddress({
-      communityName: selectedCommunity?.name ?? propertyName,
+      communityName: communityNameForSave,
       city: pickedCity.city,
       state: pickedCity.state,
       streetAddress: effectiveStreetAddress,
@@ -1167,7 +1172,7 @@ export default function AddSingleListing() {
         // (adapt-draft.ts) to skip Unit B and render this as a
         // single-unit property.
         singleListing: true,
-        name: propertyName.trim() || effectiveStreetAddress || `${pickedCity.city} listing`,
+        name: communityNameForSave.trim() || effectiveStreetAddress || `${pickedCity.city} listing`,
         city: pickedCity.city,
         state: pickedCity.state,
         // Pass a unitTypes hint that satisfies checkCommunityType
