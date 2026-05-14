@@ -166,7 +166,7 @@ function formatMinimumStay(community: CommunityResult): { label: string; tone: "
 function addressIncludesUnitToken(address: string | null | undefined): boolean {
   const text = String(address ?? "");
   return /\b(?:unit|suite|apt|apartment|condo|villa|#)\s*[A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?\b/i.test(text)
-    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{2,5}[A-Za-z]?\b/i.test(text);
+    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{1,5}[A-Za-z]?\b/i.test(text);
 }
 
 function extractUnitTokenFromListingContext(value: string): string | null {
@@ -179,7 +179,7 @@ function extractUnitTokenFromListingContext(value: string): string | null {
 
 function withUnitToken(address: string, token: string | null): string {
   if (!address) return address;
-  const trailingUnit = address.match(/^(.+\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail))\s+([A-Za-z]?\d{2,5}[A-Za-z]?)$/i);
+  const trailingUnit = address.match(/^(.+\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail))\s+([A-Za-z]?\d{1,5}[A-Za-z]?)$/i);
   if (trailingUnit) return `${trailingUnit[1]} Unit ${trailingUnit[2].toUpperCase()}`;
   if (!token || addressIncludesUnitToken(address)) return address;
   return `${address} Unit ${token}`;

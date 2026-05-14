@@ -640,12 +640,12 @@ function extractUnitTokenFromText(value: string): string | null {
 function addressIncludesUnitToken(address: string | null | undefined): boolean {
   const text = String(address ?? "");
   return /\b(?:unit|suite|apt|apartment|condo|villa|#)\s*[A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?\b/i.test(text)
-    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{2,5}[A-Za-z]?\b/i.test(text);
+    || /\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+[A-Za-z]?\d{1,5}[A-Za-z]?\b/i.test(text);
 }
 
 function withUnitToken(address: string | null, token: string | null): string | null {
   if (!address) return address;
-  const trailingUnit = address.match(/^(.+\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail))\s+([A-Za-z]?\d{2,5}[A-Za-z]?)$/i);
+  const trailingUnit = address.match(/^(.+\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail))\s+([A-Za-z]?\d{1,5}[A-Za-z]?)$/i);
   if (trailingUnit) return `${trailingUnit[1]} Unit ${trailingUnit[2].toUpperCase()}`;
   if (!token || addressIncludesUnitToken(address)) return address;
   return `${address} Unit ${token}`;
@@ -1016,7 +1016,7 @@ function parseListingAddressFromUrl(url: string): string | null {
       .replace(/\s+/g, " ")
       .trim();
     const m = decoded.match(
-      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{2,5}[A-Za-z]?)?)\b/i,
+      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
     );
     return m?.[1] ? titleCase(m[1].trim()) : null;
   };
@@ -1044,7 +1044,7 @@ function parseListingAddressFromUrl(url: string): string | null {
 function parseListingAddressFromText(text: string): string | null {
   const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
   const m = cleaned.match(
-    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{2,5}[A-Za-z]?)?)\b/i,
+    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
   );
   return m?.[1]?.trim().replace(/\b[a-z]/g, (c) => c.toUpperCase()) ?? null;
 }
