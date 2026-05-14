@@ -7065,6 +7065,12 @@ export async function registerRoutes(
     };
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
       candidateNightlySignal(c) >= minPlausibleNightly;
+    const pricePlausibilityReason = (c: Candidate): string | null => {
+      const nightly = candidateNightlySignal(c);
+      if (!(nightly > 0)) return null;
+      if (nightly >= minPlausibleNightly) return null;
+      return `$${nightly}/night is below the ${community} ${bedrooms}BR floor of $${minPlausibleNightly}/night`;
+    };
     const candidateBedroomSignal = (c: Candidate): number | null => {
       const explicit = bedroomFromText(candidateHaystack(c));
       if (explicit !== null) return explicit;
@@ -7128,10 +7134,12 @@ export async function registerRoutes(
       // simply because Airbnb/Booking returned them on the search page.
       const searchProofHasLocality = hasLocalityForPriceFallback(hay);
       const searchProofCanCarryTarget = websiteSearchProof
-        && searchProofHasLocality;
+        && searchProofHasLocality
+        && normalizedResortName !== "poipu kai";
       const pricePlausibleSearchProof = websiteSearchProof
         && hasLocalityForPriceFallback(hay)
-        && priceIsPlausibleForTarget(c);
+        && priceIsPlausibleForTarget(c)
+        && normalizedResortName !== "poipu kai";
       const targetSignal = visibleResortProof
         || photoMatchProof
         || searchProofCanCarryTarget
@@ -7142,6 +7150,7 @@ export async function registerRoutes(
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
+      if (pricePlausibilityReason(c)) return false;
       if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
@@ -8712,8 +8721,13 @@ export async function registerRoutes(
       }
     }
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
+    const targetFilterPriceDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
-      const kept = items.filter((item) => candidateFitsTarget(item));
+      const kept = items.filter((item) => {
+        const fits = candidateFitsTarget(item);
+        if (!fits && pricePlausibilityReason(item)) targetFilterPriceDropped[key]++;
+        return fits;
+      });
       targetFilterDropped[key] += items.length - kept.length;
       return kept;
     };
@@ -9028,6 +9042,15 @@ export async function registerRoutes(
           : "No scanned source produced a date-specific price for this stay window.",
       });
     }
+    const totalPricePlausibilityDropped = Object.values(targetFilterPriceDropped).reduce((sum, n) => sum + n, 0);
+    if (totalPricePlausibilityDropped > 0) {
+      issueList.push({
+        severity: "warning",
+        source: "Price plausibility",
+        summary: `Dropped ${totalPricePlausibilityDropped} candidate(s) below the ${community} ${bedrooms}BR sanity floor`,
+        detail: `Minimum plausible nightly was $${minPlausibleNightly}; this blocks placeholder rates like PM search-card "$90 total" rows from winning buy-in auto-fill.`,
+      });
+    }
 
     const sourceStatus = (
       timeoutLabels: string[],
@@ -9135,6 +9158,7 @@ export async function registerRoutes(
           photoMatchBedroomMismatch: photoMatchBedroomMismatchDropped,
           photoMatchLanding: photoMatchLandingDropped,
           targetFilter: targetFilterDropped,
+          targetFilterPricePlausibility: targetFilterPriceDropped,
         },
         verification: {
           attempted: preVerifyAttempted,
@@ -9171,7 +9195,7 @@ export async function registerRoutes(
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
       + `pm=${pm.length}/${pmRawCount}+websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}/online=${pmWebsiteSidecarOnline}/${pmWebsiteSidecarMs}ms${pmWebsiteSidecarReason ? "; " + pmWebsiteSidecarReason : ""} +${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (website sidecar primary; legacy API/search disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
-      + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} · `
+      + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} priceFloor=${JSON.stringify(targetFilterPriceDropped)} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
     );
@@ -9221,6 +9245,7 @@ export async function registerRoutes(
           photoMatchBedroomMismatch: photoMatchBedroomMismatchDropped,
           photoMatchLanding: photoMatchLandingDropped,
           targetFilter: targetFilterDropped,
+          targetFilterPricePlausibility: targetFilterPriceDropped,
         },
         verification: {
           attempted: preVerifyAttempted,
@@ -9356,10 +9381,11 @@ export async function registerRoutes(
       if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
       // Google Images/Lens often surfaces the owner site as an exact
       // top visual match without repeating the resort name in the title.
-      // Let those first few visual hits through, then require context for
-      // the broader "similar living room" rows below them.
+      // Keep that shortcut only for OTA pages; PM/direct rows still need
+      // visible Poipu Kai / Regency / Manualoha-style proof so a similar
+      // Poipu-area unit cannot qualify as a wrong-complex direct option.
       const isOta = /(^|\.)airbnb\./.test(domain) || /(^|\.)(vrbo|homeaway)\./.test(domain) || /(^|\.)booking\.com$/.test(domain);
-      return source === "known-source" || highConfidenceVisual || (isOta && (source === "visual" || source === "page") && position <= 3);
+      return source === "known-source" || (isOta && (highConfidenceVisual || ((source === "visual" || source === "page") && position <= 3)));
     };
 
     const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string; pathSpecificity: number } | null => {
@@ -19085,6 +19111,8 @@ Return ONLY compact JSON with this exact shape:
       communityName: bodyCommunityName,
       propertyAddress,
       streetAddress,
+      city: bodyCity,
+      state: bodyState,
       expandedSearch: requestedExpandedSearch = false,
     } = req.body as {
       communityFolder: string;
@@ -19095,6 +19123,8 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       propertyAddress?: string;
       streetAddress?: string;
+      city?: string;
+      state?: string;
       expandedSearch?: boolean;
     };
     const strict = requestedStrict === true && !!cleanChannel;
@@ -19105,6 +19135,18 @@ Return ONLY compact JSON with this exact shape:
     const normalizedStreetAddress = typeof streetAddress === "string" ? streetAddress.trim() : "";
     const normalizedPropertyAddress = typeof propertyAddress === "string" ? propertyAddress.trim() : "";
     const addressStreet = normalizedPropertyAddress.split(",")[0]?.trim() || "";
+    const parseLocationFromPropertyAddress = (): { city: string; state: string } | null => {
+      const parts = normalizedPropertyAddress.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length < 3) return null;
+      const city = parts[parts.length - 2] ?? "";
+      const state = (parts[parts.length - 1] ?? "").replace(/\b\d{5}(?:-\d{4})?\b/g, "").trim();
+      return city && state ? { city, state } : null;
+    };
+    const bodyLocation = (() => {
+      const city = typeof bodyCity === "string" ? bodyCity.trim() : "";
+      const state = typeof bodyState === "string" ? bodyState.trim() : "";
+      return city && state ? { city, state } : parseLocationFromPropertyAddress();
+    })();
     const folderCommunityName = COMMUNITY_FOLDER_TO_NAME[safeFolder];
     const folderCommunityAddress = COMMUNITY_FOLDER_TO_ADDRESS[safeFolder];
     const normalizeCommunityKey = (value: string) => value
@@ -19439,6 +19481,7 @@ Return ONLY compact JSON with this exact shape:
         || (loc.streetAddress && streetRootFromListingAddress(loc.streetAddress) === streetRootFromListingAddress(communityAddress)),
       );
       if (exact) return { city: exact.city, state: exact.state };
+      if (bodyLocation) return bodyLocation;
       if (/princeville/i.test(communityName)) return { city: "Princeville", state: "Hawaii" };
       if (/kaha lani/i.test(communityName)) return { city: "Wailua", state: "Hawaii" };
       if (/kekaha/i.test(communityName)) return { city: "Kekaha", state: "Hawaii" };
@@ -19456,6 +19499,26 @@ Return ONLY compact JSON with this exact shape:
     // Realtor + Redfin biased toward "for sale" since they're
     // primarily real-estate sites; Zillow gets the wider mix.
     const communityLocForQueries = resolveCommunityLocation();
+    const directRoot = streetRootFromListingAddress(communityAddress);
+    const simplifyCommunityNameForSearch = (name: string): string => {
+      const simple = name
+        .replace(/\b(?:condominiums?|condos?|villas?|townhomes?|townhouses?|apartments?)\b/gi, " ")
+        .replace(/\b(?:golf\s*&\s*country\s*club|golf\s+and\s+country\s+club)\b/gi, " ")
+        .replace(/\b(?:resort|community|at|the)\b/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return simple || name.trim();
+    };
+    const searchCommunityAliases = Array.from(new Set([
+      communityName,
+      simplifyCommunityNameForSearch(communityName),
+      ...(directRoot ? [
+        directRoot.replace(/^\d{2,6}\s+/, "").replace(/\b(?:blvd|rd|st|ave|dr|ln|way|cir|ct|pkwy|pl|ter|trail)\b$/i, "").trim(),
+      ] : []),
+    ].filter(Boolean)));
+    const locationTerms = communityLocForQueries
+      ? [`"${communityLocForQueries.city}"`, `"${communityLocForQueries.state}"`, `"${stateToAbbrev(communityLocForQueries.state)}"`]
+      : [];
     const citySearchQuery = communityLocForQueries?.city
       ? [`site:zillow.com "${communityName}" "${communityLocForQueries.city}"`]
       : [];
@@ -19489,6 +19552,21 @@ Return ONLY compact JSON with this exact shape:
       `site:redfin.com "${communityName}" "for sale"`,
       `site:redfin.com "${communityName}" condo`,
     ];
+    for (const alias of searchCommunityAliases) {
+      searchQueries.push(
+        `site:zillow.com "${alias}" ${locationTerms.join(" ")}`.trim(),
+        `site:zillow.com "${alias}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""} condo`.trim(),
+        `site:realtor.com "${alias}" ${locationTerms.join(" ")} condo`.trim(),
+        `site:redfin.com "${alias}" ${locationTerms.join(" ")} condo`.trim(),
+      );
+    }
+    if (directRoot) {
+      searchQueries.push(
+        `site:zillow.com/homedetails "${directRoot}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""}`.trim(),
+        `site:realtor.com "${directRoot}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""}`.trim(),
+        `site:redfin.com "${directRoot}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""}`.trim(),
+      );
+    }
     if (expandedSearch) {
       const quotedStreet = communityAddress && communityAddress !== communityName ? `"${communityAddress}"` : "";
       const bedroomTerm = requiredBedroomCount
@@ -19510,7 +19588,6 @@ Return ONLY compact JSON with this exact shape:
     // OTA photos create a feedback loop with the photo-listing
     // scanner.
 
-    const directRoot = streetRootFromListingAddress(communityAddress);
     const communityAddressRoots = communityKnownAddressRoots();
     const directAllowedRoots = communityAddressRoots.size > 0
       ? communityAddressRoots

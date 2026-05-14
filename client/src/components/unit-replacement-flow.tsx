@@ -91,6 +91,9 @@ export function UnitReplacementFlow({
   communityFolder,
   communityName,
   propertyAddress,
+  streetAddress,
+  city,
+  state,
   propertyId,
   skipUrls = [],
   onClose,
@@ -101,6 +104,9 @@ export function UnitReplacementFlow({
   communityFolder: string;
   communityName?: string;
   propertyAddress?: string;
+  streetAddress?: string;
+  city?: string;
+  state?: string;
   propertyId: number;
   skipUrls?: string[];
   onClose?: () => void;
@@ -142,6 +148,9 @@ export function UnitReplacementFlow({
         communityFolder,
         communityName,
         propertyAddress,
+        streetAddress,
+        city,
+        state,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
         expandedSearch: expanded,

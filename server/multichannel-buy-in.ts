@@ -196,6 +196,25 @@ function medianOfSorted(sorted: number[]): number | null {
     : Math.round(sorted[mid]);
 }
 
+export function computeRobustCheapest(samples: number[]): number | null {
+  const clean = samples
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  if (clean.length === 0) return null;
+  if (clean.length <= 2) return Math.round(clean[0]);
+  const median = medianOfSorted(clean) ?? clean[0];
+  const mean = clean.reduce((sum, n) => sum + n, 0) / clean.length;
+  const variance = clean.reduce((sum, n) => sum + Math.pow(n - mean, 2), 0) / clean.length;
+  const sigma = Math.sqrt(variance);
+  const bounded = sigma > 0
+    ? clean.filter((n) => n <= mean + 2 * sigma && n >= Math.max(1, mean - 2 * sigma))
+    : clean;
+  const floor = Math.max(1, median * 0.45);
+  const candidates = (bounded.length > 0 ? bounded : clean).filter((n) => n >= floor);
+  const lowEnd = (candidates.length > 0 ? candidates : clean).slice(0, 3);
+  return Math.round(lowEnd.reduce((sum, n) => sum + n, 0) / lowEnd.length);
+}
+
 function normalizeHost(rawUrl: string): string | null {
   try {
     return new URL(rawUrl).hostname.replace(/^www\./, "").toLowerCase();
@@ -393,8 +412,8 @@ async function fetchPmMarketRatesForBedroom(args: {
         checkIn: args.checkIn,
         checkOut: args.checkOut,
         bedrooms: br,
-        perSiteLimit: args.pmPerSiteLimit ?? 5,
-        maxSites: Math.min(args.pmMaxSites ?? 18, sites.length),
+        perSiteLimit: args.pmPerSiteLimit ?? 8,
+        maxSites: Math.min(args.pmMaxSites ?? 30, sites.length),
         walletBudgetMs: args.pmWalletBudgetMs ?? 240_000,
         queueBudgetMs: args.sidecarQueueBudgetMs ?? 285_000,
         signal: args.signal,
@@ -469,6 +488,24 @@ export type MultiChannelBuyInResult = {
       vrbo: number | null;
       booking: number | null;
       pm: number | null;
+    }
+  >;
+  rawChannelCheapestByBR?: Record<
+    number,
+    {
+      airbnb: number | null;
+      vrbo: number | null;
+      booking: number | null;
+      pm: number | null;
+    }
+  >;
+  consensusCheapestByBR?: Record<number, number | null>;
+  cheapestConfidence?: Record<
+    number,
+    {
+      sampleCount: number;
+      sourceDiversity: number;
+      singleSourceWarning?: boolean;
     }
   >;
   // Live availability counts from the same exact dated search window.
@@ -634,7 +671,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     .filter((br) => Number.isFinite(br) && br > 0)
     .sort((a, b) => a - b);
   const sharedOtaBedroomCount = sortedBedroomCounts[0] ?? args.bedroomCounts[0];
-  const reuseSharedOtaSearch = args.reuseSharedOtaSearch === true && sortedBedroomCounts.length > 1;
+  const reuseSharedOtaSearch = args.reuseSharedOtaSearch !== false && sortedBedroomCounts.length > 1;
   const otaSearchBedroomCounts = reuseSharedOtaSearch
     ? [sharedOtaBedroomCount]
     : args.bedroomCounts;
@@ -1036,6 +1073,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
       total: airbnbCount + vrboCount + bookingCount + pmCount,
     };
   }
+  const rawChannelCheapestByBR = Object.fromEntries(
+    Object.entries(channelCheapestByBR).map(([br, values]) => [Number(br), { ...values }]),
+  ) as NonNullable<MultiChannelBuyInResult["rawChannelCheapestByBR"]>;
 
   // Cross-BR monotonicity filter (PR #289, relaxed in PR #305).
   // A larger bedroom count should never have a basis dramatically
@@ -1079,6 +1119,27 @@ export async function fetchMultiChannelBuyInByBR(args: {
     if (larger.pm != null && larger.pm < floor) larger.pm = null;
   }
 
+  const consensusCheapestByBR: NonNullable<MultiChannelBuyInResult["consensusCheapestByBR"]> = {};
+  const cheapestConfidence: NonNullable<MultiChannelBuyInResult["cheapestConfidence"]> = {};
+  for (const br of args.bedroomCounts) {
+    const channelValues = channelCheapestByBR[br];
+    const availableCounts = channelAvailableCountsByBR[br];
+    const values = channelValues
+      ? [channelValues.airbnb, channelValues.vrbo, channelValues.booking, channelValues.pm]
+          .filter((n): n is number => typeof n === "number" && n > 0)
+      : [];
+    const sourceDiversity = values.length;
+    const sampleCount = availableCounts
+      ? availableCounts.airbnb + availableCounts.vrbo + availableCounts.booking + availableCounts.pm
+      : values.length;
+    consensusCheapestByBR[br] = computeRobustCheapest(values);
+    cheapestConfidence[br] = {
+      sampleCount,
+      sourceDiversity,
+      ...(sourceDiversity < 2 ? { singleSourceWarning: true } : {}),
+    };
+  }
+
   // Scan sidecar results for surfaceable warnings (CAPTCHA, bot wall,
   // rate-limit, timeout, etc.). De-dup by (channel, kind) so an op
   // that hit CAPTCHA on every BR doesn't flood the UI with three
@@ -1118,6 +1179,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
   return {
     ratesByBR,
     channelCheapestByBR,
+    rawChannelCheapestByBR,
+    consensusCheapestByBR,
+    cheapestConfidence,
     channelAvailableCountsByBR,
     snapshotCheckIn: checkIn,
     snapshotCheckOut: checkOut,

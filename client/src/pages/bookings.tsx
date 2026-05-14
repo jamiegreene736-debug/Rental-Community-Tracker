@@ -181,8 +181,11 @@ type AutoFillComboOption = {
       title: string;
       totalPrice: number;
       nightlyPrice: number;
+      bedrooms?: number;
       url: string;
       image?: string;
+      verified?: "yes" | "no" | "unclear" | "skipped";
+      verifiedReason?: string;
       groundFloorStatus?: GroundFloorStatus;
       groundFloorEvidence?: string | null;
     }>;
@@ -1127,8 +1130,17 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
   const directMatchByUrl = new Map(directMatches.map((row) => [listingUrlKey(row.candidate.url), row] as const));
   const bestDirectCandidate = directMatches[0] ?? null;
+  const minimumDirectNightly = (bedrooms?: number) => Math.max(90, (bedrooms ?? 1) * 70);
+  const plausibleForDirectCombo = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
+    const nightly = candidate.nightlyPrice > 0
+      ? candidate.nightlyPrice
+      : Math.round(candidate.totalPrice / Math.max(1, nights));
+    return nightly >= minimumDirectNightly(candidate.bedrooms);
+  };
   const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
-    candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url));
+    candidate.verified === "yes"
+    && plausibleForDirectCombo(candidate)
+    && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
   const optimizedCombos = options
     .map((option) => {
       const picks = (option.pools ?? []).map((pool) =>
@@ -2670,8 +2682,11 @@ export default function Bookings() {
             title: candidate.title,
             totalPrice: candidate.totalPrice,
             nightlyPrice: candidate.nightlyPrice,
+            bedrooms: candidate.bedrooms,
             url: candidate.url,
             image: candidate.image,
+            verified: candidate.verified,
+            verifiedReason: candidate.verifiedReason,
             groundFloorStatus: candidate.groundFloorStatus,
             groundFloorEvidence: candidate.groundFloorEvidence,
           })),

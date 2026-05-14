@@ -638,6 +638,7 @@ export default function BuilderPreflight() {
   const targetUnit = replacementTargetId
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
+  const parsedReplacementAddress = parsePropertyAddress(property.address);
 
   return (
     <div className="min-h-screen bg-background">
@@ -1303,6 +1304,9 @@ export default function BuilderPreflight() {
               communityFolder={property.communityPhotoFolder}
               communityName={property.complexName}
               propertyAddress={property.address}
+              streetAddress={parsedReplacementAddress.street || undefined}
+              city={parsedReplacementAddress.city || undefined}
+              state={parsedReplacementAddress.state || undefined}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
               onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); }}

@@ -140,9 +140,9 @@ export type SidecarPmUrlCheckParams = {
 
 // Batch variant: daemon opens N parallel Chrome tabs and verifies
 // each URL concurrently. Way faster than firing N pm_url_check
-// requests sequentially (which would block on the daemon's single
-// active page). Cap to 5 URLs per batch — Chrome handles 5 parallel
-// loads comfortably; more risks DOM-extract races.
+// requests sequentially. The upgraded local worker is sized for up to
+// 8 tabs/windows; callers should still keep URL batches scoped to the
+// exact shortlist they need.
 export type SidecarPmUrlCheckBatchParams = {
   urls: string[];
   checkIn: string;
@@ -824,6 +824,7 @@ export function getHeartbeat(): {
   lastWorkerPollAt: string | null;
   ageMs: number | null;
   onlineWindowMs: number;
+  maxConcurrency: number;
   // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): added paused
   // + activeJob to the heartbeat so the status badge can render
   // three states (online/offline/paused) and surface what op is
@@ -865,6 +866,7 @@ export function getHeartbeat(): {
       lastWorkerPollAt: null,
       ageMs: null,
       onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+      maxConcurrency: 8,
       paused: pausedState.paused,
       pausedAt: pausedState.pausedAt,
       pausedAgeMs: pausedState.pausedAgeMs,
@@ -879,6 +881,7 @@ export function getHeartbeat(): {
     lastWorkerPollAt: new Date(lastWorkerPollAt).toISOString(),
     ageMs,
     onlineWindowMs: HEARTBEAT_ONLINE_WINDOW_MS,
+    maxConcurrency: 8,
     paused: pausedState.paused,
     pausedAt: pausedState.pausedAt,
     pausedAgeMs: pausedState.pausedAgeMs,
