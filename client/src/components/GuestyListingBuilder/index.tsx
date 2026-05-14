@@ -1812,43 +1812,49 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // it automatically so the dropdown and dashboard green G recover together.
   useEffect(() => {
     if (!propertyId || propertyId >= 0 || listings.length === 0 || propertyMap.some((m) => m.propertyId === propertyId)) return;
-    const candidateNames = new Set(
-      [
-        propertyData?.nickname,
-        propertyData?.title,
-        propertyData?.descriptions?.title,
-      ]
-        .map((name) => normalizeListingName(name))
-        .filter(Boolean),
-    );
-    if (candidateNames.size === 0) return;
-    const exactMatches = listings.filter((listing) => {
-      const names = [listing.nickname, listing.title].map((name) => normalizeListingName(name)).filter(Boolean);
-      return names.some((name) => candidateNames.has(name));
-    });
-    if (exactMatches.length !== 1) return;
+    try {
+      const candidateNames = new Set<string>();
+      for (const name of [propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title]) {
+        const normalized = normalizeListingName(name);
+        if (normalized) candidateNames.add(normalized);
+      }
+      if (candidateNames.size === 0) return;
+      const exactMatches: GuestyListing[] = [];
+      for (const listing of listings) {
+        for (const name of [listing.nickname, listing.title]) {
+          const normalized = normalizeListingName(name);
+          if (normalized && candidateNames.has(normalized)) {
+            exactMatches.push(listing);
+            break;
+          }
+        }
+      }
+      if (exactMatches.length !== 1) return;
 
-    const match = exactMatches[0];
-    const attemptKey = `${propertyId}:${match._id}`;
-    if (autoMapAttemptRef.current === attemptKey) return;
-    autoMapAttemptRef.current = attemptKey;
+      const match = exactMatches[0];
+      const attemptKey = `${propertyId}:${match._id}`;
+      if (autoMapAttemptRef.current === attemptKey) return;
+      autoMapAttemptRef.current = attemptKey;
 
-    fetch("/api/guesty-property-map", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ propertyId, guestyListingId: match._id }),
-    })
-      .then(async (resp) => {
-        if (!resp.ok) throw new Error("Guesty property map repair failed");
-        rememberPropertyMap(propertyId, match._id);
-        setSelectedId(match._id);
-        toast({
-          title: "Guesty listing matched",
-          description: "This builder draft is now connected to the matching Guesty listing.",
-          duration: 6000,
-        });
+      fetch("/api/guesty-property-map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId, guestyListingId: match._id }),
       })
-      .catch(() => { /* non-fatal; the user can still select manually */ });
+        .then(async (resp) => {
+          if (!resp.ok) throw new Error("Guesty property map repair failed");
+          rememberPropertyMap(propertyId, match._id);
+          setSelectedId(match._id);
+          toast({
+            title: "Guesty listing matched",
+            description: "This builder draft is now connected to the matching Guesty listing.",
+            duration: 6000,
+          });
+        })
+        .catch(() => { /* non-fatal; the user can still select manually */ });
+    } catch (e) {
+      console.warn("[GuestyListingBuilder] draft auto-map skipped after unexpected data shape", e);
+    }
   }, [propertyId, listings, propertyMap, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap, toast]);
 
   // ── Load channel status when selection changes ─────────────────────────────
