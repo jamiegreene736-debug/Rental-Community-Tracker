@@ -26028,6 +26028,203 @@ Return ONLY compact JSON with this exact shape:
   // ============================================================
   // Step 5: Generate listing draft with Claude
   // ============================================================
+  type ResortFeeFinding = {
+    hasResortFee: boolean;
+    amountText: string | null;
+    frequencyText: string | null;
+    evidence: string | null;
+    sourceUrl: string | null;
+    confidence: "high" | "medium" | "low";
+  };
+
+  const emptyResortFeeFinding = (): ResortFeeFinding => ({
+    hasResortFee: false,
+    amountText: null,
+    frequencyText: null,
+    evidence: null,
+    sourceUrl: null,
+    confidence: "low",
+  });
+
+  const normalizeResortFeeText = (value: string) => value.replace(/\s+/g, " ").trim();
+
+  const stripHtmlForResortFeeSearch = (value: string) => normalizeResortFeeText(
+    value
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/gi, "\"")
+  );
+
+  const getResortFeeEvidenceSnippet = (text: string) => {
+    const lower = text.toLowerCase();
+    const idx = lower.indexOf("resort fee");
+    if (idx < 0) return text.slice(0, 240);
+    return normalizeResortFeeText(text.slice(Math.max(0, idx - 160), idx + 260));
+  };
+
+  const parseResortFeeText = (rawText: string, sourceUrl: string | null): ResortFeeFinding | null => {
+    const text = stripHtmlForResortFeeSearch(rawText);
+    if (!/\bresort fee\b/i.test(text)) return null;
+    const snippet = getResortFeeEvidenceSnippet(text);
+    const around = snippet.toLowerCase();
+
+    if (
+      /\b(no|without|does not|doesn't|do not|don't|not)\b.{0,70}\bresort fee\b/.test(around) ||
+      /\bresort fee\b.{0,70}\b(no charge|not charged|waived|included|not applicable)\b/.test(around)
+    ) {
+      return {
+        ...emptyResortFeeFinding(),
+        evidence: snippet,
+        sourceUrl,
+        confidence: "medium",
+      };
+    }
+
+    const amountMatch = snippet.match(/(?:resort fee[^$]{0,140}\$\s*\d+(?:\.\d{2})?|\$\s*\d+(?:\.\d{2})?[^.]{0,140}resort fee)/i);
+    const amountText = amountMatch?.[0]?.match(/\$\s*\d+(?:\.\d{2})?/i)?.[0]?.replace(/\s+/g, "") ?? null;
+    const frequencyText = snippet.match(/per\s+(?:room|accommodation|unit)[,\s]+per\s+night|per\s+night|nightly|daily|per\s+day/i)?.[0] ?? null;
+    const strongPhrase = /\b(?:mandatory|daily|nightly|per night|required)\b.{0,120}\bresort fee\b|\bresort fee\b.{0,120}\b(?:mandatory|daily|nightly|per night|required)\b/i.test(snippet);
+
+    if (!amountText && !strongPhrase) return null;
+
+    return {
+      hasResortFee: true,
+      amountText,
+      frequencyText,
+      evidence: snippet,
+      sourceUrl,
+      confidence: amountText ? "high" : strongPhrase ? "medium" : "low",
+    };
+  };
+
+  const formatResortFeeNote = (communityName: string, finding: ResortFeeFinding) => {
+    if (!finding.hasResortFee) return "";
+    const amount = finding.amountText ? ` of ${finding.amountText}` : "";
+    const frequency = finding.frequencyText ? ` ${finding.frequencyText.toLowerCase()}` : "";
+    const verb = finding.confidence === "high" ? "charges" : "may charge";
+    return `Please note: ${communityName} ${verb} a mandatory resort fee${amount}${frequency}. This fee is separate from the nightly rate, cleaning fee, and host-controlled taxes/fees, and may be collected by the resort, property manager, or booking platform.`;
+  };
+
+  const appendResortFeeNote = (text: string, note: string, fullDescription?: string) => {
+    if (!note) return text;
+    if (/\bresort fee\b/i.test(fullDescription || text)) return text;
+    return `${text.trim()}\n\n${note}`.trim();
+  };
+
+  const fetchTextWithTimeout = async (url: string, timeoutMs = 7000) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 VacationRentalExpertzBot/1.0 (+https://vacationrentalexpertz.com)",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (!resp.ok) return "";
+      return await resp.text();
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const detectResortFee = async (args: {
+    communityName: string;
+    city: string;
+    state: string;
+    sourceUrls: string[];
+  }): Promise<ResortFeeFinding> => {
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    const { communityName, city, state, sourceUrls } = args;
+    const candidates: Array<{ text: string; sourceUrl: string | null; sourceRank: number }> = [];
+
+    const addCandidate = (text: unknown, sourceUrl: string | null, sourceRank = 0) => {
+      const normalized = normalizeResortFeeText(String(text ?? ""));
+      if (normalized) candidates.push({ text: normalized, sourceUrl, sourceRank });
+    };
+
+    const directSourceUrls = sourceUrls
+      .filter((url): url is string => typeof url === "string" && /^https?:\/\//i.test(url))
+      .slice(0, 3);
+
+    for (const url of directSourceUrls) {
+      const html = await fetchTextWithTimeout(url, 5000);
+      if (html) addCandidate(html, url, 2);
+    }
+
+    if (searchApiKey) {
+      const queries = [
+        `"${communityName}" "${city}" "resort fee"`,
+        `"${communityName}" "${state}" "resort fee"`,
+        `"${communityName}" "daily resort fee"`,
+      ];
+
+      const searchResults = await Promise.all(queries.map(async (q) => {
+        try {
+          const params = new URLSearchParams({ engine: "google", q, num: "6", api_key: searchApiKey });
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+          if (!resp.ok) return [];
+          const data = await resp.json() as any;
+          return Array.isArray(data?.organic_results) ? data.organic_results : [];
+        } catch {
+          return [];
+        }
+      }));
+
+      const resultUrls: string[] = [];
+      for (const row of searchResults.flat().slice(0, 12)) {
+        addCandidate(`${row?.title ?? ""} ${row?.snippet ?? ""}`, row?.link ?? null, 1);
+        if (typeof row?.link === "string" && /^https?:\/\//i.test(row.link)) resultUrls.push(row.link);
+      }
+
+      const fetchedPages = await Promise.all(
+        Array.from(new Set(resultUrls)).slice(0, 4).map(async (url) => ({ url, html: await fetchTextWithTimeout(url, 6000) }))
+      );
+      for (const page of fetchedPages) {
+        if (page.html) addCandidate(page.html, page.url, 1);
+      }
+    }
+
+    const findings = candidates
+      .map((candidate) => ({ finding: parseResortFeeText(candidate.text, candidate.sourceUrl), sourceRank: candidate.sourceRank }))
+      .filter((row): row is { finding: ResortFeeFinding; sourceRank: number } => !!row.finding);
+
+    const positives = findings.filter((row) => row.finding.hasResortFee);
+    if (positives.length) {
+      positives.sort((a, b) => {
+        const score = (f: ResortFeeFinding, sourceRank: number) =>
+          (f.confidence === "high" ? 30 : f.confidence === "medium" ? 20 : 10) +
+          (f.amountText ? 6 : 0) +
+          sourceRank;
+        return score(b.finding, b.sourceRank) - score(a.finding, a.sourceRank);
+      });
+      return positives[0].finding;
+    }
+
+    // Pink Shell is the customer-reported case. If public search is
+    // unavailable or inconclusive, keep the listing from silently omitting
+    // the resort-fee disclosure, but do not invent the current amount.
+    if (/pink\s+shell/i.test(communityName) && /fort\s+myers/i.test(city)) {
+      return {
+        hasResortFee: true,
+        amountText: null,
+        frequencyText: "per night",
+        evidence: "Pink Shell fallback: public search unavailable or inconclusive; verify current nightly resort fee before publishing.",
+        sourceUrl: null,
+        confidence: "low",
+      };
+    }
+
+    return emptyResortFeeFinding();
+  };
+
   app.post("/api/community/generate-listing", async (req, res) => {
     const { communityName, city, state, unit1, unit2, suggestedRate, singleListing } = req.body as {
       communityName: string;
@@ -26130,6 +26327,17 @@ Return ONLY compact JSON with this exact shape:
       return "STR-099-99";
     })();
 
+    const resortFee = await detectResortFee({
+      communityName,
+      city,
+      state,
+      sourceUrls: [unit1.url, unit2?.url].filter((url): url is string => !!url),
+    }).catch((error) => {
+      console.warn("[community/generate-listing] resort fee lookup failed:", error?.message ?? error);
+      return emptyResortFeeFinding();
+    });
+    const resortFeeNote = formatResortFeeNote(communityName, resortFee);
+
     const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
 
     const fallbackUnitDraft = (unit: { bedrooms: number }): {
@@ -26168,14 +26376,15 @@ Return ONLY compact JSON with this exact shape:
         : `This bundled stay combines Unit A (${unit1.bedrooms}BR) and Unit B (${unit2!.bedrooms}BR) at ${communityName}. The units are ${walk.description.toLowerCase()} Guests receive separate access details for each unit at check-in. Update bedding, bathrooms, and amenity details once the exact units are confirmed.`;
       const neighborhood = `${communityName} places guests in the ${city}, ${state} area, close to local beaches, restaurants, shopping, and outdoor activities. Add specific nearby landmarks and drive times before publishing.`;
       const transit = `A rental car is recommended for exploring ${city} and the surrounding area. Add airport distance, parking details, and walkability notes once the exact unit location is confirmed.`;
-      const description = [summary, space, `THE NEIGHBORHOOD\n\n${neighborhood}`, `GETTING AROUND\n\n${transit}`].join("\n\n");
+      const summaryWithFee = appendResortFeeNote(summary, resortFeeNote, [summary, space, neighborhood, transit].join(" "));
+      const description = [summaryWithFee, space, `THE NEIGHBORHOOD\n\n${neighborhood}`, `GETTING AROUND\n\n${transit}`].join("\n\n");
 
       return {
         title: fallbackTitle,
         bookingTitle: fallbackTitle,
         propertyType: "Condominium",
         description,
-        summary,
+        summary: summaryWithFee,
         space,
         neighborhood,
         transit,
@@ -26185,6 +26394,7 @@ Return ONLY compact JSON with this exact shape:
         suggestedRate,
         walk,
         strPermitSample,
+        resortFee,
         ...(warning ? { warning } : {}),
       };
     };
@@ -26218,6 +26428,7 @@ Return ONLY compact JSON with this exact shape:
 CONTEXT
 - Single unit: ${unit1.bedrooms}-bedroom ${unit1.address ? `at ${unit1.address}` : `at ${communityName}`}${unit1.url ? ` (source: ${unit1.url})` : ""}
 - This is ONE standalone condo or townhouse — NOT a combination of two units.
+${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
 
@@ -26247,6 +26458,7 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about.
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
+- If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
 - Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`
       : `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
@@ -26256,6 +26468,7 @@ CONTEXT
 - Unit B: ${unit2!.bedrooms}-bedroom unit at ${communityName}${unit2!.url ? ` (source: ${unit2!.url})` : ""}
 - Combined total: ${combinedBedrooms} bedrooms across two separate units
 - Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
+${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
 
@@ -26294,6 +26507,7 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
 - summary and space must NOT contain the disclosure block; that's auto-prepended.
+- If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
 - Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`;
 
@@ -26349,11 +26563,21 @@ CONSTRAINTS
       // operator can edit them per-section, but the flat one stays
       // so the existing `Save → CommunityDraft` path keeps working
       // unchanged.
+      const parsedSummary = String(parsed.summary ?? "").trim();
+      const parsedSpace = String(parsed.space ?? "").trim();
+      const parsedNeighborhood = String(parsed.neighborhood ?? "").trim();
+      const parsedTransit = String(parsed.transit ?? "").trim();
+      const summaryWithFee = appendResortFeeNote(
+        parsedSummary,
+        resortFeeNote,
+        [parsedSummary, parsedSpace, parsedNeighborhood, parsedTransit].join(" ")
+      );
+
       const description = [
-        parsed.summary?.trim(),
-        parsed.space?.trim(),
-        parsed.neighborhood ? `THE NEIGHBORHOOD\n\n${parsed.neighborhood.trim()}` : null,
-        parsed.transit ? `GETTING AROUND\n\n${parsed.transit.trim()}` : null,
+        summaryWithFee,
+        parsedSpace,
+        parsedNeighborhood ? `THE NEIGHBORHOOD\n\n${parsedNeighborhood}` : null,
+        parsedTransit ? `GETTING AROUND\n\n${parsedTransit}` : null,
       ].filter(Boolean).join("\n\n");
 
       return res.json({
@@ -26367,16 +26591,17 @@ CONSTRAINTS
         bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 50),
         propertyType: parsed.propertyType ?? "Condominium",
         description,
-        summary: parsed.summary ?? "",
-        space: parsed.space ?? "",
-        neighborhood: parsed.neighborhood ?? "",
-        transit: parsed.transit ?? "",
+        summary: summaryWithFee,
+        space: parsedSpace,
+        neighborhood: parsedNeighborhood,
+        transit: parsedTransit,
         unitA: parsed.unitA ?? null,
         unitB: parsed.unitB ?? null,
         combinedBedrooms,
         suggestedRate,
         walk,
         strPermitSample,
+        resortFee,
       });
     } catch (e: any) {
       console.warn("[community/generate-listing] Claude error:", e.message);
