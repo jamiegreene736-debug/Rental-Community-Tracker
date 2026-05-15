@@ -5,7 +5,13 @@ import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
-import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE, SINGLE_LISTING_SAMPLE_DISCLOSURE, type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import {
+  getUnitBuilderByPropertyId,
+  LISTING_DISCLOSURE,
+  REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  SINGLE_LISTING_SAMPLE_DISCLOSURE,
+  type PropertyUnitBuilder,
+} from "@/data/unit-builder-data";
 import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
@@ -26,9 +32,6 @@ type BuilderUnitSwap = {
 
 const SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
-const COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE =
-  "Please note: photos are representative of the resort/community and unit standard. Exact assigned units, decor, furnishings, views, and layouts may vary, but the stay will match the advertised bedroom count and overall property standard.";
-
 function isComboUnitDisclosure(text: string): boolean {
   return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
 }
@@ -37,6 +40,8 @@ function isRepresentativePhotoDisclosure(text: string): boolean {
   const lower = text.toLowerCase();
   return lower.includes("photos are representative")
     || lower.includes("sample unit")
+    || lower.includes("representative accommodations")
+    || lower.includes("unit assignment note")
     || lower.includes("specific unit assigned")
     || lower.includes("specific accommodation");
 }
@@ -55,12 +60,9 @@ function stripDisclosureParagraphs(text: string): string {
 function buildGuestySummary(property: PropertyUnitBuilder, units: PropertyUnitBuilder["units"]): string {
   const body = stripDisclosureParagraphs(property.combinedDescription);
   const isSingle = units.length === 1;
-  const savedDisclaimer = String(property.sampleDisclaimer ?? "").trim();
   const bottomDisclosure = isSingle
     ? SINGLE_LISTING_SAMPLE_DISCLOSURE
-    : isComboUnitDisclosure(savedDisclaimer)
-      ? COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE
-      : (savedDisclaimer || COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE);
+    : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
 
   return [
     !isSingle ? COMBO_TOP_DISCLOSURE : "",

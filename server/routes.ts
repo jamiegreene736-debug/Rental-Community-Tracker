@@ -26764,7 +26764,8 @@ Return ONLY compact JSON with this exact shape:
 
     // The builder UI owns disclosure placement when assembling the
     // summary pushed to Guesty: combo-unit setup goes at the top, and
-    // representative/sample-photo language goes at the bottom. This
+    // representative-accommodation unit-assignment language goes at
+    // the bottom. This
     // endpoint must keep summary/space free of disclosure language so
     // generated drafts do not duplicate it.
 
@@ -26932,8 +26933,8 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "title": "Airbnb-style punchy headline, HARD CAP 50 chars. Format: '<Adjective> <N>BR <Type> in <Location>!'. Examples: 'Beautiful 3BR Condo in Poipu Beach!', 'Cozy 2BR Townhouse near Disney!'. Always end with !. Use only commas and hyphens for punctuation — NO em dashes (—). Count characters and STAY UNDER 50.",
   "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
-  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point. Do NOT mention 'two units' / 'combined' / 'multi-unit' / 'photos representative' — this is a SINGLE standalone listing and the builder appends sample-photo language separately.",
-  "space": "1-2 paragraphs describing this one unit's layout — bedrooms, what guests get, the vibe. Do NOT mention combination / two units / disclosure / sample-photo language.",
+  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point. Do NOT mention 'two units' / 'combined' / 'multi-unit' / 'representative accommodations' — this is a SINGLE standalone listing and the builder appends unit-assignment language separately.",
+  "space": "1-2 paragraphs describing this one unit's layout — bedrooms, what guests get, the vibe. Do NOT mention combination / two units / disclosure / unit-assignment language.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
   "unitA": {
@@ -26954,7 +26955,7 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about.
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
-- Do not include sample-unit or representative-photo disclosure language. The builder appends that at the bottom.
+- Do not include representative-accommodation or unit-assignment disclosure language. The builder appends that at the bottom.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
 - Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`
@@ -26973,8 +26974,8 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Beautiful 4BR for 10 in Caribe Cove!', 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
   "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Caribe Cove - 4BR Condos - Sleeps 10', 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
-  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'photos representative' here — the builder adds combo setup at the top and representative-photo language at the bottom.",
-  "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / sample-photo language; the builder adds those separately.",
+  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
+  "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
   "unitA": {

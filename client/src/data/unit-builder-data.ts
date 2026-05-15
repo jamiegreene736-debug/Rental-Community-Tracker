@@ -94,7 +94,8 @@ export type PropertyUnitBuilder = {
 };
 
 const DEFAULT_DISCLAIMER = "Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.";
-export const SINGLE_LISTING_SAMPLE_DISCLOSURE = "Please note: this is a sample unit. The unit provided will be in the same community, with the same quality level and bedroom count as shown. Photos are representative of the unit style and community standard; exact decor, furnishings, views, and layout may vary.";
+export const REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE = "Unit assignment note: This listing uses representative accommodations within the same resort/community. The assigned unit will match the advertised bedroom count, occupancy, quality standard, and core amenities. Exact decor, furnishings, layout, and view may vary by unit.";
+export const SINGLE_LISTING_SAMPLE_DISCLOSURE = REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
 
 export const LISTING_DISCLOSURE = `Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.
 
