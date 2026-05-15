@@ -2435,17 +2435,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [marketRatesRefreshing]);
   const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
   // AbortController for the in-flight refresh fetch. Lets the operator
-  // cancel a long multi-season scan (5–15 min) without freezing the
-  // tab. Server-side scan continues in the background — that's fine,
-  // it just records progress to the in-memory map and we stop polling.
+  // cancel a long multi-season scan without freezing the tab. Cancellation
+  // also stops queued/running sidecar work so Chrome does not keep scanning
+  // after the UI has entered a terminal state.
   const refreshAbortRef = useRef<AbortController | null>(null);
+  const stopSidecarPricingWork = useCallback(async (reason: string) => {
+    try {
+      await fetch("/api/vrbo-sidecar/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+    } catch (e: any) {
+      console.warn(`[refresh-market-rates] sidecar cancel failed: ${e?.message}`);
+    }
+  }, []);
   const cancelRefresh = useCallback(() => {
     if (refreshAbortRef.current) {
       console.info("[refresh-market-rates] operator cancelled");
       refreshAbortRef.current.abort();
       refreshAbortRef.current = null;
     }
-  }, []);
+    void stopSidecarPricingWork(`pricing refresh cancelled by operator for property ${propertyId ?? "unknown"}`);
+  }, [propertyId, stopSidecarPricingWork]);
   useEffect(() => {
     handledTerminalProgressRef.current = null;
     missingProgressPollsRef.current = 0;
@@ -2548,7 +2560,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       label: "Refresh tracking interrupted",
       error: REFRESH_TRACKING_LOST_MESSAGE,
     });
-  }, [recordRefreshNotice]);
+    void stopSidecarPricingWork(`pricing refresh tracking interrupted for property ${propertyId ?? "unknown"}`);
+  }, [propertyId, recordRefreshNotice, stopSidecarPricingWork]);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -2681,6 +2694,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
     const waitForBackgroundRefresh = async () => {
       const deadline = Date.now() + 4 * 60 * 60 * 1000;
+      let transientProgressFailures = 0;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
         const result = await readProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
@@ -2692,7 +2706,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           }
           continue;
         }
-        if (result.kind === "failed") continue;
+        if (result.kind === "failed") {
+          transientProgressFailures++;
+          const previous = refreshProgressRef.current;
+          setRefreshProgress({
+            ...(previous ?? { phase: "starting", percent: 1, label: "Reconnecting to market-rate scan…" }),
+            startedAt: previous?.startedAt ?? startedAt,
+            label: "Reconnecting to market-rate scan…",
+            error: result.message,
+          });
+          if (transientProgressFailures >= 20) {
+            recordLostRefreshTracking();
+            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
+          }
+          continue;
+        }
+        transientProgressFailures = 0;
         missingProgressPollsRef.current = 0;
         lostProgressRecordedRef.current = false;
         const p = result.progress;
@@ -2721,7 +2750,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         : `${basePath}?background=1`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
-      const r = await fetch(path, { method: "POST", signal: controller.signal });
+      let r: Response;
+      try {
+        r = await fetch(path, { method: "POST", signal: controller.signal });
+      } catch (e: any) {
+        if (e?.name === "AbortError") throw e;
+        // Railway/browser fetches can drop even after the server accepted
+        // the background refresh. Before showing a red failure, reconnect
+        // to the progress endpoint; if it is alive, keep waiting.
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          const progress = await readProgress().catch(() => null);
+          if (progress?.kind === "active") {
+            await waitForBackgroundRefresh();
+            setLiveSnapshot(null);
+            await reloadMarketRates();
+            recordRefreshNotice({
+              status: "done",
+              finishedAt: Date.now(),
+              startedAt,
+              label: "Season-band market-rate scan finished",
+            });
+            return;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+        throw e;
+      }
       if (!r.ok) {
         const data = await r.json().catch(() => ({}));
         const message = data?.error || `HTTP ${r.status}`;
@@ -2850,9 +2905,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
     } catch (e: any) {
       // AbortError = operator cancelled, distinct copy. Server scan
-      // continues in the background; nothing else to clean up.
+      // and sidecar queue are cancelled by cancelRefresh().
       if (e?.name === "AbortError") {
-        toast({ title: "Refresh cancelled", description: "Server scan continues in the background — refresh later to pick up partial results." });
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh cancelled", error: "Cancelled by operator", startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Season-band market-rate scan cancelled",
+          error: "Cancelled by operator",
+        });
+        toast({ title: "Refresh cancelled", description: "Queued sidecar work has been cancelled." });
       } else {
         setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: e?.message, startedAt });
         recordRefreshNotice({
@@ -2870,7 +2933,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setRefreshStartedAt(null);
       setMarketRatesRefreshing(false);
     }
-  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordRefreshNotice, reloadMarketRates, toast]);
+  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, toast]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {

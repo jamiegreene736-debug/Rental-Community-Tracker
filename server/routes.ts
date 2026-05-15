@@ -23264,6 +23264,8 @@ Return ONLY compact JSON with this exact shape:
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
+              const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+              cancelActiveAndPendingRequests(`draft ${id} pricing refresh failed in background runner`);
               releasePricingRefreshLock(refreshLock);
               setRefreshProgress({
                 propertyId: propertyKey,
@@ -23277,6 +23279,11 @@ Return ONLY compact JSON with this exact shape:
             }
           })
           .catch((e: any) => {
+            void import("./vrbo-sidecar-queue")
+              .then(({ cancelActiveAndPendingRequests }) => {
+                cancelActiveAndPendingRequests(`draft ${id} pricing refresh background runner disconnected`);
+              })
+              .catch(() => undefined);
             releasePricingRefreshLock(refreshLock);
             setRefreshProgress({
               propertyId: propertyKey,
@@ -23541,6 +23548,8 @@ Return ONLY compact JSON with this exact shape:
           .then(async (r) => {
             if (!r.ok) {
               const text = await r.text().catch(() => "");
+              const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+              cancelActiveAndPendingRequests(`property ${propertyId} market-rate refresh failed in background runner`);
               releasePricingRefreshLock(refreshLock);
               setRefreshProgress({
                 propertyId,
@@ -23554,6 +23563,11 @@ Return ONLY compact JSON with this exact shape:
             }
           })
           .catch((e: any) => {
+            void import("./vrbo-sidecar-queue")
+              .then(({ cancelActiveAndPendingRequests }) => {
+                cancelActiveAndPendingRequests(`property ${propertyId} market-rate refresh background runner disconnected`);
+              })
+              .catch(() => undefined);
             releasePricingRefreshLock(refreshLock);
             setRefreshProgress({
               propertyId,
