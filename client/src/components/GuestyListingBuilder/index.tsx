@@ -8,7 +8,7 @@ import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
-import PhotoCurator from "./PhotoCurator";
+import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
@@ -1403,7 +1403,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setUpscaleError(null);
   }, []);
 
-  // ── Cover collage: score labels → pick best outdoor + indoor → canvas → ImgBB → Guesty ──
+  // ── Cover collage: operator selects two photos → canvas → ImgBB → Guesty ──
   type CollagePhase = "idle" | "upscaling" | "generating" | "uploading" | "done" | "error";
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
@@ -1476,16 +1476,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return { community, patio };
   }
 
-  const generateCoverCollage = useCallback(async (allPhotos: GuestyPropertyData["photos"]) => {
+  const generateCoverCollage = useCallback(async (
+    allPhotos: GuestyPropertyData["photos"],
+    selection?: CoverCollageSelection,
+  ) => {
     if (!selectedId) return;
     setCollagePhase("upscaling");
     setCollageError(null);
     setCollagePreviewUrl(null);
     setCollagePicks(null);
 
-    const picks = pickCollagePhotos(allPhotos);
+    const picks = selection
+      ? {
+          community: selection.left as NonNullable<GuestyPropertyData["photos"]>[0],
+          patio: selection.right as NonNullable<GuestyPropertyData["photos"]>[0],
+        }
+      : pickCollagePhotos(allPhotos);
     if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
-    setCollagePicks({ outdoor: picks.community.caption || picks.community.url, indoor: picks.patio.caption || picks.patio.url });
+    setCollagePicks({ community: picks.community.caption || picks.community.url, patio: picks.patio.caption || picks.patio.url });
 
     // Extract local path from URL (e.g. "/photos/kaha-lani-109/photo_00.jpg")
     const toLocalPath = (url: string): string => {
@@ -5638,10 +5646,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         )}
 
                         {/* Curation grid — simple tiles in Zillow's order,
-                            with an "Auto-Set Cover Collage" banner at the top
-                            that stitches the best community + best patio
-                            photo into a single 2-up cover and sets it as the
-                            Guesty listing cover. */}
+                            with a cover-collage banner at the top that lets
+                            the operator choose two photos, stitches them into
+                            a single 2-up cover, and sets it as the Guesty
+                            listing cover. */}
                         <PhotoCurator
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
@@ -5649,7 +5657,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           coverCollageEnabled={photos.length >= 2}
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
                           coverCollageCurrentUrl={guestyCoverCollageUrl}
-                          onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
+                          onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
                           coverCollageStatus={{
                             phase: collagePhase === "upscaling" ? "generating" : collagePhase,
                             error: collageError,

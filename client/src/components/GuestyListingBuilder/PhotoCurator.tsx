@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RotateCcw, RotateCw } from "lucide-react";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
+export type CoverCollageSelection = { left: PhotoIn; right: PhotoIn };
 
 type LabelMeta = {
   label: string;
@@ -78,7 +79,7 @@ export type PhotoCuratorProps = {
   coverCollageEnabled?: boolean;
   coverCollageDisabledReason?: string | null;
   coverCollageCurrentUrl?: string | null;
-  onRequestCoverCollage?: () => void;
+  onRequestCoverCollage?: (selection: CoverCollageSelection) => void;
   coverCollageStatus?: {
     phase: "idle" | "generating" | "uploading" | "done" | "error";
     error?: string | null;
@@ -102,6 +103,8 @@ export default function PhotoCurator({
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [rotatingKey, setRotatingKey] = useState<string | null>(null);
   const [cacheBusters, setCacheBusters] = useState<Map<string, number>>(new Map());
+  const [collagePickerOpen, setCollagePickerOpen] = useState(false);
+  const [collageSelection, setCollageSelection] = useState<string[]>([]);
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -236,6 +239,39 @@ export default function PhotoCurator({
     const m = meta.get(`${parsed.folder}/${parsed.filename}`);
     return m?.hidden ? acc : acc + 1;
   }, 0);
+  const selectableCollagePhotos = sections
+    .flatMap((section) => section.photos)
+    .filter((p) => !p.meta?.hidden);
+  const selectedCollagePhotos = collageSelection
+    .map((key) => selectableCollagePhotos.find((p) => p.key === key))
+    .filter((p): p is (typeof selectableCollagePhotos)[number] => !!p);
+  const closeCollagePicker = () => {
+    setCollagePickerOpen(false);
+    setCollageSelection([]);
+  };
+  const toggleCollagePhoto = (key: string) => {
+    setCollageSelection((prev) => {
+      if (prev.includes(key)) return prev.filter((k) => k !== key);
+      if (prev.length >= 2) return prev;
+      return [...prev, key];
+    });
+  };
+  const confirmCollageSelection = () => {
+    if (selectedCollagePhotos.length !== 2) return;
+    onRequestCoverCollage?.({
+      left: {
+        url: selectedCollagePhotos[0].url,
+        caption: selectedCollagePhotos[0].caption,
+        source: selectedCollagePhotos[0].source,
+      },
+      right: {
+        url: selectedCollagePhotos[1].url,
+        caption: selectedCollagePhotos[1].caption,
+        source: selectedCollagePhotos[1].source,
+      },
+    });
+    closeCollagePicker();
+  };
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -291,9 +327,9 @@ export default function PhotoCurator({
         const gated = !!coverCollageDisabledReason;
         const disabled = busy || gated;
         const buttonText =
-          phase === "done" ? "↺ Regenerate Cover Collage" :
+          phase === "done" ? "↺ Make New Cover Collage" :
           busy ? (phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…") :
-          "🖼 Auto-Set Cover Collage";
+          "🖼 Make Cover Collage";
         return (
           <div style={{
             display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
@@ -301,7 +337,10 @@ export default function PhotoCurator({
             borderRadius: 6, marginBottom: 14, fontSize: 12,
           }}>
             <button
-              onClick={onRequestCoverCollage}
+              onClick={() => {
+                setCollageSelection([]);
+                setCollagePickerOpen(true);
+              }}
               disabled={disabled}
               title={gated ? coverCollageDisabledReason! : undefined}
               style={{
@@ -312,7 +351,7 @@ export default function PhotoCurator({
               }}
             >{buttonText}</button>
             <span style={{ color: "#075985" }}>
-              Picks the best community shot + best private patio/lanai, stitches them into a 2-up cover, and sets it as the Guesty cover photo.
+              Choose the two photos to stitch into a 2-up cover and set as the Guesty cover photo.
             </span>
             {gated && (
               <span style={{
@@ -322,7 +361,7 @@ export default function PhotoCurator({
             )}
             {coverCollageStatus?.picks && (
               <div style={{ flexBasis: "100%", fontSize: 11, color: "#0369a1" }}>
-                Picks: <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
+                Selected: <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
               </div>
             )}
             {phase === "done" && <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Set as cover on Guesty</span>}
@@ -337,6 +376,257 @@ export default function PhotoCurator({
           </div>
         );
       })()}
+
+      {collagePickerOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9999,
+            background: "rgba(15, 23, 42, 0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <div style={{
+            width: "min(1040px, 100%)",
+            maxHeight: "88vh",
+            background: "white",
+            borderRadius: 8,
+            boxShadow: "0 24px 80px rgba(15, 23, 42, 0.35)",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "16px 18px",
+              borderBottom: "1px solid #e5e7eb",
+            }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>
+                  Select 2 Photos For The Cover Collage
+                </div>
+                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
+                  Pick the left image first, then the right image. Hidden photos are excluded.
+                </div>
+              </div>
+              <button
+                onClick={closeCollagePicker}
+                style={{
+                  border: "1px solid #e5e7eb",
+                  background: "white",
+                  color: "#374151",
+                  borderRadius: 6,
+                  width: 32,
+                  height: 32,
+                  cursor: "pointer",
+                  fontSize: 18,
+                  lineHeight: "28px",
+                }}
+                aria-label="Close collage photo picker"
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) 260px",
+              gap: 0,
+              minHeight: 0,
+            }}>
+              <div style={{
+                padding: 16,
+                overflow: "auto",
+                maxHeight: "calc(88vh - 137px)",
+              }}>
+                <div style={{
+                  display: "grid",
+                  gap: 10,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+                }}>
+                  {selectableCollagePhotos.map((photo) => {
+                    const order = collageSelection.indexOf(photo.key);
+                    const selected = order >= 0;
+                    const disabledByLimit = !selected && collageSelection.length >= 2;
+                    const cacheBust = cacheBusters.get(photo.key);
+                    const imgSrc = cacheBust
+                      ? `${photo.url}${photo.url.includes("?") ? "&" : "?"}v=${cacheBust}`
+                      : photo.url;
+                    return (
+                      <button
+                        key={photo.key}
+                        type="button"
+                        onClick={() => toggleCollagePhoto(photo.key)}
+                        disabled={disabledByLimit}
+                        style={{
+                          position: "relative",
+                          border: selected ? "3px solid #0369a1" : "1px solid #e5e7eb",
+                          borderRadius: 8,
+                          padding: 0,
+                          background: "white",
+                          overflow: "hidden",
+                          cursor: disabledByLimit ? "not-allowed" : "pointer",
+                          opacity: disabledByLimit ? 0.45 : 1,
+                          textAlign: "left",
+                        }}
+                        title={disabledByLimit ? "Deselect one photo before choosing another" : "Select for collage"}
+                      >
+                        <div style={{ aspectRatio: "4/3", background: "#f3f4f6" }}>
+                          <img
+                            src={imgSrc}
+                            alt={photo.caption || "Listing photo"}
+                            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                          />
+                        </div>
+                        {selected && (
+                          <div style={{
+                            position: "absolute",
+                            top: 8,
+                            left: 8,
+                            width: 28,
+                            height: 28,
+                            borderRadius: "50%",
+                            background: "#0369a1",
+                            color: "white",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 14,
+                            fontWeight: 800,
+                            boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+                          }}>
+                            {order + 1}
+                          </div>
+                        )}
+                        <div style={{
+                          padding: "7px 9px",
+                          fontSize: 11,
+                          color: "#374151",
+                          minHeight: 42,
+                          lineHeight: 1.25,
+                        }}>
+                          <div style={{
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            fontWeight: 600,
+                          }}>
+                            {photo.source || "Photo"}
+                          </div>
+                          <div style={{
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            color: "#6b7280",
+                          }}>
+                            {photo.meta?.userLabel || photo.caption || photo.meta?.label || "No caption"}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{
+                borderLeft: "1px solid #e5e7eb",
+                padding: 16,
+                background: "#f9fafb",
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#111827" }}>
+                  {selectedCollagePhotos.length}/2 selected
+                </div>
+                {[0, 1].map((slot) => {
+                  const photo = selectedCollagePhotos[slot];
+                  return (
+                    <div
+                      key={slot}
+                      style={{
+                        border: "1px solid #d1d5db",
+                        borderRadius: 8,
+                        background: "white",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div style={{
+                        height: 92,
+                        background: "#eef2f7",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#9ca3af",
+                        fontSize: 12,
+                      }}>
+                        {photo ? (
+                          <img
+                            src={photo.url}
+                            alt={photo.caption || `Selected collage photo ${slot + 1}`}
+                            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                          />
+                        ) : (
+                          slot === 0 ? "Left image" : "Right image"
+                        )}
+                      </div>
+                      <div style={{ padding: "7px 9px", fontSize: 11, color: "#4b5563" }}>
+                        {photo
+                          ? (photo.meta?.userLabel || photo.caption || photo.meta?.label || photo.source || `Photo ${slot + 1}`)
+                          : "Not selected"}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ marginTop: "auto", display: "flex", gap: 8 }}>
+                  <button
+                    onClick={closeCollagePicker}
+                    style={{
+                      flex: 1,
+                      padding: "9px 10px",
+                      border: "1px solid #d1d5db",
+                      borderRadius: 6,
+                      background: "white",
+                      color: "#374151",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmCollageSelection}
+                    disabled={selectedCollagePhotos.length !== 2}
+                    style={{
+                      flex: 1.4,
+                      padding: "9px 10px",
+                      border: 0,
+                      borderRadius: 6,
+                      background: selectedCollagePhotos.length === 2 ? "#0369a1" : "#93c5fd",
+                      color: "white",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: selectedCollagePhotos.length === 2 ? "pointer" : "not-allowed",
+                    }}
+                  >
+                    Create Collage
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Cover collage tile — rendered above the regular sections when
           Guesty has a "Cover Collage"-captioned picture on the listing.
