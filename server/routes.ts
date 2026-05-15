@@ -6754,14 +6754,35 @@ export async function registerRoutes(
     } catch (e: any) {
       console.warn(`[find-buy-in] couldn't resolve resort name for property ${propertyId}:`, e.message);
     }
-    if (!resortName) {
-      resortName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName ?? null;
-    }
-
     // Normalize a string for inclusion checks — lowercase + collapse punctuation
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName;
+    const listingResolvedResortName = resortName;
+    if (!resortName) {
+      resortName = communitySearchName ?? null;
+    } else if (
+      communitySearchName &&
+      norm(resortName) === norm(community) &&
+      norm(communitySearchName) !== norm(community)
+    ) {
+      // Some Guesty titles are intentionally broad ("Poipu Kai - 6BR ..."),
+      // while the configured buy-in target is a specific sub-resort. Use the
+      // configured target so the sidecar searches Regency instead of accepting
+      // any Poipu Kai-area complex such as Aston, Kahala, or Villas.
+      resortName = communitySearchName;
+    }
     const resortTokens = resortName ? norm(resortName).split(" ").filter(t => t.length >= 3) : [];
     const normalizedResortName = resortName ? norm(resortName) : "";
+    const targetIsRegencyPoipuKai = normalizedResortName === "regency at poipu kai";
+    const mentionsRegencyPoipuKai = (haystack: string): boolean => {
+      const n = norm(haystack);
+      return /\bregency\b/.test(n) && /\b(poipu\s+kai|poipu|koloa|kauai)\b/.test(n);
+    };
+    const mentionsKnownNonRegencyPoipuKaiComplex = (haystack: string): boolean => {
+      if (!targetIsRegencyPoipuKai) return false;
+      const n = norm(haystack);
+      return /\b(aston|manualoha|kahala|makanui|nihi kai|poipu sands|villas?\s+at\s+poipu\s+kai|poipu\s+kai\s+villas?|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
+    };
     const mentionsPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
       if (/\bpoipu kai\b/.test(n)) return true;
@@ -6787,6 +6808,9 @@ export async function registerRoutes(
     // True if the haystack mentions every significant token of the resort name
     const mentionsResort = (haystack: string): boolean => {
       if (!resortName || resortTokens.length === 0) return true; // no filter
+      if (targetIsRegencyPoipuKai) {
+        return mentionsRegencyPoipuKai(haystack) && !mentionsKnownNonRegencyPoipuKaiComplex(haystack);
+      }
       if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
       const n = norm(haystack);
       return resortTokens.every(t => n.includes(t));
@@ -6805,6 +6829,9 @@ export async function registerRoutes(
     const significantResortTokens = resortTokens.filter((t) => t.length >= 4);
     const mentionsResortLoose = (haystack: string): boolean => {
       if (!resortName || significantResortTokens.length === 0) return true;
+      if (targetIsRegencyPoipuKai) {
+        return mentionsRegencyPoipuKai(haystack) && !mentionsKnownNonRegencyPoipuKaiComplex(haystack);
+      }
       if (normalizedResortName === "poipu kai") return mentionsPoipuKai(haystack);
       const n = norm(haystack);
       return significantResortTokens.some((t) => n.includes(t));
@@ -6833,12 +6860,10 @@ export async function registerRoutes(
       if (b === null) return true; // unknown — keep for manual review
       return b >= bedrooms;
     };
-
-    const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName;
     const websiteSearchTerm = community === "Kapaa Beachfront"
       ? communitySearchName || resortName || community
       : resortName || communitySearchName || community;
-    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
+    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
 
     const scanStartedAt = Date.now();
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
@@ -7056,6 +7081,7 @@ export async function registerRoutes(
       return 0;
     };
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
+      if (targetIsRegencyPoipuKai) return mentionsRegencyPoipuKai(haystack);
       if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
       if (normalizedResortName === "kaha lani") {
         const n = norm(haystack);
@@ -7086,6 +7112,11 @@ export async function registerRoutes(
     const rawCandidateExplicitBedroomSignal = (c: { title?: string; snippet?: string; url?: string }): number | null =>
       bedroomFromText(`${c.title ?? ""} ${c.snippet ?? ""} ${c.url ?? ""}`);
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
+      if (targetIsRegencyPoipuKai) {
+        const hay = candidateHaystack(c);
+        if (mentionsKnownNonRegencyPoipuKaiComplex(hay)) return false;
+        return mentionsRegencyPoipuKai(hay);
+      }
       if (normalizedResortName !== "poipu kai") return true;
       if (c.source === "airbnb" && c.inTargetBounds) return true;
       const n = norm(candidateHaystack(c));
@@ -7115,6 +7146,7 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay)) return false;
       if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
       if (mentionsKnownNonKahaLaniComplex(hay)) return false;
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
@@ -7124,8 +7156,10 @@ export async function registerRoutes(
       if (stayNightCounts.some((n) => n !== nights)) return false;
       const visibleResortProof = mentionsResort(hay)
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
-      const photoMatchProof = normalizedResortName === "poipu kai"
-        && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
+      const photoMatchProof = targetIsRegencyPoipuKai
+        ? (c.photoMatches ?? []).some((m) => mentionsRegencyPoipuKai(`${m.title} ${m.url} ${m.domain}`))
+        : normalizedResortName === "poipu kai"
+          && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
       // Search result cards frequently hide the exact resort name even
       // when the website search itself was driven with the resort, dates,
       // and bedroom filter. Still require a visible target signal before
@@ -7140,18 +7174,24 @@ export async function registerRoutes(
         && hasLocalityForPriceFallback(hay)
         && priceIsPlausibleForTarget(c)
         && normalizedResortName !== "poipu kai";
-      const targetSignal = visibleResortProof
-        || photoMatchProof
-        || searchProofCanCarryTarget
-        || pricePlausibleSearchProof
-        || (c.source === "airbnb" && c.inTargetBounds === true)
-        || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      const targetSignal = targetIsRegencyPoipuKai
+        ? (visibleResortProof || photoMatchProof || candidateIsPoipuKaiCondoLike(c))
+        : visibleResortProof
+          || photoMatchProof
+          || searchProofCanCarryTarget
+          || pricePlausibleSearchProof
+          || (c.source === "airbnb" && c.inTargetBounds === true)
+          || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
       if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (pricePlausibilityReason(c)) return false;
-      if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
+      if (targetIsRegencyPoipuKai) {
+        if (!visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
+      } else if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+        return false;
+      }
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
     };
