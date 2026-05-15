@@ -43,6 +43,11 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
   "Southern Dunes":    { "2BR":  85, "3BR": 192, "4BR": 200,  region: "florida" },
   "Windsor Hills":     { "2BR": 150, "3BR": 210, "4BR": 294,  region: "florida" },
+  // Internal fallback key for Florida single-listing/community drafts
+  // whose exact resort has no static buy-in row yet. Keeps live
+  // season-band scans on Florida multipliers instead of falling through
+  // to the Hawaii default.
+  "Florida Generic":   {                                      region: "florida" },
   // Caribe Cove (Kissimmee, FL) — older mid-tier resort ~5mi from Disney.
   // 2BR base of $125 reflects what the unit actually rents for on
   // Airbnb/VRBO including taxes + fees (operator-validated 2026-04, see

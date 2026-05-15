@@ -32,7 +32,10 @@ const MONTH_NAMES = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
-const FALLBACK_RATE_PER_BEDROOM = 270; // matches shared/pricing-rates.ts
+const FALLBACK_RATE_PER_BEDROOM: Record<RegionType, number> = {
+  hawaii: 270,
+  florida: 80,
+};
 
 // Build a 24-month rolling window starting this month — same window
 // the static pricing schedule uses so the Pricing tab table aligns
@@ -62,6 +65,13 @@ function positiveInteger(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function positiveMoney(value: unknown): number | null {
+  const n = typeof value === "number"
+    ? value
+    : Number.parseFloat(String(value ?? "").replace(/[$,]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function inferDraftBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
   const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
   const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
@@ -87,23 +97,24 @@ function inferDraftBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2
 //      picked an area on Step 5 → exact rate from the table)
 //   2. estimatedLowRate reversed from sell-rate markup, split across
 //      two units for combos and kept whole for single-listing drafts
-//   3. FALLBACK_RATE_PER_BEDROOM × bedrooms
-function baseBuyInForUnit(draft: CommunityDraft, bedrooms: number): number {
+//   3. region-aware FALLBACK_RATE_PER_BEDROOM × bedrooms
+function baseBuyInForUnit(draft: CommunityDraft, bedrooms: number, region: RegionType): number {
   const area = draft.pricingArea ?? "";
   if (area && BUY_IN_RATES[area]) {
     const key = `${bedrooms}BR` as keyof (typeof BUY_IN_RATES)[string];
     const rate = BUY_IN_RATES[area]?.[key];
     if (typeof rate === "number" && rate > 0) return rate;
   }
-  if (typeof draft.estimatedLowRate === "number" && draft.estimatedLowRate > 0) {
+  const estimatedLowRate = positiveMoney(draft.estimatedLowRate);
+  if (estimatedLowRate != null) {
     // Estimated rate is a per-night sell rate for the listing. Reverse
     // the markup to get buy-in, then split only when the listing is a
     // true combo. Standalone drafts should not manufacture a second unit.
-    const buyInForCombined = Math.round(draft.estimatedLowRate / MARKUP);
+    const buyInForCombined = Math.round(estimatedLowRate / MARKUP);
     const unitCount = (draft as any).singleListing === true ? 1 : 2;
     return Math.round(buyInForCombined / unitCount);
   }
-  return FALLBACK_RATE_PER_BEDROOM * bedrooms;
+  return FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
 }
 
 function generateMonthlyRatesForUnit(
@@ -134,14 +145,16 @@ export function buildDraftPropertyPricing(
   const region = regionFromState(draft.state);
   const community = draft.pricingArea && BUY_IN_RATES[draft.pricingArea]
     ? draft.pricingArea
-    : draft.name;
+    : region === "florida"
+      ? "Florida Generic"
+      : draft.name;
 
   const isSingle = (draft as any).singleListing === true;
   const u1Br = inferDraftBedroomCount(draft, "unit1");
   const u2Br = inferDraftBedroomCount(draft, "unit2");
 
-  const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br);
-  const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br);
+  const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br, region);
+  const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br, region);
 
   const unit1: UnitPricing = {
     unitId: `draft${draft.id}-unit-a`,

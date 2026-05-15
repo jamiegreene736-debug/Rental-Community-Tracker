@@ -2968,6 +2968,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
+  const displayedBasePrice = seasonalMonths[0]?.totalSell ?? pricing?.basePrice ?? null;
 
   // Per-bedroom live-buy-in summary for the Pricing tab header. Pulls
   // straight from the module-level cache so it reflects whatever
@@ -4581,7 +4582,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     ? <div>
                         <div className="glb-price-grid">
                           {[
-                            { label: "Base Price / Night", val: pricing.basePrice != null ? `$${pricing.basePrice.toLocaleString()}` : null },
+                            { label: "Base Price / Night", val: displayedBasePrice != null ? `$${displayedBasePrice.toLocaleString()}` : null },
                             { label: "Currency", val: pricing.currency || "USD" },
                           ].filter((r) => r.val != null).map((r) => (
                             <div key={r.label} className="glb-price-card">
