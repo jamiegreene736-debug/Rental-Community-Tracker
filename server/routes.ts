@@ -141,7 +141,12 @@ function stripBuilderDisclosureParagraphs(text: string): string {
     .trim();
 }
 
-function buildGuestySummaryWithAssignmentNote(property: PropertyUnitBuilder): string {
+type GuestySummarySource = {
+  units: unknown[];
+  combinedDescription: string;
+};
+
+function buildGuestySummaryWithAssignmentNote(property: GuestySummarySource): string {
   const units = Array.isArray(property.units) ? property.units : [];
   const isSingle = units.length === 1;
   const body = stripBuilderDisclosureParagraphs(property.combinedDescription);
@@ -154,6 +159,25 @@ function buildGuestySummaryWithAssignmentNote(property: PropertyUnitBuilder): st
     body,
     bottomDisclosure,
   ].filter(Boolean).join(GUESTY_SUMMARY_SEPARATOR);
+}
+
+function draftToGuestySummarySource(draft: Record<string, unknown>): { title: string; property: GuestySummarySource } {
+  const singleListing = draft.singleListing === true;
+  const unitCount = singleListing ? 1 : 2;
+  const description = String(
+    draft.listingDescription
+      ?? draft.description
+      ?? [draft.summary, draft.space, draft.neighborhood, draft.transit].filter(Boolean).join("\n\n")
+      ?? "",
+  ).trim();
+  const title = String(draft.bookingTitle ?? draft.listingTitle ?? draft.name ?? `Draft ${draft.id ?? ""}`).trim();
+  return {
+    title,
+    property: {
+      units: Array.from({ length: unitCount }, (_, i) => ({ id: `draft-unit-${i + 1}` })),
+      combinedDescription: description,
+    },
+  };
 }
 
 function normalizeHttpsUrl(value: unknown): string | null {
@@ -12317,14 +12341,39 @@ export async function registerRoutes(
 
     try {
       const map = await storage.getGuestyPropertyMap();
+      const drafts = await storage.getCommunityDrafts();
+      const draftByPropertyId = new Map<number, Record<string, unknown>>(
+        drafts.map((draft) => [-Number(draft.id), draft as unknown as Record<string, unknown>]),
+      );
       const targets = map
-        .map((row) => ({ row, property: getUnitBuilderByPropertyId(row.propertyId) }))
-        .filter((entry): entry is { row: typeof map[number]; property: PropertyUnitBuilder } => !!entry.property)
+        .map((row) => {
+          const staticProperty = getUnitBuilderByPropertyId(row.propertyId);
+          if (staticProperty) {
+            return {
+              row,
+              sourceKind: "static" as const,
+              title: staticProperty.bookingTitle,
+              property: staticProperty as GuestySummarySource,
+            };
+          }
+          const draft = draftByPropertyId.get(row.propertyId);
+          if (draft) {
+            const adapted = draftToGuestySummarySource(draft);
+            return {
+              row,
+              sourceKind: "draft" as const,
+              title: adapted.title,
+              property: adapted.property,
+            };
+          }
+          return null;
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => !!entry)
         .filter((entry) => !requestedIds || requestedIds.has(entry.row.propertyId))
         .sort((a, b) => a.row.propertyId - b.row.propertyId);
 
       const results: Array<Record<string, unknown>> = [];
-      for (const { row, property } of targets) {
+      for (const { row, property, title, sourceKind } of targets) {
         const summary = buildGuestySummaryWithAssignmentNote(property);
         const sections = summary.split(GUESTY_SUMMARY_SEPARATOR);
         const isSingle = property.units.length === 1;
@@ -12340,7 +12389,8 @@ export async function registerRoutes(
           results.push({
             propertyId: row.propertyId,
             guestyListingId: row.guestyListingId,
-            title: property.bookingTitle,
+            title,
+            sourceKind,
             units: property.units.length,
             dryRun: true,
             ...summaryPreview,
@@ -12365,7 +12415,8 @@ export async function registerRoutes(
         results.push({
           propertyId: row.propertyId,
           guestyListingId: row.guestyListingId,
-          title: property.bookingTitle,
+          title,
+          sourceKind,
           units: property.units.length,
           executed: true,
           saved: verifiedSummary === summary,
